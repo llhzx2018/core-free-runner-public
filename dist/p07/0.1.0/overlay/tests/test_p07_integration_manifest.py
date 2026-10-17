@@ -64,10 +64,10 @@ class P07IntegrationManifestTests(unittest.TestCase):
             "5c447fc99030f75c098934ddb9aa300b934564bb",
         )
 
-    def test_slot4_rc20_is_publicly_distributed(self):
+    def test_slot4_current_system_care_is_publicly_distributed(self):
         s = self.data["slots"][3]
-        self.assertEqual(s["internal_version"], "0.1.0-rc54")
-        self.assertEqual(s["installer_blob"], "e62f9def82703fb8019c73a8745f65157af2cfe2")
+        self.assertEqual(s["internal_version"], "0.1.0-rc55")
+        self.assertEqual(s["installer_blob"], "3eb66ee76eb278ce478774199f99467f78c6d644")
         self.assertEqual(s["integration_state"], "PUBLIC_DISTRIBUTED")
 
     def test_beginner_public_names_hide_project_code(self):
@@ -96,23 +96,22 @@ class P07IntegrationManifestTests(unittest.TestCase):
     def test_release_is_published(self):
         release = self.data["release"]
         self.assertEqual(self.data["release_blockers"], [])
-        self.assertEqual(release["tag"], "p07-v0.1.0-release85-mariadb-1011")
+        self.assertEqual(release["tag"], "p07-v0.1.0-release86-mariadb-1011")
         self.assertEqual(release["status"], "PUBLISHED")
         self.assertRegex(release["slot3_build"], r"^0\.1\.0-release[0-9]+$")
         self.assertEqual(release["slot3_distribution"], "PUBLIC_MAIN")
         self.assertNotIn("current_public_main_commit", release)
-        current_build=(ROOT / "BUILD_ID").read_text(encoding="utf-8").strip()
-        if "candidate" in self.data:
-            candidate=self.data["candidate"]
-            self.assertEqual(candidate["build_id"], current_build)
-            self.assertEqual(candidate["status"], "CANDIDATE_NOT_PUBLISHED")
-            self.assertEqual(candidate["formal_release"], "NOT_RUN")
-            self.assertEqual(candidate["distribution"], "NOT_RUN")
-            self.assertEqual(candidate["owner_new_vps_mariadb_real"], "NOT_RUN")
-            self.assertNotEqual(current_build, release["slot3_build"])
-        else:
-            self.assertEqual(release["slot3_build"], current_build)
-        self.assertEqual(release["slot3_build"], "0.1.0-release85")
+        current_build = (ROOT / "BUILD_ID").read_text(encoding="utf-8").strip()
+        self.assertNotIn("candidate", self.data)
+        # The public distribution snapshot remains the *published* release86
+        # until a separately gated formal release87. The working candidate's
+        # BUILD_ID must not be treated as evidence that it is already live.
+        self.assertIn(current_build, ("0.1.0-release86", "0.1.0-release87"))
+        self.assertEqual(release["slot3_build"], "0.1.0-release86")
+        if current_build == "0.1.0-release87":
+            self.assertEqual(release["status"], "PUBLISHED")
+            self.assertEqual(release["tag"], "p07-v0.1.0-release86-mariadb-1011")
+        self.assertEqual(self.data["release_history"]["release85"]["slot3_build"], "0.1.0-release85")
         self.assertEqual(release["system_care_build"], self.data["slots"][3]["internal_version"])
         self.assertEqual(release["new_vps_mariadb_1011_owner_real"], "NOT_RUN")
         self.assertEqual(release["cross_engine_mysql_to_mariadb_real"], "NOT_RUN")
@@ -122,7 +121,7 @@ class P07IntegrationManifestTests(unittest.TestCase):
         p = self.data["production"]
         self.assertEqual(p["record_kind"], "HISTORICAL_SNAPSHOT_NOT_CURRENT")
         self.assertIn("2026-09-29", p["applies_to"])
-        self.assertEqual(self.data["owner_real_evidence"]["release85_new_vps_mariadb_1011"], "NOT_RUN")
+        self.assertEqual(self.data["owner_real_evidence"]["release86_new_vps_mariadb_1011"], "NOT_RUN")
         match = re.fullmatch(r"0\.1\.0-release([0-9]+)", p["slot3_build"])
         self.assertIsNotNone(match)
         install_key = f"release{match.group(1)}_install_status"
@@ -141,6 +140,7 @@ class P07IntegrationManifestTests(unittest.TestCase):
         self.assertNotIn("current_public_main_commit", release)
         self.assertEqual(self.data["project"]["toolbox_visible_items"], 5)
         self.assertEqual(self.data["release_history"]["release32"]["slot3_build"], "0.1.0-release32")
+        self.assertEqual(self.data["release_history"]["release85"]["kind"], "HISTORICAL_SNAPSHOT_NOT_CURRENT")
 
     def test_readme_renders_five_live_menu_entries_and_no_retired_current_claim(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -148,7 +148,7 @@ class P07IntegrationManifestTests(unittest.TestCase):
                       "服务器维护与安全", "新服务器初始化"):
             self.assertIn(label, readme)
         for build in ("0.1.0-rc13", "2.1.0-rc7-field",
-                      "0.1.0-release85", "0.1.0-rc54"):
+                      "0.1.0-release86", "0.1.0-rc55"):
             self.assertIn(build, readme)
         self.assertIn("NOT_RUN", readme)
         self.assertNotIn("当前正式版本：`V0.1.0`。\\n\\n## 唯一入口", readme)
@@ -157,12 +157,12 @@ class P07IntegrationManifestTests(unittest.TestCase):
     def test_owner_acceptance_does_not_transfer_release68_real_to_mariadb(self):
         acceptance = (ROOT / "docs/authority/USER_ACCEPTANCE.md").read_text(encoding="utf-8")
         matrix = (ROOT / "docs/authority/ACCEPTANCE_MATRIX.md").read_text(encoding="utf-8")
-        self.assertIn("release85 MariaDB", acceptance)
+        self.assertIn("release86 MariaDB", acceptance)
         self.assertIn("NOT_RUN", acceptance)
         self.assertIn("## Historical guided-init16 acceptance layer", matrix)
         self.assertIn("HISTORICAL_OWNER_REAL_PASS_FOR_EXACT_SOURCE", matrix)
         self.assertIn("MACHINE_PASS / OWNER_REAL_PARTIAL", matrix)
-        self.assertEqual(self.data["release"]["system_care_real_mutation_ci"], "PASS_WORKFLOW_ONLY_2026-10-16")
+        self.assertEqual(self.data["release"]["system_care_real_mutation_ci"], "MACHINE_PASS_2026-10-17")
 
     def test_safety_boundaries(self):
         safety = self.data["safety"]
