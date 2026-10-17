@@ -142,7 +142,7 @@ class P07IntegrationManifestTests(unittest.TestCase):
                       "服务器维护与安全", "新服务器初始化"):
             self.assertIn(label, readme)
         for build in ("0.1.0-rc13", "2.1.0-rc7-field",
-                      "0.1.0-release85", "0.1.0-rc54"):
+                      "0.1.0-release86", "0.1.0-rc55"):
             self.assertIn(build, readme)
         self.assertIn("NOT_RUN", readme)
         self.assertNotIn("当前正式版本：`V0.1.0`。\\n\\n## 唯一入口", readme)
