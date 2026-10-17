@@ -67,11 +67,11 @@ async function measure(p){return p.evaluate(()=>{
  // Moving the mouse away must not hide a panel containing keyboard focus.
  await a.hover();await p.mouse.move(8,800);await p.waitForTimeout(250);
  gate(await panel.isVisible(),'mouse leave preserves a keyboard-focused panel');
- await p.keyboard.press('Escape');await p.locator('h1').click();await a.hover();
+ await p.keyboard.press('Escape');await p.mouse.click(8,800);await a.hover();
  gate(await panel.isVisible(),'pointer entry reopens a dismissed menu');
  await a.locator('.vf-nav-caret').click();gate(!await panel.isVisible(),'caret click really closes a hovered and focused menu');
  await a.locator('.vf-nav-caret').click();gate(await panel.isVisible(),'caret click reopens menu');
- await p.locator('h1').click();gate(!await panel.isVisible(),'outside click closes menu');
+ await p.mouse.click(8,800);gate(!await panel.isVisible(),'outside click closes menu');
  // Optional header regions cannot create empty tracks.
  for(const remove of ['.vf-header-actions','#vf-primary-nav']){
   await setup(p,'en');await p.locator(remove).evaluate(n=>n.remove());const m=await measure(p);
