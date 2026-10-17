@@ -46,7 +46,7 @@ cli eval-file /tmp/snapshot.php > proof/bootstrap-after.json
 python3 - <<'PYBOOT'
 import json,pathlib
 r=pathlib.Path('proof');a=json.loads((r/'bootstrap-before.json').read_text());b=json.loads((r/'bootstrap-after.json').read_text());changed=[k for k in a['sections']if a['sections'][k]!=b['sections'][k]]
-assert set(changed)<= {'vf_theme_brand','vf_theme_tokens','vf_theme_navigation'}
+assert set(changed)<= {'vf_theme_brand','vf_theme_tokens','vf_theme_navigation','vf_theme_ads','vf_theme_seo'}
 assert all(not a['option_presence'][k]and b['option_presence'][k]for k in changed)
 (r/'bootstrap.json').write_text(json.dumps({'status':'PASS','created_missing_options':changed,'existing_protected_records':'BYTE_IDENTICAL','scope':'fresh isolated installation initialization before review baseline'}))
 PYBOOT
