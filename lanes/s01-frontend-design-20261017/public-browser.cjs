@@ -181,6 +181,46 @@ function gate(value,name,detail){checks.push({name,pass:!!value,detail});/* Coll
    }
  }
  fs.writeFileSync('proof/r04-head-observations.json',JSON.stringify({status:'OBSERVED_ONLY_NOT_SEO_INDEXING_CERTIFICATION',production:'NOT_EXECUTED',observations:r04Heads},null,2));
+
+ // R05 exact-source bilingual visual + SEO projections for three page families.
+ for(const lang of ['en','zh'])for(const width of [1440,1024]){
+   await p.setViewportSize({width,height:1000});
+   for(const family of ['guide_detail','problem_index','problem_detail']){
+     const resp=await p.goto(cases[lang][family]);
+     const x=await p.evaluate(()=>{
+       const style=sel=>{const e=document.querySelector(sel);if(!e)return null;const c=getComputedStyle(e);return {padding:c.paddingTop,font:c.fontSize};};
+       return {h1:document.querySelectorAll('main h1').length,
+         canonical:[...document.querySelectorAll('head link[rel="canonical"]')].map(e=>e.href),
+         hreflang:[...document.querySelectorAll('head link[rel="alternate"][hreflang]')].map(e=>e.hreflang),
+         schema:[...document.querySelectorAll('head script[type="application/ld+json"]')].every(e=>{try{JSON.parse(e.textContent);return true}catch{return false}}),
+         overflow:document.documentElement.scrollWidth>innerWidth+1,
+         card:style('.vf-theme-post-list--problem_index .vf-directory-card'),
+         prerequisites:style('.vf-guide-prerequisites'),diagnostic:style('.vf-problem-diagnostic-panel'),
+         reading:style('.vf-reading-article')};
+     });
+     gate(resp.status()===200&&x.h1===1&&!x.overflow,'R05 page reachable, semantic H1 and desktop width',{lang,width,family,x});
+     gate(x.canonical.length===1&&x.schema&&new Set(x.hreflang).size===x.hreflang.length,
+       'R05 canonical, hreflang and JSON-LD syntax',{lang,width,family,x});
+     const actual=family==='problem_index'?x.card?.padding:family==='guide_detail'?x.prerequisites?.padding:x.diagnostic?.padding;
+     const expected=family==='problem_index'?'18px':family==='guide_detail'?'18px':'20px';
+     gate(actual===expected,'R05 scoped page-family spacing reaches final computed CSS',{lang,width,family,actual,expected});
+     if(family!=='problem_index')gate(x.reading?.font==='18px','R05 guide/problem body font 18px',{lang,width,family,reading:x.reading});
+   }
+   await p.goto(cases[lang].problem_index);
+   const filter=p.locator('.vf-directory-filter-group a[data-vf-directory-filter-button]:not([data-vf-directory-filter-button="all"])').first();
+   const href=await filter.getAttribute('href');
+   gate(!!href,'R05 symptom filter link exists',{lang,width,href});
+   if(href){
+     await p.goto(new URL(href,p.url()).href);
+     gate(await p.locator('.vf-theme-post-list--problem_index .vf-directory-card:visible').count()>0,
+       'R05 symptom filter retains meaningful results',{lang,width});
+     const reset=p.locator('.vf-theme-post-list--problem_index [data-vf-directory-reset]:visible').first();
+     gate(await reset.count()===1,'R05 symptom reset action exists',{lang,width});
+     if(await reset.count())await reset.click();
+     gate(await p.locator('.vf-theme-post-list--problem_index .vf-directory-card:visible').count()>=8,
+       'R05 reset restores problem list',{lang,width});
+   }
+ }
  const nativeContext=await browser.newContext({javaScriptEnabled:false,viewport:{width:1440,height:1000}}),n=await nativeContext.newPage();for(const lang of ['en','zh']){await n.goto(cases[lang].faq_page);await n.locator('[data-vf-faq-item] summary').first().click();gate(await n.locator('[data-vf-faq-item][open]').count()>0,'FAQ works without JavaScript',{lang});await n.goto(cases[lang].archive_list+'?vf_fixture_count=1');await n.locator('.pagination .next').click();gate(await n.locator('.pagination .current').count()===1,'native pagination works',{lang});}await nativeContext.close();
  const admin=await context.newPage();await admin.goto('http://127.0.0.1:18880/wp-login.php');await admin.locator('#user_login').fill('admin');await admin.locator('#user_pass').fill('Synthetic-Only-Update-54!');await admin.locator('input[name="redirect_to"]').evaluate(e=>e.value='http://127.0.0.1:18880/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages');await admin.locator('#wp-submit').click();await admin.waitForURL('**/wp-admin/**');await admin.goto('http://127.0.0.1:18880/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages');gate(await admin.locator('[data-vf-page-context]').count()===20,'same admin directory keeps all types');gate((await admin.locator('.vf-frontend-pages__review-overview').innerText()).includes('待复验'),'backend records source phase truthfully');gate((await admin.locator('#vf-review-home .vf-frontend-pages__progress-record > p').first().innerText()).includes('待复验'),'unreviewed source starts at verify, not accepted');await admin.screenshot({path:'proof/admin-progress.png'});
  gate(errors.length===0,'no uncaught runtime errors',errors);assert(checks.every(c=>c.pass),'Independent gates failed: '+JSON.stringify(checks.filter(c=>!c.pass))); fs.writeFileSync('proof/public-browser.json',JSON.stringify({status:'PASS',checks,mobile:'NOT_RUN_OWNER_DEFERRED',production:'NOT_EXECUTED',owner_real_use:'PENDING'},null,2));await browser.close();
