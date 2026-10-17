@@ -41,7 +41,8 @@ class OpsConsoleR9Tests(unittest.TestCase):
         self.assertIn('--confirm "CUTOVER_PULL:$mid"',migrate)
         self.assertIn("DNS_UPDATED:",migrate)
         auto=(ROOT/"bin/vfops-auto-backup").read_text(encoding="utf-8")
-        self.assertIn("DISABLE-AUTOBACKUP",auto)
+        self.assertIn("--confirm DISABLE_DUAL_REMOTE_AUTOBACKUP",auto)
+        self.assertIn("ui_safety_tier danger",auto)
 
     def test_selfcheck_and_init_are_guarded(self):
         selfcheck=(ROOT/"bin/vfops-selfcheck-ui").read_text(encoding="utf-8")
