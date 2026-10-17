@@ -1,0 +1,104 @@
+name: p01-baseline-preflight-one-off
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-backup-baseline-preflight-onetime.yml'
+permissions:
+  contents: read
+concurrency:
+  group: p01-baseline-preflight-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  install-and-gates:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      EXACT_P01_SHA: 77fd3736520e47c527c5c5726082c9f6db14fa10
+    steps:
+      - name: Checkout disposable public control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install native PHP, SQLite and browser smoke dependencies
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd unzip >/dev/null
+          php -m | grep -i -Fx pdo_sqlite
+          echo P01_PREFLIGHT_RUNTIME=PASS
+      - name: Checkout exact P01 private candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 77fd3736520e47c527c5c5726082c9f6db14fa10
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          path: candidate
+          persist-credentials: false
+      - name: Checkout live-resolved stable tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.47.384
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          path: stable
+          persist-credentials: false
+      - name: Exact candidate / stable identity and canonical unit regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$EXACT_P01_SHA"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "2.47.384"
+          test "$(tr -d '\r\n ' < stable/VERSION)" = "2.47.384"
+          bash candidate/tests/canonical_release_regression.sh candidate stable --require-zero-debt | tee /tmp/p01-canonical-preflight.txt
+          grep -Fx 'P01_CANONICAL_UNIT_REGRESSION=PASS' /tmp/p01-canonical-preflight.txt
+          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-canonical-preflight.txt
+          echo P01_PREFLIGHT_CANONICAL=PASS
+      - name: Fresh isolated install and authenticated/anonymous HTTP boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp -a candidate/src /tmp/p01-preflight-runtime
+          cd /tmp/p01-preflight-runtime
+          php -S 127.0.0.1:19149 -t . >/tmp/p01-preflight-http.log 2>&1 &
+          echo $! >/tmp/p01-preflight-server.pid
+          for n in $(seq 1 45); do
+            if curl -fsS -c /tmp/p01-preflight-cookie -b /tmp/p01-preflight-cookie http://127.0.0.1:19149/setup.php -o /tmp/p01-preflight-setup.html; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 - <<'PY'
+          import re
+          html=open('/tmp/p01-preflight-setup.html',encoding='utf-8').read()
+          found=re.search(r'name="setup_csrf"\s+value="([^"]+)"',html)
+          assert found,'CSRF missing from setup page'
+          print(found.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-preflight-cookie -b /tmp/p01-preflight-cookie -X POST http://127.0.0.1:19149/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01 Isolated Preflight' --data-urlencode 'admin_password=PreflightOnly!2026' --data-urlencode 'admin_password_confirm=PreflightOnly!2026' -o /tmp/p01-preflight-setup-post.html
+          test -f app/.runtime.php
+          php cli/verify.php | tee /tmp/p01-preflight-verify.txt
+          grep -Fx 'VERIFY_PASS=YES' /tmp/p01-preflight-verify.txt
+          for page in / /start.php /books.php /projects.php; do
+            curl -fsS "http://127.0.0.1:19149$page" >/dev/null
+          done
+          test "$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:19149/data-safety.php)" = 302
+          STATUS=$(curl -sS -o /tmp/p01-preflight-noauth.json -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data '{"confirmation":"确认重建备份","digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' 'http://127.0.0.1:19149/api.php?action=backup_baseline_reset')
+          test "$STATUS" != 200 || ! grep -Fq '"ok":true' /tmp/p01-preflight-noauth.json
+          echo P01_PREFLIGHT_UNAUTHORIZED_RESET_DENIED=PASS
+          curl -fsS -c /tmp/p01-preflight-cookie -b /tmp/p01-preflight-cookie -H 'Content-Type: application/json' --data '{"password":"PreflightOnly!2026"}' 'http://127.0.0.1:19149/api.php?action=login' -o /tmp/p01-preflight-login.json
+          grep -Fq '"ok":true' /tmp/p01-preflight-login.json
+          curl -fsS -c /tmp/p01-preflight-cookie -b /tmp/p01-preflight-cookie http://127.0.0.1:19149/data-safety.php -o /tmp/p01-preflight-admin.html
+          grep -Fq 'id="resetBackupBaseline"' /tmp/p01-preflight-admin.html
+          grep -Fq 'assets/data-recovery.js?v=247385-backup-baseline' /tmp/p01-preflight-admin.html
+          curl -fsS -c /tmp/p01-preflight-cookie -b /tmp/p01-preflight-cookie 'http://127.0.0.1:19149/api.php?action=backup_baseline_reset_preview' -o /tmp/p01-preflight-preview.json
+          grep -Fq '"OWNER_BASELINE_RESET_PREVIEW"' /tmp/p01-preflight-preview.json
+          echo P01_PREFLIGHT_FRESH_INSTALL_AUTH_UI=PASS
+      - name: Cleanup all synthetic runtime and private source
+        if: always()
+        shell: bash
+        run: |
+          if test -f /tmp/p01-preflight-server.pid; then kill "$(cat /tmp/p01-preflight-server.pid)" >/dev/null 2>&1 || true; fi
+          rm -rf candidate stable /tmp/p01-preflight-runtime
