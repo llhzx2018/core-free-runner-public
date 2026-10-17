@@ -75,6 +75,43 @@ function gate(value,name,detail){checks.push({name,pass:!!value,detail});/* Coll
    gate(guide.pad==='17px','guide index desktop row spacing consumes family owner',{lang,width,guide});
    gate(await p.locator('.vf-theme-post-list--guide_index .vf-directory-card').count()>=9,'guide index keeps nine or more existing results',{lang,width});
  }
+
+ // R03 visual system: exact-source home/header/footer computed desktop styles.
+ for(const lang of ['en','zh']) for(const width of [1440,1319,1024]){
+   await p.setViewportSize({width,height:1000});
+   await p.goto(cases[lang].home);
+   const o=await p.evaluate(()=>{
+     const sty=selector=>{const el=document.querySelector(selector);if(!el)return null;const s=getComputedStyle(el);return {font:s.fontSize,min:s.minHeight,padTop:s.paddingTop,padBottom:s.paddingBottom,outline:s.outlineWidth,visible:el.getBoundingClientRect().width>0};};
+     return {
+       overflow:document.documentElement.scrollWidth>innerWidth+1,
+       heading:sty('.vf-home-hero h1'),
+       hero:sty('.vf-home-hero'),
+       nav:sty('.vf-primary-nav .vf-nav-link'),
+       link:sty('.vf-production-footer-col .vf-footer-link'),
+       legal:sty('.vf-footer-legal a'),
+       bottom:sty('.vf-footer-bottom')
+     };
+   });
+   gate(!o.overflow,'R03 home shell stays within desktop viewport',{lang,width,o});
+   gate(!!o.link&&o.link.font==='14px'&&!!o.legal&&o.legal.font==='14px',
+     'R03 readable footer links and legal copy',{lang,width,o});
+   if(width>=1180){
+     gate(!!o.nav&&o.nav.visible&&o.nav.font==='15px',
+       'R03 desktop nav has consistent 15px font',{lang,width,o});
+     gate(!!o.heading&&parseFloat(o.heading.font)<=44&&!!o.hero&&parseFloat(o.hero.padTop)<=44,
+       'R03 home hero remains compact without hiding heading',{lang,width,o});
+   }
+   if(width===1440){
+     const a=p.locator('.vf-primary-nav .vf-nav-link:visible').first();
+     await a.focus();
+     const navFocus=await a.evaluate(e=>getComputedStyle(e).outlineWidth);
+     gate(parseFloat(navFocus)>=2,'R03 header keyboard focus visibly outlined',{lang});
+     const legal=p.locator('.vf-footer-legal a:visible').first();
+     await legal.focus();
+     const legalFocus=await legal.evaluate(e=>getComputedStyle(e).outlineWidth);
+     gate(parseFloat(legalFocus)>=2,'R03 footer keyboard focus visibly outlined',{lang});
+   }
+ }
  const nativeContext=await browser.newContext({javaScriptEnabled:false,viewport:{width:1440,height:1000}}),n=await nativeContext.newPage();for(const lang of ['en','zh']){await n.goto(cases[lang].faq_page);await n.locator('[data-vf-faq-item] summary').first().click();gate(await n.locator('[data-vf-faq-item][open]').count()>0,'FAQ works without JavaScript',{lang});await n.goto(cases[lang].archive_list+'?vf_fixture_count=1');await n.locator('.pagination .next').click();gate(await n.locator('.pagination .current').count()===1,'native pagination works',{lang});}await nativeContext.close();
  const admin=await context.newPage();await admin.goto('http://127.0.0.1:18880/wp-login.php');await admin.locator('#user_login').fill('admin');await admin.locator('#user_pass').fill('Synthetic-Only-Update-54!');await admin.locator('input[name="redirect_to"]').evaluate(e=>e.value='http://127.0.0.1:18880/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages');await admin.locator('#wp-submit').click();await admin.waitForURL('**/wp-admin/**');await admin.goto('http://127.0.0.1:18880/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages');gate(await admin.locator('[data-vf-page-context]').count()===20,'same admin directory keeps all types');gate((await admin.locator('.vf-frontend-pages__review-overview').innerText()).includes('待复验'),'backend records source phase truthfully');gate((await admin.locator('#vf-review-home .vf-frontend-pages__progress-record > p').first().innerText()).includes('待复验'),'unreviewed source starts at verify, not accepted');await admin.screenshot({path:'proof/admin-progress.png'});
  gate(errors.length===0,'no uncaught runtime errors',errors);assert(checks.every(c=>c.pass),'Independent gates failed: '+JSON.stringify(checks.filter(c=>!c.pass))); fs.writeFileSync('proof/public-browser.json',JSON.stringify({status:'PASS',checks,mobile:'NOT_RUN_OWNER_DEFERRED',production:'NOT_EXECUTED',owner_real_use:'PENDING'},null,2));await browser.close();
