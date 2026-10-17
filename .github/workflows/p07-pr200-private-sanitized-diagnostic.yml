@@ -1,0 +1,97 @@
+name: TEMP P07 PR200 sanitized per-module failure diagnostic
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-pr200-private-sanitized-diagnostic.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [2, 4]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 13
+    steps:
+      - name: Verify private read boundary
+        shell: bash
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN"
+      - name: Checkout immutable private candidate transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 15b6dc7b26dc12489251f49387d033b5a2862577
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: p07-private
+      - name: Run independent modules and print only sanitized failure metadata
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p07-private rev-parse HEAD)" = '15b6dc7b26dc12489251f49387d033b5a2862577'
+          cd p07-private
+          log="$RUNNER_TEMP/p07-private-diagnostic.log"
+          if timeout --signal=TERM --kill-after=5s 630 python3 - "$SHARD_INDEX" >"$log" 2>&1 <<'PY'
+          import contextlib, hashlib, io, pathlib, re, sys, unittest
+          excluded = {
+              "test_backup", "test_restore_new", "test_auto_backup",
+              "test_cloudpanel", "test_server_migration_pull", "test_policy",
+              "test_storage", "test_restore", "test_restore_apply",
+              "test_mariadb_owner_policy", "test_cli_menu",
+          }
+          names = sorted(p.stem for p in pathlib.Path("tests").glob("test_*.py") if p.stem not in excluded)
+          assert len(names) == 45
+          shard = int(sys.argv[1])
+          selected = [n for i, n in enumerate(names) if i % 5 == shard]
+          def flatten(suite):
+              for item in suite:
+                  if isinstance(item, unittest.TestSuite):
+                      yield from flatten(item)
+                  else:
+                      yield item
+          failures = 0
+          for slot, module in enumerate(selected):
+              suite = unittest.defaultTestLoader.loadTestsFromName("tests." + module)
+              identities = [t.id() for t in flatten(suite)]
+              sink = io.StringIO()
+              with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
+                  result = unittest.TextTestRunner(stream=sink, verbosity=0).run(suite)
+              verdict = "PASS" if result.wasSuccessful() else "FAIL"
+              failures += not result.wasSuccessful()
+              print(f"P07_DIAG_SHARD={shard} MODULE_SLOT={slot} TESTS={result.testsRun} STATUS={verdict}",flush=True)
+              for typ, items in (("FAILURE",result.failures),("ERROR",result.errors)):
+                  for testcase, traceback_text in items:
+                      identity = testcase.id()
+                      position = identities.index(identity) if identity in identities else -1
+                      last_line = next((x for x in reversed(traceback_text.splitlines()) if x.strip()), "UnknownError")
+                      kind = re.search(r"([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception|Failure))(?=[: ]|$)", last_line)
+                      category = kind.group(1) if kind else "UNKNOWN"
+                      print(f"P07_DIAG_SHARD={shard} MODULE_SLOT={slot} CASE_SLOT={position} ISSUE={typ} CLASS={category}",flush=True)
+          print(f"P07_DIAG_SHARD={shard} FAILED_MODULES={failures}",flush=True)
+          PY
+          then
+            grep '^P07_DIAG_' "$log" || true
+          else
+            rc=$?
+            grep '^P07_DIAG_' "$log" || true
+            echo "P07_DIAG_PROCESS_EXIT=$rc"
+            exit "$rc"
+          fi
+      - name: Remove private test inputs and raw traces
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- "$GITHUB_WORKSPACE/p07-private"
+          rm -f -- "$RUNNER_TEMP/p07-private-diagnostic.log"
+          echo 'P07_PRIVATE_SOURCE_PERSISTED=NO'
+          echo 'P07_PRIVATE_TRACE_PERSISTED=NO'
