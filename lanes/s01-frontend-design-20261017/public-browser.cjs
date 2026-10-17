@@ -58,6 +58,23 @@ function gate(value,name,detail){checks.push({name,pass:!!value,detail});/* Coll
   const external=p.locator('.vf-footer-partner-link[href="https://www.youtube.com/"]');
   gate(await external.count()===1&&await external.getAttribute('aria-current')!=='page','external partner inactive on inner page',{lang});
  }
+
+ // Bounded 1024+ three-family desktop rhythm proof on exact WordPress output.
+ for(const lang of ['en','zh']) for(const width of [1440,1024]){
+   await p.setViewportSize({width,height:1000});
+   await p.goto(cases[lang].tool_hub);
+   const directory=await p.locator('.vf-directory-tool-card').first().evaluate(el=>({pad:getComputedStyle(el).paddingTop,gap:getComputedStyle(el).gap}));
+   gate(directory.pad==='18px'&&directory.gap==='11px','tool hub desktop cards consume dense family owner',{lang,width,directory});
+   gate(await p.locator('.vf-directory-tool-card').count()===11,'tool directory retains all 11 fixture tools',{lang,width});
+   await p.goto(cases[lang].tool);
+   const steps=await p.locator('.vf-tool-steps-list li').first().evaluate(el=>({min:getComputedStyle(el).minHeight,pad:getComputedStyle(el).paddingTop}));
+   gate(steps.min==='150px'&&steps.pad==='18px','tool detail only tightens secondary guidance',{lang,width,steps});
+   gate(await p.locator('[data-vf-tool-runtime-stage="1"]').count()===1,'Provider work surface retained',{lang,width});
+   await p.goto(cases[lang].guide_index);
+   const guide=await p.locator('.vf-theme-post-list--guide_index .vf-directory-card').first().evaluate(el=>({pad:getComputedStyle(el).paddingTop}));
+   gate(guide.pad==='17px','guide index desktop row spacing consumes family owner',{lang,width,guide});
+   gate(await p.locator('.vf-theme-post-list--guide_index .vf-directory-card').count()>=9,'guide index keeps nine or more existing results',{lang,width});
+ }
  const nativeContext=await browser.newContext({javaScriptEnabled:false,viewport:{width:1440,height:1000}}),n=await nativeContext.newPage();for(const lang of ['en','zh']){await n.goto(cases[lang].faq_page);await n.locator('[data-vf-faq-item] summary').first().click();gate(await n.locator('[data-vf-faq-item][open]').count()>0,'FAQ works without JavaScript',{lang});await n.goto(cases[lang].archive_list+'?vf_fixture_count=1');await n.locator('.pagination .next').click();gate(await n.locator('.pagination .current').count()===1,'native pagination works',{lang});}await nativeContext.close();
  const admin=await context.newPage();await admin.goto('http://127.0.0.1:18880/wp-login.php');await admin.locator('#user_login').fill('admin');await admin.locator('#user_pass').fill('Synthetic-Only-Update-54!');await admin.locator('input[name="redirect_to"]').evaluate(e=>e.value='http://127.0.0.1:18880/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages');await admin.locator('#wp-submit').click();await admin.waitForURL('**/wp-admin/**');await admin.goto('http://127.0.0.1:18880/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages');gate(await admin.locator('[data-vf-page-context]').count()===20,'same admin directory keeps all types');gate((await admin.locator('.vf-frontend-pages__review-overview').innerText()).includes('待复验'),'backend records source phase truthfully');gate((await admin.locator('#vf-review-home .vf-frontend-pages__progress-record > p').first().innerText()).includes('待复验'),'unreviewed source starts at verify, not accepted');await admin.screenshot({path:'proof/admin-progress.png'});
  gate(errors.length===0,'no uncaught runtime errors',errors);assert(checks.every(c=>c.pass),'Independent gates failed: '+JSON.stringify(checks.filter(c=>!c.pass))); fs.writeFileSync('proof/public-browser.json',JSON.stringify({status:'PASS',checks,mobile:'NOT_RUN_OWNER_DEFERRED',production:'NOT_EXECUTED',owner_real_use:'PENDING'},null,2));await browser.close();
