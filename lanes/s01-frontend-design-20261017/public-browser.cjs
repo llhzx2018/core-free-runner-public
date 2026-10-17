@@ -1,0 +1,36 @@
+'use strict';
+const fs=require('fs'),assert=require('node:assert/strict'),{chromium}=require('playwright');
+const cases=JSON.parse(fs.readFileSync('proof/cases.json')).cases,seed=JSON.parse(fs.readFileSync('proof/seed.json')),checks=[],errors=[];
+function gate(value,name,detail){checks.push({name,pass:!!value,detail});assert(value,name+' '+JSON.stringify(detail));}
+(async()=>{const browser=await chromium.launch({headless:true}),context=await browser.newContext(),p=await context.newPage();p.setDefaultTimeout(8000);p.on('pageerror',e=>errors.push(e.message));
+ for(const lang of ['en','zh'])for(const width of [1920,1440,1319,1024]){
+  await p.setViewportSize({width,height:1000});
+  for(const [family,url]of Object.entries(cases[lang])){
+   const response=await p.goto(url);await p.waitForLoadState('networkidle');
+   gate(response.status()===(family==='not_found'?404:200),'real route status',{lang,width,family,status:response.status()});
+   gate(await p.locator('[data-vf-theme-module-stack="'+family+'"][data-vf-frontend-design="reference-v1"]').count()===1,'real context uses approved design',{lang,width,family,actual:await p.locator('[data-vf-theme-module-stack]').getAttribute('data-vf-theme-module-stack')});
+   gate(await p.locator('main h1').count()===1,'one page title',{lang,width,family});
+   gate(await p.locator('header[data-vf-frontend-design]').count()===1&&await p.locator('footer[data-vf-frontend-design]').count()===1,'one shared header/footer',{lang,width,family});
+   const geom=await p.evaluate(()=>({overflow:document.documentElement.scrollWidth>innerWidth+1,header:document.querySelector('.vf-header-inner').getBoundingClientRect().x,footer:document.querySelector('.vf-production-footer-wrap').getBoundingClientRect().x,css:getComputedStyle(document.querySelector('.vf-production-footer')).backgroundColor}));
+   gate(!geom.overflow&&Math.abs(geom.header-geom.footer)<=1,'desktop rails align without overflow',{lang,width,family,...geom});
+   gate(geom.css!=='rgb(11, 18, 32)'&&await p.locator('.vf-footer-component-version').count()===0,'light footer has no technical version label',{lang,width,family});
+   if(width===1440)await p.screenshot({path:'proof/'+family+'-'+lang+'.png',fullPage:true});
+  }
+ }
+ for(const lang of ['en','zh']){
+  await p.setViewportSize({width:1440,height:1000});await p.goto(cases[lang].home);
+  gate(await p.locator('.vf-home-quick-start a').count()>0,'home quick start consumes available tools',{lang});
+  const quick=await p.locator('.vf-home-quick-start a').first().getAttribute('href');gate(new URL(quick).origin===new URL(p.url()).origin,'quick start points to real same-site tool',{lang});
+  await p.goto(cases[lang].tool_hub);const search=p.locator('[data-vf-directory-query],.vf-directory-search input[type="search"]').first();
+  if(await search.count()){await search.fill('zz-no-such-tool-147');await search.press('Enter');await p.waitForLoadState('networkidle');gate(await p.locator('.vf-directory-tool-card:visible').count()===0,'tool search empty stays empty',{lang});}
+  await p.goto(cases[lang].faq_page);const faq=p.locator('[data-vf-faq-page]');const q=faq.locator('[data-vf-faq-query]');await q.fill('Uniqueanswer');gate(await faq.locator('[data-vf-faq-item]:visible').count()===1,'FAQ filters authored answers',{lang});await faq.locator('[data-vf-faq-clear]').click();gate(await faq.locator('[data-vf-faq-item]:visible').count()===4,'FAQ clear recovers',{lang});const summary=faq.locator('[data-vf-faq-item] summary').first();await summary.focus();await p.keyboard.press('Enter');gate(await summary.locator('..').getAttribute('open')!==null,'FAQ keyboard opens answer',{lang});
+  await p.goto(cases[lang].search+'&vf_fixture_count=1');const form=p.locator('.vf-theme-search-workspace form').first();if(await form.count()){await form.locator('input[type="search"]').fill('zz-no-article-match');await form.locator('[type="submit"]').click();await p.waitForLoadState('networkidle');gate(await p.locator('.vf-theme-search-results-grid .vf-directory-card').count()===0,'search no result does not fabricate cards',{lang});}
+  await p.goto(cases[lang].archive_list+'?vf_fixture_count=1');const next=p.locator('.vf-theme-post-list--archive_list .pagination .next');gate(await next.count()===1,'archive keeps real next page',{lang});await next.click();await p.waitForLoadState('networkidle');gate(await p.locator('.vf-theme-post-list--archive_list .pagination .current').count()===1,'archive next page resolves',{lang});
+  await p.goto(cases[lang].guide_index+'?vf_fixture_pages=guide');const g=p.locator('.vf-theme-post-list--guide_index .vf-theme-pagination--internal .next');if(await g.count()){await g.click();await p.waitForLoadState('networkidle');gate(await p.locator('.vf-theme-post-list--guide_index .vf-directory-grid a').count()>0,'guide pagination works',{lang});}
+  await p.goto(seed.basic[lang].basiclong);gate(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'long authored content does not overflow',{lang});gate((await p.locator('main').innerText()).includes('Owner preserved code'),'authored code preserved',{lang});
+  await p.goto(cases[lang].tool);gate(await p.locator('main input, main textarea').count()>0,'real provider input still mounted',{lang});
+ }
+ const nativeContext=await browser.newContext({javaScriptEnabled:false,viewport:{width:1440,height:1000}}),n=await nativeContext.newPage();for(const lang of ['en','zh']){await n.goto(cases[lang].faq_page);await n.locator('[data-vf-faq-item] summary').first().click();gate(await n.locator('[data-vf-faq-item][open]').count()>0,'FAQ works without JavaScript',{lang});await n.goto(cases[lang].archive_list+'?vf_fixture_count=1');await n.locator('.pagination .next').click();gate(await n.locator('.pagination .current').count()===1,'native pagination works',{lang});}await nativeContext.close();
+ const admin=await context.newPage();await admin.goto('http://127.0.0.1:18880/wp-login.php');await admin.locator('#user_login').fill('admin');await admin.locator('#user_pass').fill('Synthetic-Only-Update-54!');await admin.locator('#wp-submit').click();await admin.waitForURL('**/wp-admin/**');await admin.goto('http://127.0.0.1:18880/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages');gate(await admin.locator('[data-vf-page-context]').count()===20,'same admin directory keeps all types');gate((await admin.locator('.vf-frontend-pages__review-overview').innerText()).includes('待复验'),'backend records source phase truthfully');gate((await admin.locator('#vf-review-home .vf-frontend-pages__progress-record > p').first().innerText()).includes('待复验'),'unreviewed source starts at verify, not accepted');await admin.screenshot({path:'proof/admin-progress.png'});
+ gate(errors.length===0,'no uncaught runtime errors',errors);fs.writeFileSync('proof/public-browser.json',JSON.stringify({status:'PASS',checks,mobile:'NOT_RUN_OWNER_DEFERRED',production:'NOT_EXECUTED',owner_real_use:'PENDING'},null,2));await browser.close();
+})().catch(e=>{fs.writeFileSync('proof/public-browser-failure.json',JSON.stringify({status:'FAIL',error:e.message,checks,errors},null,2));console.error(e);process.exit(1)});
