@@ -64,7 +64,7 @@ class FirstVerifyBeforeSchedulerContractTests(unittest.TestCase):
         self.assertIn("没有修改定时任务（Cron）", self.enable)
         self.assertIn("DNS 未修改", self.enable)
         self.assertIn("源服务器保留", self.enable)
-        self.assertIn("本次验证不会创建或修改 P07 定时任务（Cron）", self.run_now)
+        self.assertIn("本次验证不会创建或修改 自动备份计划", self.run_now)
         self.assertIn("DNS 未修改", self.run_now)
         self.assertIn("源服务器保留", self.run_now)
 
