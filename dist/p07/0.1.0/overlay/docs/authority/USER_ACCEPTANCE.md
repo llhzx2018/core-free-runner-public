@@ -1,13 +1,13 @@
 # P07 · USER ACCEPTANCE
 
-Last reconciled: 2026-10-16
+Last reconciled: 2026-10-17
 
 > This file is the Authority for **real user usability**. Machine PASS does not imply Owner Real PASS. One real migration path PASS also does not imply every P07 capability is Owner-accepted.
 
 ## Current status
 
 ```text
-Engineering / Machine regression layer       release85 migration machine evidence PASS (not all independent CI)
+Engineering / Machine regression layer       release86 exact-source 451/451 PASS; native CI failure remains non-PASS
 Full-server Migration Owner Real Path        REAL_PASS / PRODUCTION_PASS
 Full-server Migration DNS Cutover            OWNER_MANUAL_PASS
 Full-server Migration Source Recovery Copy   RETAINED
@@ -15,18 +15,24 @@ Old-server Decommission Safety               NOT_PROVEN / DELETE_DENIED
 Other P07 real-user capability paths         MIXED / NOT blanket-proven
 P07 User Acceptance                          PARTIAL / NOT_BLANKET_PASS
 release69+ Hardening Owner Real               NOT_RUN
-release85 MariaDB 10.11 new VPS Owner Real     NOT_RUN
-release85 MySQL 8.4 -> MariaDB 10.11 Owner Real NOT_RUN
-System Care rc54 real-mutation workflow        MACHINE_PASS / GitHub-hosted runner 38914624486
+release86 MariaDB 10.11 new VPS Owner Real     NOT_RUN
+release86 MySQL 8.4 -> MariaDB 10.11 Owner Real NOT_RUN
+System Care rc55 real-mutation workflow        MACHINE_PASS / GitHub-hosted runner 38992499233
 ```
 
-## Release85 identity and evidence separation · 2026-10-16
+## Release86 published identity · 2026-10-17
 
-Release85 is the current **published baseline** (product `BUILD_ID=0.1.0-release85`, public Toolbox Slot3, System Care rc54). Its MariaDB 10.11 default installation and target-side migration guard were validated by synthetic machine tests; no real new VPS MySQL/Percona → MariaDB migration has been observed.
+The current published software is P07 `0.1.0-release86` with System Care `0.1.0-rc55`, tag `p07-v0.1.0-release86-mariadb-1011` and public commit `55ec3edd764e5294044ec05e55d88c564df94a92`. Official formal publication and remote distribution readback [run 38992499359](https://github.com/llhzx2018/core-free-runner-public/actions/runs/38992499359) PASS; full exact-source synthetic 451/451 [run 38992078210](https://github.com/llhzx2018/core-free-runner-public/actions/runs/38992078210) PASS; System Care real-mutation disposable runner [run 38992499233](https://github.com/llhzx2018/core-free-runner-public/actions/runs/38992499233) PASS.
+
+These are **machine and publication** facts only. There is still **no** Owner new-VPS MariaDB 10.11 or MySQL/Percona-to-MariaDB field acceptance. Production installed version UNKNOWN unless the Owner reports a direct current readback. Source old VPS must remain available.
+
+## Historical release85 evidence · 2026-10-16
+
+Release85 was the prior **published baseline** (product `BUILD_ID=0.1.0-release85`, public Toolbox Slot3, System Care rc54). Its MariaDB 10.11 default installation and target-side migration guard were validated by synthetic machine tests; no real new VPS MySQL/Percona → MariaDB migration has been observed.
 
 The 2026-10-05 **release68** real 16-site migration remains a genuine historical Owner PASS for that exact old-engine environment, not release85 MariaDB compatibility proof.
 
-Round 1 hardening work is an **unmerged candidate** on product PR #196, with 143/143 isolated exact-source regressions PASS. Candidate PASS does not update released byte identities or Owner Real status.
+Round 1 and Round 2 hardening PR #196/#197 were merged before the release86 source candidate #198 was promoted; independent R3 exact-source and formal published-byte checks PASS. None of this changes the Owner Real `NOT_RUN` status.
 
 System Care rc54 real-mutation workflow previously failed because CI expected retired success wording. The corrected **workflow-only** public main change (PR #2757) ran on GitHub-hosted Ubuntu 24.04 and passed [run 38914624486](https://github.com/llhzx2018/core-free-runner-public/actions/runs/38914624486), including real APT cache cleanup, journal cleanup and negative safety gates. This is independent machine evidence, **not** an Owner VPS approval or a new System Care binary release.
 
@@ -79,20 +85,20 @@ The following claims remain prohibited:
 "all backup/restore/storage paths PASS" from the migration result
 "old server can be deleted"             before separate decommission audit
 "release69+ Owner Real PASS"            without a fresh real run
-"release85 MariaDB new-VPS Real PASS"     without an actual MariaDB server run
+"release86 MariaDB new-VPS Real PASS"     without an actual MariaDB server run
 ```
 
 ## Current identities
 
 ```text
-current released product build         0.1.0-release85 (source/main; public distributor)
-formal public release                  p07-v0.1.0-release85-mariadb-1011
-system care package                    0.1.0-rc54
+current released product build         0.1.0-release86 (source/main; public distributor)
+formal public release                  p07-v0.1.0-release86-mariadb-1011
+system care package                    0.1.0-rc55
 2026-10-05 real migration build        0.1.0-release68 (historical exact-source evidence)
 release68 source main                  68738ec8a1f3651d84db86b103cfa52b57653f8f
 release68 public main                  6496f6b3c80f9e7c8b499d02df3a363708ec489f
 release69 former candidate             0.1.0-release69 (historical only)
-release85 MariaDB Owner real           NOT_RUN
+release86 MariaDB Owner real           NOT_RUN
 overall P07 Owner real                 PARTIAL / NOT_BLANKET_PASS
 ```
 
