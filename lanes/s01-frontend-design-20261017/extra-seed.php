@@ -28,6 +28,7 @@ foreach(['en','zh']as $lang){
    'footer_company'=>['about_page','contact_page','blog_index','html_sitemap'],default=>[],
   };
   foreach($items as $key)wp_update_nav_menu_item($menu,0,['menu-item-title'=>vf_theme_page_runtime_contracts()[$key]['label'],'menu-item-url'=>$cases[$lang][$key],'menu-item-status'=>'publish','menu-item-type'=>'custom']);
+  if($location==='footer_partners')wp_update_nav_menu_item($menu,0,['menu-item-title'=>'Synthetic External Partner','menu-item-url'=>'https://www.youtube.com/','menu-item-status'=>'publish','menu-item-type'=>'custom']);
   $menus[$location][$lang]=(int)$menu;
  }
 }

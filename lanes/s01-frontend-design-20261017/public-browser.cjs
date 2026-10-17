@@ -32,6 +32,32 @@ function gate(value,name,detail){checks.push({name,pass:!!value,detail});/* Coll
   await p.goto(seed.basic[lang].basiclong);gate(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'long authored content does not overflow',{lang});gate((await p.locator('main').innerText()).includes('Owner preserved code'),'authored code preserved',{lang});
   await p.goto(cases[lang].tool);gate(await p.locator('main input, main textarea').count()>0,'real provider input still mounted',{lang});
  }
+ for(const lang of ['en','zh']){
+  await p.setViewportSize({width:1440,height:1000});await p.goto(cases[lang].home);
+  const partner=p.locator('.vf-footer-partner-link[href="https://www.youtube.com/"]');
+  gate(await partner.count()===1,'external partner menu seeded',{lang});
+  if(await partner.count()){
+    const external=await partner.first().evaluate(e=>({active:e.classList.contains('is-active'),current:e.getAttribute('aria-current')}));
+    gate(!external.active&&external.current!=='page','external footer link cannot be current page',{lang,external});
+  }
+  const grid=p.locator('.vf-home-tools-grid'),cards=grid.locator('.vf-home-tool-card');
+  gate(await grid.count()===1&&await cards.count()>0,'home tool grid remains populated',{lang,count:await cards.count()});
+  if(await grid.count()){
+    const geom=await grid.evaluate(e=>({columns:getComputedStyle(e).gridTemplateColumns.split(' ').length,scroll:document.documentElement.scrollWidth,viewport:innerWidth}));
+    gate(geom.scroll<=geom.viewport+1&&(await cards.count()!==6||geom.columns===3),'desktop home card grid stays compact',{lang,geom,count:await cards.count()});
+  }
+  const disc=p.locator('.vf-home-task-disclosure');
+  gate(await disc.count()===1,'home task disclosure exists',{lang,count:await disc.count()});
+  if(await disc.count()){
+    const summary=disc.locator('summary');gate(await disc.getAttribute('open')===null,'home task disclosure closed by default',{lang});
+    await summary.focus();await p.keyboard.press('Enter');
+    gate(await disc.getAttribute('open')!==null,'home task disclosure keyboard opens',{lang});
+    await p.keyboard.press('Enter');gate(await disc.getAttribute('open')===null,'home task disclosure keyboard closes',{lang});
+  }
+  await p.goto(cases[lang].tool_hub);
+  const external=p.locator('.vf-footer-partner-link[href="https://www.youtube.com/"]');
+  gate(await external.count()===1&&await external.getAttribute('aria-current')!=='page','external partner inactive on inner page',{lang});
+ }
  const nativeContext=await browser.newContext({javaScriptEnabled:false,viewport:{width:1440,height:1000}}),n=await nativeContext.newPage();for(const lang of ['en','zh']){await n.goto(cases[lang].faq_page);await n.locator('[data-vf-faq-item] summary').first().click();gate(await n.locator('[data-vf-faq-item][open]').count()>0,'FAQ works without JavaScript',{lang});await n.goto(cases[lang].archive_list+'?vf_fixture_count=1');await n.locator('.pagination .next').click();gate(await n.locator('.pagination .current').count()===1,'native pagination works',{lang});}await nativeContext.close();
  const admin=await context.newPage();await admin.goto('http://127.0.0.1:18880/wp-login.php');await admin.locator('#user_login').fill('admin');await admin.locator('#user_pass').fill('Synthetic-Only-Update-54!');await admin.locator('input[name="redirect_to"]').evaluate(e=>e.value='http://127.0.0.1:18880/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages');await admin.locator('#wp-submit').click();await admin.waitForURL('**/wp-admin/**');await admin.goto('http://127.0.0.1:18880/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages');gate(await admin.locator('[data-vf-page-context]').count()===20,'same admin directory keeps all types');gate((await admin.locator('.vf-frontend-pages__review-overview').innerText()).includes('待复验'),'backend records source phase truthfully');gate((await admin.locator('#vf-review-home .vf-frontend-pages__progress-record > p').first().innerText()).includes('待复验'),'unreviewed source starts at verify, not accepted');await admin.screenshot({path:'proof/admin-progress.png'});
  gate(errors.length===0,'no uncaught runtime errors',errors);assert(checks.every(c=>c.pass),'Independent gates failed: '+JSON.stringify(checks.filter(c=>!c.pass))); fs.writeFileSync('proof/public-browser.json',JSON.stringify({status:'PASS',checks,mobile:'NOT_RUN_OWNER_DEFERRED',production:'NOT_EXECUTED',owner_real_use:'PENDING'},null,2));await browser.close();
