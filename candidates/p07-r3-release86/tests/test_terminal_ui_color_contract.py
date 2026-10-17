@@ -159,7 +159,9 @@ class TerminalUiColorContractTests(unittest.TestCase):
         self.assertIn("--confirm DISABLE_DUAL_REMOTE_AUTOBACKUP", auto)
         self.assertIn("确认关闭自动备份？[y/N]", auto)
         self.assertIn("ui_good 'Google：已就绪 ✓'", storage)
-        self.assertIn("ui_menu_danger 2 '关闭面板基础认证（Basic Auth）'", admin)
+        self.assertIn("ui_menu_danger 2 '关闭额外登录保护（Basic Auth）'", admin)
+        self.assertIn("ui_safety_tier danger '会降低 CloudPanel 登录保护。'", admin)
+        self.assertIn("确认关闭额外登录保护？[y/N]", admin)
         self.assertIn("ui_menu_danger 4 '关闭两步验证（2FA）'", admin)
 
     def test_chinese_first_and_lazy_dependency_contract(self) -> None:
