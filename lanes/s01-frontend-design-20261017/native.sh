@@ -25,10 +25,10 @@ cli theme activate vf-tools-theme >/dev/null
 cli plugin install polylang --version=3.8.10 --activate >/dev/null
 docker cp lane/languages.php "$WP:/tmp/languages.php";cli eval-file /tmp/languages.php >/dev/null
 docker cp lane/wp-check.php "$WP:/tmp/wp-check.php";cli eval-file /tmp/wp-check.php > proof/wordpress.json
+cli rewrite structure '/%postname%/' --hard >/dev/null
 docker cp lane/mount-seed.php "$WP:/tmp/mount-seed.php";cli eval-file /tmp/mount-seed.php > proof/mounts.json
 docker cp lane/seed.php "$WP:/tmp/seed.php";cli eval-file /tmp/seed.php > proof/seed.json
 docker cp lane/extra-seed.php "$WP:/tmp/extra-seed.php";cli eval-file /tmp/extra-seed.php > proof/cases.json
-cli rewrite structure '/%postname%/' --hard >/dev/null
 docker cp lane/snapshot.php "$WP:/tmp/snapshot.php"
 # Warm only public read-only boot paths before protected-state comparison.
 curl -fsS http://127.0.0.1:18880/ >/dev/null
