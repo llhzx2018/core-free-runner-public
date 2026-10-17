@@ -474,9 +474,11 @@ def write_checksums(package_dir: Path) -> None:
     for path in sorted(package_dir.rglob("*")):
         if path.is_symlink():
             raise RuntimeError(f"backup package contains external symlink: {path.relative_to(package_dir).as_posix()}")
-        if not path.is_file() or path.name in {"checksums.sha256", "verification.json"}:
+        if not path.is_file():
             continue
         rel = path.relative_to(package_dir)
+        if rel.as_posix() in {"checksums.sha256", "verification.json"}:
+            continue
         entries.append(f"{sha256_file(path)}  {rel.as_posix()}")
     target = package_dir / "checksums.sha256"
     fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -539,12 +541,23 @@ def verify_package(package_dir: Path) -> dict[str, Any]:
     checked = 0
     try:
         checksum_lines = checksums.read_text(encoding="utf-8").splitlines()
+    except UnicodeError:
+        checksum_lines = []
+        failures.append("checksums:invalid-encoding")
     except OSError:
         checksum_lines = []
         failures.append("checksums:missing")
+    # A valid index must enumerate every payload file, not merely verify those
+    # that happen to remain listed. Otherwise removal of a checksum line can
+    # silently exclude a damaged database or private recovery metadata.
+    actual_paths: set[str] = set()
+    declared_paths: set[str] = set()
     for path in sorted(package_dir.rglob("*")):
+        rel = path.relative_to(package_dir).as_posix()
         if path.is_symlink():
-            failures.append(f"symlink:{path.relative_to(package_dir).as_posix()}")
+            failures.append(f"symlink:{rel}")
+        elif path.is_file() and rel not in {"checksums.sha256", "verification.json"}:
+            actual_paths.add(rel)
     for line in checksum_lines:
         if not line.strip():
             continue
@@ -553,10 +566,29 @@ def verify_package(package_dir: Path) -> dict[str, Any]:
         except ValueError:
             failures.append("checksums:invalid-line")
             continue
-        target = package_dir / rel
+        rel_path = Path(rel)
+        if (
+            not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or not rel
+            or rel_path.is_absolute()
+            or chr(92) in rel
+            or rel_path.as_posix() != rel
+            or any(part in ("", ".", "..") for part in rel.split("/"))
+        ):
+            failures.append("checksums:unsafe-entry")
+            continue
+        if rel in declared_paths:
+            failures.append(f"checksums:duplicate:{rel}")
+            continue
+        declared_paths.add(rel)
+        target = package_dir / rel_path
         checked += 1
-        if not target.is_file() or sha256_file(target) != digest:
+        if not target.is_file() or target.is_symlink() or sha256_file(target) != digest:
             failures.append(f"checksum:{rel}")
+    for rel in sorted(actual_paths - declared_paths):
+        failures.append(f"checksums:unlisted:{rel}")
+    for rel in sorted(declared_paths - actual_paths):
+        failures.append(f"checksums:missing-payload:{rel}")
 
     archive = package_dir / "files" / "site.tar.gz"
     try:
@@ -603,9 +635,15 @@ def verification_failure_code(failures: list[str]) -> str:
         ("checksum:manifest.json", "MANIFEST_CHANGED"),
         ("manifest:sqlite-invalid", "SQLITE_MANIFEST_INVALID"),
         ("manifest:invalid", "MANIFEST_INVALID"),
+        # An undeclared SQLite sidecar is a more actionable root cause than
+        # the generic checksum coverage error triggered by the same file.
+        ("sqlite-unexpected:", "SQLITE_AUXILIARY_FILE_FOUND"),
+        ("checksums:unlisted:", "CHECKSUM_COVERAGE_INCOMPLETE"),
+        ("checksums:missing-payload:", "CHECKSUM_COVERAGE_INCOMPLETE"),
+        ("checksums:duplicate:", "CHECKSUM_INDEX_INVALID"),
+        ("checksums:unsafe-entry", "CHECKSUM_INDEX_INVALID"),
         ("checksum:", "PACKAGE_FILE_CHANGED"),
         ("mysql:", "MYSQL_SNAPSHOT_INVALID"),
-        ("sqlite-unexpected:", "SQLITE_AUXILIARY_FILE_FOUND"),
         ("sqlite:", "SQLITE_SNAPSHOT_INVALID"),
         ("archive:empty", "SITE_ARCHIVE_EMPTY"),
         ("archive:invalid", "SITE_ARCHIVE_INVALID"),
