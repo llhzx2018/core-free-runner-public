@@ -1,0 +1,109 @@
+name: TEMP P07 comprehensive source test matrix
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-complete-source-regression-temporary.yml'
+permissions:
+  contents: read
+concurrency:
+  group: temp-p07-complete-source-20261017
+  cancel-in-progress: false
+jobs:
+  syntax-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Require isolated checkout authorization
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN" || exit 78
+      - name: Checkout exact P07 source privately
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: b6dd45b7c939b3f407201fe3c1533d4ab90df236
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: p07-private
+      - name: Shell syntax, Python compile, smoke, secret scan
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p07-private rev-parse HEAD)" = 'b6dd45b7c939b3f407201fe3c1533d4ab90df236'
+          cd p07-private
+          export PYTHONPATH="$PWD/lib"
+          find bin lib -type f \( -name '*.sh' -o -name 'vfops*' \) -print0 | while IFS= read -r -d '' path; do
+            if head -n 1 "$path" | grep -Eq '^#!.*(bash|/sh)([[:space:]]|$)'; then
+              bash -n "$path"
+            fi
+          done
+          python3 -m compileall -q lib tests
+          bash -n tests/smoke.sh
+          log="$RUNNER_TEMP/p07-checks.log"
+          if timeout 480 bash tests/smoke.sh >"$log" 2>&1 && timeout 240 python3 scripts/secret_scan.py --root . >>"$log" 2>&1; then
+            echo 'P07_COMPLETE_SYNTAX_SMOKE_SECRET_SCAN=PASS'
+          else
+            echo 'P07_COMPLETE_SYNTAX_SMOKE_SECRET_SCAN=FAIL'
+            exit 1
+          fi
+      - name: Remove private files and logs
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/p07-private"
+          rm -f "$RUNNER_TEMP/p07-checks.log"
+          echo 'PRIVATE_WORKSPACE_CLEANUP=PASS'
+  python-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 29
+    steps:
+      - name: Require isolated checkout authorization
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN" || exit 78
+      - name: Checkout exact P07 source privately
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: b6dd45b7c939b3f407201fe3c1533d4ab90df236
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: p07-private
+      - name: Run assigned unittest modules
+        shell: bash
+        env:
+          TEST_SHARD: ${{ matrix.shard }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p07-private rev-parse HEAD)" = 'b6dd45b7c939b3f407201fe3c1533d4ab90df236'
+          cd p07-private
+          export PYTHONPATH="$PWD/lib"
+          mapfile -t modules < <(python3 -c 'from pathlib import Path; import os; items=sorted(Path("tests").glob("test_*.py")); shard=int(os.environ["TEST_SHARD"]); print("\n".join("tests."+p.stem for i,p in enumerate(items) if i%3==shard))')
+          test "${#modules[@]}" -gt 0
+          echo "P07_TEST_SHARD_${TEST_SHARD}_MODULES=${#modules[@]}"
+          log="$RUNNER_TEMP/p07-shard-${TEST_SHARD}.log"
+          if timeout --signal=TERM --kill-after=5s 1600 python3 -m unittest -q "${modules[@]}" >"$log" 2>&1; then
+            echo "P07_TEST_SHARD_${TEST_SHARD}=PASS"
+            grep -E '^Ran [0-9]+ tests? in ' "$log" | tail -n 1 || true
+          else
+            rc=$?
+            echo "P07_TEST_SHARD_${TEST_SHARD}=FAIL_${rc}"
+            grep -E '^Ran [0-9]+ tests? in |^FAILED \(' "$log" | tail -n 2 || true
+            exit "$rc"
+          fi
+      - name: Erase private test checkout and logs
+        if: always()
+        shell: bash
+        env:
+          TEST_SHARD: ${{ matrix.shard }}
+        run: |
+          rm -rf "$GITHUB_WORKSPACE/p07-private"
+          rm -f "$RUNNER_TEMP/p07-shard-${TEST_SHARD}.log"
+          echo "P07_TEST_SHARD_${TEST_SHARD}_PRIVATE_CLEANUP=PASS"
