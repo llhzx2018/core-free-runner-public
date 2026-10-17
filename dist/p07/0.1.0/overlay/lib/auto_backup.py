@@ -297,8 +297,24 @@ def _verified_automatic_for_domain(path: Path, domain: str) -> bool:
         verification = json.loads((path / "verification.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
+    # Malformed but parseable JSON must never crash retention or authorize a
+    # deletion. The historical verification record is not current proof.
+    if not isinstance(manifest, dict) or not isinstance(verification, dict):
+        return False
     site = manifest.get("site", {}) if isinstance(manifest.get("site"), dict) else {}
-    return manifest.get("backup_kind") == "automatic" and site.get("domain") == domain and verification.get("status") == "PASS"
+    if (
+        manifest.get("backup_kind") != "automatic"
+        or site.get("domain") != domain
+        or manifest.get("backup_id") != path.name
+        or verification.get("status") != "PASS"
+    ):
+        return False
+    # Recorded PASS is historical evidence, not permission to delete. Prove
+    # current on-disk package integrity every time retention considers it.
+    try:
+        return package_engine.verify_package(path).get("status") == "PASS"
+    except (OSError, ValueError, RuntimeError):
+        return False
 
 
 def prune_local(root: Path, domain: str, keep_last: int) -> list[str]:
@@ -310,7 +326,12 @@ def prune_local(root: Path, domain: str, keep_last: int) -> list[str]:
     resolved_root = root.resolve()
     for path in items[keep_last:]:
         target = path.resolve()
-        if target.parent != resolved_root:
+        if (
+            target.parent != resolved_root
+            or path.is_symlink()
+            or not path.is_dir()
+            or not _verified_automatic_for_domain(path, domain)
+        ):
             continue
         shutil.rmtree(target)
         deleted.append(path.name)
