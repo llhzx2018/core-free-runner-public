@@ -10,7 +10,7 @@ async function setup(page,lang,old=false,js=true){
  await page.route('**/*',r=>r.abort());
  await page.setContent(fs.readFileSync('lane/fixture-'+lang+'.html','utf8'));
  // Match production order: the runtime bundle precedes runtime token styles.
- await page.evaluate(text=>{const n=document.createElement('style');n.textContent=text;document.head.prepend(n)},old?baseline:css);
+ await page.evaluate(text=>{document.querySelector('[data-vf-test-runtime]').textContent=text},old?baseline:css);
  if(js)await page.addScriptTag({content:old?oldScript:script});
  await page.evaluate(()=>document.fonts.ready);
 }
