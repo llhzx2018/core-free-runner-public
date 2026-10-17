@@ -1,0 +1,139 @@
+name: TEMP P07 CloudPanel real host compatibility
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-clean-cloudpanel-host-temporary.yml'
+permissions:
+  contents: read
+jobs:
+  isolated-host:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Validate transient private source access
+        shell: bash
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN" || exit 78
+      - name: Read exact P07 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: cf09baab9fcdf1337c601ec57ebb27243c458a5b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: p07-private
+      - name: Require pristine Ubuntu and original P07 policy
+        id: ready
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p07-private rev-parse HEAD)" = 'cf09baab9fcdf1337c601ec57ebb27243c458a5b'
+          test "$(cat p07-private/BUILD_ID)" = '0.1.0-release87'
+          python3 - <<'PY'
+          import sys
+          sys.path.insert(0, "p07-private/lib")
+          import server_migration as m
+          assert m.CLOUDPANEL_BOOTSTRAP_DB_ENGINE == "MARIADB_10.11"
+          assert len(m.CLOUDPANEL_INSTALLER_SHA256) == 64
+          print("P07_CLOUDPANEL_REAL_TEST_SOURCE_POLICY=PASS")
+          PY
+          echo 'ready=no' >> "$GITHUB_OUTPUT"
+          if test -e /etc/nginx || test -e /etc/apache2 ||
+             test -e /var/lib/mysql || test -e /home/clp ||
+             command -v nginx >/dev/null 2>&1 ||
+             command -v mysql >/dev/null 2>&1 ||
+             command -v mariadb >/dev/null 2>&1; then
+            echo 'P07_REAL_CLOUDPANEL=NOT_RUN_GITHUB_VM_IS_NOT_EMPTY_SERVER'
+            exit 0
+          fi
+          if ! test -d /run/systemd/system; then
+            echo 'P07_REAL_CLOUDPANEL=NOT_RUN_NO_SYSTEMD'
+            exit 0
+          fi
+          if test "$(df -B1 --output=size / | tail -1 | tr -d ' ')" -lt 10737418240; then
+            echo 'P07_REAL_CLOUDPANEL=NOT_RUN_DISK_BELOW_10G'
+            exit 0
+          fi
+          echo 'ready=yes' >> "$GITHUB_OUTPUT"
+          echo 'P07_CLOUDPANEL_PRISTINE_HOST=PASS'
+      - name: Verify official CloudPanel installer is exactly P07 pinned SHA
+        if: steps.ready.outputs.ready == 'yes'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY' > "$RUNNER_TEMP/p07-official-installer-contract"
+          import sys
+          sys.path.insert(0, "p07-private/lib")
+          import server_migration as m
+          print(m.CLOUDPANEL_INSTALLER_URL)
+          print(m.CLOUDPANEL_INSTALLER_SHA256)
+          PY
+          url="$(sed -n '1p' "$RUNNER_TEMP/p07-official-installer-contract")"
+          pin="$(sed -n '2p' "$RUNNER_TEMP/p07-official-installer-contract")"
+          curl -fLsS --retry 2 --connect-timeout 15 --max-time 120 "$url" -o "$RUNNER_TEMP/p07-official-installer.sh"
+          echo "$pin  $RUNNER_TEMP/p07-official-installer.sh" | sha256sum -c - >/dev/null
+          bash -n "$RUNNER_TEMP/p07-official-installer.sh"
+          echo 'P07_CLOUDPANEL_VENDOR_INSTALLER_SHA256=PASS'
+      - name: Install complete CloudPanel using P07 MariaDB 10.11 policy
+        if: steps.ready.outputs.ready == 'yes'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          log="$RUNNER_TEMP/p07-private-install.log"
+          if timeout 360 sudo -n apt-get update -qq >"$log" 2>&1 &&
+             timeout 360 sudo -n apt-get install -y -qq curl wget rsync cron >>"$log" 2>&1 &&
+             timeout 1100 sudo -n env DEBIAN_FRONTEND=noninteractive DB_ENGINE=MARIADB_10.11 bash "$RUNNER_TEMP/p07-official-installer.sh" >>"$log" 2>&1; then
+            echo 'P07_CLOUDPANEL_FRESH_INSTALL=PASS'
+          else
+            echo 'P07_CLOUDPANEL_FRESH_INSTALL=FAIL_UPSTREAM_OR_RUNNER'
+            exit 1
+          fi
+          test -f /home/clp/htdocs/app/data/db.sq3
+          sudo -n clpctl --version >/dev/null
+          echo 'P07_CLOUDPANEL_REAL_CLI=PASS'
+      - name: Create real P07 site and database in disposable CloudPanel
+        if: steps.ready.outputs.ready == 'yes'
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p07-private
+          sudo -n env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/lib" python3 - <<'PY'
+          from pathlib import Path
+          import secrets
+          import cloudpanel, inventory, site_lifecycle
+          domain = "p07-ephemeral-ci.invalid"
+          user = "p07ephemeralci"
+          database = "p07ephemeralci"
+          created_site = False
+          created_db = False
+          try:
+              site_lifecycle.ensure_domain_available(Path("/"), domain)
+              cloudpanel.add_static_site(domain, user, secrets.token_urlsafe(20))
+              created_site = True
+              assert (Path("/home") / user / "htdocs" / domain).is_dir()
+              print("P07_REAL_CLOUDPANEL_SITE_CREATE=PASS")
+              manifest = inventory.build_manifest(Path("/"))
+              assert any(site.get("domain") == domain for site in manifest.get("sites", []))
+              print("P07_REAL_CLOUDPANEL_INVENTORY=PASS")
+              cloudpanel.add_database(domain, database, "p07ciuser", secrets.token_urlsafe(20))
+              created_db = True
+              print("P07_REAL_CLOUDPANEL_DB_CREATE=PASS")
+          finally:
+              if created_db:
+                  cloudpanel.delete_database(database, force=True)
+              if created_site:
+                  cloudpanel.delete_site(domain, force=True)
+          print("P07_REAL_CLOUDPANEL_TEST_CLEANUP=PASS")
+          PY
+      - name: Erase temporary P07 checkout and installer secrets
+        if: always()
+        shell: bash
+        run: |
+          sudo -n rm -rf -- "$GITHUB_WORKSPACE/p07-private"
+          rm -f -- "$RUNNER_TEMP/p07-official-installer-contract" "$RUNNER_TEMP/p07-official-installer.sh" "$RUNNER_TEMP/p07-private-install.log"
+          test ! -e "$GITHUB_WORKSPACE/p07-private"
+          echo 'P07_CLOUDPANEL_PRIVATE_SOURCE_AND_LOG_CLEANUP=PASS'
