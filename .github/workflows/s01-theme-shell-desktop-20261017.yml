@@ -1,0 +1,84 @@
+name: S01 public shell desktop alignment proof
+on:
+  push:
+    branches: [task/s01-theme-shell-desktop-20261017]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      TARGET_REPO: 'llhzx2018/vf-tools-theme'
+      TARGET_VERSION: '1.35.131'
+      TARGET_SHA: 'ab5fa61b002383a3456734b664b6a7640cc88af6'
+      TARGET_TREE: '130464d125a47430c20a1f9e59d34b0832e2e20f'
+      BASE_SHA: 'e66034b4485b953ee96a4fb16a2cc980281b0859'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Bound ephemeral lane identity
+        run: |
+          set -Eeuo pipefail
+          mkdir proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/s01-theme-shell-desktop-20261017/spec.json --template runner/lanes/s01-theme-shell-desktop-20261017/candidate.template.yml --output /tmp/shell-rendered.yml
+          cmp /tmp/shell-rendered.yml runner/.github/workflows/s01-theme-shell-desktop-20261017.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/s01-theme-shell-desktop-20261017/spec.json --input runner/.github/workflows/s01-theme-shell-desktop-20261017.yml > proof/lane-identity.json
+          cp -a runner/lanes/s01-theme-shell-desktop-20261017 lane
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Exact source and CSS owner containment
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import subprocess,pathlib,json,os,hashlib
+          def git(*a): return subprocess.check_output(['git','-C','target',*a])
+          assert git('rev-parse','HEAD').decode().strip()==os.environ['TARGET_SHA']
+          assert git('rev-parse','HEAD^{tree}').decode().strip()==os.environ['TARGET_TREE']
+          assert pathlib.Path('target/VERSION').read_text().strip()==os.environ['TARGET_VERSION']
+          changed=git('diff','--name-only',os.environ['BASE_SHA'],'HEAD').decode().splitlines()
+          allowed=json.loads(pathlib.Path('lane/allowed.json').read_text());assert sorted(changed)==sorted(allowed)
+          bundle_path='src/assets/css/public/vf-theme-public-runtime.css'
+          bundle=pathlib.Path('target',bundle_path).read_text();reversed_bundle=bundle
+          owners=[p for p in allowed if '/responsive/header-footer/' in p]
+          for path in owners:
+              new=pathlib.Path('target',path).read_text();old=git('show',os.environ['BASE_SHA']+':'+path).decode()
+              assert reversed_bundle.count(new)==1,path
+              reversed_bundle=reversed_bundle.replace(new,old,1)
+          assert reversed_bundle==git('show',os.environ['BASE_SHA']+':'+bundle_path).decode()
+          digest=hashlib.sha256(bundle.encode()).hexdigest()
+          assert digest in pathlib.Path('target/src/inc/public-css-owner-registry.php').read_text()
+          for path in ['src/header.php','src/footer.php','src/inc/services/navigation-service.php','src/inc/services/navigation-footer-output-service.php','src/inc/services/page-runtime-contract-service.php','VERSION']:
+              assert pathlib.Path('target',path).read_bytes()==git('show',os.environ['BASE_SHA']+':'+path),path
+          pathlib.Path('proof/source.json').write_text(json.dumps({'status':'PASS','sha':os.environ['TARGET_SHA'],'tree':os.environ['TARGET_TREE'],'changed':changed,'css_owners':owners,'bundle_sha256':digest,'all_other_css':'BYTE_IDENTICAL','header_footer_templates':'BYTE_IDENTICAL','config_and_data_writes':'NONE','version':'UNCHANGED_DEVELOPMENT_CANDIDATE','release':'NOT_EXECUTED'},indent=2))
+          PY
+          php -l target/src/inc/public-css-owner-registry.php
+          node --check target/src/assets/js/modules/public-shell-navigation.js
+          node --check lane/browser.cjs
+      - name: Desktop browser runtime
+        run: |
+          npm install --no-audit --no-fund playwright@1.62.1
+          npx playwright install chromium
+          mkdir -p "$HOME/.local/share/fonts"
+          curl -g -fsSL --retry 2 'https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc/NotoSansSC[wght].ttf' -o "$HOME/.local/share/fonts/NotoSansSC.ttf"
+          fc-cache -f
+      - name: Reproduce old defects and verify candidate desktop layouts and navigation
+        run: node lane/browser.cjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: public-shell-desktop-proof-${{ github.run_id }}
+          path: proof/
+          retention-days: 14
+      - name: Remove transient private source
+        if: always()
+        run: rm -rf target
