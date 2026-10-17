@@ -31,7 +31,7 @@ async function measure(p){return p.evaluate(()=>{
  await trigger.focus();await trigger.press('ArrowDown');await p.keyboard.press('Escape');
  gate(await parent.locator('.vf-nav-submenu').isVisible()&&await parent.locator('.vf-nav-submenu').getAttribute('aria-hidden')==='true','baseline reproduces visually open but ARIA closed Escape bug');
  await p.screenshot({path:'proof/baseline-en-1440.png',fullPage:true});
- for(const lang of ['en','zh'])for(const width of [1920,1440,1319,1024]){
+ for(const lang of ['en','zh-configured-synthetic'])for(const width of [1920,1440,1319,1024]){
   await p.setViewportSize({width,height:1000});await setup(p,lang);const m=await measure(p);
   gate(m.scroll<=width,'no desktop horizontal overflow',{lang,width,m});
   gate(m.cta&&Math.abs(m.cta.right-m.header.right)<1,'header actions align to container right edge',{lang,width,m});
@@ -48,6 +48,12 @@ async function measure(p){return p.evaluate(()=>{
    await p.evaluate(mode=>document.querySelector('[data-vf-footer-config]').classList.replace('vf-footer-columns-'+mode,'vf-footer-columns-three'),mode);
   }
  }
+ // The actual Chinese public output has no bound language menus. Preserve and
+ // report that configuration gap; do not turn it into invented navigation.
+ await p.setViewportSize({width:1440,height:1000});await setup(p,'zh');
+ gate(await p.locator('[data-vf-footer-section]').count()===0&&await p.locator('#vf-site-header').getAttribute('data-vf-header-menu-id')==='0','actual Chinese unbound-menu configuration is reproduced and remains an explicit operational gap');
+ gate((await measure(p)).scroll<=1440,'actual unbound Chinese shell still fits desktop viewport');
+ await p.screenshot({path:'proof/actual-zh-unbound-1440.png',fullPage:true});
  // A real keyboard and pointer workflow, rather than an ARIA-only assertion.
  await p.setViewportSize({width:1440,height:1000});await setup(p,'en');
  const group=p.locator('#vf-primary-nav>.vf-nav-item.has-children').first(),a=group.locator(':scope > a'),panel=group.locator(':scope > .vf-nav-submenu');
@@ -78,6 +84,6 @@ async function measure(p){return p.evaluate(()=>{
  gate(await ng.locator('.vf-nav-submenu').isVisible(),'CSS keyboard submenu fallback remains available without site JavaScript');
  gate(await n.locator('.vf-production-footer-col a:visible').count()>10,'desktop footer links stay available without JavaScript');
  await ctx.close();
- fs.writeFileSync('proof/result.json',JSON.stringify({status:'PASS',checks,source_sha:process.env.TARGET_SHA,source_tree:process.env.TARGET_TREE,scope:'public header/footer desktop CSS and dropdown dismissal',fixture:'anonymous public-rendered shell, no WordPress database or production write',mobile:'NOT_RUN_OWNER_DEFERRED',full_product_ux:'NOT_CLAIMED',release:'NOT_EXECUTED'},null,2));
+ fs.writeFileSync('proof/result.json',JSON.stringify({status:'PASS',checks,source_sha:process.env.TARGET_SHA,source_tree:process.env.TARGET_TREE,scope:'public header/footer desktop CSS and dropdown dismissal',fixture:'EN and unbound ZH are anonymous public-rendered shells; populated ZH layout is explicitly synthetic',production_menu_gap:'OPEN_OWNER_CONFIGURATION: existing ZH menus have no Polylang term language/translation relations; zero runtime menu IDs observed',production_operational_readiness:'NOT_PASS',mobile:'NOT_RUN_OWNER_DEFERRED',full_product_ux:'NOT_CLAIMED',release:'NOT_EXECUTED'},null,2));
  await browser.close();
 })().catch(async e=>{fs.writeFileSync('proof/result.json',JSON.stringify({status:'FAIL',checks,error:e.stack},null,2));if(browser)await browser.close();process.exitCode=1;});
