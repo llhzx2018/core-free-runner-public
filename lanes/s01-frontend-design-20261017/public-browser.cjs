@@ -207,6 +207,7 @@ function gate(value,name,detail){checks.push({name,pass:!!value,detail});/* Coll
      if(family!=='problem_index')gate(x.reading?.font==='18px','R05 guide/problem body font 18px',{lang,width,family,reading:x.reading});
    }
    await p.goto(cases[lang].problem_index);
+   const originalCount=await p.locator('.vf-theme-post-list--problem_index .vf-directory-card:visible').count();
    const filter=p.locator('.vf-directory-filter-group a[data-vf-directory-filter-button]:not([data-vf-directory-filter-button="all"])').first();
    const href=await filter.getAttribute('href');
    gate(!!href,'R05 symptom filter link exists',{lang,width,href});
@@ -216,9 +217,10 @@ function gate(value,name,detail){checks.push({name,pass:!!value,detail});/* Coll
        'R05 symptom filter retains meaningful results',{lang,width});
      const reset=p.locator('.vf-theme-post-list--problem_index [data-vf-directory-reset]:visible').first();
      gate(await reset.count()===1,'R05 symptom reset action exists',{lang,width});
-     if(await reset.count())await reset.click();
-     gate(await p.locator('.vf-theme-post-list--problem_index .vf-directory-card:visible').count()>=8,
-       'R05 reset restores problem list',{lang,width});
+     if(await reset.count()){await reset.click();await p.waitForLoadState('networkidle');}
+     gate(await p.locator('.vf-theme-post-list--problem_index .vf-directory-card:visible').count()===originalCount,
+       'R05 reset restores problem list',{lang,width,originalCount,url:p.url()});
+   // Count must be compared to the real unfiltered fixture rather than a guessed fixture size.
    }
  }
  const nativeContext=await browser.newContext({javaScriptEnabled:false,viewport:{width:1440,height:1000}}),n=await nativeContext.newPage();for(const lang of ['en','zh']){await n.goto(cases[lang].faq_page);await n.locator('[data-vf-faq-item] summary').first().click();gate(await n.locator('[data-vf-faq-item][open]').count()>0,'FAQ works without JavaScript',{lang});await n.goto(cases[lang].archive_list+'?vf_fixture_count=1');await n.locator('.pagination .next').click();gate(await n.locator('.pagination .current').count()===1,'native pagination works',{lang});}await nativeContext.close();
