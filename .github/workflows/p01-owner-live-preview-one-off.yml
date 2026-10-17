@@ -1,0 +1,162 @@
+name: p01-owner-live-preview-one-off
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-owner-live-preview-one-off.yml'
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+concurrency:
+  group: p01-owner-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  ephemeral-preview:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 105
+    env:
+      P01_SHA: 950cc28ad49ae23218553270bec58feff195084d
+      PREVIEW_PASSWORD: PreviewOnly-P01-20261017
+    steps:
+      - name: Checkout temporary public control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prepare isolated native PHP and Quick Tunnel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd >/dev/null
+          php -m | grep -i -Fx pdo_sqlite
+          curl -fLsS --retry 3 --connect-timeout 15 -o /tmp/p01-cloudflared             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+          chmod 700 /tmp/p01-cloudflared
+          /tmp/p01-cloudflared --version
+          echo P01_PREVIEW_RUNTIME_PREREQUISITES=PASS
+      - name: Read exact P01 candidate transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 950cc28ad49ae23218553270bec58feff195084d
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: candidate
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Install P01 into synthetic-only isolated runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$P01_SHA"
+          root=/tmp/p01-owner-preview-runtime
+          rm -rf "$root"
+          mkdir -p "$root"
+          cp -a candidate/src/. "$root/"
+          # Never serve dot-private storage under the PHP built-in test server.
+          cat >/tmp/p01-preview-router.php <<'PHP'
+          <?php
+          $path=(string)(parse_url((string)($_SERVER['REQUEST_URI']??'/'),PHP_URL_PATH)??'/');
+          header('X-Robots-Tag: noindex, nofollow, noarchive');
+          header('Cache-Control: no-store, private');
+          if(preg_match('#(?:^|/)\\.|\\.sqlite3?(?:$|/)|(?:^|/)private(?:/|$)|\\.runtime\\.php#i',$path)){
+            http_response_code(404);echo 'Not Found';return true;
+          }
+          return false;
+          PHP
+          php -S 127.0.0.1:19177 -t "$root" /tmp/p01-preview-router.php >/tmp/p01-preview-php.log 2>&1 &
+          echo $! >/tmp/p01-preview-php.pid
+          for i in $(seq 1 50); do
+            if curl -fsS -c /tmp/p01-preview-cookie -b /tmp/p01-preview-cookie               http://127.0.0.1:19177/setup.php -o /tmp/p01-preview-setup.html 2>/dev/null; then break; fi
+            sleep 0.2
+          done
+          csrf=$(python3 - <<'PY'
+          import pathlib,re
+          txt=pathlib.Path('/tmp/p01-preview-setup.html').read_text()
+          m=re.search(r'name="setup_csrf"\\s+value="([^"]+)"',txt)
+          assert m,'Setup CSRF not found'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-preview-cookie -b /tmp/p01-preview-cookie             -X POST http://127.0.0.1:19177/setup.php             --data-urlencode "setup_csrf=$csrf" --data-urlencode 'site_title=VF Start · 隔离预览（模拟数据）'             --data-urlencode "admin_password=$PREVIEW_PASSWORD"             --data-urlencode "admin_password_confirm=$PREVIEW_PASSWORD"             -o /tmp/p01-preview-setup-post.html
+          test -f "$root/app/.runtime.php"
+          cat >/tmp/p01-preview-synthetic-seed.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require $argv[1].'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $cat=$repo->createCategory(['name'=>'Preview · 模拟分类','description'=>'仅用于预览','icon'=>'','is_private'=>1,'sort_order'=>0]);
+          $repo->saveLink(null,['surface'=>'start','category_id'=>$cat,'title'=>'Preview · 模拟网址','url'=>'https://example.org/preview-only',
+            'description'=>'所有数据都是临时生成','tags'=>['preview'],'is_private'=>1,'is_pending'=>0]);
+          $db=vf_db();
+          $q=$db->prepare('INSERT INTO backup_records (backup_key,file_name,is_protected,created_at) VALUES (?,?,?,?)');
+          for($i=0;$i<268;$i++){
+            $key='backup-preview-'.str_pad((string)$i,4,'0',STR_PAD_LEFT);
+            $q->execute([$key,$key.'.sqlite',$i<264?1:0,gmdate('c')]);
+          }
+          if((int)$db->query('SELECT COUNT(*) FROM backup_records')->fetchColumn()!==268)
+            throw new RuntimeException('Synthetic backup fixture mismatch');
+          echo 'P01_PREVIEW_SYNTHETIC_FIXTURE=PASS'.PHP_EOL;
+          PHP
+          php /tmp/p01-preview-synthetic-seed.php "$root"
+          (cd "$root" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          # Local real-session smoke: admin auth, preview data, unauthenticated mutation denied.
+          curl -fsS -c /tmp/p01-preview-cookie -b /tmp/p01-preview-cookie             -H 'Content-Type: application/json' -d "{\"password\":\"$PREVIEW_PASSWORD\"}"             'http://127.0.0.1:19177/api.php?action=login' -o /tmp/p01-preview-login.json
+          python3 - <<'PY'
+          import json
+          assert json.load(open('/tmp/p01-preview-login.json'))['ok']
+          PY
+          curl -fsS -c /tmp/p01-preview-cookie -b /tmp/p01-preview-cookie             'http://127.0.0.1:19177/api.php?action=backup_baseline_reset_preview'             -o /tmp/p01-preview-inventory.json
+          python3 - <<'PY'
+          import json
+          p=json.load(open('/tmp/p01-preview-inventory.json'))['preview']
+          assert (p['count'],p['protected'],p['missing'])==(268,264,268),p
+          PY
+          curl -fsS -c /tmp/p01-preview-cookie -b /tmp/p01-preview-cookie             http://127.0.0.1:19177/data-safety.php -o /tmp/p01-preview-admin.html
+          grep -F 'id="resetBackupBaseline"' /tmp/p01-preview-admin.html >/dev/null
+          curl -sS -o /dev/null -w '%{http_code}'             'http://127.0.0.1:19177/.runtime.php' | grep -Fx 404
+          echo P01_REAL_PHP_OWNER_PREVIEW_LOCAL=PASS
+      - name: Publish time-limited public Preview URL and keep PHP alive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -Eeuo pipefail
+          /tmp/p01-cloudflared tunnel --no-autoupdate --url http://127.0.0.1:19177             --loglevel info >/tmp/p01-preview-tunnel.log 2>&1 &
+          tunnel_pid=$!
+          echo $tunnel_pid >/tmp/p01-preview-tunnel.pid
+          trap 'kill $tunnel_pid 2>/dev/null || true; kill $(cat /tmp/p01-preview-php.pid) 2>/dev/null || true' EXIT
+          url=''
+          for i in $(seq 1 90); do
+            url=$(grep -Eo 'https://[a-z0-9-]+\\.trycloudflare\\.com' /tmp/p01-preview-tunnel.log | head -n1 || :)
+            if test -n "$url"; then break; fi
+            if ! kill -0 "$tunnel_pid" 2>/dev/null; then
+              echo 'PREVIEW_TUNNEL_START_FAILED' >&2; tail -n 30 /tmp/p01-preview-tunnel.log; exit 1
+            fi
+            sleep 1
+          done
+          test -n "$url"
+          echo "P01_PREVIEW_PUBLIC_ORIGIN=$url"
+          code=''
+          for i in $(seq 1 45); do
+            code=$(curl -k -sS --max-time 12 -o /dev/null -w '%{http_code}' "$url/" || :)
+            if test "$code" = 200; then break; fi
+            sleep 2
+          done
+          test "$code" = 200
+          echo P01_PREVIEW_CLOUDFLARE_LIVE=PASS
+          expire=$(date -u -d '+75 minutes' '+%Y-%m-%d %H:%M UTC')
+          message="P01_OWNER_PREVIEW_READY (synthetic PHP runtime, no Production data)\n\nURL: $url/\nBackup & Restore: $url/data-safety.php\nTemporary preview login password: \`$PREVIEW_PASSWORD\` (synthetic fixture only)\nExpires: $expire.\nSource: $P01_SHA.\nOnly synthetic fixtures: 268 missing backup records, 264 protected.\nOwner acceptance is NOT auto-granted. This PR must close WITHOUT MERGE."
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PULL_NUMBER/comments" -f body="$message" >/dev/null
+          echo P01_PREVIEW_URL_PUBLISHED=PASS
+          # Keep the fully isolated PHP Preview alive for Owner inspection.
+          sleep 4500
+          echo P01_PREVIEW_LIFETIME_EXPIRED=YES
+      - name: Destroy ephemeral Preview data and private source
+        if: always()
+        shell: bash
+        run: |
+          if test -f /tmp/p01-preview-tunnel.pid; then kill "$(cat /tmp/p01-preview-tunnel.pid)" 2>/dev/null || true; fi
+          if test -f /tmp/p01-preview-php.pid; then kill "$(cat /tmp/p01-preview-php.pid)" 2>/dev/null || true; fi
+          rm -rf candidate /tmp/p01-owner-preview-runtime /tmp/p01-preview-synthetic-seed.php             /tmp/p01-preview-router.php /tmp/p01-preview-*.json /tmp/p01-preview-*.html             /tmp/p01-preview-cloudflared /tmp/p01-cloudflared /tmp/p01-preview-cookie
