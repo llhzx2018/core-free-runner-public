@@ -1,7 +1,7 @@
 <?php
 // Synthetic-only exact-source behavioral tests, executed inside real WordPress.
 foreach (['page-runtime-contract-service','admin-preview-catalog-service','frontend-page-directory-service','frontend-page-progress-service'] as $file) { require_once get_template_directory().'/inc/services/'.$file.'.php'; }
-$checks=[];
+global $checks; $checks=[];
 function check_progress($condition,$name): void { global $checks; $checks[]=['name'=>$name,'pass'=>(bool)$condition]; if(!$condition){throw new RuntimeException('CHECK_FAILED:'.$name);} }
 $admin=get_user_by('login','admin');$admin->add_cap('vf_manage_theme_profile');wp_set_current_user($admin->ID);
 $subscriber=wp_insert_user(['user_login'=>'subscriber','user_pass'=>'Synthetic-Subscriber-47!','user_email'=>'subscriber@example.invalid','role'=>'subscriber']);
@@ -24,7 +24,7 @@ try {
  wp_set_current_user((int)$subscriber);check_progress(!save_progress($input)['ok'],'subscriber write denied');wp_set_current_user($admin->ID);
  $bad=input_progress();$bad['_wpnonce']='invalid';$failure=save_progress($bad);check_progress(!$failure['ok']&&$failure['draft']['note']===$bad['vf_review_note'],'nonce failure preserves valid draft');
  foreach (['vf_review_subject'=>'unknown','vf_pages_language'=>'xx','vf_review_device'=>'tablet','vf_review_phase'=>'PASS','vf_review_status'=>'PASS','vf_review_revision'=>'junk','vf_review_note'=>['bad'],'vf_review_version'=>'older'] as $field=>$value) { $bad=input_progress();$bad[$field]=$value;check_progress(!save_progress($bad)['ok'],'reject invalid '.$field); }
- $bad=input_progress();$bad['vf_review_note']=str_repeat('x',6001);check_progress(!save_progress($bad)['ok'],'reject oversize note');
+ $bad=input_progress();$bad['vf_review_note']=str_repeat('x',6001);$over=save_progress($bad);check_progress(!$over['ok']&&$over['draft']['note']===$bad['vf_review_note'],'reject oversize note and preserve input');
  $bad=input_progress();$bad['vf_review_status']='accepted';check_progress(!save_progress($bad)['ok'],'acceptance requires completed development');
  $bad=input_progress();$bad['vf_review_phase']='complete';$bad['vf_review_status']='accepted';$bad['vf_review_note']='';check_progress(!save_progress($bad)['ok'],'acceptance requires checked-page note');
  $input=input_progress();$input['vf_review_note']="Synthetic line one\n<script>alert(1)</script><b>safe</b>";
