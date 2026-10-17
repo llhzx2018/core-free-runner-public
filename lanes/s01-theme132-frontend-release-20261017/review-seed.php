@@ -1,5 +1,5 @@
 <?php
-require_once get_template_directory().'/inc/services/frontend-page-progress-service.php';
+foreach(['page-runtime-contract-service','admin-preview-catalog-service','frontend-page-directory-service','frontend-page-progress-service']as $f)require_once get_template_directory().'/inc/services/'.$f.'.php';
 $u=get_user_by('login','admin');wp_set_current_user($u->ID);$_SERVER['REQUEST_METHOD']='POST';
 foreach([['home','zh','desktop'],['shared_footer','en','mobile']]as [$s,$l,$d]){
  $r=vf_theme_frontend_progress_record($s,$l,$d);
