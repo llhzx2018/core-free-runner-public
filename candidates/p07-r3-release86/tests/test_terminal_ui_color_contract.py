@@ -1,0 +1,224 @@
+from __future__ import annotations
+
+import os
+import pty
+from pathlib import Path
+import subprocess
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class TerminalUiColorContractTests(unittest.TestCase):
+    def _run_pty(self, command: str, *, no_color: bool = False) -> bytes:
+        master, slave = pty.openpty()
+        env = os.environ.copy()
+        if no_color:
+            env["NO_COLOR"] = "1"
+        else:
+            env.pop("NO_COLOR", None)
+        proc = subprocess.Popen(
+            ["bash", "-lc", command],
+            cwd=ROOT,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=slave,
+            stderr=slave,
+            close_fds=True,
+        )
+        os.close(slave)
+        chunks: list[bytes] = []
+        try:
+            while True:
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        finally:
+            os.close(master)
+        self.assertEqual(proc.wait(timeout=10), 0)
+        return b"".join(chunks)
+
+    def test_shared_helper_exposes_canonical_semantics(self) -> None:
+        text = (ROOT / "lib" / "terminal_ui.sh").read_text(encoding="utf-8")
+        self.assertIn('[[ -t 1 && -z "${NO_COLOR:-}" ]]', text)
+        for helper in (
+            "ui_title()",
+            "ui_rule()",
+            "ui_menu_good()",
+            "ui_menu_info()",
+            "ui_menu_warn()",
+            "ui_menu_danger()",
+            "ui_menu_flow()",
+            "ui_menu_back()",
+            "ui_note()",
+            "ui_good()",
+            "ui_attention()",
+            "ui_bad()",
+            "ui_flow()",
+            "ui_screen_clear()",
+            "ui_page()",
+            "ui_section()",
+            "ui_kv()",
+            "ui_result_ok()",
+            "ui_result_attention()",
+            "ui_result_error()",
+            "ui_empty_state()",
+            "ui_pause_return()",
+            "ui_safety_tier()",
+            "ui_confirm_exact()",
+        ):
+            self.assertIn(helper, text)
+
+    def test_interactive_tty_has_semantic_ansi_hierarchy(self) -> None:
+        output = self._run_pty(
+            "source lib/terminal_ui.sh; "
+            "ui_title TITLE; ui_good READY; ui_attention REVIEW; "
+            "ui_bad FAIL; ui_flow MIGRATION; ui_note BOUNDARY"
+        )
+        for code, word in (
+            (b"\x1b[36m", b"TITLE"),
+            (b"\x1b[32m", b"READY"),
+            (b"\x1b[33m", b"REVIEW"),
+            (b"\x1b[31m", b"FAIL"),
+            (b"\x1b[35m", b"MIGRATION"),
+            (b"\x1b[90m", b"BOUNDARY"),
+        ):
+            self.assertIn(code, output)
+            self.assertIn(word, output)
+
+    def test_no_color_disables_ansi_even_on_tty(self) -> None:
+        output = self._run_pty(
+            "source lib/terminal_ui.sh; ui_good READY; ui_bad FAIL; ui_flow MIGRATION",
+            no_color=True,
+        )
+        self.assertNotIn(b"\x1b[", output)
+        self.assertIn(b"READY", output)
+        self.assertIn(b"FAIL", output)
+        self.assertIn(b"MIGRATION", output)
+
+    def test_non_tty_is_plain_text(self) -> None:
+        proc = subprocess.run(
+            [
+                "bash",
+                "-lc",
+                "source lib/terminal_ui.sh; "
+                "ui_good READY; ui_attention REVIEW; ui_bad FAIL; ui_flow MIGRATION; ui_note BOUNDARY",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        self.assertNotIn("\x1b[", proc.stdout)
+        self.assertEqual(
+            proc.stdout.splitlines(),
+            ["READY", "REVIEW", "FAIL", "MIGRATION", "BOUNDARY"],
+        )
+
+    def test_machine_identity_output_remains_plain(self) -> None:
+        version = subprocess.run(
+            ["bash", "bin/vfops-user", "--version"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+        build = subprocess.run(
+            ["bash", "bin/vfops-user", "--build-id"],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout
+        self.assertEqual(version, "VF Server Ops 0.1.0\n")
+        self.assertEqual(build, (ROOT / "BUILD_ID").read_text(encoding="utf-8"))
+        self.assertNotIn("\x1b[", version + build)
+
+        core = (ROOT / "bin" / "vfops").read_text(encoding="utf-8")
+        self.assertNotIn("terminal_ui.sh", core)
+
+    def test_slot3_semantic_mapping_is_locked(self) -> None:
+        migrate = (ROOT / "bin" / "vfops-migrate-ui").read_text(encoding="utf-8")
+        site = (ROOT / "bin" / "vfops-site-ui").read_text(encoding="utf-8")
+        auto = (ROOT / "bin" / "vfops-auto-backup").read_text(encoding="utf-8")
+        storage = (ROOT / "bin" / "vfops-storage-setup").read_text(encoding="utf-8")
+        admin = (ROOT / "lib" / "cloudpanel_ui_admin.sh").read_text(encoding="utf-8")
+
+        self.assertIn("ui_menu_flow 1 '迁入整台旧服务器'", migrate)
+        self.assertIn("ui_menu_flow 2 '迁入一个网站'", migrate)
+        self.assertIn("ui_menu_flow 3 '继续上次迁移'", migrate)
+        self.assertIn("旧服务器 IP", migrate)
+        self.assertIn("这台新服务器（接收数据）", migrate)
+        self.assertIn("唯一剩余人工步骤", migrate)
+        self.assertNotIn("目标服务器 IP（输入 0 返回）", migrate)
+        self.assertIn("ui_menu_warn 1 '恢复为新网站", site)
+        self.assertIn("DISABLE-AUTOBACKUP", auto)
+        self.assertIn("ui_good 'Google：已就绪 ✓'", storage)
+        self.assertIn("ui_menu_danger 2 '关闭面板基础认证（Basic Auth）'", admin)
+        self.assertIn("ui_menu_danger 4 '关闭两步验证（2FA）'", admin)
+
+    def test_chinese_first_and_lazy_dependency_contract(self) -> None:
+        core = (ROOT / "bin" / "vfops").read_text(encoding="utf-8")
+        migrate = (ROOT / "bin" / "vfops-migrate-ui").read_text(encoding="utf-8")
+        storage = (ROOT / "bin" / "vfops-storage-setup").read_text(encoding="utf-8")
+        self.assertIn("高级命令说明", core)
+        self.assertIn("安全边界", core)
+        self.assertNotIn("V1 commands:", core)
+        self.assertIn("ensure_migration_dependencies", migrate)
+        self.assertIn("按需准备", migrate)
+        self.assertIn("ensure_rclone", storage)
+        self.assertIn("现在才按需安装", storage)
+
+    def test_terminal_ux_v2_page_isolation_is_adopted(self) -> None:
+        user = (ROOT / "bin" / "vfops-user").read_text(encoding="utf-8")
+        site = (ROOT / "bin" / "vfops-site-ui").read_text(encoding="utf-8")
+        migrate = (ROOT / "bin" / "vfops-migrate-ui").read_text(encoding="utf-8")
+        auto = (ROOT / "bin" / "vfops-auto-backup").read_text(encoding="utf-8")
+        cloudpanel = (ROOT / "bin" / "vfops-cloudpanel-ui").read_text(encoding="utf-8")
+
+        self.assertIn("ui_screen_clear", user)
+        self.assertIn("ui_page '网站与数据概况'", site)
+        self.assertIn("ui_page '备份网站'", site)
+        self.assertIn("ui_page '恢复网站'", site)
+        self.assertIn("ui_page '服务器迁移'", migrate)
+        self.assertIn("ui_page '迁入整台旧服务器'", migrate)
+        self.assertIn("ui_page '迁入一个网站'", migrate)
+        self.assertIn("ui_page '自动备份与异地备份'", auto)
+        self.assertIn("ui_page '网站创建与维护'", cloudpanel)
+        self.assertIn("ui_page 'CloudPanel 管理'", cloudpanel)
+        self.assertIn("ui_empty_state '恢复网站'", site)
+
+    def test_color_contract_is_in_owning_authority(self) -> None:
+        rpd = (ROOT / "docs" / "authority" / "RPD.md").read_text(encoding="utf-8")
+        matrix = (ROOT / "docs" / "authority" / "ACCEPTANCE_MATRIX.md").read_text(encoding="utf-8")
+        self.assertIn("Terminal UI / Color System Contract", rpd)
+        self.assertIn("Terminal UX System V2", rpd)
+        self.assertIn("一屏一任务", rpd)
+        self.assertIn("Terminal UI Color Contract", matrix)
+        for term in ("Cyan", "Green", "Yellow", "Red", "Magenta", "Gray", "NO_COLOR", "non-TTY"):
+            self.assertIn(term, rpd)
+
+    def test_slot3_ui_files_stay_bounded(self) -> None:
+        caps = {
+            "bin/vfops-user": 240,
+            "bin/vfops-site-ui": 500,
+            "bin/vfops-migrate-ui": 900,
+            "bin/vfops-auto-backup": 800,
+            "bin/vfops-cloudpanel-ui": 160,
+            "bin/vfops-storage-setup": 850,
+            "lib/cloudpanel_ui_common.sh": 260,
+            "lib/cloudpanel_ui_sites.sh": 240,
+            "lib/cloudpanel_ui_ops.sh": 220,
+            "lib/cloudpanel_ui_admin.sh": 320,
+        }
+        for relative, cap in caps.items():
+            count = len((ROOT / relative).read_text(encoding="utf-8").splitlines())
+            self.assertLessEqual(count, cap, f"{relative} unexpectedly expanded to {count} lines")
+
+
+if __name__ == "__main__":
+    unittest.main()
