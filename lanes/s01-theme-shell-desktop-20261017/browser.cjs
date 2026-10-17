@@ -18,7 +18,8 @@ async function measure(p){return p.evaluate(()=>{
  const rect=n=>{const r=n.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height,right:r.right,bottom:r.bottom,cy:r.y+r.height/2}};
  const header=document.querySelector('.vf-header-inner'),cta=document.querySelector('.vf-header-actions'),brand=document.querySelector('.vf-brand'),mark=document.querySelector('.vf-brand-mark');
  const footer=document.querySelector('.vf-production-footer-grid');
- return {header:rect(header),cta:cta?rect(cta):null,brand:rect(brand),mark:mark?{...rect(mark),rows:getComputedStyle(mark).gridTemplateRows,dotArea:getComputedStyle(mark,'::after').gridArea}:null,footer:rect(footer),groups:[...footer.children].map(x=>({class:x.className,...rect(x)})),width:innerWidth,scroll:document.documentElement.scrollWidth};
+ let dot=null;if(mark){const d=getComputedStyle(mark,'::after'),s=getComputedStyle(mark),t=new DOMMatrix(d.transform==='none'?undefined:d.transform);dot={position:d.position,cx:parseFloat(s.borderLeftWidth)+parseFloat(d.left)+parseFloat(d.width)/2+t.e,cy:parseFloat(s.borderTopWidth)+parseFloat(d.top)+parseFloat(d.height)/2+t.f};}
+ return {header:rect(header),cta:cta?rect(cta):null,brand:rect(brand),mark:mark?{...rect(mark),rows:getComputedStyle(mark).gridTemplateRows,dot}:null,footer:rect(footer),groups:[...footer.children].map(x=>({class:x.className,...rect(x)})),width:innerWidth,scroll:document.documentElement.scrollWidth};
 });}
 (async()=>{
  browser=await chromium.launch({headless:true,args:['--no-sandbox']});
@@ -35,7 +36,7 @@ async function measure(p){return p.evaluate(()=>{
   gate(m.scroll<=width,'no desktop horizontal overflow',{lang,width,m});
   gate(m.cta&&Math.abs(m.cta.right-m.header.right)<1,'header actions align to container right edge',{lang,width,m});
   gate(Math.abs(m.brand.cy-m.cta.cy)<1,'header brand and actions share vertical center',{lang,width});
-  gate(m.mark&&m.mark.dotArea==='1 / 1 / auto / auto'&&m.mark.rows.trim().split(/\s+/).length===1,'brand dot occupies one centered grid row',{lang,width,m:m.mark});
+  gate(m.mark&&m.mark.dot.position==='absolute'&&Math.abs(m.mark.dot.cx-m.mark.w/2)<1&&Math.abs(m.mark.dot.cy-m.mark.h/2)<1,'brand dot is centered in both axes',{lang,width,m:m.mark});
   const navs=m.groups.slice(1);gate(navs.length===3&&navs.every(x=>Math.abs(x.y-navs[0].y)<1),'all three footer navigation headings share a row',{lang,width,m});
   gate(m.groups[0].bottom<navs[0].y&&m.groups[0].x===m.footer.x,'three-column brand introduction precedes navigation',{lang,width});
   await p.screenshot({path:'proof/candidate-'+lang+'-'+width+'.png',fullPage:true});
