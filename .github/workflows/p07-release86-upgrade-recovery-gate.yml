@@ -1,0 +1,69 @@
+name: P07 release86 clean install, atomic upgrade and rollback evidence
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'dist/p07/0.1.0/overlay/**'
+      - 'installers/p07.sh'
+      - 'installers/p07-final.sh'
+      - 'installers/p07-toolbox.sh'
+      - '.github/workflows/p07-release86-upgrade-recovery-gate.yml'
+permissions:
+  contents: read
+jobs:
+  upgrade-recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install clean current source, previous release to current upgrade, failure and recovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          old_sha='869f64bd75abb0aa11c4418fc2f6a00b521a50c7'
+          ref="${{ github.event.pull_request.head.sha || github.sha }}"
+          root="$RUNNER_TEMP/p07-atomic-proof"
+          mkdir -p "$root"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1
+          export P07_INSTALL_DIR="$root/installed" P07_PREVIOUS_DIR="$root/previous"
+          export P07_BIN_LINK="$root/vfops"
+          url="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public"
+          curl -fsSL --retry 3 --connect-timeout 15 "$url/$old_sha/installers/p07-final.sh" -o "$root/previous-final.sh"
+          bash -n "$root/previous-final.sh"
+          sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 \
+            P07_INSTALL_DIR="$P07_INSTALL_DIR" P07_PREVIOUS_DIR="$P07_PREVIOUS_DIR" P07_BIN_LINK="$P07_BIN_LINK" \
+            P07_PUBLIC_ROOT="$url/$old_sha" bash "$root/previous-final.sh" >"$root/install-old.log" 2>&1
+          test "$("$root/vfops" --build-id)" = '0.1.0-release85'
+          test "$(cat "$root/installed/BUILD_ID")" = '0.1.0-release85'
+          echo SAFE_SENTINEL > "$root/untouched-user-data"
+          sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 \
+            P07_INSTALL_DIR="$P07_INSTALL_DIR" P07_PREVIOUS_DIR="$P07_PREVIOUS_DIR" P07_BIN_LINK="$P07_BIN_LINK" \
+            P07_PUBLIC_ROOT="$url/$ref" bash installers/p07-final.sh >"$root/upgrade.log" 2>&1
+          test "$("$root/vfops" --build-id)" = '0.1.0-release86'
+          test "$(cat "$root/previous/BUILD_ID")" = '0.1.0-release85'
+          test "$(cat "$root/untouched-user-data")" = SAFE_SENTINEL
+          grep -Fq '网站与数据功能安装 / 升级完成' "$root/upgrade.log"
+          sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 \
+            P07_INSTALL_DIR="$P07_INSTALL_DIR" P07_PREVIOUS_DIR="$P07_PREVIOUS_DIR" P07_BIN_LINK="$P07_BIN_LINK" \
+            P07_PUBLIC_ROOT="$url/$ref" bash installers/p07-final.sh >"$root/repeat.log" 2>&1
+          grep -Fq '已是当前版本，无需下载或重复安装' "$root/repeat.log"
+          test "$(cat "$root/previous/BUILD_ID")" = '0.1.0-release85'
+          set +e
+          sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 \
+            P07_INSTALL_DIR="$P07_INSTALL_DIR" P07_PREVIOUS_DIR="$P07_PREVIOUS_DIR" P07_BIN_LINK="$P07_BIN_LINK" \
+            P07_PUBLIC_ROOT="$url/$old_sha" bash installers/p07-final.sh >"$root/injected-failure.log" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          test "$("$root/vfops" --build-id)" = '0.1.0-release86'
+          test "$(cat "$root/previous/BUILD_ID")" = '0.1.0-release85'
+          test "$(cat "$root/untouched-user-data")" = SAFE_SENTINEL
+          test ! -e "$root/installed.new"
+          # Isolated rollback to the immutable previous-runtime copy, no host service touches.
+          sudo mv "$root/installed" "$root/failed-upgrade"
+          sudo mv "$root/previous" "$root/installed"
+          test "$("$root/vfops" --build-id)" = '0.1.0-release85'
+          test "$(cat "$root/untouched-user-data")" = SAFE_SENTINEL
+          echo P07_RELEASE86_CLEAN_UPGRADE_IDEMPOTENT_FAILURE_ROLLBACK_MACHINE_PASS
