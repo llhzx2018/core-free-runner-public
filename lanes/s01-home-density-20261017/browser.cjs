@@ -1,0 +1,35 @@
+'use strict';
+const fs=require('fs'),assert=require('node:assert/strict'),{chromium}=require('playwright');
+const phase=process.argv[2]||'candidate',base='http://127.0.0.1:18880',checks=[],pages=[],errors=[];
+const gate=(pass,name,detail={})=>{checks.push({pass:!!pass,name,detail});assert(pass,name+' '+JSON.stringify(detail));};
+const route=href=>new URL(href).pathname.replace(/^\/zh\//,'/').replace(/\/$/,'');
+(async()=>{const b=await chromium.launch({headless:true}),ctx=await b.newContext(),p=await ctx.newPage();p.setDefaultTimeout(7000);p.on('pageerror',e=>errors.push(e.message));
+ for(const lang of ['en','zh'])for(const width of [1920,1440,1319,1024]){
+  await p.setViewportSize({width,height:1000});const url=base+(lang==='zh'?'/zh/':'/')+'?vf_home_count=6';const response=await p.goto(url);await p.waitForLoadState('networkidle');
+  const geom=await p.evaluate(()=>{const rect=e=>{const r=e.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height}};return{height:document.documentElement.scrollHeight,overflow:document.documentElement.scrollWidth>innerWidth+1,header:rect(document.querySelector('.vf-header-inner')),footer:rect(document.querySelector('.vf-production-footer-wrap')),cards:Array.from(document.querySelectorAll('.vf-home-tool-card')).map(rect),columns:getComputedStyle(document.querySelector('.vf-home-tools-grid')).gridTemplateColumns,sectionPadding:getComputedStyle(document.querySelector('.vf-home-tool-grid')).paddingTop}});
+  pages.push({lang,width,...geom});if(width===1440)await p.screenshot({path:'proof/'+phase+'-home-'+lang+'.png',fullPage:true});
+  if(phase==='baseline')continue;
+  gate(response.status()===200,'homepage resolves',{lang,width});gate(await p.locator('main h1').count()===1,'single heading',{lang,width});
+  gate(!geom.overflow&&Math.abs(geom.header.x-geom.footer.x)<=1,'header and footer align without overflow',{lang,width});
+  gate(geom.cards.length===6&&geom.columns.split(' ').length===3,'six configured tools form three columns',{lang,width,columns:geom.columns});
+  gate(Math.abs(geom.cards[0].y-geom.cards[2].y)<=1&&Math.abs(geom.cards[3].y-geom.cards[5].y)<=1&&geom.cards[3].y>geom.cards[0].y,'two balanced rows',{lang,width});
+  const links=await p.locator('.vf-home-tool-card').evaluateAll(es=>es.map(e=>e.href));gate(links.slice(0,3).map(route).join('|')==='/m3u8-player|/m3u8-browser-stream-test|/m3u8-playlist-checker','both languages use the same task priority',{lang,width,links});
+  gate((await p.locator('.vf-home-quick-start a').evaluateAll(es=>es.map(e=>e.href))).map(route).join('|')==='/m3u8-player|/m3u8-browser-stream-test|/m3u8-playlist-checker','hero quick entry follows canonical priority',{lang,width});
+  const d=p.locator('.vf-home-task-disclosure'),summary=d.locator('summary');gate(await d.count()===1&&await d.getAttribute('open')===null,'supplementary paths start collapsed',{lang,width});
+  gate(await p.locator('.vf-home-task-card:visible').count()===0,'repeated paths do not crowd the initial view',{lang,width});
+  await summary.focus();await p.keyboard.press('Enter');gate(await d.getAttribute('open')!==null&&await p.locator('.vf-home-task-card:visible').count()===6,'native keyboard expansion retains all six paths',{lang,width});
+  await p.keyboard.press('Enter');gate(await d.getAttribute('open')===null,'keyboard collapse recovers initial view',{lang,width});
+  const before=JSON.parse(fs.readFileSync('proof/baseline.json')).pages.find(x=>x.lang===lang&&x.width===width);gate(geom.height<before.height*.86,'page density improves on the same configuration',{lang,width,before:before.height,after:geom.height});
+  gate(geom.sectionPadding==='20px','decorative section spacing is reduced on desktop',{lang,width,actual:geom.sectionPadding});
+ }
+ if(phase==='baseline'){fs.writeFileSync('proof/baseline.json',JSON.stringify({status:'OBSERVED',pages}));await b.close();return;}
+ for(const lang of ['en','zh']){
+  await p.setViewportSize({width:1440,height:1000});
+  for(const count of [1,2,3,4,5,7,8]){await p.goto(base+(lang==='zh'?'/zh/':'/')+'?vf_home_count='+count);gate(await p.locator('.vf-home-tool-card').count()===count,'configured tool count retained',{lang,count});gate(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'other configured counts stay within desktop rails',{lang,count});}
+  await p.goto(base+(lang==='zh'?'/zh/':'/')+'?vf_home_count=6&vf_home_mode=custom');gate((await p.locator('.vf-home-tool-grid h2').innerText())==='Owner custom home tool_grid'&&(await p.locator('.vf-home-task-section h2').innerText())==='Owner custom home content_matrix','saved module headings retained',{lang});gate((await p.locator('.vf-home-task-section').innerText()).includes('Owner custom description content_matrix'),'saved description retained',{lang});await p.locator('.vf-home-task-disclosure summary').click();gate(await p.locator('.vf-home-task-card:visible').count()===2,'configured supplementary count retained',{lang});
+  await p.goto(base+(lang==='zh'?'/zh/tools/':'/tools/'));gate(await p.locator('[data-vf-directory-context="tool_hub"]').count()===1&&await p.locator('.vf-home-task-disclosure').count()===0,'tool directory remains a distinct complete workflow',{lang});
+ }
+ const nojs=await b.newContext({javaScriptEnabled:false,viewport:{width:1440,height:1000}}),n=await nojs.newPage();for(const lang of ['en','zh']){await n.goto(base+(lang==='zh'?'/zh/':'/')+'?vf_home_count=6');await n.locator('.vf-home-task-disclosure summary').click();gate(await n.locator('.vf-home-task-card:visible').count()===6,'task paths work without JavaScript',{lang});}await nojs.close();
+ await p.goto(base+'/wp-login.php');await p.locator('#user_login').fill('admin');await p.locator('#user_pass').fill('Synthetic-Only-Update-54!');await p.locator('input[name="redirect_to"]').evaluate(e=>e.value='http://127.0.0.1:18880/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages');await p.locator('#wp-submit').click();await p.waitForURL('**/wp-admin/**');await p.goto(base+'/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages');gate(await p.locator('[data-vf-page-context]').count()===20,'backend keeps the twenty-type denominator');gate((await p.locator('#vf-review-home .vf-frontend-pages__note').innerText()).includes('三列两行'),'home implementation progress appears in the existing backend');gate((await p.locator('.vf-frontend-pages__review-overview').innerText()).includes('0 / 20'),'implementation does not grant human acceptance');await p.screenshot({path:'proof/candidate-admin-progress.png'});
+ gate(errors.length===0,'no uncaught runtime errors',{errors});fs.writeFileSync('proof/browser.json',JSON.stringify({status:'PASS',source_sha:process.env.TARGET_SHA,source_tree:process.env.TARGET_TREE,checks,pages,mobile:'OWNER_DEFERRED_NOT_TESTED',production:'NOT_EXECUTED'},null,2));await b.close();
+})().catch(e=>{fs.writeFileSync('proof/browser-failure.json',JSON.stringify({status:'FAIL',phase,error:e.message,checks,pages,errors},null,2));console.error(e);process.exit(1)});
