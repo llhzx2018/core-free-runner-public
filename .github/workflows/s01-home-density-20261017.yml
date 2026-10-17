@@ -1,0 +1,82 @@
+name: S01 home density focused desktop verification
+on:
+  push:
+    branches: [task/s01-home-density-20261017]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      TARGET_REPO: 'llhzx2018/vf-tools-theme'
+      TARGET_VERSION: '1.35.132'
+      TARGET_SHA: 'bf4a881efe76014fa39cc346feeb488fa12d4ef3'
+      BASE_SHA: 'd96af981e95fe43e26c686c5127c7f15100596a5'
+      TARGET_TREE: 'a202a683f44ecb628e0eace89a862ea4fe8728dd'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Bound exact lane identity
+        run: |
+          set -Eeuo pipefail
+          mkdir proof
+          python3 runner/scripts/ephemeral_lane_spec.py render --spec runner/lanes/s01-home-density-20261017/spec.json --template runner/lanes/s01-home-density-20261017/candidate.template.yml --output /tmp/review-rendered.yml
+          cmp /tmp/review-rendered.yml runner/.github/workflows/s01-home-density-20261017.yml
+          python3 runner/scripts/ephemeral_lane_spec.py audit-rendered --spec runner/lanes/s01-home-density-20261017/spec.json --input runner/.github/workflows/s01-home-density-20261017.yml > proof/lane-identity.json
+          cp -a runner/lanes/s01-home-density-20261017 lane
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Exact source and scoped syntax
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse 'HEAD^{tree}')" = "$TARGET_TREE"
+          test "$(cat target/VERSION)" = "$TARGET_VERSION"
+          for path in target/src/inc/modules/module-{tool-grid,content-matrix}.php target/src/inc/admin/views/frontend-pages.php target/src/inc/public-css-owner-registry.php;do php -l "$path";done
+          python3 - <<'PYOWN'
+          import os,pathlib,subprocess,json,hashlib
+          def git(*args):return subprocess.check_output(['git','-C','target',*args])
+          meta=json.loads(pathlib.Path('lane/source-meta.json').read_text())
+          changed=git('diff','--name-only',os.environ['BASE_SHA'],'HEAD').decode().splitlines();assert sorted(changed)==sorted(meta['changed_files'])
+          bundle=pathlib.Path('target/src/assets/css/public/vf-theme-public-runtime.css').read_text();assert hashlib.sha256(bundle.encode()).hexdigest()==meta['bundle_sha256']
+          rel='src/assets/css/public/pages/families/public-family-01-shell-home-operations-closure.css'
+          new=pathlib.Path('target',rel).read_text();assert bundle.count(new)==1;bundle=bundle.replace(new,git('show',os.environ['BASE_SHA']+':'+rel).decode(),1)
+          assert bundle.encode()==git('show',os.environ['BASE_SHA']+':src/assets/css/public/vf-theme-public-runtime.css')
+          pathlib.Path('proof/source.json').write_text(json.dumps({'status':'PASS','sha':os.environ['TARGET_SHA'],'tree':os.environ['TARGET_TREE'],'files':changed,'other_css':'BYTE_IDENTICAL','version':'UNCHANGED_UNRELEASED_SOURCE'}))
+          PYOWN
+          node --check lane/browser.cjs
+      - name: Existing Provider fixture
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          mkdir provider
+          gh release download v1.25.91 --repo llhzx2018/vf-tools-m3u8 --pattern vf-tools-m3u8_V1.25.91.zip --dir provider
+          echo 'fcb56d605550c5b04a3ff8b3b78b8bf86ca11b77e0aa22334fa67e675b01d6df  provider/vf-tools-m3u8_V1.25.91.zip' | sha256sum -c
+      - name: Browser runtime
+        run: |
+          npm install --no-audit --no-fund playwright@1.62.1
+          npx playwright install chromium
+          mkdir -p "$HOME/.local/share/fonts"
+          curl -g -fsSL --retry 2 'https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc/NotoSansSC[wght].ttf' -o "$HOME/.local/share/fonts/NotoSansSC.ttf"
+          fc-cache -f
+      - name: Real isolated WordPress persistence and desktop browser
+        run: bash lane/native.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: home-density-proof-${{ github.run_id }}
+          path: proof/
+          retention-days: 14
+      - name: Remove transient private source
+        if: always()
+        run: rm -rf target provider
