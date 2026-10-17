@@ -1,0 +1,179 @@
+name: TEMP P07 release88 RC1 offline candidate installer gate
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release88-rc1-offline-candidate-temporary.yml'
+permissions:
+  contents: read
+jobs:
+  offline-candidate:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Require private read
+        shell: bash
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN" || exit 78
+      - name: Checkout public PR proposed test only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Checkout exact private P07 latest release-readiness source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: cf09baab9fcdf1337c601ec57ebb27243c458a5b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: p07-private
+      - name: Build local version-locked candidate from exact private source and public baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p07-private rev-parse HEAD)" = 'cf09baab9fcdf1337c601ec57ebb27243c458a5b'
+          test "$(cat p07-private/BUILD_ID)" = '0.1.0-release87'
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          import os
+          import shutil
+          public = Path.cwd()
+          product = public / "p07-private"
+          work = Path(os.environ["RUNNER_TEMP"]) / "p07-release88-rc1-candidate"
+          overlay = work / "dist/p07/0.1.0/overlay"
+          overlay.mkdir(parents=True, exist_ok=True)
+          def blob(data):
+              return hashlib.sha1(b"blob " + str(len(data)).encode() + b"\\0" + data).hexdigest()
+          old_manifest = (public / "dist/p07/0.1.0/overlay/RUNTIME.gitblob").read_text(encoding="utf-8").splitlines()
+          records = []
+          for record in old_manifest:
+              before, name = record.split("  ", 1)
+              source_file = product / name
+              assert source_file.is_file(), f"missing product runtime source: {name}"
+              data = (b"0.1.0-release88-rc1\\n" if name == "BUILD_ID" else source_file.read_bytes())
+              target = overlay / name
+              target.parent.mkdir(parents=True, exist_ok=True)
+              target.write_bytes(data)
+              records.append(f"{blob(data)}  {name}")
+          runtime_manifest = ("\\n".join(records) + "\\n").encode()
+          (overlay / "RUNTIME.gitblob").write_bytes(runtime_manifest)
+          original_base = public / "dist/p07/0.1.0-rc2/P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"
+          assert original_base.is_file()
+          base_destination = work / "dist/p07/0.1.0-rc2/P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"
+          base_destination.parent.mkdir(parents=True, exist_ok=True)
+          shutil.copyfile(original_base, base_destination)
+          stage_installer = work / "installers/p07-final.sh"
+          stage_installer.parent.mkdir(parents=True, exist_ok=True)
+          installer = (public / "installers/p07-final.sh").read_text(encoding="utf-8")
+          orig_build = 'EXPECTED_BUILD_ID="0.1.0-release87"'
+          orig_manifest_pin = 'RUNTIME_MANIFEST_BLOB="5cbbd927920be86d4e42d39a15abcbb445531a4d"'
+          assert installer.count(orig_build) == 1
+          assert installer.count(orig_manifest_pin) == 1
+          installer = installer.replace(orig_build, 'EXPECTED_BUILD_ID="0.1.0-release88-rc1"')
+          installer = installer.replace(orig_manifest_pin, 'RUNTIME_MANIFEST_BLOB="' + blob(runtime_manifest) + '"')
+          stage_installer.write_text(installer, encoding="utf-8")
+          stable = (public / "installers/p07.sh").read_text(encoding="utf-8")
+          old_pin = 'EXPECTED_BLOB="77e44f55182aec282877b95d921af60cbfae0bd3"'
+          assert stable.count(old_pin) == 1
+          (work / "installers/p07.sh").write_text(
+              stable.replace(old_pin, 'EXPECTED_BLOB="' + blob(installer.encode()) + '"'), encoding="utf-8")
+          toolbox = (public / "installers/p07-toolbox.sh").read_text(encoding="utf-8")
+          assert toolbox.count('VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release87"') == 1
+          (work / "installers/p07-toolbox.sh").write_text(
+              toolbox.replace('VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release87"',
+                              'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release88-rc1"'), encoding="utf-8")
+          care = (public / "packages/p07-system-care/0.1.0-rc56/vf-system-care.sh").read_text(encoding="utf-8")
+          assert care.count("VFOPS_BUILD_EXPECTED='0.1.0-release87'") == 1
+          (work / "system-care-compatibility-candidate.sh").write_text(
+              care.replace("VFOPS_BUILD_EXPECTED='0.1.0-release87'",
+                           "VFOPS_BUILD_EXPECTED='0.1.0-release88-rc1'"), encoding="utf-8")
+          for changed in (
+              "lib/auto_backup.py", "lib/cloudpanel.py", "lib/restore.py",
+              "lib/restore_apply_core.py", "lib/restore_as.py", "lib/restore_new.py",
+              "lib/server_migration.py", "lib/site_lifecycle.py",
+          ):
+              assert (overlay / changed).read_bytes() == (product / changed).read_bytes()
+              assert (overlay / changed).read_bytes() != (public / "dist/p07/0.1.0/overlay" / changed).read_bytes()
+          assert (overlay / "BUILD_ID").read_text().strip() == "0.1.0-release88-rc1"
+          print("P07_CANDIDATE_EXACT_SOURCE_RUNTIME_FILES=" + str(len(records)))
+          print("P07_CANDIDATE_EIGHT_SECURITY_FIXES_PRESENT=PASS")
+          print("P07_CANDIDATE_INSTALLER_RUNTIME_MANIFEST_IDENTITY=PASS")
+          print("P07_CANDIDATE_CARE_RC56_VERSION_LOCK_REQUIRES_COORDINATED_UPDATE=YES")
+          PY
+          bash -n "$RUNNER_TEMP/p07-release88-rc1-candidate/installers/p07-final.sh"
+          bash -n "$RUNNER_TEMP/p07-release88-rc1-candidate/installers/p07.sh"
+          bash -n "$RUNNER_TEMP/p07-release88-rc1-candidate/installers/p07-toolbox.sh"
+          bash -n "$RUNNER_TEMP/p07-release88-rc1-candidate/system-care-compatibility-candidate.sh"
+      - name: Fresh install candidate with offline file URL, exact manifest, five routes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stage="$RUNNER_TEMP/p07-release88-rc1-candidate"
+          root="$RUNNER_TEMP/p07-rc1-clean"
+          mkdir -p "$root"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1
+          export P07_INSTALL_DIR="$root/installed" P07_PREVIOUS_DIR="$root/previous" P07_BIN_LINK="$root/vfops"
+          export P07_PUBLIC_ROOT="file://$stage"
+          bash "$stage/installers/p07.sh" > "$RUNNER_TEMP/p07-rc1-clean.log" 2>&1
+          test "$("$root/vfops" --build-id)" = '0.1.0-release88-rc1'
+          test -f "$root/installed/.runtime-manifest.gitblob"
+          grep -Fq 'VFOPS' "$root/installed/bin/vfops" || true
+          NO_COLOR=1 bash "$stage/installers/p07-toolbox.sh" --version | grep -Fq 'V0.1.0'
+          for keyword in run_network_node run_vps_audit run_server_ops run_system_care run_server_init; do
+            grep -q "$keyword" "$stage/installers/p07-toolbox.sh"
+          done
+          echo 'P07_CANDIDATE_OFFLINE_FRESH_INSTALL=PASS'
+          echo 'P07_CANDIDATE_FIVE_MENU_ROUTE_CONTRACT=PASS'
+      - name: Upgrade release87 to candidate and test repeat install, negative pin and rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="$RUNNER_TEMP/p07-rc1-upgrade"
+          stage="$RUNNER_TEMP/p07-release88-rc1-candidate"
+          mkdir -p "$root"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1
+          export P07_INSTALL_DIR="$root/installed" P07_PREVIOUS_DIR="$root/previous" P07_BIN_LINK="$root/vfops"
+          export P07_PUBLIC_ROOT="file://$PWD"
+          bash installers/p07-final.sh > "$RUNNER_TEMP/p07-release87-install.log" 2>&1
+          test "$("$root/vfops" --build-id)" = '0.1.0-release87'
+          echo original-preserved > "$root/user-data-sentinel"
+          export P07_PUBLIC_ROOT="file://$stage"
+          bash "$stage/installers/p07.sh" > "$RUNNER_TEMP/p07-rc1-upgrade.log" 2>&1
+          test "$("$root/vfops" --build-id)" = '0.1.0-release88-rc1'
+          test "$(cat "$root/previous/BUILD_ID")" = '0.1.0-release87'
+          test "$(cat "$root/user-data-sentinel")" = original-preserved
+          bash "$stage/installers/p07.sh" > "$RUNNER_TEMP/p07-rc1-repeat.log" 2>&1
+          grep -Fq '已是当前版本，无需下载或重复安装' "$RUNNER_TEMP/p07-rc1-repeat.log"
+          cp "$root/installed/.runtime-manifest.gitblob" "$root/pinned-manifest.copy"
+          printf '\nCORRUPTED_FOR_NEGATIVE_PROOF\n' >> "$root/installed/.runtime-manifest.gitblob"
+          if P07_PUBLIC_ROOT="file://$PWD" bash "$stage/installers/p07-final.sh" > "$RUNNER_TEMP/p07-rc1-negative.log" 2>&1; then
+            echo 'P07_NEGATIVE_MANIFEST=UNEXPECTED_SUCCESS'
+            exit 1
+          fi
+          grep -Fq '当前运行时清单身份校验失败' "$RUNNER_TEMP/p07-rc1-negative.log"
+          test "$("$root/vfops" --build-id)" = '0.1.0-release88-rc1'
+          test "$(cat "$root/previous/BUILD_ID")" = '0.1.0-release87'
+          cp "$root/pinned-manifest.copy" "$root/installed/.runtime-manifest.gitblob"
+          mv "$root/installed" "$root/failed-rc1"
+          mv "$root/previous" "$root/installed"
+          test "$("$root/vfops" --build-id)" = '0.1.0-release87'
+          test "$(cat "$root/user-data-sentinel")" = original-preserved
+          echo 'P07_CANDIDATE_RELEASE87_UPGRADE=PASS'
+          echo 'P07_CANDIDATE_IDEMPOTENT_REINSTALL=PASS'
+          echo 'P07_CANDIDATE_CORRUPT_MANIFEST_REJECTED=PASS'
+          echo 'P07_CANDIDATE_ISOLATED_ROLLBACK=PASS'
+      - name: Purge all transient private source and candidate installation data
+        if: always()
+        shell: bash
+        run: |
+          sudo rm -rf -- "$GITHUB_WORKSPACE/p07-private"
+          rm -rf -- "$RUNNER_TEMP/p07-release88-rc1-candidate" "$RUNNER_TEMP/p07-rc1-clean" "$RUNNER_TEMP/p07-rc1-upgrade"
+          rm -f -- "$RUNNER_TEMP"/p07-rc1-*.log "$RUNNER_TEMP/p07-release87-install.log"
+          test ! -e "$GITHUB_WORKSPACE/p07-private"
+          echo 'P07_CANDIDATE_PRIVATE_SOURCE_AND_PACKAGE_CLEANUP=PASS'
