@@ -1,0 +1,244 @@
+name: TEMP P07 comprehensive source and real host components
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-comprehensive-real-services-temporary.yml'
+permissions:
+  contents: read
+concurrency:
+  group: temp-p07-comprehensive-real-services-20261017
+  cancel-in-progress: false
+jobs:
+  syntax-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Require private repository authorization
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN" || exit 78
+      - name: Checkout P07 pinned private source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: cf09baab9fcdf1337c601ec57ebb27243c458a5b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: p07-private
+      - name: Validate all source syntax, CLI smoke, identity, secret scan
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p07-private rev-parse HEAD)" = 'cf09baab9fcdf1337c601ec57ebb27243c458a5b'
+          cd p07-private
+          export PYTHONPATH="$PWD/lib"
+          test "$(cat BUILD_ID)" = '0.1.0-release87'
+          for file in bin/vfops bin/vfops-user bin/vfops-site-ui bin/vfops-migrate-ui bin/vfops-cloudpanel-ui lib/cloudpanel_ui_common.sh lib/cloudpanel_ui_sites.sh lib/cloudpanel_ui_ops.sh lib/cloudpanel_ui_admin.sh bin/vfops-auto-backup bin/vfops-storage-setup bin/vfops-init-ui; do
+            bash -n "$file"
+          done
+          python3 -m compileall -q lib tests
+          python3 -m json.tool VF_PROJECT.json >/dev/null
+          python3 -m json.tool docs/authority/P07_INTEGRATION_MANIFEST.json >/dev/null
+          log="$RUNNER_TEMP/p07-source-smoke.log"
+          if timeout 420 bash tests/smoke.sh >"$log" 2>&1 && timeout 240 python3 scripts/secret_scan.py --root . >>"$log" 2>&1; then
+            echo 'P07_SOURCE_SYNTAX_CLI_SECRET=PASS'
+          else
+            echo 'P07_SOURCE_SYNTAX_CLI_SECRET=FAIL'
+            exit 1
+          fi
+      - name: Erase P07 checkout and logs
+        if: always()
+        run: |
+          rm -rf -- "$GITHUB_WORKSPACE/p07-private"
+          rm -f -- "$RUNNER_TEMP/p07-source-smoke.log"
+          echo 'P07_SOURCE_PRIVATE_CLEANUP=PASS'
+  full-python-regression:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 29
+    steps:
+      - name: Require private repository authorization
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN" || exit 78
+      - name: Checkout P07 pinned private source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: cf09baab9fcdf1337c601ec57ebb27243c458a5b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: p07-private
+      - name: Run every Python test module exactly once across matrix
+        shell: bash
+        env:
+          TEST_SHARD: ${{ matrix.shard }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p07-private rev-parse HEAD)" = 'cf09baab9fcdf1337c601ec57ebb27243c458a5b'
+          cd p07-private
+          export PYTHONPATH="$PWD/lib"
+          mapfile -t modules < <(python3 -c 'from pathlib import Path; import os; items=sorted(Path("tests").glob("test_*.py")); shard=int(os.environ["TEST_SHARD"]); print("\n".join("tests."+p.stem for i,p in enumerate(items) if i%3==shard))')
+          test "${#modules[@]}" -gt 0
+          echo "P07_FULL_SHARD_${TEST_SHARD}_MODULES=${#modules[@]}"
+          log="$RUNNER_TEMP/p07-full-shard-${TEST_SHARD}.log"
+          if timeout --signal=TERM --kill-after=5s 1550 python3 -m unittest -q "${modules[@]}" >"$log" 2>&1; then
+            echo "P07_FULL_SHARD_${TEST_SHARD}=PASS"
+            grep -E '^Ran [0-9]+ tests? in ' "$log" | tail -n1 || true
+          else
+            rc=$?
+            echo "P07_FULL_SHARD_${TEST_SHARD}=FAIL_${rc}"
+            grep -E '^Ran [0-9]+ tests? in |^FAILED \(' "$log" | tail -n2 || true
+            exit "$rc"
+          fi
+      - name: Erase P07 checkout and logs
+        if: always()
+        shell: bash
+        env:
+          TEST_SHARD: ${{ matrix.shard }}
+        run: |
+          rm -rf -- "$GITHUB_WORKSPACE/p07-private"
+          rm -f -- "$RUNNER_TEMP/p07-full-shard-${TEST_SHARD}.log"
+          echo "P07_FULL_SHARD_${TEST_SHARD}_PRIVATE_CLEANUP=PASS"
+  real-mariadb-nginx-transfer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - name: Require private repository authorization
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN" || exit 78
+      - name: Checkout P07 pinned private source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: cf09baab9fcdf1337c601ec57ebb27243c458a5b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: p07-private
+      - name: Install disposable real server dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p07-private rev-parse HEAD)" = 'cf09baab9fcdf1337c601ec57ebb27243c458a5b'
+          export DEBIAN_FRONTEND=noninteractive
+          log="$RUNNER_TEMP/p07-apt-services.log"
+          if timeout 460 sudo apt-get update -qq >"$log" 2>&1 && timeout 460 sudo apt-get install -y -qq mariadb-server mariadb-client nginx rsync openssh-client >>"$log" 2>&1; then
+            echo 'P07_EPHEMERAL_SERVICE_PACKAGES=PASS'
+          else
+            echo 'P07_EPHEMERAL_SERVICE_PACKAGES=INFRA_BLOCKED'
+            exit 1
+          fi
+          sudo systemctl start mariadb || sudo service mariadb start
+          sudo mariadb --batch --skip-column-names -e 'SELECT 1;' | grep -Fx 1
+      - name: Actual MariaDB 10.11 owner-policy and SQL backup restore
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p07-private
+          sudo env PYTHONPATH="$PWD/lib" python3 - <<'PY'
+          import server_migration_pull as p
+          assert p.local_target_db_engine_version() == "MARIADB_10.11", p.local_target_db_engine_version()
+          assert p.local_target_active_db_engine_version() == "MARIADB_10.11", p.local_target_active_db_engine_version()
+          p.require_mariadb_1011_target()
+          print("P07_LIVE_MARIADB_OWNER_POLICY=PASS")
+          PY
+          tmp="$(mktemp -d)"
+          trap 'rm -rf -- "$tmp"' EXIT
+          sudo mariadb -e "CREATE DATABASE vfops_ci_sandbox; CREATE TABLE vfops_ci_sandbox.records (id INT PRIMARY KEY, name VARCHAR(80)); INSERT INTO vfops_ci_sandbox.records VALUES (1,'safe-backup'),(2,'restore-verified');"
+          sudo mariadb-dump --single-transaction --skip-lock-tables vfops_ci_sandbox > "$tmp/backup.sql"
+          gzip -c "$tmp/backup.sql" > "$tmp/backup.sql.gz"
+          sudo mariadb -e "DROP DATABASE vfops_ci_sandbox; CREATE DATABASE vfops_ci_sandbox;"
+          gzip -dc "$tmp/backup.sql.gz" | sudo mariadb vfops_ci_sandbox
+          count="$(sudo mariadb --batch --skip-column-names -e 'SELECT COUNT(*) FROM vfops_ci_sandbox.records')"
+          test "$count" = "2"
+          value="$(sudo mariadb --batch --skip-column-names -e 'SELECT name FROM vfops_ci_sandbox.records WHERE id=2')"
+          test "$value" = "restore-verified"
+          sudo mariadb -e "DROP DATABASE vfops_ci_sandbox"
+          echo 'P07_LIVE_MARIADB_BACKUP_IMPORT_VERIFY=PASS'
+      - name: Actual local Nginx HTTP, route response and file transfer
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tmp="$(mktemp -d)"
+          trap 'rm -rf -- "$tmp"' EXIT
+          mkdir -p "$tmp"/{www,copy,logs}
+          printf 'VFOPS_EPHEMERAL_HTTP_PROBE\n' >"$tmp/www/index.html"
+          printf 'private-test\n' >"$tmp/www/.hidden"
+          cat >"$tmp/nginx.conf" <<CONF
+          pid $tmp/nginx.pid;
+          error_log $tmp/logs/error.log warn;
+          events { worker_connections 64; }
+          http {
+            access_log off;
+            server { listen 127.0.0.1:18735; server_name localhost; root $tmp/www; index index.html; }
+          }
+          CONF
+          nginx -t -c "$tmp/nginx.conf" -p "$tmp"
+          nginx -c "$tmp/nginx.conf" -p "$tmp"
+          trap 'nginx -s stop -c "$tmp/nginx.conf" -p "$tmp" >/dev/null 2>&1 || true; rm -rf -- "$tmp"' EXIT
+          curl --fail --silent --show-error --max-time 10 http://127.0.0.1:18735/ | grep -Fx 'VFOPS_EPHEMERAL_HTTP_PROBE'
+          rsync -a --checksum "$tmp/www/" "$tmp/copy/"
+          cmp "$tmp/www/index.html" "$tmp/copy/index.html"
+          cmp "$tmp/www/.hidden" "$tmp/copy/.hidden"
+          echo 'P07_LIVE_NGINX_LOOPBACK_HTTP=PASS'
+          echo 'P07_LIVE_RSYNC_FILE_TRANSFER=PASS'
+      - name: Erase ephemeral private material
+        if: always()
+        run: |
+          sudo mariadb -e 'DROP DATABASE IF EXISTS vfops_ci_sandbox' >/dev/null 2>&1 || true
+          rm -rf -- "$GITHUB_WORKSPACE/p07-private"
+          rm -f -- "$RUNNER_TEMP/p07-apt-services.log"
+          echo 'P07_LIVE_SERVICE_PRIVATE_CLEANUP=PASS'
+  cloudpanel-availability:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - name: Require private repository authorization
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN" || exit 78
+      - name: Checkout P07 pinned private source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: cf09baab9fcdf1337c601ec57ebb27243c458a5b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: p07-private
+      - name: Check official installer trust pin and deployment boundaries without mutating target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p07-private rev-parse HEAD)" = 'cf09baab9fcdf1337c601ec57ebb27243c458a5b'
+          cd p07-private
+          export PYTHONPATH="$PWD/lib"
+          python3 -m unittest -q tests.test_mariadb_owner_policy tests.test_cloudpanel_integration tests.test_cloudpanel_ui_complete tests.test_server_migration_pull >"$RUNNER_TEMP/p07-cloudpanel-safety.log" 2>&1
+          python3 - <<'PY'
+          import server_migration as m
+          assert m.CLOUDPANEL_BOOTSTRAP_DB_ENGINE == "MARIADB_10.11"
+          assert m.CLOUDPANEL_INSTALLER_URL.startswith("https://installer.cloudpanel.io/")
+          assert len(m.CLOUDPANEL_INSTALLER_SHA256) == 64
+          installer = m.cloudpanel_bootstrap_script("")
+          assert "sha256sum -c" in installer
+          assert "DB_ENGINE=MARIADB_10.11" in installer
+          print("P07_CLOUDPANEL_INSTALLER_POLICY=PASS")
+          PY
+          echo 'P07_LIVE_CLOUDPANEL_SITE_CREATE=NOT_RUN_NO_ISOLATED_CLOUDPANEL_HOST'
+          echo 'P07_LIVE_DNS_CHANGE=NOT_RUN_PRODUCTION_OWNER_ONLY'
+          echo 'P07_LIVE_CROSS_VPS_MIGRATION=NOT_RUN_NO_SECOND_VM'
+          echo 'P07_LIVE_GOOGLE_B2_REMOTE=NOT_RUN_NO_USER_CREDENTIALS'
+      - name: Erase private source and logs
+        if: always()
+        run: |
+          rm -rf -- "$GITHUB_WORKSPACE/p07-private"
+          rm -f -- "$RUNNER_TEMP/p07-cloudpanel-safety.log"
+          echo 'P07_CLOUDPANEL_POLICY_PRIVATE_CLEANUP=PASS'
