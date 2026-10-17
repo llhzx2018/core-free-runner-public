@@ -1,0 +1,101 @@
+name: TEMP P07 real MariaDB Nginx cleanup recheck
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-live-host-recheck-temporary.yml'
+permissions:
+  contents: read
+jobs:
+  live-host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - name: Require transient private source read
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN" || exit 78
+      - name: Checkout exact P07 source without saved credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: cf09baab9fcdf1337c601ec57ebb27243c458a5b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: p07-private
+      - name: Install real server services on isolated Ubuntu
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p07-private rev-parse HEAD)" = 'cf09baab9fcdf1337c601ec57ebb27243c458a5b'
+          export DEBIAN_FRONTEND=noninteractive
+          log="$RUNNER_TEMP/p07-host-install.log"
+          if timeout 480 sudo apt-get update -qq >"$log" 2>&1 &&
+             timeout 480 sudo apt-get install -y -qq mariadb-server mariadb-client nginx rsync openssh-client >>"$log" 2>&1; then
+            echo 'P07_REAL_SERVER_DEPENDENCIES=PASS'
+          else
+            echo 'P07_REAL_SERVER_DEPENDENCIES=INFRA_BLOCKED'
+            exit 1
+          fi
+          sudo systemctl start mariadb || sudo service mariadb start
+      - name: Test actual MariaDB version protection and database backup restore
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p07-private
+          sudo env PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$PWD/lib" python3 - <<'PY'
+          import server_migration_pull as m
+          assert m.local_target_db_engine_version() == "MARIADB_10.11", m.local_target_db_engine_version()
+          assert m.local_target_active_db_engine_version() == "MARIADB_10.11", m.local_target_active_db_engine_version()
+          m.require_mariadb_1011_target()
+          print("P07_REAL_MARIADB_VERSION_AND_ROOT_SOCKET=PASS")
+          PY
+          work="$(mktemp -d)"
+          trap 'rm -rf -- "$work"' EXIT
+          sudo mariadb -e "CREATE DATABASE vfops_ci_sandbox; CREATE TABLE vfops_ci_sandbox.sample (id INT PRIMARY KEY, name VARCHAR(60)); INSERT INTO vfops_ci_sandbox.sample VALUES (1,'first'),(2,'verified');"
+          sudo mariadb-dump --single-transaction --skip-lock-tables vfops_ci_sandbox >"$work/backup.sql"
+          gzip -c "$work/backup.sql" >"$work/backup.sql.gz"
+          sudo mariadb -e "DROP DATABASE vfops_ci_sandbox; CREATE DATABASE vfops_ci_sandbox;"
+          gzip -dc "$work/backup.sql.gz" | sudo mariadb vfops_ci_sandbox
+          count="$(sudo mariadb -Nse 'SELECT COUNT(*) FROM vfops_ci_sandbox.sample')"
+          test "$count" = "2"
+          value="$(sudo mariadb -Nse 'SELECT name FROM vfops_ci_sandbox.sample WHERE id=2')"
+          test "$value" = "verified"
+          sudo mariadb -e "DROP DATABASE vfops_ci_sandbox"
+          echo 'P07_REAL_MARIADB_EXPORT_IMPORT_DATA_VERIFY=PASS'
+      - name: Test actual Nginx localhost HTTP and rsync contents including dotfiles
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          work="$(mktemp -d)"
+          mkdir -p "$work"/{site,copy,logs}
+          trap 'nginx -s stop -c "$work/nginx.conf" -p "$work" >/dev/null 2>&1 || true; rm -rf -- "$work"' EXIT
+          printf 'P07_REAL_NGINX_HTTP_OK\n' >"$work/site/index.html"
+          printf 'p07-hidden\n' >"$work/site/.hidden"
+          cat >"$work/nginx.conf" <<CONF
+          pid $work/nginx.pid;
+          error_log $work/logs/error.log warn;
+          events { worker_connections 64; }
+          http {
+            access_log off;
+            server { listen 127.0.0.1:18736; server_name localhost; root $work/site; index index.html; }
+          }
+          CONF
+          nginx -t -c "$work/nginx.conf" -p "$work"
+          nginx -c "$work/nginx.conf" -p "$work"
+          curl --fail --silent --show-error --max-time 12 http://127.0.0.1:18736/ | grep -Fx 'P07_REAL_NGINX_HTTP_OK'
+          rsync -a --checksum "$work/site/" "$work/copy/"
+          cmp "$work/site/index.html" "$work/copy/index.html"
+          cmp "$work/site/.hidden" "$work/copy/.hidden"
+          echo 'P07_REAL_NGINX_HTTP=PASS'
+          echo 'P07_REAL_RSYNC_HIDDEN_FILES=PASS'
+      - name: Clean all private transient material including root-owned caches
+        if: always()
+        shell: bash
+        run: |
+          sudo mariadb -e 'DROP DATABASE IF EXISTS vfops_ci_sandbox' >/dev/null 2>&1 || true
+          sudo rm -rf -- "$GITHUB_WORKSPACE/p07-private"
+          rm -f -- "$RUNNER_TEMP/p07-host-install.log"
+          test ! -e "$GITHUB_WORKSPACE/p07-private"
+          echo 'P07_REAL_HOST_PRIVATE_CLEANUP=PASS'
