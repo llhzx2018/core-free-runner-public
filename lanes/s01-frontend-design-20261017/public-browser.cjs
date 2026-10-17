@@ -112,6 +112,73 @@ function gate(value,name,detail){checks.push({name,pass:!!value,detail});/* Coll
      gate(parseFloat(legalFocus)>=2,'R03 footer keyboard focus visibly outlined',{lang});
    }
  }
+
+ // R04: blog list + article detail visual rhythm and technical SEO projections.
+ const r04Heads=[];
+ for(const lang of ['en','zh'])for(const width of [1440,1024]){
+   await p.setViewportSize({width,height:1000});
+   for(const family of ['blog_index','article_detail']){
+     const url=cases[lang][family];
+     const response=await p.goto(url);
+     const obs=await p.evaluate(()=>{
+       const style=s=>{const e=document.querySelector(s);if(!e)return null;const c=getComputedStyle(e);return{font:c.fontSize,line:c.lineHeight,padding:c.paddingTop,outline:c.outlineWidth,maxWidth:c.maxWidth};};
+       const canon=[...document.querySelectorAll('head link[rel="canonical"]')].map(e=>e.href);
+       const alt=[...document.querySelectorAll('head link[rel="alternate"][hreflang]')].map(e=>({lang:e.hreflang,url:e.href}));
+       return{
+         overflow:document.documentElement.scrollWidth>innerWidth+1,
+         title:document.title.trim(),
+         h1:[...document.querySelectorAll('main h1')].map(x=>x.textContent.trim()),
+         canonical:canon,
+         hreflang:alt,
+         robots:[...document.querySelectorAll('head meta[name="robots"]')].map(e=>e.content),
+         description:[...document.querySelectorAll('head meta[name="description"]')].map(e=>e.content),
+         schemas:[...document.querySelectorAll('head script[type="application/ld+json"]')].map(e=>{try{JSON.parse(e.textContent);return'VALID_JSON'}catch{return'INVALID_JSON'}}),
+         listCard:style('.vf-theme-post-list--blog_index .vf-directory-card'),
+         listTitle:style('.vf-theme-post-list--blog_index .vf-post-card-body h3'),
+         listMeta:style('.vf-theme-post-list--blog_index .vf-post-card-meta'),
+         articleBody:style('.vf-reading-article'),
+         articleMeta:style('.vf-article-hero-meta strong')
+       };
+     });
+     gate(response.status()===200&&!obs.overflow,'R04 blog/article real desktop status and no overflow',{lang,width,family,status:response.status(),overflow:obs.overflow});
+     gate(obs.title.length>6&&obs.h1.length===1&&obs.h1[0].length>3,'R04 article/list title H1 consistency',{lang,width,family,title:obs.title,h1:obs.h1});
+     gate(obs.canonical.length<=1&&obs.canonical.every(h=>new URL(h).origin===new URL(p.url()).origin),
+       'R04 canonical output nonduplicate and same-origin',{lang,width,family,canonical:obs.canonical});
+     gate(obs.description.length<=1&&obs.robots.length<=1&&obs.schemas.every(x=>x==='VALID_JSON'),
+       'R04 SEO meta single writer and structured data JSON valid',{lang,width,family,metaCount:obs.description.length,robotsCount:obs.robots.length,schemas:obs.schemas});
+     gate(new Set(obs.hreflang.map(x=>x.lang)).size===obs.hreflang.length&&obs.hreflang.every(x=>new URL(x.url).origin===new URL(p.url()).origin),
+       'R04 hreflang projection not duplicated or external',{lang,width,family,hreflang:obs.hreflang});
+     if(family==='blog_index'){
+       gate(!!obs.listCard&&obs.listCard.padding==='19px'&&!!obs.listTitle&&obs.listTitle.font==='21px',
+         'R04 blog list uses readable row and headline',{lang,width,styles:obs});
+       gate(await p.locator('.vf-theme-post-list--blog_index .vf-directory-card').count()>=9,
+         'R04 blog keeps fixture entries intact',{lang,width});
+       const action=p.locator('.vf-theme-post-list--blog_index .vf-directory-card-action:visible').first();
+       await action.focus();
+       const out=await action.evaluate(e=>getComputedStyle(e).outlineWidth);
+       gate(parseFloat(out)>=2,'R04 blog read action keyboard focus clear',{lang,width,outline:out});
+     }else{
+       gate(!!obs.articleBody&&obs.articleBody.font==='18px'&&!!obs.articleMeta&&obs.articleMeta.font==='14px',
+         'R04 article reading measure and metadata readable',{lang,width,styles:obs});
+       gate(await p.locator('.vf-reading-article').count()===1,
+         'R04 article uses original authored body',{lang,width});
+       const prev=p.locator('.vf-reading-post-navigation a:visible').first();
+       if(await prev.count()){
+         await prev.focus();const out=await prev.evaluate(e=>getComputedStyle(e).outlineWidth);
+         gate(parseFloat(out)>=2,'R04 article previous/next keyboard focus visible',{lang,width,outline:out});
+       }
+     }
+     r04Heads.push({lang,width,family,url:p.url(),title:obs.title,h1:obs.h1,canonical:obs.canonical,hreflang:obs.hreflang,robots:obs.robots,description:obs.description,schemas:obs.schemas});
+   }
+   await p.goto(cases[lang].blog_index+'?vf_fixture_pages=blog');
+   const next=p.locator('.vf-theme-post-list--blog_index .vf-theme-pagination--internal .next');
+   gate(await next.count()===1,'R04 real blog pagination next exists',{lang,width});
+   if(await next.count()){
+     await next.click();await p.waitForLoadState('networkidle');
+     gate(await p.locator('.vf-theme-post-list--blog_index .vf-directory-card').count()>0,'R04 blog page 2 keeps articles',{lang,width});
+   }
+ }
+ fs.writeFileSync('proof/r04-head-observations.json',JSON.stringify({status:'OBSERVED_ONLY_NOT_SEO_INDEXING_CERTIFICATION',production:'NOT_EXECUTED',observations:r04Heads},null,2));
  const nativeContext=await browser.newContext({javaScriptEnabled:false,viewport:{width:1440,height:1000}}),n=await nativeContext.newPage();for(const lang of ['en','zh']){await n.goto(cases[lang].faq_page);await n.locator('[data-vf-faq-item] summary').first().click();gate(await n.locator('[data-vf-faq-item][open]').count()>0,'FAQ works without JavaScript',{lang});await n.goto(cases[lang].archive_list+'?vf_fixture_count=1');await n.locator('.pagination .next').click();gate(await n.locator('.pagination .current').count()===1,'native pagination works',{lang});}await nativeContext.close();
  const admin=await context.newPage();await admin.goto('http://127.0.0.1:18880/wp-login.php');await admin.locator('#user_login').fill('admin');await admin.locator('#user_pass').fill('Synthetic-Only-Update-54!');await admin.locator('input[name="redirect_to"]').evaluate(e=>e.value='http://127.0.0.1:18880/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages');await admin.locator('#wp-submit').click();await admin.waitForURL('**/wp-admin/**');await admin.goto('http://127.0.0.1:18880/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages');gate(await admin.locator('[data-vf-page-context]').count()===20,'same admin directory keeps all types');gate((await admin.locator('.vf-frontend-pages__review-overview').innerText()).includes('待复验'),'backend records source phase truthfully');gate((await admin.locator('#vf-review-home .vf-frontend-pages__progress-record > p').first().innerText()).includes('待复验'),'unreviewed source starts at verify, not accepted');await admin.screenshot({path:'proof/admin-progress.png'});
  gate(errors.length===0,'no uncaught runtime errors',errors);assert(checks.every(c=>c.pass),'Independent gates failed: '+JSON.stringify(checks.filter(c=>!c.pass))); fs.writeFileSync('proof/public-browser.json',JSON.stringify({status:'PASS',checks,mobile:'NOT_RUN_OWNER_DEFERRED',production:'NOT_EXECUTED',owner_real_use:'PENDING'},null,2));await browser.close();
