@@ -1,4 +1,4 @@
-name: TEMP P07 PR200 base-versus-candidate private diagnostic
+name: TEMP P07 PR200 exact-source final bounded regression
 on:
   pull_request:
     branches: [main]
@@ -8,93 +8,90 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: temp-p07-pr200-final-gate
+  cancel-in-progress: false
+
 jobs:
-  compare:
+  final-regression:
     if: github.repository == 'llhzx2018/core-free-runner-public'
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - lane: BASE
-            source_sha: a274d22259d7e88e24f7c360869fdffae16375fb
-          - lane: FIX
-            source_sha: 7fa7a76c3afc0227345f7c44f8e74e16b413c1af
+        shard: [0, 1, 2, 3, 4, 5]
     runs-on: ubuntu-24.04
-    timeout-minutes: 12
+    timeout-minutes: 14
     steps:
-      - name: Validate private read capability
+      - name: Verify registered private read capability
         shell: bash
         env:
           PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
         run: |
           test -n "$PRIVATE_READ_TOKEN" || exit 78
-      - name: Checkout immutable private source into temporary workspace
+
+      - name: Checkout exact P07 private candidate into transient workspace
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-server-ops
-          ref: ${{ matrix.source_sha }}
+          ref: 1cfeaa3da4ff9a01ee8f5b089168030343d47cde
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           fetch-depth: 1
           persist-credentials: false
           path: p07-private
-      - name: Compare failing module cases with public-safe metadata only
+
+      - name: Run exact-source independent full coverage shard
         shell: bash
         env:
-          LANE: ${{ matrix.lane }}
-          SOURCE_SHA: ${{ matrix.source_sha }}
+          SHARD_INDEX: ${{ matrix.shard }}
         run: |
           set -Eeuo pipefail
-          test "$(git -C p07-private rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git -C p07-private rev-parse HEAD)" = '1cfeaa3da4ff9a01ee8f5b089168030343d47cde'
+          test "$(cat p07-private/BUILD_ID)" = '0.1.0-release86'
           cd p07-private
           export PYTHONPATH="$PWD/lib"
-          log="$RUNNER_TEMP/p07-private-compare.log"
-          if timeout --signal=TERM --kill-after=5s 570 python3 - "$LANE" >"$log" 2>&1 <<'PY'
-          import contextlib, io, re, sys, unittest
-          lane=sys.argv[1]
-          modules=(
-              "test_backup_frontend",
-              "test_release15_sqlite_wal",
-              "test_user_entry",
-              "test_user_remote_backup",
+          bash -n bin/vfops bin/vfops-migrate-ui
+          mapfile -t modules < <(python3 - "$SHARD_INDEX" <<'PY'
+          import pathlib,sys
+          critical = (
+              "test_backup", "test_restore_new", "test_auto_backup",
+              "test_cloudpanel", "test_server_migration_pull", "test_policy",
+              "test_storage", "test_restore", "test_restore_apply",
+              "test_mariadb_owner_policy", "test_cli_menu",
           )
-          def flatten(suite):
-              for item in suite:
-                  if isinstance(item, unittest.TestSuite):
-                      yield from flatten(item)
-                  else: yield item
-          failed=0
-          for slot, module in enumerate(modules):
-              suite=unittest.defaultTestLoader.loadTestsFromName("tests."+module)
-              cases=[t.id() for t in flatten(suite)]
-              sink=io.StringIO()
-              with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
-                  result=unittest.TextTestRunner(stream=sink,verbosity=0).run(suite)
-              status="PASS" if result.wasSuccessful() else "FAIL"
-              failed+=not result.wasSuccessful()
-              print(f"P07_COMPARE_LANE={lane} MODULE_SLOT={slot} TESTS={result.testsRun} STATUS={status}",flush=True)
-              for typ,group in (("FAILURE",result.failures),("ERROR",result.errors)):
-                  for testcase,trace in group:
-                      key=testcase.id()
-                      case_slot=cases.index(key) if key in cases else -1
-                      tail=next((line for line in reversed(trace.splitlines()) if line.strip()),"")
-                      match=re.search(r"([A-Za-z_][A-Za-z0-9_]*(?:Error|Exception))(?=[: ]|$)",tail)
-                      category=match.group(1) if match else "ASSERTION_OR_UNKNOWN"
-                      print(f"P07_COMPARE_LANE={lane} MODULE_SLOT={slot} CASE_SLOT={case_slot} ISSUE={typ} CLASS={category}",flush=True)
-          print(f"P07_COMPARE_LANE={lane} FAILING_MODULES={failed}",flush=True)
+          all_test_names=sorted(p.stem for p in pathlib.Path("tests").glob("test_*.py"))
+          assert len(all_test_names)==56, "source test inventory drift"
+          remaining=[name for name in all_test_names if name not in critical]
+          assert len(remaining)==45
+          shard=int(sys.argv[1])
+          selected=critical if shard==0 else tuple(name for idx,name in enumerate(remaining) if idx%5==shard-1)
+          assert len(selected)==(11 if shard==0 else 9)
+          print("\n".join("tests."+name for name in selected))
           PY
-          then
-            grep '^P07_COMPARE_' "$log" || true
+          )
+          echo "P07_FINAL_SHARD_${SHARD_INDEX}_MODULES=${#modules[@]}"
+          log="$RUNNER_TEMP/p07-exact-final-${SHARD_INDEX}.log"
+          if timeout --signal=TERM --kill-after=5s 750 python3 -m unittest -q "${modules[@]}" >"$log" 2>&1; then
+            echo "P07_FINAL_SHARD_${SHARD_INDEX}=PASS"
+            grep -E '^Ran [0-9]+ tests? in ' "$log" | tail -n1 || true
           else
             rc=$?
-            grep '^P07_COMPARE_' "$log" || true
-            echo "P07_COMPARE_PROCESS_EXIT=$rc"
+            if [ "$rc" -eq 124 ]; then
+              echo "P07_FINAL_SHARD_${SHARD_INDEX}=TIMEOUT"
+            else
+              echo "P07_FINAL_SHARD_${SHARD_INDEX}=UNRESOLVED_FAILURE"
+            fi
+            echo "P07_FINAL_SHARD_${SHARD_INDEX}_EXIT=$rc"
+            grep -E '^Ran [0-9]+ tests? in |^FAILED \(' "$log" | tail -n2 || true
             exit "$rc"
           fi
-      - name: Cleanup private workspace and diagnostic output
+
+      - name: Erase transient private source and private raw test output
         if: always()
         shell: bash
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
         run: |
           rm -rf -- "$GITHUB_WORKSPACE/p07-private"
-          rm -f -- "$RUNNER_TEMP/p07-private-compare.log"
+          rm -f -- "$RUNNER_TEMP/p07-exact-final-${SHARD_INDEX}.log"
           echo 'P07_PRIVATE_SOURCE_PERSISTED=NO'
-          echo 'P07_PRIVATE_TRACE_PERSISTED=NO'
+          echo 'P07_PRIVATE_LOG_PERSISTED=NO'
