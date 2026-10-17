@@ -1,4 +1,4 @@
-name: TEMP P07 PR200 exact-private-source safety regression
+name: TEMP P07 PR200 exact-private-source sharded regression
 on:
   pull_request:
     branches: [main]
@@ -9,28 +9,29 @@ permissions:
   contents: read
 
 concurrency:
-  group: p07-pr200-exact-private-safety-gate
+  group: p07-pr200-exact-private-regression
   cancel-in-progress: false
 
 jobs:
-  p07-exact-source:
+  remaining-regression:
     if: github.repository == 'llhzx2018/core-free-runner-public'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4]
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 16
     steps:
-      - name: Registered private-read capability preflight
+      - name: Verify registered private source read capability
+        shell: bash
         env:
           PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-        shell: bash
         run: |
           set -Eeuo pipefail
-          if [ -z "$PRIVATE_READ_TOKEN" ]; then
-            echo 'P07_RUNNER_BLOCK=VF_PRIVATE_READ_TOKEN_MISSING'
-            exit 78
-          fi
-          echo 'P07_PRIVATE_READ_CAPABILITY=PRESENT'
+          test -n "$PRIVATE_READ_TOKEN" || { echo 'P07_PRIVATE_READ_CAPABILITY=BLOCKED'; exit 78; }
+          echo 'P07_PRIVATE_READ_CAPABILITY=PASS'
 
-      - name: Checkout P07 private exact commit only into temporary workspace
+      - name: Fetch exact immutable P07 PR200 candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-server-ops
@@ -40,63 +41,56 @@ jobs:
           fetch-depth: 1
           path: p07-private
 
-      - name: Verify exact source identity
+      - name: Execute deterministic bounded shard on exact source
         shell: bash
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
         run: |
           set -Eeuo pipefail
           test "$(git -C p07-private rev-parse HEAD)" = '15b6dc7b26dc12489251f49387d033b5a2862577'
           test "$(cat p07-private/BUILD_ID)" = '0.1.0-release86'
-          test "$(cat p07-private/VERSION)" = '0.1.0'
-          echo 'P07_EXACT_SOURCE_IDENTITY=PASS'
-
-      - name: Validate changed Python modules and shell commands
-        shell: bash
-        run: |
-          set -Eeuo pipefail
           cd p07-private
-          bash -n bin/vfops bin/vfops-migrate-ui
-          python3 -m py_compile lib/package_core.py lib/restore_new.py lib/auto_backup.py lib/cloudpanel.py lib/restore_apply_core.py lib/server_migration_pull.py tests/test_backup.py tests/test_restore_new.py tests/test_auto_backup.py tests/test_cloudpanel.py tests/test_server_migration_pull.py
-          echo 'P07_PR200_SYNTAX=PASS'
-
-      - name: Execute exact-source critical safety regression
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          cd p07-private
-          log="$RUNNER_TEMP/p07-pr200-critical-tests.log"
-          if python3 -m unittest -q tests.test_backup tests.test_restore_new tests.test_auto_backup tests.test_cloudpanel tests.test_server_migration_pull tests.test_policy tests.test_storage tests.test_restore tests.test_restore_apply tests.test_mariadb_owner_policy tests.test_cli_menu >"$log" 2>&1; then
-            echo 'P07_PR200_CRITICAL_REGRESSION=PASS'
+          mapfile -t modules < <(python3 - "$SHARD_INDEX" <<'PY'
+          import pathlib, sys
+          excluded = {
+              "test_backup.py", "test_restore_new.py", "test_auto_backup.py",
+              "test_cloudpanel.py", "test_server_migration_pull.py", "test_policy.py",
+              "test_storage.py", "test_restore.py", "test_restore_apply.py",
+              "test_mariadb_owner_policy.py", "test_cli_menu.py",
+          }
+          remaining = sorted(p.stem for p in pathlib.Path("tests").glob("test_*.py") if p.name not in excluded)
+          assert len(remaining) == 45, "Unexpected regression inventory"
+          shard = int(sys.argv[1])
+          selected = [f"tests.{name}" for index, name in enumerate(remaining) if index % 5 == shard]
+          assert len(selected) == 9, "Unexpected shard size"
+          print("\n".join(selected))
+          PY
+          )
+          test "${#modules[@]}" -eq 9
+          echo "P07_REMAINING_SHARD_${SHARD_INDEX}_MODULES=${#modules[@]}"
+          log="$RUNNER_TEMP/p07-remaining-shard-${SHARD_INDEX}.log"
+          if timeout --signal=TERM --kill-after=5s 750 python3 -m unittest -q "${modules[@]}" >"$log" 2>&1; then
+            echo "P07_REMAINING_SHARD_${SHARD_INDEX}=PASS"
             grep -E '^Ran [0-9]+ tests? in ' "$log" | tail -n1 || true
           else
             rc=$?
-            echo 'P07_PR200_CRITICAL_REGRESSION=FAIL'
-            echo "P07_PR200_CRITICAL_EXIT_CODE=$rc"
-            grep -E '^Ran [0-9]+ tests? in |^(FAILED|OK) ' "$log" | tail -n2 || true
+            if [ "$rc" -eq 124 ]; then
+              echo "P07_REMAINING_SHARD_${SHARD_INDEX}=TIMEOUT"
+            else
+              echo "P07_REMAINING_SHARD_${SHARD_INDEX}=UNRESOLVED_TEST_FAILURE"
+            fi
+            echo "P07_REMAINING_SHARD_${SHARD_INDEX}_EXIT=$rc"
+            grep -E '^Ran [0-9]+ tests? in |^FAILED \(' "$log" | tail -n2 || true
             exit "$rc"
           fi
 
-      - name: Execute full in-repository regression without leaking private source
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          cd p07-private
-          log="$RUNNER_TEMP/p07-pr200-full-tests.log"
-          if timeout 600 python3 -m unittest discover -s tests -p 'test_*.py' -q >"$log" 2>&1; then
-            echo 'P07_PR200_FULL_REGRESSION=PASS'
-            grep -E '^Ran [0-9]+ tests? in ' "$log" | tail -n1 || true
-          else
-            rc=$?
-            echo 'P07_PR200_FULL_REGRESSION=FAIL'
-            echo "P07_PR200_FULL_EXIT_CODE=$rc"
-            grep -E '^Ran [0-9]+ tests? in |^(FAILED|OK) ' "$log" | tail -n2 || true
-            exit "$rc"
-          fi
-
-      - name: Cleanup private workspace and raw diagnostics
+      - name: Erase private worktree and private test output
         if: always()
         shell: bash
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
         run: |
           rm -rf -- "$GITHUB_WORKSPACE/p07-private"
-          rm -f -- "$RUNNER_TEMP/p07-pr200-critical-tests.log" "$RUNNER_TEMP/p07-pr200-full-tests.log"
+          rm -f -- "$RUNNER_TEMP/p07-remaining-shard-${SHARD_INDEX}.log"
           echo 'P07_PRIVATE_SOURCE_PERSISTED=NO'
-          echo 'P07_PRIVATE_TEST_LOGS_UPLOADED=NO'
+          echo 'P07_PRIVATE_TEST_RAW_LOG_UPLOADED=NO'
