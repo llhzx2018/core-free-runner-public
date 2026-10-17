@@ -13,7 +13,7 @@ for domain,entry in authority['publicAuthority'].items():
     assert entry['applicability'] in ['REQUIRED','N_A']
     if entry['applicability']=='REQUIRED':
         assert entry['evidence']['status']=='PASS'
-        assert str(entry['evidence']['run'])==os.environ['CANDIDATE_RUN']
+        assert str(entry['evidence']['run']) in [os.environ['CANDIDATE_RUN'],os.environ['PRESERVATION_RUN']]
         assert entry['evidence']['themeSha']==os.environ['TESTED_SHA']
 # Preflight the Theme source before creating its release.
 for name,repo,file,main_key,tree_key in items:
@@ -25,7 +25,7 @@ for name,repo,file,main_key,tree_key in items:
     ident=json.loads((out/file).read_text())
     asset=ident.get('asset',ident.get('asset_name'));tag='v'+ident['version']
     note=(out/(name+'-notes.md'))
-    note.write_text('前台统一风格V1接入20类真实模板；修正页头页尾宽度对齐、导航列与行动区样式。现有“前台页面”增加参考标准和按页型、语言、设备保存的人工进度；待复验不自动视作人工通过。正文、既有配置、菜单与Provider算法保持。\n\n发布包验证覆盖真实WordPress安装、131升级、回退重应用、重装幂等、3项进度数据（含未知schema）的完整数据库备份恢复与全部保护字段保持。1510项浏览器/WordPress断言通过。手机按Owner安排暂缓；Production仅由Owner手工升级，线上人工体验仍待复核。升级前请做完整数据库及主题文件备份，Theme七域配置导出不包含人工进度记录。\n\nExact source: '+ident['source_sha']+'; tree: '+ident['source_tree']+'; Candidate run: '+os.environ['CANDIDATE_RUN']+'.\n')
+    note.write_text('V1.35.133：首页桌面工具卡片收紧为三列两行，重复任务路径按需展开；修复中英文页尾外站链接误标当前页面。保留正文、WordPress 菜单、配置、语言关系和 M3U8 工具能力。\n\n真实隔离 WordPress / MariaDB / Chromium 中英页面断言和 PHP/数据权限测试 PASS；实际 V1.35.132→V1.35.133 升级、回退、重升级、重复安装、全库恢复、保护字段保持 PASS。正式站仅由 OWNER 手工升级，先备份完整数据库与主题文件；手机和 OWNER 真实体验仍待验收。\n\nExact source: '+ident['source_sha']+'; tree: '+ident['source_tree']+'; Browser run: '+os.environ['CANDIDATE_RUN']+'; Lifecycle run: '+os.environ['PRESERVATION_RUN']+'.\n')
     probe=subprocess.run(['gh','release','view',tag,'--repo',repo],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
     if probe.returncode:
         subprocess.run(['gh','release','create',tag,str(out/asset),'--repo',repo,'--target',os.environ[main_key],'--title',('VF Tools Theme V' if name=='theme' else 'VF Tools M3U8 V')+ident['version'],'--notes-file',str(note)],check=True)
