@@ -34,12 +34,12 @@ docker cp lane/snapshot.php "$WP:/tmp/snapshot.php"
 curl -fsS http://127.0.0.1:18880/ >/dev/null
 curl -fsS http://127.0.0.1:18880/m3u8-playlist-checker/ >/dev/null
 cli eval-file /tmp/snapshot.php > proof/state-before.sha256
-node lane/public-browser.cjs
+if [ "${VF_REVIEW_ONLY_SHELL:-0}" = "1" ];then node lane/shell-browser.cjs;else node lane/public-browser.cjs;fi
 cli eval-file /tmp/snapshot.php > proof/state-after.sha256
 cmp proof/state-before.sha256 proof/state-after.sha256
 python3 - <<'PY'
-import json,pathlib
-for name in ['wordpress','public-browser']:
+import json,pathlib,os
+for name in ['wordpress','shell-result'if os.environ.get('VF_REVIEW_ONLY_SHELL')=='1'else'public-browser']:
  data=json.loads(pathlib.Path('proof',name+'.json').read_text());assert data['status']=='PASS' and all(c['pass'] for c in data['checks'])
 print('Exact-source WordPress/MariaDB and browser checks passed.')
 PY
