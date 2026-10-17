@@ -116,8 +116,11 @@ def run(
             timeout=timeout,
             env=env,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise CloudPanelError(op) from exc
+    except (OSError, subprocess.TimeoutExpired):
+        # TimeoutExpired embeds its argv command, including CloudPanel's
+        # mandatory --password flags. Never chain the original exception into
+        # an error that might be rendered by a CLI or troubleshooting report.
+        raise CloudPanelError(op) from None
     if proc.returncode != 0:
         # Never include stderr/stdout in the raised exception: CloudPanel commands can
         # contain or print credentials. Callers may log only operation + return code.
