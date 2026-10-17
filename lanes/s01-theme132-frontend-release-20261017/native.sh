@@ -35,8 +35,7 @@ cli eval-file /tmp/snapshot.php > proof/state-before.json
 cli theme install /tmp/target.zip --force >/dev/null
 test "$(cli theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
 cli eval-file /tmp/wp-check.php > proof/wordpress.json
-node lane/public-browser.cjs
-node lane/shell-browser.cjs
+node lane/smoke.cjs upgrade
 cli eval-file /tmp/snapshot.php > proof/state-upgrade.json
 cmp proof/state-before.json proof/state-upgrade.json
 cli eval-file /tmp/review-seed.php > proof/review-seed.json
@@ -84,9 +83,9 @@ curl -fsS http://127.0.0.1:18880/wp-admin/install.php > /tmp/setup-revisit.html
 python3 - <<'PYEND'
 import json,pathlib,os
 p=pathlib.Path('proof')
-for name in ['public-browser','shell-result','wordpress','wordpress-clean','smoke-rollback','smoke-reapply','smoke-clean']:
+for name in ['smoke-upgrade','wordpress','wordpress-clean','smoke-rollback','smoke-reapply','smoke-clean']:
  d=json.loads((p/(name+'.json')).read_text());assert d['status']=='PASS'and all(c['pass']for c in d['checks'])
 assert 'Already Installed'in pathlib.Path('/tmp/setup-revisit.html').read_text()
-checks={k:'PASS'for k in ['clean_full','native_upgrade131to132','rollback131','reapply132','idempotent_reinstall','full_database_review_recovery','security','package_browser','setup_revisit_locked','protected_all_records']}
-(p/'FINAL_EVIDENCE.json').write_text(json.dumps({'status':'PASS','source_sha':os.environ['TARGET_SHA'],'source_tree':os.environ['TARGET_TREE'],'version':os.environ['TARGET_VERSION'],'checks':checks,'review_records':3,'protected_state':'BYTE_IDENTICAL','mobile':'NOT_RUN_OWNER_DEFERRED','production':'NOT_EXECUTED','owner_real_use':'POST_PRODUCTION_REQUIRED'},indent=2))
+checks={k:'PASS'for k in ['clean_full','native_upgrade131to132','rollback131','reapply132','idempotent_reinstall','full_database_review_recovery','security','package_route_smoke','setup_revisit_locked','protected_all_records_including_ads_seo_provider_and_translation_tables']}
+(p/'PRESERVATION_EVIDENCE.json').write_text(json.dumps({'status':'PASS','source_sha':os.environ['TARGET_SHA'],'source_tree':os.environ['TARGET_TREE'],'version':os.environ['TARGET_VERSION'],'checks':checks,'review_records':3,'protected_state':'BYTE_IDENTICAL','mobile':'NOT_RUN_OWNER_DEFERRED','production':'NOT_EXECUTED','owner_real_use':'POST_PRODUCTION_REQUIRED'},indent=2))
 PYEND
