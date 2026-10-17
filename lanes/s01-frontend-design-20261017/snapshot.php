@@ -8,7 +8,7 @@ $rows['content']=$wpdb->get_results("SELECT ID,post_type,post_status,post_name,p
 $rows['postmeta']=$wpdb->get_results("SELECT post_id,meta_key,meta_value FROM {$wpdb->postmeta} WHERE meta_key NOT LIKE '\\_edit\\_%' ORDER BY meta_id",ARRAY_A);
 foreach($rows as $key=>$value){$parts[$key]=hash('sha256',wp_json_encode($value));}
 $details=[];foreach($rows as $key=>$value){
- if($key==='content')foreach($value as $row)$details[$key][$row['ID']]=hash('sha256',wp_json_encode($row));
+ if($key==='content')foreach($value as $row)$details[$key][$row['ID']]=['sha256'=>hash('sha256',wp_json_encode($row)),'post_type'=>$row['post_type'],'post_status'=>$row['post_status']];
  elseif($key==='postmeta')foreach($value as $row)$details[$key][$row['post_id'].'|'.$row['meta_key']][]=hash('sha256',$row['meta_value']);
  elseif(is_array($value))foreach($value as $k=>$v)$details[$key][$k]=hash('sha256',wp_json_encode($v));
 }
