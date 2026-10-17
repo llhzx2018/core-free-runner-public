@@ -1,0 +1,133 @@
+name: TEMP P07 release88 and Care rc57 coordinated proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release88-care57-temp.yml'
+permissions:
+  contents: read
+jobs:
+  run:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - name: Require private token
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: test -n "$PRIVATE_READ_TOKEN" || exit 78
+      - name: Checkout public baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact private product candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 6554853cafe3e5f39c7f92f1c87952188e47199a
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: p07-private
+      - name: Construct coordinated release candidate under runner temp
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p07-private rev-parse HEAD)" = '6554853cafe3e5f39c7f92f1c87952188e47199a'
+          python3 p07-private/scripts/p07_candidate_bundle.py --product-root "$PWD/p07-private" --public-root "$PWD" --output "$RUNNER_TEMP/p07-candidate" --product-sha '6554853cafe3e5f39c7f92f1c87952188e47199a'
+          stage="$RUNNER_TEMP/p07-candidate"
+          for file in "$stage"/installers/*.sh "$stage"/packages/p07-system-care/0.1.0-rc57/vf-system-care.sh; do bash -n "$file"; done
+          grep -Fq 'EXPECTED_BUILD_ID="0.1.0-release88-rc1"' "$stage/installers/p07-final.sh"
+          grep -Fq 'SYSTEM_CARE_EXPECTED="0.1.0-rc57"' "$stage/installers/p07-toolbox.sh"
+          grep -Fq "VFOPS_BUILD_EXPECTED='0.1.0-release88-rc1'" "$stage/packages/p07-system-care/0.1.0-rc57/vf-system-care.sh"
+          echo 'P07_COORDINATED_BUNDLE_PINS=PASS'
+      - name: Real installer clean and release87 upgrade regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stage="$RUNNER_TEMP/p07-candidate"
+          a="$RUNNER_TEMP/p07-new"
+          b="$RUNNER_TEMP/p07-upgrade"
+          mkdir -p "$a" "$b"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1
+          export P07_INSTALL_DIR="$a/installed" P07_PREVIOUS_DIR="$a/previous" P07_BIN_LINK="$a/vfops" P07_PUBLIC_ROOT="file://$stage"
+          bash "$stage/installers/p07.sh" >"$RUNNER_TEMP/p07-new.log" 2>&1
+          test "$("$a/vfops" --build-id)" = '0.1.0-release88-rc1'
+          bash "$stage/installers/p07.sh" >"$RUNNER_TEMP/p07-repeat.log" 2>&1
+          grep -Fq '已是当前版本，无需下载或重复安装' "$RUNNER_TEMP/p07-repeat.log"
+          echo 'P07_CANDIDATE_FRESH_AND_REPEAT_INSTALL=PASS'
+          export P07_INSTALL_DIR="$b/installed" P07_PREVIOUS_DIR="$b/previous" P07_BIN_LINK="$b/vfops" P07_PUBLIC_ROOT="file://$PWD"
+          bash installers/p07-final.sh >"$RUNNER_TEMP/p07-old.log" 2>&1
+          test "$("$b/vfops" --build-id)" = '0.1.0-release87'
+          printf 'sentinel' >"$b/user-data"
+          export P07_PUBLIC_ROOT="file://$stage"
+          bash "$stage/installers/p07.sh" >"$RUNNER_TEMP/p07-upgrade.log" 2>&1
+          test "$("$b/vfops" --build-id)" = '0.1.0-release88-rc1'
+          test "$(cat "$b/previous/BUILD_ID")" = '0.1.0-release87'
+          printf 'damaged\n' >>"$b/installed/.runtime-manifest.gitblob"
+          if P07_PUBLIC_ROOT="file://$PWD" bash "$stage/installers/p07-final.sh" > "$RUNNER_TEMP/p07-tamper.log" 2>&1; then exit 11; fi
+          grep -Fq '当前运行时清单身份校验失败' "$RUNNER_TEMP/p07-tamper.log"
+          mv "$b/installed" "$b/broken-candidate"
+          mv "$b/previous" "$b/installed"
+          test "$("$b/vfops" --build-id)" = '0.1.0-release87'
+          test "$(cat "$b/user-data")" = sentinel
+          echo 'P07_CANDIDATE_UPGRADE_TAMPER_AND_ROLLBACK=PASS'
+      - name: Install full System Care rc57 from strict local fetch shim
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stage="$RUNNER_TEMP/p07-candidate"
+          shim="$RUNNER_TEMP/p07-shim"
+          box="$RUNNER_TEMP/p07-care"
+          mkdir -p "$shim" "$box"
+          cat >"$shim/curl" <<'PY'
+          #!/usr/bin/env python3
+          import os,sys,pathlib,shutil
+          args=sys.argv[1:]
+          urls=[x for x in args if x.startswith("https://")]
+          fragment="/packages/p07-system-care/0.1.0-rc57/"
+          if len(urls)!=1 or fragment not in urls[0] or "-o" not in args:
+              raise SystemExit("unexpected network request denied")
+          rel=urls[0].split(fragment,1)[1]
+          if not rel or ".." in pathlib.PurePosixPath(rel).parts:
+              raise SystemExit("invalid package path")
+          file=pathlib.Path(os.environ["P07_CANDIDATE_STAGE"])/"packages/p07-system-care/0.1.0-rc57"/rel
+          if not file.is_file(): raise SystemExit("missing staged package file")
+          shutil.copyfile(file,args[args.index("-o")+1])
+          PY
+          chmod 755 "$shim/curl"
+          python3 - "$stage/installers/p07-system-care.sh" "$box/install.sh" "$box" <<'PY'
+          from pathlib import Path
+          import sys
+          source,target,box=(Path(x) for x in sys.argv[1:])
+          content=source.read_text(encoding="utf-8")
+          for old,new in [("TARGET='/opt/vf-system-care'","TARGET='"+str(box/"installed")+"'"),("ENTRY='/usr/local/bin/vf-system-care'","ENTRY='"+str(box/"vf-system-care")+"'")]:
+              assert content.count(old)==1
+              content=content.replace(old,new)
+          target.write_text(content,encoding="utf-8")
+          PY
+          sudo env PATH="$shim:$PATH" P07_CANDIDATE_STAGE="$stage" NO_COLOR=1 bash "$box/install.sh" status >"$RUNNER_TEMP/p07-care.log" 2>&1
+          test "$(NO_COLOR=1 "$box/vf-system-care" --version)" = '服务器维护与安全 0.1.0-rc57'
+          sudo env PATH="$shim:$PATH" P07_CANDIDATE_STAGE="$stage" NO_COLOR=1 bash "$box/install.sh" status >"$RUNNER_TEMP/p07-care-repeat.log" 2>&1
+          test "$(NO_COLOR=1 "$box/vf-system-care" --version)" = '服务器维护与安全 0.1.0-rc57'
+          echo 'P07_CARE57_REAL_PACKAGE_INSTALL_REINSTALL=PASS'
+          export P07_VFOPS_DIR="$RUNNER_TEMP/p07-new/installed"
+          timeout 40 bash -c "printf '7\n0\n' | P07_FORCE_INTERACTIVE=1 NO_COLOR=1 PATH='$shim':\$PATH bash '$box/installed/vf-system-care.sh' menu" >"$RUNNER_TEMP/p07-care-menu.log" 2>&1
+          ! grep -Fq '正在同步当前正式版服务器工具箱运行文件' "$RUNNER_TEMP/p07-care-menu.log"
+          echo 'P07_CARE57_MENU_SHARED_RUNTIME_NO_DOWNGRADE=PASS'
+      - name: Guard other public toolbox modules
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          file="$RUNNER_TEMP/p07-candidate/installers/p07-toolbox.sh"
+          for name in run_network_node run_vps_audit run_server_ops run_system_care run_server_init; do grep -Fq "$name" "$file"; done
+          grep -Fq 'VF_NODE_EXPECTED="0.1.0-rc13"' "$file"
+          grep -Fq 'VPS_AUDIT_BUILD_EXPECTED="2.1.0-rc7-field"' "$file"
+          echo 'P07_FIVE_TOOLBOX_ROUTES=PASS'
+      - name: Remove transient source and all installation material
+        if: always()
+        shell: bash
+        run: |
+          sudo rm -rf -- "$GITHUB_WORKSPACE/p07-private" "$RUNNER_TEMP/p07-candidate" "$RUNNER_TEMP/p07-new" "$RUNNER_TEMP/p07-upgrade" "$RUNNER_TEMP/p07-care" "$RUNNER_TEMP/p07-shim"
+          rm -f -- "$RUNNER_TEMP"/p07-*.log
+          test ! -e "$GITHUB_WORKSPACE/p07-private"
+          echo 'P07_TEMP_PRIVATES_AND_PACKAGES_REMOVED=PASS'
