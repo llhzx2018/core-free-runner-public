@@ -1,0 +1,128 @@
+name: TEMP P07 release87 isolated install upgrade rollback
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release87-temporary-upgrade.yml'
+permissions:
+  contents: read
+jobs:
+  install-upgrade:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    steps:
+      - name: Checkout public published release86 packaging in temporary workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 55ec3edd764e5294044ec05e55d88c564df94a92
+          persist-credentials: false
+          path: public-base
+      - name: Checkout exact private release87 source without persistence
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 36f0c6b8375a4788eeb40cb8a12fab9dcbae2b0b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-source
+      - name: Build private, local-only release87 mirror and isolated release86 install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C private-source rev-parse HEAD)" = 36f0c6b8375a4788eeb40cb8a12fab9dcbae2b0b
+          test "$(cat private-source/BUILD_ID)" = 0.1.0-release87
+          test "$(cat public-base/dist/p07/0.1.0/overlay/BUILD_ID)" = 0.1.0-release86
+          root="$RUNNER_TEMP/p07-r87-upgrade"
+          mkdir -p "$root/http/dist/p07/0.1.0" "$root/http/dist/p07/0.1.0-rc2" "$root/bin"
+          cp public-base/dist/p07/0.1.0-rc2/P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz "$root/http/dist/p07/0.1.0-rc2/"
+          cp -a public-base/dist/p07/0.1.0/overlay "$root/http/dist/p07/0.1.0/"
+          cp public-base/installers/p07-final.sh "$root/release86.sh"
+          cd "$root/http"
+          python3 -m http.server 18787 --bind 127.0.0.1 >"$root/http.log" 2>&1 &
+          echo $! >"$root/http.pid"
+          cd "$GITHUB_WORKSPACE"
+          for tries in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS http://127.0.0.1:18787/dist/p07/0.1.0/overlay/BUILD_ID >/dev/null; then break; fi
+            sleep 1
+          done
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1
+          export P07_INSTALL_DIR="$root/installed" P07_PREVIOUS_DIR="$root/previous" P07_BIN_LINK="$root/vfops"
+          export P07_PUBLIC_ROOT="http://127.0.0.1:18787"
+          bash "$root/release86.sh" >"$root/install86.log" 2>&1
+          test "$(cat "$root/installed/BUILD_ID")" = 0.1.0-release86
+          test "$("$root/vfops" --build-id)" = 0.1.0-release86
+          echo P07_RELEASE87_PREVIOUS_RELEASE86_INSTALL=PASS
+
+          # Populate an *ephemeral* local HTTP root with exact candidate files;
+          # never commit any private source or raw package bytes to public Git.
+          overlay="$root/http/dist/p07/0.1.0/overlay"
+          while read -r sha relative; do
+            test -n "$sha" && test -n "$relative"
+            test -f "private-source/$relative"
+            mkdir -p "$overlay/$(dirname "$relative")"
+            cp "private-source/$relative" "$overlay/$relative"
+          done < "$overlay/RUNTIME.gitblob"
+          : >"$root/runtime-new.gitblob"
+          while read -r sha relative; do
+            hash="$(git hash-object "$overlay/$relative")"
+            printf '%s  %s\n' "$hash" "$relative" >>"$root/runtime-new.gitblob"
+          done < "$root/http/dist/p07/0.1.0/overlay/RUNTIME.gitblob"
+          mv "$root/runtime-new.gitblob" "$overlay/RUNTIME.gitblob"
+          manifest_blob="$(git hash-object "$overlay/RUNTIME.gitblob")"
+          export MANIFEST_BLOB="$manifest_blob"
+          python3 - "$root/release86.sh" "$root/release87.sh" <<'PY'
+          import os, pathlib, sys
+          before=pathlib.Path(sys.argv[1]).read_text()
+          assert 'EXPECTED_BUILD_ID="0.1.0-release86"' in before
+          assert 'RUNTIME_MANIFEST_BLOB="b6bef5d07e9dccfaa72aa599add9aceaef7ecb8d"' in before
+          after=before.replace('EXPECTED_BUILD_ID="0.1.0-release86"', 'EXPECTED_BUILD_ID="0.1.0-release87"').replace(
+              'RUNTIME_MANIFEST_BLOB="b6bef5d07e9dccfaa72aa599add9aceaef7ecb8d"',
+              'RUNTIME_MANIFEST_BLOB="'+os.environ["MANIFEST_BLOB"]+'"'
+          )
+          pathlib.Path(sys.argv[2]).write_text(after)
+          PY
+          bash -n "$root/release87.sh"
+          echo P07_RELEASE87_EPHEMERAL_PACKAGE_IDENTITY=PASS
+      - name: Prove release86 to release87 upgrade, repeat, data preservation and rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="$RUNNER_TEMP/p07-r87-upgrade"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1
+          export P07_INSTALL_DIR="$root/installed" P07_PREVIOUS_DIR="$root/previous" P07_BIN_LINK="$root/vfops"
+          export P07_PUBLIC_ROOT="http://127.0.0.1:18787"
+          echo KEEP_MY_UNRELATED_DATA >"$root/owner-data-sentinel"
+          bash "$root/release87.sh" >"$root/upgrade87.log" 2>&1
+          test "$("$root/vfops" --build-id)" = 0.1.0-release87
+          test "$(cat "$root/previous/BUILD_ID")" = 0.1.0-release86
+          test "$(cat "$root/owner-data-sentinel")" = KEEP_MY_UNRELATED_DATA
+          echo P07_RELEASE87_ATOMIC_UPGRADE=PASS
+          bash "$root/release87.sh" >"$root/repeat87.log" 2>&1
+          grep -Fq '已是当前版本，无需下载或重复安装' "$root/repeat87.log"
+          echo P07_RELEASE87_IDEMPOTENT=PASS
+          cp "$root/installed/.runtime-manifest.gitblob" "$root/verified-manifest"
+          printf 'CORRUPTION_GUARD\n' >>"$root/installed/.runtime-manifest.gitblob"
+          if bash "$root/release86.sh" >"$root/reject-corrupt.log" 2>&1; then
+            echo P07_RELEASE87_NEGATIVE_INTEGRITY=FAIL
+            exit 1
+          fi
+          grep -Fq '当前运行时清单身份校验失败' "$root/reject-corrupt.log"
+          cp "$root/verified-manifest" "$root/installed/.runtime-manifest.gitblob"
+          test "$("$root/vfops" --build-id)" = 0.1.0-release87
+          echo P07_RELEASE87_NEGATIVE_INTEGRITY=PASS
+          mv "$root/installed" "$root/failed-upgrade"
+          mv "$root/previous" "$root/installed"
+          test "$("$root/vfops" --build-id)" = 0.1.0-release86
+          test "$(cat "$root/owner-data-sentinel")" = KEEP_MY_UNRELATED_DATA
+          echo P07_RELEASE87_ROLLBACK=PASS
+      - name: Remove all transient private and generated packaging data
+        if: always()
+        shell: bash
+        run: |
+          root="$RUNNER_TEMP/p07-r87-upgrade"
+          if [[ -f "$root/http.pid" ]]; then kill "$(cat "$root/http.pid")" 2>/dev/null || true; fi
+          rm -rf -- "$GITHUB_WORKSPACE/private-source" "$GITHUB_WORKSPACE/public-base" "$root"
+          echo P07_PRIVATE_SOURCE_PERSISTED=NO
+          echo P07_GENERATED_PACKAGE_PERSISTED=NO
