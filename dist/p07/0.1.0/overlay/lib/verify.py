@@ -114,7 +114,7 @@ def sql_data_fingerprint(path: Path) -> dict[str, Any]:
     objects: set[str] = set()
     data_line_hashes: list[str] = []
     try:
-        with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+        with opener(path, "rt", encoding="utf-8", errors="strict") as handle:
             for raw in handle:
                 line = raw.strip()
                 if not line or line.startswith("--") or line.startswith("#"):
@@ -127,10 +127,16 @@ def sql_data_fingerprint(path: Path) -> dict[str, Any]:
                 object_match = _CREATE_OBJECT_RE.match(normalized)
                 if object_match:
                     objects.add(object_match.group(1))
+                if re.match(r"^(?:INSERT|REPLACE|UPDATE|DELETE|LOAD|COPY)[ ]+", normalized, re.I) and not _DATA_STATEMENT_RE.match(normalized):
+                    raise RestoreVerifyError("unrecognized SQL data command in cross-engine verification")
                 if _DATA_STATEMENT_RE.match(normalized):
+                    if not normalized.endswith(";"):
+                        raise RestoreVerifyError(
+                            "multiline SQL data requires manual cross-engine verification"
+                        )
                     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
                     data_line_hashes.append(digest)
-    except (OSError, EOFError) as exc:
+    except (OSError, EOFError, UnicodeError) as exc:
         raise RestoreVerifyError(
             f"SQL dump cannot be content-fingerprinted: {path.name}"
         ) from exc
@@ -150,6 +156,54 @@ def sql_data_fingerprint(path: Path) -> dict[str, Any]:
         "data_hash": digest.hexdigest(),
         "data_statements": len(data_line_hashes),
     }
+
+
+def sql_structure_fingerprint(path: Path) -> tuple[str, int]:
+    """Conservative DDL parity gate for cross-engine SQL restore.
+
+    Unlike a row-only fingerprint, this catches lost indexes, constraints,
+    triggers, defaults and changed collations. Unknown vendor-guarded DDL and
+    custom delimiters remain unproven rather than silently accepted.
+    """
+    opener = gzip.open if path.name.endswith(".gz") else open
+    digest = hashlib.sha256()
+    ddl_count = 0
+    collecting: list[str] = []
+    ddl_start = re.compile(
+        r"^(?:CREATE|ALTER|DROP|RENAME|TRUNCATE)[ ]+",
+        re.IGNORECASE,
+    )
+    try:
+        with opener(path, "rt", encoding="utf-8", errors="strict") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not line or line.startswith("--") or line.startswith("#"):
+                    continue
+                if line.upper().startswith("DELIMITER "):
+                    raise RestoreVerifyError("custom SQL delimiters require manual schema verification")
+                if line.startswith("/*!") or line.startswith("/*M!"):
+                    if re.search(
+                        r"(?:CREATE|ALTER|DROP|RENAME|TRUNCATE|TRIGGER|INDEX|EVENT|PROCEDURE|FUNCTION|VIEW)",
+                        line, re.I,
+                    ):
+                        raise RestoreVerifyError("conditional SQL DDL is not independently verified")
+                    continue
+                if not collecting and not ddl_start.match(line):
+                    continue
+                collecting.append(canonical_sql_line(line))
+                if line.endswith(";"):
+                    statement = " ".join(" ".join(collecting).split())
+                    digest.update(statement.encode("utf-8"))
+                    digest.update(bytes((10,)))
+                    ddl_count += 1
+                    collecting.clear()
+    except (OSError, UnicodeError, EOFError) as exc:
+        raise RestoreVerifyError("SQL schema cannot be fingerprinted") from exc
+    if collecting:
+        raise RestoreVerifyError("unterminated SQL schema statement")
+    if ddl_count == 0:
+        raise RestoreVerifyError("no comparable SQL schema statements")
+    return digest.hexdigest(), ddl_count
 
 
 def run_db_export(clpctl: str, database: str, output: Path) -> None:

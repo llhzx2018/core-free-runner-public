@@ -746,12 +746,55 @@ def local_target_db_engine_version() -> str:
     return "UNKNOWN"
 
 
+def local_target_active_db_engine_version() -> str:
+    """Verify the *running* local SQL server through a credential-free root socket.
+
+    A MariaDB binary on PATH alone is not evidence that CloudPanel's target
+    SQL endpoint is running MariaDB. Authentication failure is UNKNOWN.
+    """
+    client = shutil.which("mariadb") or shutil.which("mysql")
+    if not client:
+        return "UNKNOWN"
+    try:
+        p = subprocess.run(
+            [
+                client, "--no-defaults", "--protocol=socket", "--user=root",
+                "--batch", "--skip-column-names", "--connect-timeout=5",
+                "--execute=SELECT @@version, @@version_comment",
+            ],
+            capture_output=True, text=True, timeout=9, check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "UNKNOWN"
+    if p.returncode != 0:
+        return "UNKNOWN"
+    fields = p.stdout.strip().split("\t")
+    if len(fields) != 2:
+        return "UNKNOWN"
+    version, comment = fields
+    if re.match(r"^(?:5[.]5[.]5-)?10[.]11[.][0-9]+[-+]MariaDB(?:$|[-+])", version, re.I):
+        if "percona" not in comment.lower() and "mysql community" not in comment.lower():
+            return "MARIADB_10.11"
+    if "mariadb" in version.lower():
+        return "MARIADB_OTHER"
+    if "mysql" in comment.lower() or "percona" in comment.lower():
+        return "MYSQL_OR_PERCONA"
+    return "UNKNOWN"
+
+
 def require_mariadb_1011_target() -> None:
-    if local_target_db_engine_version() != "MARIADB_10.11":
+    # Both installed daemon identity and the active root socket must agree.
+    # Fail closed before creating/importing target databases or freezing SOURCE.
+    if (
+        local_target_db_engine_version() != "MARIADB_10.11"
+        or local_target_active_db_engine_version() != "MARIADB_10.11"
+    ):
         raise PullMigrationError(
             "NEW_SERVER_REQUIRES_MARIADB_10_11: "
-            "新服务器必须使用 MariaDB 10.11，已停止迁移；"
-            "不会自动卸载或替换任何已有数据库"
+            "新服务器必须实际运行 MariaDB 10.11（含本机数据库连接验证）；"
+            "如本机 root socket 无法只读验证，请先检查 CloudPanel/数据库服务。"
+            "已停止迁移，不会自动卸载或替换任何已有数据库"
         )
 
 
@@ -1085,7 +1128,9 @@ def compare_database_dumps(source_dump: Path, target_dump: Path) -> str:
         if before == after and before_count == after_count:
             return "CANONICAL_SQL_EXACT"
         if (
-            verify_engine.sql_data_fingerprint(source_dump)
+            verify_engine.sql_structure_fingerprint(source_dump)
+            == verify_engine.sql_structure_fingerprint(target_dump)
+            and verify_engine.sql_data_fingerprint(source_dump)
             == verify_engine.sql_data_fingerprint(target_dump)
         ):
             return "CROSS_ENGINE_LOGICAL_CONTENT"

@@ -51,7 +51,8 @@ class MariaDBDefaultPolicy(unittest.TestCase):
             return_value=subprocess.CompletedProcess(["mariadbd", "--version"], 0, "mariadbd  Ver 10.11.14-MariaDB-0+deb12u2 for debian-linux-gnu on x86_64", ""),
         ):
             self.assertEqual(pull.local_target_db_engine_version(), "MARIADB_10.11")
-            self.assertIsNone(pull.require_mariadb_1011_target())
+            with mock.patch.object(pull, "local_target_active_db_engine_version", return_value="MARIADB_10.11"):
+                self.assertIsNone(pull.require_mariadb_1011_target())
 
     def test_other_mariadb_and_unreadable_are_fail_closed(self):
         import server_migration_pull as pull
@@ -69,6 +70,59 @@ class MariaDBDefaultPolicy(unittest.TestCase):
         self.assertIn("def resume_prepare_migration(",pull)
         self.assertIn("def cutover_migration(",pull)
         self.assertGreaterEqual(pull.count("    require_mariadb_1011_target()"),3)
+
+    def test_running_server_version_is_queried_via_unprivileged_argv_socket(self):
+        import server_migration_pull as pull
+        fake = subprocess.CompletedProcess(
+            [], 0, "10.11.14-MariaDB-0+deb12u2\tDebian 12\n", ""
+        )
+        with mock.patch.object(pull.shutil, "which", side_effect=lambda name: "/usr/bin/mariadb" if name == "mariadb" else None), mock.patch.object(
+            pull.subprocess, "run", return_value=fake
+        ) as run:
+            self.assertEqual(pull.local_target_active_db_engine_version(), "MARIADB_10.11")
+            args = run.call_args.args[0]
+            self.assertIn("--no-defaults", args)
+            self.assertIn("--protocol=socket", args)
+            self.assertIn("--user=root", args)
+            self.assertFalse(any("password=" in value.lower() for value in args))
+
+    def test_mariadb_binary_with_wrong_or_unreachable_live_server_is_blocked(self):
+        import server_migration_pull as pull
+        for live in ("MYSQL_OR_PERCONA", "MARIADB_OTHER", "UNKNOWN"):
+            with self.subTest(live=live), mock.patch.object(
+                pull, "local_target_db_engine_version", return_value="MARIADB_10.11"
+            ), mock.patch.object(
+                pull, "local_target_active_db_engine_version", return_value=live
+            ):
+                with self.assertRaisesRegex(pull.PullMigrationError, "NEW_SERVER_REQUIRES_MARIADB_10_11"):
+                    pull.require_mariadb_1011_target()
+
+    def test_live_socket_rejects_mysql_other_mariadb_and_connection_failure(self):
+        import server_migration_pull as pull
+        with mock.patch.object(pull.shutil, "which", return_value="/usr/bin/mariadb"):
+            for version, expected in (
+                ("8.4.4\tPercona Server\n", "MYSQL_OR_PERCONA"),
+                ("10.6.18-MariaDB\tDebian\n", "MARIADB_OTHER"),
+                ("10.11.14-MariaDB\tDebian\n", "MARIADB_10.11"),
+            ):
+                with self.subTest(version=version), mock.patch.object(
+                    pull.subprocess, "run",
+                    return_value=subprocess.CompletedProcess([], 0, version, ""),
+                ):
+                    self.assertEqual(pull.local_target_active_db_engine_version(), expected)
+            with mock.patch.object(
+                pull.subprocess, "run",
+                return_value=subprocess.CompletedProcess([], 1, "", "Access denied"),
+            ):
+                self.assertEqual(pull.local_target_active_db_engine_version(), "UNKNOWN")
+
+    def test_mariadb_tuning_skip_does_not_claim_apply_pass(self):
+        ui=(ROOT/"bin/vfops-init-ui").read_text(encoding="utf8")
+        self.assertIn("SKIPPED_MARIADB_UNCALIBRATED", ui)
+        self.assertIn("if [[ \"$block_reasons\" == 'MYSQL_FLAVOR_NOT_SUPPORTED' ]]; then", ui)
+        self.assertIn("record_action SKIP '性能配置'", ui)
+        self.assertIn("基础初始化完成（MariaDB 性能调优未执行）", ui)
+        self.assertIn("RESOURCE_STATE='BLOCKED'", ui)
 
     def test_migration_safety_preserved(self):
         code=(ROOT/"lib/server_migration.py").read_text(encoding="utf8")
