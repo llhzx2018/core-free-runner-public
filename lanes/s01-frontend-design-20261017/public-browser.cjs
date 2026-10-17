@@ -174,6 +174,8 @@ function gate(value,name,detail){checks.push({name,pass:!!value,detail});/* Coll
    const next=p.locator('.vf-theme-post-list--blog_index .vf-theme-pagination--internal .next');
    gate(await next.count()===1,'R04 real blog pagination next exists',{lang,width});
    if(await next.count()){
+     const href=await next.getAttribute('href');
+     gate(new URL(href,p.url()).searchParams.has('paged'), 'R04 blog pagination keeps exact route with paged query var',{lang,width,href});
      await next.click();await p.waitForLoadState('networkidle');
      gate(await p.locator('.vf-theme-post-list--blog_index .vf-directory-card').count()>0,'R04 blog page 2 keeps articles',{lang,width});
    }
