@@ -323,5 +323,63 @@ class AutoBackupTests(unittest.TestCase):
             self.assertIn("无需修复", output)
 
 
+
+    def test_local_prune_protects_tampered_automatic_even_with_old_pass_record(self):
+        from tests.test_backup import BackupTest
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "source"
+            _, fake = BackupTest().make_cloudpanel_fixture(source)
+            directory = root / "backups"
+            with mock.patch.dict(os.environ, {"VFOPS_NOW": "2026-10-01T00:00:00+00:00"}):
+                old = auto_backup.package_engine.build_backup(source, "example.com", directory, str(fake), "automatic")
+            with mock.patch.dict(os.environ, {"VFOPS_NOW": "2026-10-02T00:00:00+00:00"}):
+                new = auto_backup.package_engine.build_backup(source, "example.com", directory, str(fake), "automatic")
+            self.assertEqual(json.loads((old / "verification.json").read_text())["status"], "PASS")
+            with (old / "mysql/example_prod.sql.gz").open("ab") as output:
+                output.write(b"tamper-after-verification")
+            self.assertFalse(auto_backup._verified_automatic_for_domain(old, "example.com"))
+            self.assertEqual(auto_backup.prune_local(directory, "example.com", 1), [])
+            self.assertTrue(old.exists(), "unverified backup must never be deleted")
+            self.assertTrue(new.exists())
+
+    def test_local_prune_still_removes_old_fresh_verified_automatic(self):
+        from tests.test_backup import BackupTest
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "source"
+            _, fake = BackupTest().make_cloudpanel_fixture(source)
+            directory = root / "backups"
+            with mock.patch.dict(os.environ, {"VFOPS_NOW": "2026-10-01T00:00:00+00:00"}):
+                old = auto_backup.package_engine.build_backup(source, "example.com", directory, str(fake), "automatic")
+            with mock.patch.dict(os.environ, {"VFOPS_NOW": "2026-10-02T00:00:00+00:00"}):
+                new = auto_backup.package_engine.build_backup(source, "example.com", directory, str(fake), "automatic")
+            self.assertEqual(auto_backup.prune_local(directory, "example.com", 1), [old.name])
+            self.assertFalse(old.exists())
+            self.assertTrue(new.exists())
+
+
+    def test_prune_skips_parseable_nonobject_backup_records(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            backup = root / "old-automatic"
+            backup.mkdir()
+            manifest = backup / "manifest.json"
+            verification = backup / "verification.json"
+            for bad_manifest, bad_verification in [
+                ("[]", '{"status":"PASS"}'),
+                ('{"backup_kind":"automatic","site":{"domain":"example.com"}}', "[]"),
+                ("null", "null"),
+            ]:
+                with self.subTest(bad_manifest=bad_manifest, bad_verification=bad_verification):
+                    manifest.write_text(bad_manifest, encoding="utf-8")
+                    verification.write_text(bad_verification, encoding="utf-8")
+                    with mock.patch.object(auto_backup.package_engine, "verify_package") as verify:
+                        self.assertEqual(auto_backup.prune_local(root, "example.com", 1), [])
+                    verify.assert_not_called()
+                    self.assertTrue(backup.exists())
+
+
+
 if __name__ == "__main__":
     unittest.main()
