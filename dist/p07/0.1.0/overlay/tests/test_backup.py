@@ -321,5 +321,67 @@ with gzip.open(out, 'wb') as handle:
                 self.assertFalse(any(path.is_dir() and not path.name.startswith(".") for path in output.iterdir()))
 
 
+    def test_checksum_index_missing_mysql_entry_blocks_fresh_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "source"
+            _, cli = self.make_cloudpanel_fixture(base)
+            proc = self.run_backup(base, cli, Path(tmp) / "backup")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            package = Path(proc.stdout.strip())
+            index = package / "checksums.sha256"
+            rows = index.read_text(encoding="utf-8").splitlines()
+            omitted = [row for row in rows if "  mysql/" in row]
+            self.assertTrue(omitted)
+            index.write_text("\n".join(row for row in rows if row not in omitted) + "\n", encoding="utf-8")
+            # The SQL dump still exists and can be read; omission alone must fail.
+            self.assertEqual(package_engine.verify_package(package)["status"], "FAIL")
+            self.assertTrue(any(x.startswith("checksums:unlisted:mysql/") for x in package_engine.verify_package(package)["failures"]))
+
+    def test_checksum_index_rejects_missing_metadata_and_duplicate_records(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "source"
+            _, cli = self.make_cloudpanel_fixture(base)
+            proc = self.run_backup(base, cli, Path(tmp) / "backup")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            package = Path(proc.stdout.strip())
+            index = package / "checksums.sha256"
+            rows = index.read_text(encoding="utf-8").splitlines()
+            metadata = next(row for row in rows if "  metadata/cloudpanel-private.json" in row)
+            index.write_text("\n".join(row for row in rows if row != metadata) + "\n", encoding="utf-8")
+            self.assertIn("checksums:unlisted:metadata/cloudpanel-private.json", package_engine.verify_package(package)["failures"])
+            index.write_text("\n".join(rows + [rows[0]]) + "\n", encoding="utf-8")
+            self.assertEqual(package_engine.verify_package(package)["status"], "FAIL")
+            self.assertTrue(any(x.startswith("checksums:duplicate:") for x in package_engine.verify_package(package)["failures"]))
+
+    def test_checksum_index_rejects_path_escape_without_reading_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp) / "source"
+            _, cli = self.make_cloudpanel_fixture(base)
+            proc = self.run_backup(base, cli, Path(tmp) / "backup")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            package = Path(proc.stdout.strip())
+            index = package / "checksums.sha256"
+            with index.open("a", encoding="utf-8") as out:
+                out.write("0" * 64 + "  ../outside\n")
+            result = package_engine.verify_package(package)
+            self.assertEqual(result["status"], "FAIL")
+            self.assertIn("checksums:unsafe-entry", result["failures"])
+
+
+
+    def test_non_utf8_checksum_index_fails_without_uncaught_exception(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            _, exporter = self.make_cloudpanel_fixture(source)
+            proc = self.run_backup(source, exporter, root / "backups")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            package = Path(proc.stdout.strip())
+            (package / "checksums.sha256").write_bytes(bytes((255, 254, 0)))
+            result = package_engine.verify_package(package)
+            self.assertEqual(result["status"], "FAIL")
+            self.assertIn("checksums:invalid-encoding", result["failures"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -387,7 +387,9 @@ def stage_source_runtime(source: dict[str, Any], token: str) -> str:
     runtime = f"/var/lib/vf-server-ops/pull-source/{token}/runtime"
     command = (
         "set -eu; "
-        f"rm -rf -- {shlex.quote(runtime)}; "
+        # Never reuse, overwrite or delete a pre-existing helper directory.
+        f"test ! -e {shlex.quote(runtime)}; "
+        f"test ! -L {shlex.quote(runtime)}; "
         f"install -d -m 700 {shlex.quote(runtime)}; "
         f"tar -xzf - -C {shlex.quote(runtime)}; "
         f"chmod -R go-rwx {shlex.quote(runtime)}"
@@ -427,16 +429,16 @@ def source_python(
 
 def cleanup_probe_runtime(source: dict[str, Any], runtime: str) -> None:
     root = str(Path(runtime).parent)
-    if root.startswith("/var/lib/vf-server-ops/pull-source/probe-"):
+    # Cleanup is restricted to unpredictable, transaction-owned probe IDs.
+    if re.fullmatch(r"/var/lib/vf-server-ops/pull-source/probe-[0-9a-f]{32}", root):
         source_remote(source, f"rm -rf -- {shlex.quote(root)}", timeout=120, check=False)
 
 
 def source_probe(source: dict[str, Any], domains: list[str]) -> dict[str, Any]:
-    token = "probe-" + hashlib.sha256(
-        f"{source['host']}:{source['ssh_port']}".encode()
-    ).hexdigest()[:16]
-    runtime = stage_source_runtime(source, token)
+    token = "probe-" + os.urandom(16).hex()
+    runtime = f"/var/lib/vf-server-ops/pull-source/{token}/runtime"
     try:
+        stage_source_runtime(source, token)
         args: list[str] = ["_source-plan"]
         for domain in domains:
             args.extend(["--site", domain])
@@ -2161,7 +2163,16 @@ def production_verify(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def plan_payload(source: dict[str, Any], domains: list[str]) -> dict[str, Any]:
+def plan_payload(
+    source: dict[str, Any], domains: list[str], confirm_source_staging: str = ""
+) -> dict[str, Any]:
+    # A complete source inventory currently requires a short-lived helper on
+    # the old server. Do not disguise that filesystem write as a dry run.
+    if confirm_source_staging != "ALLOW_SOURCE_HELPER_STAGING":
+        raise PullMigrationError(
+            "source helper staging requires --confirm-source-helper-staging "
+            "ALLOW_SOURCE_HELPER_STAGING before migration plan"
+        )
     source_plan = source_probe(source, domains)
     target = target_preflight_local(source_plan)
     return {
@@ -2181,7 +2192,12 @@ def plan_payload(source: dict[str, Any], domains: list[str]) -> dict[str, Any]:
         "automatic_dns_change": False,
         "old_server_delete_allowed": False,
         "existing_target_overwrite_allowed": False,
-        "writes_performed": False,
+        # PLAN stages and removes a temporary helper on the old host.
+        # This is not a purely read-only operation, even if cleanup succeeds.
+        "writes_performed": True,
+        "source_temporary_helper_written": True,
+        "source_helper_cleanup_attempted": True,
+        "source_business_data_written": False,
         "secrets_emitted": False,
     }
 
@@ -3131,6 +3147,7 @@ def main() -> int:
 
     plan = sub.add_parser("plan")
     add_source_args(plan)
+    plan.add_argument("--confirm-source-helper-staging", default="")
 
     prepare = sub.add_parser("prepare")
     add_source_args(prepare)
@@ -3230,7 +3247,9 @@ def main() -> int:
         elif args.command == "bootstrap-local":
             result = bootstrap_local_cloudpanel(args.confirm)
         elif args.command == "plan":
-            result = plan_payload(source_from_args(args), args.site)
+            result = plan_payload(
+                source_from_args(args), args.site, args.confirm_source_helper_staging
+            )
         elif args.command == "prepare":
             result = summary(prepare_migration(
                 source_from_args(args), args.site, args.confirm

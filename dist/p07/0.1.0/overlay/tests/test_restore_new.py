@@ -337,5 +337,45 @@ sys.exit(0)
             self.assertFalse((base / "clpctl.log").exists())
 
 
+    def test_existing_recovery_evidence_is_never_deleted_or_replaced(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            package = self.make_package(base)
+            target = self.make_target(base)
+            previous = target / "var/lib/vf-server-ops/restored-metadata" / package.name
+            previous.mkdir(parents=True)
+            keep = previous / "KEEP.txt"
+            keep.write_text("previous recovery evidence", encoding="utf-8")
+            fake = self.make_fake_clpctl(base)
+            proc = self.run_restore(package, target, fake, self.env(base, target), self.confirmation(package))
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("recovery/evidence path already exists", proc.stderr)
+            self.assertEqual(keep.read_text(encoding="utf-8"), "previous recovery evidence")
+            self.assertFalse((base / "clpctl.log").exists())
+
+    def test_existing_failed_restore_recovery_point_is_protected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            package = self.make_package(base)
+            target = self.make_target(base)
+            previous = target / "home/alice/htdocs" / f".vfops-failed-{package.name}"
+            previous.mkdir(parents=True)
+            keep = previous / "keep.txt"
+            keep.write_text("never delete me", encoding="utf-8")
+            fake = self.make_fake_clpctl(base)
+            proc = self.run_restore(package, target, fake, self.env(base, target), self.confirmation(package))
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertEqual(keep.read_text(encoding="utf-8"), "never delete me")
+            self.assertFalse((base / "clpctl.log").exists())
+
+    def test_backup_id_path_traversal_rejected_before_side_effects(self) -> None:
+        for unsafe in ("../outside", "/etc", "bad/name", "..", "a\\b", ""):
+            with self.subTest(unsafe=unsafe):
+                with self.assertRaises(restore_engine.NewSiteRestoreError):
+                    restore_engine.expected_confirm({
+                        "backup_id": unsafe, "site": {"domain": "example.com"},
+                    })
+
+
 if __name__ == "__main__":
     unittest.main()

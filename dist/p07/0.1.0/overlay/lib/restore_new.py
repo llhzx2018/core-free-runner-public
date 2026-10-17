@@ -42,6 +42,10 @@ def expected_confirm(manifest: dict) -> str:
     backup_id = str(manifest.get("backup_id", ""))
     if not domain or not backup_id:
         raise NewSiteRestoreError("backup identity is incomplete")
+    # The ID is also used in private evidence, bootstrap and failure paths.
+    # Validate it before *any* CloudPanel/database mutation can begin.
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", backup_id):
+        raise NewSiteRestoreError("backup id contains unsafe path characters")
     return f"RESTORE_NEW_SITE:{domain}:{backup_id}"
 
 
@@ -70,7 +74,7 @@ def require_target(target_root: Path, manifest: dict, confirm: str) -> Path:
 
 def target_has_site(target_root: Path, domain: str, site_root: str) -> bool:
     final_site = restore_plan.target_path(target_root, site_root)
-    if final_site.exists():
+    if os.path.lexists(final_site):
         return True
     try:
         manifest = inventory.build_manifest(target_root)
@@ -167,7 +171,15 @@ def restore_new_site(package_dir: Path, target_root: Path, clpctl: str, confirm:
     application_config_file: str | None = None
     bootstrap_dir: Path | None = None
     staging: Path | None = None
-    evidence_root = target_root / "var/lib/vf-server-ops/restored-metadata" / str(manifest.get("backup_id"))
+    backup_id = str(manifest["backup_id"])
+    evidence_root = target_root / "var/lib/vf-server-ops/restored-metadata" / backup_id
+    bootstrap_candidate = final_site.parent / f".vfops-bootstrap-{backup_id}"
+    failed_candidate = final_site.parent / f".vfops-failed-{backup_id}"
+    # Every backup-derived target must be transaction-private. Never remove a
+    # recovery point or an evidence directory left by an earlier transaction.
+    if any(os.path.lexists(path) for path in (evidence_root, bootstrap_candidate, failed_candidate)):
+        raise NewSiteRestoreError("backup recovery/evidence path already exists")
+    evidence_created = False
     cleanup_status = "NOT_REQUIRED"
     failure_stage = "CLOUDPANEL_SITE_CREATE"
     steps: list[str] = []
@@ -280,6 +292,7 @@ def restore_new_site(package_dir: Path, target_root: Path, clpctl: str, confirm:
             if evidence_root.exists():
                 raise NewSiteRestoreError("runtime metadata evidence already exists")
             os.replace(pending_meta, evidence_root)
+            evidence_created = True
             os.chmod(evidence_root, 0o700)
         steps.append("runtime_metadata_evidence_committed")
 
@@ -347,15 +360,15 @@ def restore_new_site(package_dir: Path, target_root: Path, clpctl: str, confirm:
         if swap_committed and final_site.exists() and bootstrap_dir and bootstrap_dir.exists():
             failed_dir = final_site.parent / f".vfops-failed-{manifest.get('backup_id')}"
             try:
-                if failed_dir.exists():
-                    shutil.rmtree(failed_dir, ignore_errors=True)
+                if os.path.lexists(failed_dir):
+                    raise NewSiteRestoreError("existing failed-restore recovery point is protected")
                 os.replace(final_site, failed_dir)
                 os.replace(bootstrap_dir, final_site)
                 bootstrap_dir = None
                 shutil.rmtree(failed_dir, ignore_errors=True)
             except OSError:
                 pass
-        if evidence_root.exists():
+        if evidence_created and evidence_root.is_dir() and not evidence_root.is_symlink():
             shutil.rmtree(evidence_root, ignore_errors=True)
 
         database_cleanup = "DATABASE_DELETE_NOT_REQUIRED"
