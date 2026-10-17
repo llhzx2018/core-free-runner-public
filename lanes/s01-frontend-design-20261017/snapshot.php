@@ -1,9 +1,15 @@
 <?php
-// Hash only protected persistent records, never expose user/session/credentials.
+// Only digests and row identities; never expose protected values or credentials.
 global $wpdb;
-$rows=[];
+$rows=[];$parts=[];
 $rows['theme_mods']=get_theme_mods();
 foreach(['vf_theme_layout','vf_theme_brand','vf_theme_tokens','vf_theme_navigation','polylang']as $key)$rows[$key]=get_option($key);
 $rows['content']=$wpdb->get_results("SELECT ID,post_type,post_status,post_name,post_title,post_content,post_excerpt FROM {$wpdb->posts} ORDER BY ID",ARRAY_A);
 $rows['postmeta']=$wpdb->get_results("SELECT post_id,meta_key,meta_value FROM {$wpdb->postmeta} WHERE meta_key NOT LIKE '\\_edit\\_%' ORDER BY meta_id",ARRAY_A);
-echo hash('sha256',wp_json_encode($rows));
+foreach($rows as $key=>$value){$parts[$key]=hash('sha256',wp_json_encode($value));}
+$details=[];foreach($rows as $key=>$value){
+ if($key==='content')foreach($value as $row)$details[$key][$row['ID']]=hash('sha256',wp_json_encode($row));
+ elseif($key==='postmeta')foreach($value as $row)$details[$key][$row['post_id'].'|'.$row['meta_key']][]=hash('sha256',$row['meta_value']);
+ elseif(is_array($value))foreach($value as $k=>$v)$details[$key][$k]=hash('sha256',wp_json_encode($v));
+}
+echo wp_json_encode(['protected_sha256'=>hash('sha256',wp_json_encode($rows)),'sections'=>$parts,'details'=>$details]);
