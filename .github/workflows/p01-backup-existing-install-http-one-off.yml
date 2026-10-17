@@ -13,9 +13,9 @@ jobs:
   http:
     if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'llhzx2018'
     runs-on: ubuntu-24.04
-    timeout-minutes: 16
+    timeout-minutes: 36
     env:
-      EXPECTED_SHA: 950cc28ad49ae23218553270bec58feff195084d
+      EXPECTED_SHA: 0cb26e5572cae81c59a5e1f9552fc2d0fde5b40e
     steps:
       - name: Checkout public temporary control
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -33,7 +33,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-start
-          ref: 950cc28ad49ae23218553270bec58feff195084d
+          ref: 0cb26e5572cae81c59a5e1f9552fc2d0fde5b40e
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           path: candidate
           persist-credentials: false
@@ -52,7 +52,8 @@ jobs:
         run: |
           set -Eeuo pipefail
           test "$(git -C candidate rev-parse HEAD)" = "$EXPECTED_SHA"
-          test "$(tr -d '\r\n ' < candidate/VERSION)" = 2.47.384
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = 2.47.385
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = 2.47.385
           bash -n candidate/tests/integration/p01_backup_baseline_existing_install_http.sh
           php -l candidate/src/data-safety.php
           node --check candidate/src/assets/data-recovery.js
@@ -64,7 +65,158 @@ jobs:
           echo P01_CANONICAL_CURRENT_EXACT_SOURCE=PASS
           bash candidate/tests/integration/p01_backup_baseline_existing_install_http.sh candidate stable
           echo P01_EXISTING_SITE_HTTP_MACHINE=PASS
-      - name: Remove all transient private checkouts
+      - name: Build prospective FULL and UPDATE artifacts without publishing
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          TARGET_SHA="$EXPECTED_SHA"
+          TARGET_TREE="$(git -C candidate rev-parse HEAD^{tree})"
+          mkdir -p /tmp/p01-release-baseline/full /tmp/p01-release-baseline/update /tmp/p01-preflight-build
+          gh release download v2.47.384 -R llhzx2018/vf-start \
+            -p VF-Start-V2.47.384-FULL.zip -p VF_Start_V2.47.384_UPDATE.zip \
+            -D /tmp/p01-release-baseline
+          unzip -q /tmp/p01-release-baseline/VF-Start-V2.47.384-FULL.zip \
+            -d /tmp/p01-release-baseline/full
+          unzip -q /tmp/p01-release-baseline/VF_Start_V2.47.384_UPDATE.zip \
+            -d /tmp/p01-release-baseline/update
+          python3 scripts/p01-maintenance-release.py \
+            --candidate candidate/src \
+            --baseline-full /tmp/p01-release-baseline/full \
+            --baseline-repair /tmp/p01-release-baseline/update/repair-v2.47.384.php \
+            --out /tmp/p01-preflight-build \
+            --version 2.47.385 --source-version 2.47.384 \
+            --target-sha "$TARGET_SHA" --target-tree "$TARGET_TREE" \
+            | tee /tmp/p01-artifact-receipt.json
+          FULL=/tmp/p01-preflight-build/VF-Start-V2.47.385-FULL.zip
+          UPDATE=/tmp/p01-preflight-build/VF_Start_V2.47.385_UPDATE.zip
+          test -f "$FULL" && test -f "$UPDATE"
+          unzip -t "$FULL" >/dev/null
+          unzip -t "$UPDATE" >/dev/null
+          test "$(unzip -Z1 "$UPDATE")" = repair-v2.47.385.php
+          unzip -p "$FULL" VERSION.txt | tr -d '\r\n ' | grep -Fx 2.47.385
+          if unzip -Z1 "$FULL" | grep -Ei '(^|/)(\.runtime\.php|.*\.sqlite3?$|.*\.db$|private/|backups?/|sessions?/|tokens?/|staging/)'; then
+            echo P01_FULL_PRIVATE_PAYLOAD=FAIL
+            exit 80
+          fi
+          if unzip -Z1 "$UPDATE" | grep -Ei '(^|/)(\.runtime\.php|.*\.sqlite3?$|.*\.db$|private/|backups?/|sessions?/|tokens?/|staging/)'; then
+            echo P01_UPDATE_PRIVATE_PAYLOAD=FAIL
+            exit 81
+          fi
+          echo P01_247385_FULL_UPDATE_ARTIFACT_BUILD=PASS
+      - name: Verify FULL setup and prior-release Atomic upgrade rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FULL=/tmp/p01-preflight-build/VF-Start-V2.47.385-FULL.zip
+          UPDATE=/tmp/p01-preflight-build/VF_Start_V2.47.385_UPDATE.zip
+          WORK=/tmp/p01-release-check
+          mkdir -p "$WORK/full" "$WORK/from-stable" "$WORK/repair"
+          unzip -q "$FULL" -d "$WORK/full"
+          unzip -q /tmp/p01-release-baseline/VF-Start-V2.47.384-FULL.zip -d "$WORK/from-stable"
+          unzip -q "$UPDATE" -d "$WORK/repair"
+          REPAIR="$WORK/repair/repair-v2.47.385.php"
+          php -l "$REPAIR" >/dev/null
+          php "$REPAIR" --self-test | tee /tmp/p01-atomic-selftest.txt
+          grep -Fq '"ok":true' /tmp/p01-atomic-selftest.txt
+          cd "$WORK/full"
+          php -S 127.0.0.1:18561 -t . >/tmp/p01-release-full-php.log 2>&1 &
+          echo $! >/tmp/p01-release-full.pid
+          ready=0
+          for n in $(seq 1 35); do
+            if curl -fsS -c /tmp/p01-release-cookie -b /tmp/p01-release-cookie \
+              http://127.0.0.1:18561/setup.php -o /tmp/p01-release-setup.html 2>/dev/null; then ready=1; break; fi
+            sleep 0.25
+          done
+          test "$ready" -eq 1
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-release-setup.html').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-release-cookie -b /tmp/p01-release-cookie \
+            -X POST http://127.0.0.1:18561/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=Isolated 247385 Full' \
+            --data-urlencode 'admin_password=IsolatedOnly!247385' \
+            --data-urlencode 'admin_password_confirm=IsolatedOnly!247385' \
+            -o /tmp/p01-release-full-result.html
+          test -f app/.runtime.php
+          php cli/verify.php | grep -Fx VERIFY_PASS=YES
+          curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18561/setup.php | grep -Fx 302
+          curl -fsS -c /tmp/p01-release-cookie -b /tmp/p01-release-cookie \
+            -H 'Content-Type: application/json' \
+            --data '{"password":"IsolatedOnly!247385"}' \
+            http://127.0.0.1:18561/api.php?action=login -o /tmp/p01-release-login.json
+          grep -Fq '"ok":true' /tmp/p01-release-login.json
+          kill "$(cat /tmp/p01-release-full.pid)" >/dev/null 2>&1 || true
+          echo P01_247385_FULL_CLEAN_INSTALL_AND_LOCK=PASS
+          cd "$WORK/from-stable"
+          php -S 127.0.0.1:18562 -t . >/tmp/p01-release-stable-php.log 2>&1 &
+          echo $! >/tmp/p01-release-stable.pid
+          ready=0
+          for n in $(seq 1 35); do
+            if curl -fsS -c /tmp/p01-release-stable-cookie -b /tmp/p01-release-stable-cookie \
+              http://127.0.0.1:18562/setup.php -o /tmp/p01-release-stable-setup.html 2>/dev/null; then ready=1; break; fi
+            sleep 0.25
+          done
+          test "$ready" -eq 1
+          CSRF=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-release-stable-setup.html').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-release-stable-cookie -b /tmp/p01-release-stable-cookie \
+            -X POST http://127.0.0.1:18562/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=Isolated Old Install' \
+            --data-urlencode 'admin_password=IsolatedOnly!247384' \
+            --data-urlencode 'admin_password_confirm=IsolatedOnly!247384' \
+            -o /tmp/p01-release-stable-result.html
+          test -f app/.runtime.php
+          php cli/verify.php | grep -Fx VERIFY_PASS=YES
+          kill "$(cat /tmp/p01-release-stable.pid)" >/dev/null 2>&1 || true
+          cat > /tmp/p01-release-sentinel.php <<'PHP'
+          <?php
+          require $argv[1].'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $cat=$repo->createCategory(['name'=>'Keep Me','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+          $link=$repo->saveLink(null,['surface'=>'start','category_id'=>$cat,'title'=>'Persist on Atomic',
+            'url'=>'https://example.org/atomic-stable','description'=>'','tags'=>['atomic'],'is_private'=>1,'is_pending'=>0]);
+          echo 'RELEASE_SENTINEL_ID='.$link['id'].PHP_EOL;
+          PHP
+          php /tmp/p01-release-sentinel.php "$WORK/from-stable" | tee /tmp/p01-sentinel.txt
+          cp "$REPAIR" "$WORK/from-stable/repair-v2.47.385.php"
+          php "$WORK/from-stable/repair-v2.47.385.php" --verify-source="$WORK/from-stable" \
+            | tee /tmp/p01-release-source-verify.txt
+          grep -Fq '"ok":true' /tmp/p01-release-source-verify.txt
+          php "$WORK/from-stable/repair-v2.47.385.php" --run="$WORK/from-stable" \
+            | tee /tmp/p01-release-atomic-result.txt
+          grep -Fq '"ok":true' /tmp/p01-release-atomic-result.txt
+          test "$(tr -d '\r\n ' < "$WORK/from-stable/VERSION.txt")" = 2.47.385
+          (cd "$WORK/from-stable" && php cli/verify.php) | grep -Fx VERIFY_PASS=YES
+          php -r 'require $argv[1]."/app/bootstrap.php"; $n=(int)vf_db()->query("SELECT COUNT(*) FROM links WHERE url='\''https://example.org/atomic-stable'\''")->fetchColumn();if($n!==1)exit(1);echo "P01_UPGRADE_BUSINESS_PRESERVED=PASS\n";' "$WORK/from-stable"
+          cp "$REPAIR" "$WORK/from-stable/repair-v2.47.385.php"
+          php "$WORK/from-stable/repair-v2.47.385.php" --run="$WORK/from-stable" \
+            | tee /tmp/p01-release-atomic-repeat.txt
+          grep -Fq '"already_current":true' /tmp/p01-release-atomic-repeat.txt
+          echo P01_247385_ATOMIC_UPGRADE_IDEMPOTENT=PASS
+      - name: Delete private artifacts after readback
+        if: always()
+        shell: bash
+        run: |
+          rm -rf candidate stable /tmp/p01-release-baseline /tmp/p01-preflight-build /tmp/p01-release-check
+          for f in /tmp/p01-release-full.pid /tmp/p01-release-stable.pid; do
+            if test -f "$f"; then kill "$(cat "$f")" >/dev/null 2>&1 || true; fi
+          done
+
         if: always()
         shell: bash
         run: rm -rf candidate stable
