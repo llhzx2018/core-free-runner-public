@@ -258,7 +258,7 @@ class TargetPullContractTests(unittest.TestCase):
             "target_preflight_local",
             return_value={"status": "READY", "target_identity": "sha256:new"},
         ):
-            result = pull.plan_payload(source, [])
+            result = pull.plan_payload(source, [], "ALLOW_SOURCE_HELPER_STAGING")
         self.assertEqual(result["migration_direction"], "CURRENT_SERVER_PULLS_OLD_SERVER")
         self.assertEqual(result["current_server_role"], "RECEIVER")
         self.assertEqual(result["old_server_ip"], "192.0.2.10")
@@ -2017,6 +2017,74 @@ class TargetPullUiContractTests(unittest.TestCase):
         self.assertIn("第一次连接旧服务器，需要输入旧服务器 root 密码一次", text)
         self.assertIn("密码只交给系统 ssh-copy-id；P07 不读取、不保存。", text)
         self.assertNotIn("现在为新服务器准备专用迁移密钥", text)
+
+
+    def test_plan_rejects_unconfirmed_old_server_writes_before_probe(self) -> None:
+        source = {"ip": "192.0.2.10"}
+        with mock.patch.object(pull, "source_probe") as probe:
+            with self.assertRaisesRegex(pull.PullMigrationError, "requires --confirm-source-helper-staging"):
+                pull.plan_payload(source, [])
+        probe.assert_not_called()
+
+    def test_plan_reports_remote_probe_helper_writes_truthfully(self) -> None:
+        source = {"ip": "192.0.2.10"}
+        src_plan = {
+            "status": "READY",
+            "source_server_identity": "sha256:old",
+            "sites": [],
+            "capacity_estimate": {},
+            "source_external_listeners": [],
+        }
+        with mock.patch.object(pull, "source_probe", return_value=src_plan), mock.patch.object(
+            pull, "target_preflight_local", return_value={"target_identity": "sha256:new"}
+        ):
+            result = pull.plan_payload(source, [], "ALLOW_SOURCE_HELPER_STAGING")
+        self.assertTrue(result["writes_performed"])
+        self.assertTrue(result["source_temporary_helper_written"])
+        self.assertTrue(result["source_helper_cleanup_attempted"])
+        self.assertFalse(result["source_business_data_written"])
+
+    def test_source_plan_helpers_use_unique_probe_ids_and_cleanup(self) -> None:
+        source = {"host": "old.example", "ssh_port": 22}
+        observed = []
+        result = subprocess.CompletedProcess([], 0, '{"status":"READY"}', "")
+        with mock.patch.object(pull, "stage_source_runtime", side_effect=lambda _src, token: observed.append(token)), mock.patch.object(
+            pull, "source_python", return_value=result
+        ), mock.patch.object(pull, "cleanup_probe_runtime") as cleanup:
+            pull.source_probe(source, [])
+            pull.source_probe(source, [])
+        self.assertNotEqual(observed[0], observed[1])
+        self.assertRegex(observed[0], r"^probe-[0-9a-f]{32}$")
+        self.assertEqual(cleanup.call_count, 2)
+
+    def test_probe_cleanup_runs_even_on_partial_helper_stage_failure(self) -> None:
+        source = {"host": "old.example", "ssh_port": 22}
+        with mock.patch.object(pull, "stage_source_runtime", side_effect=pull.PullMigrationError("stage failed")), mock.patch.object(
+            pull, "cleanup_probe_runtime"
+        ) as cleanup:
+            with self.assertRaisesRegex(pull.PullMigrationError, "stage failed"):
+                pull.source_probe(source, [])
+        cleanup.assert_called_once()
+
+    def test_helper_staging_never_removes_existing_target(self) -> None:
+        source = {
+            "host": "192.0.2.10", "ssh_user": "root",
+            "ssh_port": 22, "identity_file": None, "ssh": "ssh",
+        }
+        with mock.patch.object(pull.transport, "stream_tar_to_remote") as streaming:
+            pull.stage_source_runtime(source, "probe-" + "f" * 32)
+        rendered = " ".join(str(x) for x in streaming.call_args.args)
+        self.assertIn("test ! -e", rendered)
+        self.assertIn("test ! -L", rendered)
+        self.assertNotIn("rm -rf", rendered)
+
+    def test_probe_cleanup_refuses_unowned_old_source_paths(self) -> None:
+        source = {}
+        with mock.patch.object(pull, "source_remote") as remote:
+            pull.cleanup_probe_runtime(source, "/var/lib/vf-server-ops/pull-source/other/runtime")
+            pull.cleanup_probe_runtime(source, "/var/lib/vf-server-ops/pull-source/probe-unsafe/runtime")
+        remote.assert_not_called()
+
 
 
 if __name__ == "__main__":
