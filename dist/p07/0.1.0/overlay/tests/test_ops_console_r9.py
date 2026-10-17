@@ -38,18 +38,22 @@ class OpsConsoleR9Tests(unittest.TestCase):
         self.assertIn("ui_safety_tier()",ui)
         self.assertIn("ui_confirm_exact()",ui)
         migrate=(ROOT/"bin/vfops-migrate-ui").read_text(encoding="utf-8")
-        self.assertIn("ui_confirm_exact CUTOVER",migrate)
+        self.assertIn('--confirm "CUTOVER_PULL:$mid"',migrate)
+        self.assertIn("DNS_UPDATED:",migrate)
         auto=(ROOT/"bin/vfops-auto-backup").read_text(encoding="utf-8")
-        self.assertIn("DISABLE-AUTOBACKUP",auto)
+        self.assertIn("--confirm DISABLE_DUAL_REMOTE_AUTOBACKUP",auto)
+        self.assertIn("ui_safety_tier danger",auto)
 
     def test_selfcheck_and_init_are_guarded(self):
         selfcheck=(ROOT/"bin/vfops-selfcheck-ui").read_text(encoding="utf-8")
         init=(ROOT/"bin/vfops-init-ui").read_text(encoding="utf-8")
         self.assertIn("现在重新安装工具运行文件？[y/N]",selfcheck)
         self.assertNotIn("ui_menu_info 1 '重新检查'",selfcheck)
-        self.assertIn("APPLY_BASELINE",init)
-        self.assertIn("INSTALL_CLOUDPANEL",init)
-        self.assertIn("DNS、生产切流、旧服务器删除均不属于初始化自动步骤",init)
+        self.assertIn("apply_basic_settings_for_init",init)
+        self.assertIn("BOOTSTRAP_LOCAL_CLOUDPANEL",init)
+        self.assertIn("record_action SKIP 'DNS' '未修改'",init)
+        self.assertIn("record_action SKIP '旧服务器' '未删除'",init)
+        self.assertIn("record_action SKIP '网站 Nginx' '未自动停止或重启'",init)
 
 if __name__=="__main__":
     unittest.main()

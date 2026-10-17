@@ -185,6 +185,35 @@ INSERT INTO `wp_posts` VALUES (1),(2);
                 verify_engine.sql_data_fingerprint(changed),
             )
 
+    def test_cross_engine_structural_guard_detects_missing_indexes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            a = Path(td) / "a.sql.gz"
+            b = Path(td) / "b.sql.gz"
+            with gzip.open(a, "wt", encoding="utf-8") as f:
+                f.write("CREATE TABLE `t` (\n `id` int,\n KEY `i` (`id`)\n);\n")
+            with gzip.open(b, "wt", encoding="utf-8") as f:
+                f.write("CREATE TABLE `t` (\n `id` int\n);\n")
+            self.assertNotEqual(
+                verify_engine.sql_structure_fingerprint(a),
+                verify_engine.sql_structure_fingerprint(b),
+            )
+
+    def test_cross_engine_structural_guard_blocks_vendor_ddl(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            a = Path(td) / "with-trigger.sql.gz"
+            with gzip.open(a, "wt", encoding="utf-8") as f:
+                f.write("CREATE TABLE `t` (`id` int);\n/*!50003 CREATE TRIGGER `audit` BEFORE INSERT ON `t` FOR EACH ROW SET @x=1 */;\n")
+            with self.assertRaisesRegex(verify_engine.RestoreVerifyError, "conditional SQL DDL"):
+                verify_engine.sql_structure_fingerprint(a)
+
+    def test_cross_engine_multiline_dml_does_not_claim_parity(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            a = Path(td) / "dml.sql.gz"
+            with gzip.open(a, "wt", encoding="utf-8") as f:
+                f.write("CREATE TABLE `t` (`id` int);\nINSERT INTO `t` VALUES\n (1), (2);\n")
+            with self.assertRaisesRegex(verify_engine.RestoreVerifyError, "multiline SQL data"):
+                verify_engine.sql_data_fingerprint(a)
+
     def test_mysql_fingerprint_keeps_real_collation_changes_visible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)

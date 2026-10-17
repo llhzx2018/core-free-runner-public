@@ -1,10 +1,10 @@
 # P07 · VF Server Ops · Acceptance Matrix V1.5
 
 状态：CURRENT  
-Last reconciled: 2026-10-05  
+Last reconciled: 2026-10-16  
 原则：`NOT_RUN / UNKNOWN / DEFERRED / BLOCKED_ENV / SYNTHETIC_PASS / MACHINE_PASS != REAL_PASS`
 
-Current canonical Machine evidence:
+Historical / retained Machine evidence (exact source only):
 
 - `docs/evidence/P07_GUIDED_INIT16_R2_ONBOARDING_MACHINE_CLOSURE_20260911.md`
 - `docs/evidence/P07_GUIDED_INIT12_REAL_R1_DBADD_CLOSURE_20260911.md` — retained Restore-As DB remediation evidence
@@ -12,9 +12,28 @@ Current canonical Machine evidence:
 - `docs/evidence/P07_REAL_GATE_CLOSURE_20260906.md` — historical Real engineering closure for its exact older identities
 - `docs/evidence/P07_FULL_SERVER_MIGRATION_REAL_PRODUCTION_PASS_20261005.md` — current Owner real 16-site full-server migration Production closure on release68
 
-## Current guided-init16 acceptance layer
+## Current release85 identity and acceptance · 2026-10-16
 
-This section governs the current Slot 3 product line. Historical Real engineering evidence remains valid only for the exact identities recorded in its evidence and does not automatically promote guided-init16 to current Owner/User `REAL_PASS`.
+Release current comes from product `main/BUILD_ID=0.1.0-release85` and the live public Toolbox / immutable distribution. The earlier guided-init16 / release28–release69 rows below are **historical / exact-source evidence**, not a blanket claim about current release85 or a new MariaDB VPS.
+
+| Area | Released identity | Acceptance scope | State |
+|---|---|---|---|
+| Public toolbox | V0.1.0; five visible entries / four modules | live public installer and entry smoke | **PUBLISHED / MACHINE_SMOKE_PASS** |
+| Network Node | 0.1.0-rc13 | routed public installer | **PUBLIC_DISTRIBUTED** |
+| VPS audit | V2.1.0 / 2.1.0-rc7-field | pinned public script, not the old V2.2.2 snapshot | **PUBLIC_DISTRIBUTED** |
+| Slot 3 Website/Data | 0.1.0-release85 | official MariaDB 10.11 default + installed-engine refusal | **PUBLISHED / EXACT_SOURCE_SYNTHETIC_PASS** |
+| System Care | 0.1.0-rc54 | public install/smoke PASS; corrected real-mutation GitHub Runner [38914624486](https://github.com/llhzx2018/core-free-runner-public/actions/runs/38914624486) covers APT/journal cleanup and negative safety gates | **MACHINE_PASS / OWNER_REAL_PARTIAL** |
+| New VPS MariaDB bootstrap | release85 | actual clean-VPS install and first-admin/database test | **NOT_RUN** |
+| New VPS TARGET_PULL MySQL/Percona → MariaDB 10.11 | release85 | real SQL import, DDL/data equivalence, user-site function and cutover recovery | **NOT_RUN** |
+| 16-site whole-server real path | release68 only | 2026-10-05 old-engine 16/16 + DNS Owner handoff | **HISTORICAL_OWNER_REAL_PASS_FOR_EXACT_SOURCE** |
+| R1 MariaDB hardening | product PR #196, unmerged | independent isolated proof [143/143](https://github.com/llhzx2018/core-free-runner-public/actions/runs/38912471080) | **CANDIDATE_MACHINE_PASS / RELEASE_NOT_CHANGED** |
+| P07 Owner real whole product | current | backup/restore/cloud storage/scheduler all capabilities | **PARTIAL / NOT_BLANKET_PASS** |
+
+**Next independent gates**: R2 authority/identity regression; formal release/upgrade; Owner real MariaDB 10.11 VPS migration. Corrected System Care real-mutation CI is PASS (workflow-only). A gate remains NON-PASS until its own evidence is observed.
+
+## Historical guided-init16 acceptance layer
+
+This section records guided-init16 historical contract/evidence. It is not the current release85 distribution or current MariaDB runtime. Historical Real engineering evidence remains valid only for exact identities and does not grant present-day Owner/User `REAL_PASS`.
 
 | ID | Capability | Acceptance | Evidence | Current |
 |---|---|---|---|---|

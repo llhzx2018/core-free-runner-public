@@ -34,7 +34,7 @@ class FirstVerifyBeforeSchedulerContractTests(unittest.TestCase):
         self.assertNotIn("ENABLE_DUAL_REMOTE_AUTOBACKUP", self.prepare)
 
     def test_run_now_bootstraps_first_verification_when_config_missing(self):
-        self.assertIn('if [[ ! -f "$CONFIG" ]]', self.run_now)
+        self.assertIn('if [[ $schedule_active -eq 0 ]]', self.run_now)
         self.assertIn("prepare_first_run_config", self.run_now)
         self.assertIn("不会安装定时任务（Cron）", self.run_now)
         self.assertIn("本次仅做真实验证", self.run_now)
@@ -50,21 +50,21 @@ class FirstVerifyBeforeSchedulerContractTests(unittest.TestCase):
     def test_pass_without_scheduler_gives_correct_next_action(self):
         self.assertIn("当前全部网站本地 + 两处异地备份（Google + B2）真实验证已通过", self.run_now)
         self.assertIn("定时备份仍未开启", self.run_now)
-        self.assertIn("选择“2. 启用 / 更新自动备份”", self.run_now)
-        self.assertIn("本次验证不会创建或修改 P07 定时任务（Cron）", self.run_now)
+        self.assertIn("选择“2. 开启 / 修改自动备份”", self.run_now)
+        self.assertIn("本次验证不会创建或修改 自动备份计划", self.run_now)
 
     def test_status_distinguishes_ready_and_verified_without_schedule(self):
-        self.assertIn("READY_NO_SCHEDULE", self.status)
-        self.assertIn("VERIFIED_NO_SCHEDULE", self.status)
-        self.assertIn("远程已就绪 · 待首次验证", self.status)
-        self.assertIn("首次验证已通过 · 定时未开启", self.status)
-        self.assertIn("通过后再选择“2. 启用 / 更新自动备份”", self.status)
+        self.assertIn("异地备份已准备 · 等待首次验证", self.status)
+        self.assertIn("全部网站已验证 · 自动备份未开启", self.status)
+        self.assertIn("单站验证已通过 · 还需验证全部网站", self.status)
+        self.assertIn("自动备份未开启", self.status)
+        self.assertIn("选择“3. 首次验证：先备份一个网站”", self.status)
 
     def test_safety_boundaries_remain_explicit(self):
         self.assertIn("没有修改定时任务（Cron）", self.enable)
         self.assertIn("DNS 未修改", self.enable)
         self.assertIn("源服务器保留", self.enable)
-        self.assertIn("本次验证不会创建或修改 P07 定时任务（Cron）", self.run_now)
+        self.assertIn("本次验证不会创建或修改 自动备份计划", self.run_now)
         self.assertIn("DNS 未修改", self.run_now)
         self.assertIn("源服务器保留", self.run_now)
 

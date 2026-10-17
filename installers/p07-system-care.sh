@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-VERSION='0.1.0-rc54'
+VERSION='0.1.0-rc55'
 PACKAGE_PATH="packages/p07-system-care/${VERSION}"
 SOURCE_REF="${P07_SYSTEM_CARE_SOURCE_REF:-main}"
 RAW_BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${SOURCE_REF}/${PACKAGE_PATH}"
-MANIFEST_BLOB='e9ccedae9232d345ebbe945ee37197f030ce2ea5'
-BEGINNER_UI_BLOB='0b0b72f7ff6933dc7cb59881d1becadc40566ee7'
+MANIFEST_BLOB='ca90c397ed139d0d74e3f70f8653efd220082e93'
+BEGINNER_UI_BLOB='2b9ba0e4b98457a81bfd1b2dd70a94746307fb94'
 TARGET='/opt/vf-system-care'
 ENTRY='/usr/local/bin/vf-system-care'
 

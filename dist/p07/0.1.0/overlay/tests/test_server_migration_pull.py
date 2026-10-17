@@ -30,6 +30,11 @@ class TargetPullContractTests(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
+        live = mock.patch.object(
+            pull, "local_target_active_db_engine_version", return_value="MARIADB_10.11"
+        )
+        live.start()
+        self.addCleanup(live.stop)
 
     def test_wrong_target_engine_fails_without_inventory_mutation(self) -> None:
         with mock.patch.object(pull, "cloudpanel_ready_local", return_value=True), \
@@ -41,6 +46,30 @@ class TargetPullContractTests(unittest.TestCase):
             ):
                 pull.target_preflight_local({"sites": []})
             inventory.assert_not_called()
+
+    def test_cross_engine_rejects_missing_index_even_when_rows_match(self) -> None:
+        import gzip
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "source.sql.gz"
+            target = Path(td) / "target.sql.gz"
+            with gzip.open(source, "wt", encoding="utf-8") as f:
+                f.write("CREATE TABLE `t` (\n  `id` int,\n  KEY `idx_id` (`id`)\n);\nINSERT INTO `t` VALUES (1);\n")
+            with gzip.open(target, "wt", encoding="utf-8") as f:
+                f.write("CREATE TABLE `t` (\n  `id` int\n);\nINSERT INTO `t` VALUES (1);\n")
+            with self.assertRaisesRegex(pull.PullMigrationError, "logical-content verification failed"):
+                pull.compare_database_dumps(source, target)
+
+    def test_cross_engine_rejects_changed_collation_on_same_rows(self) -> None:
+        import gzip
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "source.sql.gz"
+            target = Path(td) / "target.sql.gz"
+            with gzip.open(source, "wt", encoding="utf-8") as f:
+                f.write("CREATE TABLE `t` (`txt` varchar(30)) COLLATE=utf8mb4_0900_ai_ci;\nINSERT INTO `t` VALUES ('same');\n")
+            with gzip.open(target, "wt", encoding="utf-8") as f:
+                f.write("CREATE TABLE `t` (`txt` varchar(30)) COLLATE=utf8mb4_general_ci;\nINSERT INTO `t` VALUES ('same');\n")
+            with self.assertRaisesRegex(pull.PullMigrationError, "logical-content verification failed"):
+                pull.compare_database_dumps(source, target)
 
     def test_progress_note_is_opt_in_and_secret_free_channel(self) -> None:
         import io
