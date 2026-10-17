@@ -12,4 +12,5 @@ $details=[];foreach($rows as $key=>$value){
  elseif($key==='postmeta')foreach($value as $row)$details[$key][$row['post_id'].'|'.$row['meta_key']][]=hash('sha256',$row['meta_value']);
  elseif(is_array($value))foreach($value as $k=>$v)$details[$key][$k]=hash('sha256',wp_json_encode($v));
 }
-echo wp_json_encode(['protected_sha256'=>hash('sha256',wp_json_encode($rows)),'sections'=>$parts,'details'=>$details]);
+$presence=[];foreach(['vf_theme_layout','vf_theme_brand','vf_theme_tokens','vf_theme_navigation','polylang']as $key)$presence[$key]=(bool)$wpdb->get_var($wpdb->prepare("SELECT COUNT(*) FROM {$wpdb->options} WHERE option_name=%s",$key));
+echo wp_json_encode(['option_presence'=>$presence,'protected_sha256'=>hash('sha256',wp_json_encode($rows)),'sections'=>$parts,'details'=>$details]);

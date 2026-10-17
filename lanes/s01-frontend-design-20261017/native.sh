@@ -33,6 +33,16 @@ docker cp lane/snapshot.php "$WP:/tmp/snapshot.php"
 # Warm only public read-only boot paths before protected-state comparison.
 curl -fsS http://127.0.0.1:18880/ >/dev/null
 curl -fsS http://127.0.0.1:18880/m3u8-playlist-checker/ >/dev/null
+cli eval-file /tmp/snapshot.php > proof/bootstrap-before.json
+node lane/warm-admin.cjs
+cli eval-file /tmp/snapshot.php > proof/bootstrap-after.json
+python3 - <<'PYBOOT'
+import json,pathlib
+r=pathlib.Path('proof');a=json.loads((r/'bootstrap-before.json').read_text());b=json.loads((r/'bootstrap-after.json').read_text());changed=[k for k in a['sections']if a['sections'][k]!=b['sections'][k]]
+assert set(changed)<= {'vf_theme_brand','vf_theme_tokens','vf_theme_navigation'}
+assert all(not a['option_presence'][k]and b['option_presence'][k]for k in changed)
+(r/'bootstrap.json').write_text(json.dumps({'status':'PASS','created_missing_options':changed,'existing_protected_records':'BYTE_IDENTICAL','scope':'fresh isolated installation initialization before review baseline'}))
+PYBOOT
 cli eval-file /tmp/snapshot.php > proof/state-before.sha256
 if [ "${VF_REVIEW_ONLY_STATE:-0}" = "1" ];then node lane/state-browser.cjs;elif [ "${VF_REVIEW_ONLY_SHELL:-0}" = "1" ];then node lane/shell-browser.cjs;else node lane/public-browser.cjs;fi
 cli eval-file /tmp/snapshot.php > proof/state-after.sha256
