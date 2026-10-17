@@ -102,8 +102,10 @@ def run_clpctl(clpctl: str, args: list[str], timeout: int = 1800) -> None:
             check=False,
             timeout=timeout,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise SandboxRestoreError(f"CloudPanel CLI execution failed: {args[0]}") from exc
+    except (OSError, subprocess.TimeoutExpired):
+        # Direct-core fallback must not chain TimeoutExpired: its message
+        # embeds argv, which may contain database or site-user passwords.
+        raise SandboxRestoreError(f"CloudPanel CLI execution failed: {args[0]}") from None
     if proc.returncode != 0:
         raise SandboxRestoreError(f"CloudPanel CLI command failed: {args[0]} (exit {proc.returncode})")
 
