@@ -41,7 +41,8 @@ cli eval-file /tmp/snapshot.php > proof/state-upgrade.json
 cmp proof/state-before.json proof/state-upgrade.json
 cli eval-file /tmp/review-seed.php > proof/review-seed.json
 cli eval-file /tmp/snapshot.php > proof/state-reviews.json
-cli db export /tmp/recovery.sql --quiet >/dev/null
+docker exec "$DB" mariadb-dump --single-transaction -uroot -psyntheticroot wordpress > /tmp/s01-theme132-recovery.sql
+test -s /tmp/s01-theme132-recovery.sql
 cli theme install /tmp/source.zip --force >/dev/null
 test "$(cli theme get vf-tools-theme --field=version)" = "$SOURCE_VERSION"
 node lane/smoke.cjs rollback
@@ -55,7 +56,8 @@ cli theme install /tmp/target.zip --force >/dev/null
 cli eval-file /tmp/snapshot.php > proof/state-idempotent.json
 cmp proof/state-reviews.json proof/state-idempotent.json
 cli option update vf_theme_frontend_review_restore_probe synthetic >/dev/null
-cli db import /tmp/recovery.sql --quiet >/dev/null
+docker exec -i "$DB" mariadb -uroot -psyntheticroot wordpress < /tmp/s01-theme132-recovery.sql
+rm -f /tmp/s01-theme132-recovery.sql
 cli eval-file /tmp/snapshot.php > proof/state-recovered.json
 cmp proof/state-reviews.json proof/state-recovered.json
 # A fresh database and freshly extracted Theme root exercise clean FULL independently.
