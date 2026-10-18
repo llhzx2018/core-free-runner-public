@@ -45,7 +45,7 @@ assert all(not a['option_presence'][k]and b['option_presence'][k]for k in change
 PYBOOT
 cli eval-file /tmp/snapshot.php > proof/state-before.sha256
 if [ "${VF_REVIEW_ONLY_STATE:-0}" = "1" ];then node lane/state-browser.cjs;elif [ "${VF_REVIEW_ONLY_SHELL:-0}" = "1" ];then node lane/shell-browser.cjs;else node lane/public-browser.cjs;fi
-if [ "${VF_REVIEW_ONLY_STATE:-0}" != "1" ] && [ "${VF_REVIEW_ONLY_SHELL:-0}" != "1" ];then node lane/r08-content-pages.cjs; node lane/r10-technical-head.cjs; node lane/r11-shared-shell.cjs;fi
+if [ "${VF_REVIEW_ONLY_STATE:-0}" != "1" ] && [ "${VF_REVIEW_ONLY_SHELL:-0}" != "1" ];then node lane/r08-content-pages.cjs; node lane/r10-technical-head.cjs; node lane/r11-shared-shell.cjs; node lane/r12-all-families.cjs;fi
 cli eval-file /tmp/snapshot.php > proof/state-after.sha256
 cmp proof/state-before.sha256 proof/state-after.sha256
 python3 - <<'PY'
