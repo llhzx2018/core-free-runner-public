@@ -7,7 +7,7 @@ IFS= read -r VERSION < "$SCRIPT_DIR/VERSION" 2>/dev/null || VERSION='UNKNOWN'
 source "$SCRIPT_DIR/lib/common.sh"
 VFOPS_DIR="${P07_VFOPS_DIR:-/opt/vf-server-ops}"
 VFOPS_INSTALLER='https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-final.sh'
-VFOPS_BUILD_EXPECTED='0.1.0-release88-rc1'
+VFOPS_BUILD_EXPECTED='0.1.0-release88'
 
 show_help() {
   cat <<'HELP'
