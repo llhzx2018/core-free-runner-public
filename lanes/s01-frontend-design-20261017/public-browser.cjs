@@ -260,6 +260,115 @@ function gate(value,name,detail){checks.push({name,pass:!!value,detail});/* Coll
   gate(dm.font==='18px'&&dm.line>=32&&dm.notes===1&&dm.pad==='20px','R06 glossary reading layout',{lang,width,dm});gate(dm.related>=3,'R06 related glossary links',{lang,width,dm});
   const nx=p.locator('.vf-reading-post-navigation a[href*="/glossary/"]').first(),nh=await nx.getAttribute('href');gate(!!nh,'R06 next glossary term exists',{lang,width});if(nh){const res=await p.goto(new URL(nh,p.url()).href);await p.waitForLoadState('networkidle');gate(res.status()===200&&new URL(p.url()).pathname.includes('-2/'),'R06 next glossary term opens',{lang,width,url:p.url()});}
  }
+
+ // R06 exact WordPress: FAQ, glossary index and glossary detail, EN/ZH desktop.
+ const r06=[];
+ for(const lang of ['en','zh'])for(const width of [1440,1024]){
+   await p.setViewportSize({width,height:1000});
+   for(const family of ['faq_page','glossary_index','glossary_detail']){
+     const res=await p.goto(cases[lang][family]);await p.waitForLoadState('networkidle');
+     const d=await p.evaluate(()=>{
+       const style=q=>{const el=document.querySelector(q);if(!el)return null;const c=getComputedStyle(el);return{font:c.fontSize,padding:c.paddingTop,line:c.lineHeight,width:c.maxWidth};};
+       return{
+         h1:[...document.querySelectorAll('main h1')].map(x=>x.textContent.trim()),
+         title:document.title.trim(),
+         overflow:document.documentElement.scrollWidth>innerWidth+1,
+         canonical:[...document.querySelectorAll('head link[rel="canonical"]')].map(x=>x.href),
+         description:[...document.querySelectorAll('head meta[name="description"]')].map(x=>x.content),
+         robots:[...document.querySelectorAll('head meta[name="robots"]')].map(x=>x.content),
+         alternate:[...document.querySelectorAll('head link[rel="alternate"][hreflang]')].map(x=>({lang:x.hreflang,href:x.href})),
+         jsonld:[...document.querySelectorAll('head script[type="application/ld+json"]')].map(x=>{try{JSON.parse(x.textContent);return true}catch{return false}}),
+         faqSearch:style('.vf-faq-search input'),faqQuestion:style('.vf-support-faq-list summary strong'),
+         faqAnswer:style('.vf-support-faq-list details p'),
+         glossaryCard:style('.vf-theme-post-list--glossary_index .vf-directory-card'),
+         glossaryTitle:style('.vf-theme-post-list--glossary_index .vf-directory-card h3'),
+         glossaryBody:style('.vf-reading-article'),
+         glossaryExplainerHeader:style('.vf-glossary-explainer>header'),
+         glossaryExplainerSection:style('.vf-glossary-explainer section')
+       };
+     });
+     gate(res.status()===200&&!d.overflow&&d.h1.length===1&&d.h1[0].length>2,
+       'R06 route, H1 and no desktop overflow',{lang,width,family,status:res.status(),h1:d.h1,overflow:d.overflow});
+     gate(d.title.length>5&&d.canonical.length===1&&new URL(d.canonical[0]).origin===new URL(p.url()).origin
+       &&d.description.length<=1&&d.robots.length<=1&&d.jsonld.every(Boolean)
+       &&new Set(d.alternate.map(x=>x.lang)).size===d.alternate.length
+       &&d.alternate.every(x=>new URL(x.href).origin===new URL(p.url()).origin),
+       'R06 single-owner technical SEO output',{lang,width,family,title:d.title,canonical:d.canonical,alternates:d.alternate,jsonld:d.jsonld});
+     if(family==='faq_page'){
+       gate(d.faqSearch?.font==='16px'&&d.faqQuestion?.font==='16px'&&d.faqAnswer?.font==='16px',
+         'R06 FAQ search, question and answer type scale',{lang,width,actual:d});
+       gate(await p.locator('[data-vf-faq-item]').count()>0,'R06 native FAQ content retained',{lang,width});
+     }else if(family==='glossary_index'){
+       gate(d.glossaryCard?.padding==='20px'&&d.glossaryTitle?.font==='22px',
+         'R06 glossary index readable row/headline',{lang,width,actual:d});
+       gate(await p.locator('.vf-theme-post-list--glossary_index .vf-directory-card').count()>0,
+         'R06 term directory still populated',{lang,width});
+     }else{
+       gate(d.glossaryBody?.font==='18px'&&d.glossaryExplainerHeader?.padding==='22px'
+         &&d.glossaryExplainerSection?.padding==='20px',
+         'R06 glossary detail reading and concept panels',{lang,width,actual:d});
+     }
+     r06.push({lang,width,family,url:p.url(),title:d.title,canonical:d.canonical,robots:d.robots,
+       description:d.description,hreflang:d.alternate,jsonld_valid:d.jsonld});
+   }
+   await p.goto(cases[lang].faq_page);
+   const faq=p.locator('[data-vf-faq-page]');
+   const query=faq.locator('[data-vf-faq-query]');
+   const baseline=await faq.locator('[data-vf-faq-item]:visible').count();
+   gate(baseline>0,'R06 FAQ has real baseline',{lang,width,baseline});
+   await query.fill('r06-no-such-answer-246891');
+   gate(await faq.locator('[data-vf-faq-item]:visible').count()===0&&await faq.locator('[data-vf-faq-empty]:visible').count()===1,
+     'R06 FAQ unknown query shows explicit empty state',{lang,width});
+   await faq.locator('[data-vf-faq-clear]').click();
+   gate(await faq.locator('[data-vf-faq-item]:visible').count()===baseline,
+     'R06 FAQ clear restores all authored answers',{lang,width,baseline});
+   const nativeSummary=faq.locator('[data-vf-faq-item] summary').first();
+   const wasOpen=await nativeSummary.locator('..').getAttribute('open')!==null;
+   await nativeSummary.focus();await p.keyboard.press('Enter');
+   gate((await nativeSummary.locator('..').getAttribute('open')!==null)!==wasOpen,
+     'R06 native FAQ question toggles via keyboard',{lang,width,wasOpen});
+   const nav=faq.locator('.vf-faq-category-nav a').first();
+   if(await nav.count()){
+     const href=await nav.getAttribute('href');
+     gate(!!href&&await p.locator(href).count()===1,
+       'R06 category anchor resolves to real FAQ group',{lang,width,href});
+   }
+   await p.goto(cases[lang].glossary_index);
+   const cards=p.locator('.vf-theme-post-list--glossary_index .vf-directory-card:visible');
+   const original=await cards.count();
+   gate(original>0,'R06 glossary has real unfiltered baseline',{lang,width,original});
+   const cat=await cards.first().getAttribute('data-vf-directory-category');
+   const catLink=p.locator('.vf-glossary-category-filter a[data-vf-directory-filter-button]').filter({hasText:/./}).filter({hasNotText:/^All categories$|^全部分类$/}).first();
+   const matchingCat=p.locator('.vf-glossary-category-filter a[data-vf-directory-filter-button="'+cat+'"]').first();
+   gate(!!cat&&await matchingCat.count()===1,'R06 term category link matches real card',{lang,width,cat});
+   if(await matchingCat.count()){
+     const href=await matchingCat.getAttribute('href');
+     await p.goto(new URL(href,p.url()).href);await p.waitForLoadState('networkidle');
+     const selected=await p.locator('.vf-theme-post-list--glossary_index .vf-directory-card:visible').evaluateAll(es=>es.map(e=>e.getAttribute('data-vf-directory-category')));
+     gate(selected.length>0&&selected.every(x=>x===cat),
+       'R06 glossary category filter uses actual term category',{lang,width,cat,selected});
+   }
+   const clear=p.locator('.vf-theme-post-list--glossary_index [data-vf-directory-reset]:visible').first();
+   gate(await clear.count()===1,'R06 glossary category clear action visible',{lang,width});
+   if(await clear.count()){await clear.click();await p.waitForLoadState('networkidle');}
+   gate(await p.locator('.vf-theme-post-list--glossary_index .vf-directory-card:visible').count()===original,
+     'R06 glossary clear returns original results',{lang,width,original});
+   const letter=p.locator('.vf-glossary-letter-disclosure');
+   gate(await letter.count()===1,'R06 initial-letter browser present',{lang,width});
+   if(await letter.count()){
+     if(await letter.getAttribute('open')===null)await letter.locator('summary').click();
+     const letterKey=await p.locator('.vf-theme-post-list--glossary_index .vf-directory-card:visible').first().getAttribute('data-vf-directory-letter');
+     const letterLink=letter.locator('a[data-vf-directory-filter-button="'+letterKey+'"]').first();
+     gate(!!letterKey&&await letterLink.count()===1,'R06 initial letter link matches real terms',{lang,width,letterKey});
+     if(await letterLink.count()){
+       await letterLink.click();await p.waitForLoadState('networkidle');
+       const letters=await p.locator('.vf-theme-post-list--glossary_index .vf-directory-card:visible').evaluateAll(es=>es.map(e=>e.getAttribute('data-vf-directory-letter')));
+       gate(letters.length>0&&letters.every(x=>x===letterKey),
+         'R06 letter filters only matching terms',{lang,width,letterKey,letters});
+     }
+   }
+ }
+ fs.writeFileSync('proof/r06-head.json',JSON.stringify({scope:'SYNTHETIC_WORDPRESS_NOT_PRODUCTION_SEO_PASS',records:r06},null,2));
  const nativeContext=await browser.newContext({javaScriptEnabled:false,viewport:{width:1440,height:1000}}),n=await nativeContext.newPage();for(const lang of ['en','zh']){await n.goto(cases[lang].faq_page);await n.locator('[data-vf-faq-item] summary').first().click();gate(await n.locator('[data-vf-faq-item][open]').count()>0,'FAQ works without JavaScript',{lang});await n.goto(cases[lang].archive_list+'?vf_fixture_count=1');await n.locator('.pagination .next').click();gate(await n.locator('.pagination .current').count()===1,'native pagination works',{lang});}await nativeContext.close();
  const admin=await context.newPage();await admin.goto('http://127.0.0.1:18880/wp-login.php');await admin.locator('#user_login').fill('admin');await admin.locator('#user_pass').fill('Synthetic-Only-Update-54!');await admin.locator('input[name="redirect_to"]').evaluate(e=>e.value='http://127.0.0.1:18880/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages');await admin.locator('#wp-submit').click();await admin.waitForURL('**/wp-admin/**');await admin.goto('http://127.0.0.1:18880/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages');gate(await admin.locator('[data-vf-page-context]').count()===20,'same admin directory keeps all types');gate((await admin.locator('.vf-frontend-pages__review-overview').innerText()).includes('待复验'),'backend records source phase truthfully');gate((await admin.locator('#vf-review-home .vf-frontend-pages__progress-record > p').first().innerText()).includes('待复验'),'unreviewed source starts at verify, not accepted');await admin.screenshot({path:'proof/admin-progress.png'});
  gate(errors.length===0,'no uncaught runtime errors',errors);assert(checks.every(c=>c.pass),'Independent gates failed: '+JSON.stringify(checks.filter(c=>!c.pass))); fs.writeFileSync('proof/public-browser.json',JSON.stringify({status:'PASS',checks,mobile:'NOT_RUN_OWNER_DEFERRED',production:'NOT_EXECUTED',owner_real_use:'PENDING'},null,2));await browser.close();
