@@ -1,5 +1,6 @@
 <?php
 declare(strict_types=1);
+define('ABSPATH', '/');
 /** R07 focused sitemap eligibility regression against exact checked-out Theme source. */
 function wp_parse_url(string $url, int $component = -1) { return parse_url($url, $component); }
 require __DIR__ . '/../../../target/src/inc/services/url/public-url-sitemap-output-guards.php';
