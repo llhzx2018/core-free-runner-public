@@ -1,0 +1,48 @@
+name: S01-C01 v1.35.134 WordPress native discovery candidate
+on:
+  push:
+    branches: [task/s01-frontend-design-20261017]
+    paths: ['.github/workflows/s01-theme-v135134-discovery.yml']
+permissions:
+  contents: read
+jobs:
+  discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    steps:
+      - name: Retrieve private old release and candidate manifest
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh release download v1.35.133 --repo llhzx2018/vf-tools-theme --pattern vf-tools-theme_V1.35.133.zip
+          echo '8a36ef59971316b7aa69c4f1df78f9305ee25097cc10f379156025ff151c8f3f  vf-tools-theme_V1.35.133.zip' | sha256sum -c
+          gh api repos/llhzx2018/core-updates/contents/projects/S01-C01.json?ref=release/s01-c01-v135134-distribution-20261018 --jq .content | base64 -d > manifest.json
+      - name: Verify candidate discoverability on real WordPress theme update transient
+        run: |
+          set -Eeuo pipefail
+          docker run -d --name s01-discovery-db -e MARIADB_ROOT_PASSWORD=synthetic -e MARIADB_DATABASE=wordpress -e MARIADB_USER=wp -e MARIADB_PASSWORD=synthetic mariadb:11.8.8
+          docker run -d --name s01-discovery-wp --link s01-discovery-db:db -e WORDPRESS_DB_HOST=db -e WORDPRESS_DB_USER=wp -e WORDPRESS_DB_PASSWORD=synthetic -e WORDPRESS_DB_NAME=wordpress wordpress:7.1.2-php8.3-apache
+          for i in $(seq 1 80); do docker exec s01-discovery-db mariadb-admin ping -uroot -psynthetic --silent >/dev/null 2>&1 && break; sleep 2; done
+          curl -fsSLo wp.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          docker cp wp.phar s01-discovery-wp:/usr/local/bin/wp
+          docker cp vf-tools-theme_V1.35.133.zip s01-discovery-wp:/tmp/old.zip
+          wp(){ docker exec --user www-data s01-discovery-wp php /usr/local/bin/wp "$@" --path=/var/www/html; }
+          for i in $(seq 1 80); do docker exec s01-discovery-wp test -f /var/www/html/wp-settings.php && break; sleep 2; done
+          wp core install --url=http://example.test --title=Synthetic --admin_user=admin --admin_password=synthetic-test-only --admin_email=synthetic@example.invalid --skip-email
+          wp theme install /tmp/old.zip --activate
+          python3 - <<'PY'
+          import json
+          m=json.load(open('manifest.json'))
+          assert m['target_version']=='1.35.134' and m['package_slug']=='vf-tools-theme'
+          # Explicitly do not claim WordPress native updater discovery until the real registered updater is invoked.
+          print('CANDIDATE_MANIFEST_DISCOVERY_PRECONDITION=PASS')
+          PY
+          wp theme get vf-tools-theme --field=version | grep -qx '1.35.133'
+          echo 'WORDPRESS_133_INSTALLED=PASS'
+          echo 'NATIVE_UPDATER_DISCOVERY=NOT_TESTED'
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f s01-discovery-wp s01-discovery-db >/dev/null 2>&1 || true
+          rm -f vf-tools-theme_V1.35.133.zip wp.phar manifest.json
