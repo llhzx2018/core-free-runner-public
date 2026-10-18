@@ -17,9 +17,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/llhzx2018/core-free-runner-p
 ```text
 1. 网络代理节点          V0.1.0 · 0.1.0-rc13
 2. 服务器性能检测        V2.1.0 · 2.1.0-rc7-field
-3. 网站与数据            V0.1.0 · 0.1.0-release86
-4. 服务器维护与安全      V0.1.0 · 0.1.0-rc55
-5. 新服务器初始化        经由网站与数据模块，release86
+3. 网站与数据            V0.1.0 · 0.1.0-release87
+4. 服务器维护与安全      V0.1.0 · 0.1.0-rc56
+5. 新服务器初始化        经由网站与数据模块，release87
 0. 退出
 ```
 
@@ -40,6 +40,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/llhzx2018/core-free-runner-p
 - **2026-10-05**：release68 曾经完成真实的 **16 站整机迁移、16/16 本机验证、人工 DNS 切换及公网 Production 验证**。这项证据只适用于当时的具体环境和源码，旧服务器需要继续保留作为 Recovery Copy。
 - **2026-10-09**：release85 正式发布并通过公共安装器与独立机器测试；为全新服务器设置 MariaDB 10.11 默认目标。
 - **2026-10-17**：release86 与 System Care rc55 已正式发布，公共安装器和升级/回滚机器测试 PASS；**新 VPS 实际 MariaDB 10.11 初始化、MySQL/Percona 8.4 → MariaDB 10.11 跨引擎实机恢复** 仍是 `NOT_RUN`。不能以 release68 的真实迁移成绩或机器模拟测试冒充新版本实机通过。
+- **2026-10-17**：release87 与 System Care rc56 已正式发布，669/669 精确源码机器验证和公共分发 PASS；Owner 只确认 `--build-id=0.1.0-release87`、五个主菜单可打开。MariaDB、备份恢复、迁移及 System Care rc56 单独安装不能据此宣告实机 PASS。CloudPanel 密码 argv 可见性仍有残余风险。
 - **P07 全模块 Owner 用户验收** 仍为 `PARTIAL`：独立 Restore-As、远程恢复、定时备份、卸载旧服务器等存在单独的验收边界。
 
 备份文件存在不等于可恢复；只有恢复演练与数据验证合格，才能称为已证实可恢复。旧 VPS、DNS、真实数据库、网站 Nginx 不允许由普通开发和测试任务自动修改。

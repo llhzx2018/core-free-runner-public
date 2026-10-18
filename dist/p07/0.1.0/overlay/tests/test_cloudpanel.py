@@ -169,6 +169,54 @@ class CloudPanelAdapterTests(unittest.TestCase):
         self.assertTrue(error.__suppress_context__)
         self.assertIn("db_add", rendered)
 
+    def test_unexpected_subprocess_error_with_secret_argv_is_redacted(self) -> None:
+        secret = "PRIVATE-ARGUMENT-DO-NOT-ECHO"
+        original = subprocess.CalledProcessError(
+            9,
+            ["clpctl", "db:add", f"--databaseUserPassword={secret}"],
+            output=secret,
+            stderr=secret,
+        )
+        with mock.patch.object(cloudpanel.subprocess, "run", side_effect=original):
+            with self.assertRaises(cloudpanel.CloudPanelError) as ctx:
+                cloudpanel.add_database("www.example.com", "db", "user", secret)
+        error = ctx.exception
+        rendered = "".join(traceback.format_exception(
+            type(error), error, error.__traceback__
+        ))
+        self.assertNotIn(secret, str(error))
+        self.assertNotIn(secret, rendered)
+        self.assertTrue(error.__suppress_context__)
+        self.assertIn("db_add", str(error))
+
+    def test_undecodable_cli_output_is_redacted_without_exception_chaining(self) -> None:
+        secret = "PRIVATE-OUTPUT-DO-NOT-ECHO"
+        original = UnicodeDecodeError("utf-8", secret.encode(), 0, 1, "invalid byte")
+        with mock.patch.object(cloudpanel.subprocess, "run", side_effect=original):
+            with self.assertRaises(cloudpanel.CloudPanelError) as ctx:
+                cloudpanel.add_database("www.example.com", "db", "user", secret)
+        error = ctx.exception
+        rendered = "".join(traceback.format_exception(
+            type(error), error, error.__traceback__
+        ))
+        self.assertNotIn(secret, str(error))
+        self.assertNotIn(secret, rendered)
+        self.assertTrue(error.__suppress_context__)
+
+    def test_operation_label_cannot_echo_injected_password_flag(self) -> None:
+        secret = "INJECTED-OPERATION-PASSWORD"
+        with mock.patch.object(
+            cloudpanel.subprocess, "run",
+            return_value=subprocess.CompletedProcess(["clpctl"], 9, stdout="", stderr=""),
+        ):
+            with self.assertRaises(cloudpanel.CloudPanelError) as ctx:
+                cloudpanel.run(
+                    ["db:add", f"--databaseUserPassword={secret}"],
+                    operation=f"db:add --databaseUserPassword={secret}",
+                )
+        self.assertEqual(ctx.exception.operation, "unknown")
+        self.assertNotIn(secret, str(ctx.exception))
+
     def test_failures_never_echo_command_output_or_secret(self) -> None:
         secret = "super-secret-value"
         with mock.patch.object(

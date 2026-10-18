@@ -306,6 +306,130 @@ class RestoreAsTests(unittest.TestCase):
         self.assertIn("--skip-columns=guid", search)
         self.assertIn("--precise", search)
 
+    def test_double_swap_failure_keeps_bootstrap_and_staging_without_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            package = self.make_package(base)
+            backup_id = json.loads((package / "manifest.json").read_text(encoding="utf-8"))["backup_id"]
+            target = self.make_target(base)
+            identity, patches = self.common_patches(target, package)
+            final_site = target / identity.site_root.lstrip("/")
+            parent = final_site.parent
+            orig_replace = restore_as.os.replace
+
+            def fail_new_site_move(src, dst):
+                if Path(dst) == final_site and (
+                    Path(src).name == "site" or
+                    Path(src).name.startswith(".vfops-bootstrap-as-")
+                ):
+                    raise OSError("synthetic atomic commit and rollback failure")
+                return orig_replace(src, dst)
+
+            patches.extend([
+                mock.patch.object(restore_as.os, "replace", side_effect=fail_new_site_move),
+                mock.patch.object(restore_as.site_lifecycle, "cleanup_database"),
+                mock.patch.object(restore_as.site_lifecycle, "cleanup_site"),
+            ])
+
+            def assert_failure(entered):
+                with self.assertRaisesRegex(
+                    restore_as.RestoreAsError, "SITE_DELETE_SKIPPED_RECOVERY_PROTECTION"
+                ):
+                    restore_as.restore_as(
+                        package, identity.domain, target, "clpctl",
+                        self.confirmation(package, identity.domain))
+                entered[-2].assert_not_called()
+                entered[-1].assert_not_called()
+
+            self._run_with_patches(patches, assert_failure)
+            bootstrap = parent / f".vfops-bootstrap-as-{backup_id}"
+            self.assertEqual((bootstrap / "index.html").read_text(encoding="utf-8"),
+                             "cloudpanel bootstrap\n")
+            self.assertFalse(final_site.exists())
+            staged = list(parent.glob(".vfops-restore-as-*"))
+            self.assertEqual(len(staged), 1)
+            self.assertTrue((staged[0] / "site/public/index.php").is_file())
+
+    def test_postcommit_rollback_failure_preserves_site_and_database(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            package = self.make_package(base)
+            backup_id = json.loads((package / "manifest.json").read_text(encoding="utf-8"))["backup_id"]
+            target = self.make_target(base)
+            identity, patches = self.common_patches(target, package)
+            final_site = target / identity.site_root.lstrip("/")
+            parent = final_site.parent
+            orig_replace = restore_as.os.replace
+
+            def fail_bootstrap_rollback(src, dst):
+                if (Path(dst) == final_site and
+                        Path(src).name.startswith(".vfops-bootstrap-as-")):
+                    raise OSError("synthetic postcommit rollback failure")
+                return orig_replace(src, dst)
+
+            patches[-2] = mock.patch.object(
+                restore_as, "reconcile_wordpress_domain",
+                side_effect=restore_as.RestoreAsError("synthetic WP remap failure"))
+            patches.extend([
+                mock.patch.object(restore_as.os, "replace", side_effect=fail_bootstrap_rollback),
+                mock.patch.object(restore_as.site_lifecycle, "cleanup_database"),
+                mock.patch.object(restore_as.site_lifecycle, "cleanup_site"),
+            ])
+
+            def assert_failure(entered):
+                with self.assertRaisesRegex(
+                    restore_as.RestoreAsError, "DATABASE_DELETE_SKIPPED_RECOVERY_PROTECTION"
+                ):
+                    restore_as.restore_as(
+                        package, identity.domain, target, "clpctl",
+                        self.confirmation(package, identity.domain))
+                entered[-2].assert_not_called()
+                entered[-1].assert_not_called()
+
+            self._run_with_patches(patches, assert_failure)
+            bootstrap = parent / f".vfops-bootstrap-as-{backup_id}"
+            failed = parent / f".vfops-failed-as-{backup_id}"
+            self.assertEqual((bootstrap / "index.html").read_text(encoding="utf-8"),
+                             "cloudpanel bootstrap\n")
+            self.assertTrue((failed / "public/index.php").is_file())
+            self.assertFalse(final_site.exists())
+
+    def test_preexisting_failed_restore_point_refused_without_site_create(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            package = self.make_package(base)
+            backup_id = json.loads((package / "manifest.json").read_text(encoding="utf-8"))["backup_id"]
+            target = self.make_target(base)
+            identity, patches = self.common_patches(target, package)
+            parent = (target / identity.site_root.lstrip("/")).parent
+            parent.mkdir(parents=True, exist_ok=True)
+            failed = parent / f".vfops-failed-as-{backup_id}"
+            failed.mkdir()
+            sentinel = failed / "KEEP.txt"
+            sentinel.write_text("previous attempt remains\n", encoding="utf-8")
+            with mock.patch.object(restore_as.package_engine, "verify_package",
+                                   return_value={"status": "PASS"}), mock.patch.object(
+                restore_as.site_lifecycle, "ensure_domain_available"), mock.patch.object(
+                restore_as.site_lifecycle, "derive_target_identity",
+                return_value=identity), mock.patch.object(
+                restore_as.site_lifecycle, "create_site") as create:
+                with self.assertRaisesRegex(restore_as.RestoreAsError,
+                                            "recovery path already exists"):
+                    restore_as.restore_as(
+                        package, identity.domain, target, "clpctl",
+                        self.confirmation(package, identity.domain))
+            create.assert_not_called()
+            self.assertEqual(sentinel.read_text(encoding="utf-8"),
+                             "previous attempt remains\n")
+
+    def test_backup_id_cannot_escape_restore_as_recovery_directory(self) -> None:
+        for invalid in ("../elsewhere", "/etc/passwd", "..", "a/b", "a\\b", ""):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(restore_as.RestoreAsError):
+                    restore_as.expected_confirm(
+                        {"site": {"domain": "source.example.com"},
+                         "backup_id": invalid}, "target.example.com")
+
     def test_failure_after_commit_rolls_back_created_target_and_preserves_source(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

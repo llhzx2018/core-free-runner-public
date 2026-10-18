@@ -1,0 +1,111 @@
+name: P07 release88 formal source identity gate
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release88-formal-source-gate.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  formal-identity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      P07_SOURCE_SHA: 1bbd14c2c87b72179469992d5050c19b101aa2ca
+    steps:
+      - name: Check registered private read capability
+        shell: bash
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo 'P07_PRIVATE_READ_CAPABILITY_UNAVAILABLE'; exit 78; }
+      - name: Fetch exact private product source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 1bbd14c2c87b72179469992d5050c19b101aa2ca
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: transient-p07-private
+      - name: Verify source identity and focused formal build tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd transient-p07-private
+          test "$(git rev-parse HEAD)" = "$P07_SOURCE_SHA"
+          test "$(cat BUILD_ID)" = '0.1.0-release88'
+          python3 -m unittest -q tests.test_p07_bundle_identity
+          python3 -m py_compile scripts/p07_candidate_bundle.py
+          python3 - <<'PY'
+          import importlib.util
+          from pathlib import Path
+          path = Path("scripts/p07_candidate_bundle.py")
+          spec = importlib.util.spec_from_file_location("p07_bundle_check", path)
+          module = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          assert module.safe_manifest("a" * 40 + "  BUILD_ID\n") == [("a" * 40, "BUILD_ID")]
+          try:
+              module.safe_manifest("a" * 40 + "  ../outside\n")
+          except module.CandidateBundleError:
+              pass
+          else:
+              raise AssertionError("unsafe manifest must fail closed")
+          print("P07_RELEASE88_MANIFEST_PATH_POLICY=PASS")
+          PY
+          echo P07_RELEASE88_FORMAL_SOURCE_IDENTITY=PASS
+      - name: Checkout immutable public release87 baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ecaefcf0435105ee29097799ad244d652aa1efb3
+          persist-credentials: false
+          path: transient-p07-public-base
+      - name: Build formal release88 offline and verify every recorded blob
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 transient-p07-private/scripts/p07_candidate_bundle.py \
+            --product-root transient-p07-private \
+            --public-root transient-p07-public-base \
+            --output "$RUNNER_TEMP/p07-formal-staging" \
+            --product-sha "$P07_SOURCE_SHA" \
+            --build 0.1.0-release88 --care 0.1.0-rc57
+          export P07_STAGING="$RUNNER_TEMP/p07-formal-staging"
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          root = Path(os.environ["P07_STAGING"])
+          def blob(data):
+              return hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+          def verify(base, manifest):
+              rows = (base / manifest).read_text().splitlines()
+              assert len(rows) == len(set(rows))
+              for row in rows:
+                  sha, name = row.split("  ", 1)
+                  f = base / name
+                  assert f.is_file() and blob(f.read_bytes()) == sha, name
+              return len(rows)
+          overlay = root / "dist/p07/0.1.0/overlay"
+          assert (overlay / "BUILD_ID").read_text().strip() == "0.1.0-release88"
+          assert verify(overlay, "RUNTIME.gitblob") == 44
+          assert verify(overlay, "MANIFEST.gitblob") == 95
+          meta = json.loads((root / "candidate_attestation.json").read_text())
+          assert meta["product_build"] == "0.1.0-release88"
+          assert meta["system_care_build"] == "0.1.0-rc57"
+          assert meta["status"] == "FORMAL_STAGING_NOT_PUBLISHED"
+          assert blob((overlay / "RUNTIME.gitblob").read_bytes()) == meta["runtime_manifest_blob"]
+          assert blob((overlay / "MANIFEST.gitblob").read_bytes()) == meta["overlay_manifest_blob"]
+          assert blob((root / "installers/p07-final.sh").read_bytes()) == meta["final_installer_blob"]
+          care = root / "packages/p07-system-care/0.1.0-rc57"
+          assert (care / "VERSION").read_text().strip() == "0.1.0-rc57"
+          assert blob((care / "MANIFEST.gitblob").read_bytes()) == meta["system_care_manifest_blob"]
+          verify(care, "MANIFEST.gitblob")
+          print("P07_RELEASE88_FORMAL_STAGING_BLOB_VERIFICATION=PASS")
+          print(json.dumps({k: meta[k] for k in ("product_source_sha", "product_build", "system_care_build", "runtime_manifest_blob", "overlay_manifest_blob", "final_installer_blob", "system_care_manifest_blob")}, sort_keys=True))
+          PY
+      - name: Cleanup private material
+        if: always()
+        shell: bash
+        run: rm -rf transient-p07-private transient-p07-public-base "$RUNNER_TEMP/p07-formal-staging"

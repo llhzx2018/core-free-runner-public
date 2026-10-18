@@ -206,10 +206,15 @@ def extract_site_archive(archive_path: Path, destination: Path) -> None:
                     os.symlink(link, target)
                 else:
                     link_pure = PurePosixPath(member.linkname)
-                    if not link_pure.parts or link_pure.parts[0] != "site":
+                    if (len(link_pure.parts) < 2 or link_pure.parts[0] != "site"
+                            or ".." in link_pure.parts or link_pure.is_absolute()):
                         raise SandboxRestoreError(f"archive hardlink escapes site: {member.name}")
                     link_rel = Path(*link_pure.parts[1:])
                     source_target = destination / link_rel
+                    source_resolved = source_target.resolve(strict=False)
+                    if (source_resolved != root_resolved
+                            and root_resolved not in source_resolved.parents):
+                        raise SandboxRestoreError(f"archive hardlink escapes site: {member.name}")
                     if not source_target.is_file() or source_target.is_symlink():
                         raise SandboxRestoreError(f"archive hardlink target is invalid: {member.name}")
                     os.link(source_target, target)
@@ -326,6 +331,7 @@ def apply_sandbox(package_dir: Path, target_root: Path, clpctl: str) -> dict[str
     pending_meta = staging / "pending-metadata"
     steps: list[str] = []
     site_created = False
+    created_databases: list[str] = []
     committed = False
 
     try:
@@ -366,6 +372,9 @@ def apply_sandbox(package_dir: Path, target_root: Path, clpctl: str) -> dict[str
                 f"--databaseUserName={username}",
                 f"--databaseUserPassword={password}",
             ])
+            # Only a successful db:add establishes transaction ownership.
+            # Import/SSL/metadata failures must clean up this newly created DB.
+            created_databases.append(database)
             run_clpctl(clpctl, ["db:import", f"--databaseName={database}", f"--file={dump}"])
             mysql_count += 1
         steps.append("mysql_restored")
@@ -417,11 +426,31 @@ def apply_sandbox(package_dir: Path, target_root: Path, clpctl: str) -> dict[str
     except Exception as exc:
         if committed and final_site.exists():
             shutil.rmtree(final_site, ignore_errors=True)
+        database_cleanup_verified = True
+        for database in reversed(created_databases):
+            # The only names eligible for cleanup were successfully created
+            # by this transaction. Never delete pre-existing/failed db:add.
+            try:
+                run_clpctl(clpctl, [
+                    "db:delete", f"--databaseName={database}", "--force"
+                ], timeout=300)
+            except SandboxRestoreError:
+                # CloudPanel CLI versions differ in accepted --force flags.
+                try:
+                    run_clpctl(clpctl, [
+                        "db:delete", f"--databaseName={database}"
+                    ], timeout=300)
+                except SandboxRestoreError:
+                    database_cleanup_verified = False
         if site_created:
             try:
                 run_clpctl(clpctl, ["site:delete", f"--domainName={domain}", "--force"], timeout=300)
             except SandboxRestoreError:
                 pass
+        if not database_cleanup_verified:
+            raise SandboxRestoreError(
+                "sandbox restore failed; created database cleanup unverified"
+            ) from None
         if isinstance(exc, SandboxRestoreError):
             raise
         if isinstance(exc, restore_plan.RestorePlanError):

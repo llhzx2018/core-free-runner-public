@@ -52,19 +52,54 @@ def target_path(target_root: Path, absolute: str) -> Path:
     return candidate
 
 
+def trusted_target_sites(target_root: Path) -> list[dict[str, Any]]:
+    """Reject unreadable/partial inventories before using them as absence proof."""
+    try:
+        manifest = inventory.build_manifest(target_root)
+    except Exception as exc:
+        # Absence of a directory is not proof that CloudPanel does not own
+        # the domain. Unknown inventory must never authorize site creation.
+        raise RestorePlanError("target site inventory could not be inspected") from exc
+    if not isinstance(manifest, dict) or manifest.get("schema") != inventory.SCHEMA:
+        raise RestorePlanError("target site inventory is invalid")
+    sites = manifest.get("sites")
+    warnings = manifest.get("warnings", [])
+    if (not isinstance(sites, list) or not isinstance(warnings, list)
+            or any(not isinstance(item, str) for item in warnings)):
+        raise RestorePlanError("target site inventory is incomplete")
+    # An unreadable/unsupported CloudPanel site table cannot be substituted
+    # by a partial Nginx vhost scan to establish domain nonexistence.
+    uncertain = (
+        "CloudPanel database could not be opened",
+        "CloudPanel site schema is unsupported",
+        "CloudPanel database query failed",
+    )
+    if any(item.startswith(uncertain) for item in warnings):
+        raise RestorePlanError("CloudPanel site inventory is unverified")
+    if (target_root.resolve() == Path("/")
+            and any(item.startswith("CloudPanel database not found") for item in warnings)):
+        raise RestorePlanError("CloudPanel site inventory is unavailable")
+    for site in sites:
+        if not isinstance(site, dict):
+            raise RestorePlanError("target site inventory contains invalid site records")
+        recorded_domain = site.get("domain")
+        domains = site.get("domains", [])
+        if (not isinstance(recorded_domain, str) or not recorded_domain
+                or not isinstance(domains, list)
+                or any(not isinstance(name, str) for name in domains)):
+            raise RestorePlanError("target site inventory contains invalid domain records")
+    return sites
+
+
 def target_has_site(target_root: Path, domain: str, site_root: str) -> bool:
     final_site = target_path(target_root, site_root)
     if os.path.lexists(final_site):
         return True
-    try:
-        manifest = inventory.build_manifest(target_root)
-    except Exception:
-        return False
-    for site in manifest.get("sites", []):
-        if not isinstance(site, dict):
-            continue
-        domains = site.get("domains", []) if isinstance(site.get("domains"), list) else []
-        if site.get("domain") == domain or domain in domains:
+    for site in trusted_target_sites(target_root):
+        domains = site["domains"]
+        if site["domain"].casefold() == domain.casefold() or any(
+            name.casefold() == domain.casefold() for name in domains
+        ):
             return True
     return False
 
@@ -97,6 +132,16 @@ def inspect_archive(archive_path: Path) -> dict[str, Any]:
                     link = member.linkname
                     if not link or link.startswith("/"):
                         blockers.append(f"ARCHIVE_UNSAFE_LINK:{name}")
+                    elif member.islnk():
+                        # Tar hardlink targets are archive-root names, unlike
+                        # symlink targets which are relative to the link parent.
+                        # Joining a hardlink to dirname(name) can incorrectly
+                        # approve a deep member's "site/../../.." escape.
+                        hardlink_parts = PurePosixPath(link).parts
+                        if (len(hardlink_parts) < 2
+                                or hardlink_parts[0] != "site"
+                                or ".." in hardlink_parts):
+                            blockers.append(f"ARCHIVE_LINK_ESCAPE:{name}")
                     else:
                         normalized = posixpath.normpath(posixpath.join(posixpath.dirname(name), link))
                         if normalized != "site" and not normalized.startswith("site/"):

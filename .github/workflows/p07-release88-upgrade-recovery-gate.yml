@@ -1,0 +1,84 @@
+name: P07 release88 candidate clean install, atomic upgrade and rollback evidence
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'dist/p07/0.1.0/overlay/**'
+      - 'installers/p07.sh'
+      - 'installers/p07-final.sh'
+      - 'installers/p07-toolbox.sh'
+      - '.github/workflows/p07-release88-upgrade-recovery-gate.yml'
+permissions:
+  contents: read
+jobs:
+  upgrade-recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install clean current source, previous release to current upgrade, failure and recovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          old_sha='ecaefcf0435105ee29097799ad244d652aa1efb3'
+          ref="${{ github.event.pull_request.head.sha || github.sha }}"
+          root="$RUNNER_TEMP/p07-atomic-proof"
+          mkdir -p "$root"
+          trap 'rc=$?; echo "P07 isolated upgrade failure rc=$rc"; for f in "$root"/install-old.log "$root"/upgrade.log "$root"/repeat.log "$root"/injected-failure.log; do if [[ -f "$f" ]]; then echo "===$(basename "$f")==="; tail -n 35 "$f"; fi; done; exit "$rc"' ERR
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1
+          export P07_INSTALL_DIR="$root/installed" P07_PREVIOUS_DIR="$root/previous"
+          export P07_BIN_LINK="$root/vfops"
+          url="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public"
+          curl -fsSL --retry 3 --connect-timeout 15 "$url/$old_sha/installers/p07-final.sh" -o "$root/previous-final.sh"
+          bash -n "$root/previous-final.sh"
+          sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 \
+            P07_INSTALL_DIR="$P07_INSTALL_DIR" P07_PREVIOUS_DIR="$P07_PREVIOUS_DIR" P07_BIN_LINK="$P07_BIN_LINK" \
+            P07_PUBLIC_ROOT="$url/$old_sha" bash "$root/previous-final.sh" >"$root/install-old.log" 2>&1
+          test "$("$root/vfops" --build-id)" = '0.1.0-release87'
+          test "$(cat "$root/installed/BUILD_ID")" = '0.1.0-release87'
+          echo SAFE_SENTINEL > "$root/untouched-user-data"
+          sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 \
+            P07_INSTALL_DIR="$P07_INSTALL_DIR" P07_PREVIOUS_DIR="$P07_PREVIOUS_DIR" P07_BIN_LINK="$P07_BIN_LINK" \
+            P07_PUBLIC_ROOT="$url/$ref" bash installers/p07-final.sh >"$root/upgrade.log" 2>&1
+          test "$("$root/vfops" --build-id)" = '0.1.0-release88'
+          test "$(cat "$root/previous/BUILD_ID")" = '0.1.0-release87'
+          test "$(cat "$root/untouched-user-data")" = SAFE_SENTINEL
+          grep -Fq '网站与数据功能安装 / 升级完成' "$root/upgrade.log"
+          sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 \
+            P07_INSTALL_DIR="$P07_INSTALL_DIR" P07_PREVIOUS_DIR="$P07_PREVIOUS_DIR" P07_BIN_LINK="$P07_BIN_LINK" \
+            P07_PUBLIC_ROOT="$url/$ref" bash installers/p07-final.sh >"$root/repeat.log" 2>&1
+          grep -Fq '已是当前版本，无需下载或重复安装' "$root/repeat.log"
+          test "$(cat "$root/previous/BUILD_ID")" = '0.1.0-release87'
+          # Trigger an integrity-aware reinstall path; a fully verified current
+          # install intentionally short-circuits before accessing any URL.
+          cp "$root/installed/.runtime-manifest.gitblob" "$root/manifest.restore"
+          printf 'INJECTED_MANIFEST_MISMATCH\\n' | sudo tee -a "$root/installed/.runtime-manifest.gitblob" >/dev/null
+          # A negative security test must capture its expected nonzero status
+          # inside an if guard: set +e alone does NOT disable the ERR trap.
+          if sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 \
+            P07_INSTALL_DIR="$P07_INSTALL_DIR" P07_PREVIOUS_DIR="$P07_PREVIOUS_DIR" P07_BIN_LINK="$P07_BIN_LINK" \
+            P07_PUBLIC_ROOT="$url/$old_sha" bash installers/p07-final.sh >"$root/injected-failure.log" 2>&1; then
+            rc=0
+          else
+            rc=$?
+          fi
+          echo "P07 negative integrity path exit: $rc"
+          test "$rc" -ne 0
+          grep -Fq '当前运行时清单身份校验失败' "$root/injected-failure.log"
+          echo 'P07 negative corruption test PASS; restoring saved exact manifest'
+          sudo cp "$root/manifest.restore" "$root/installed/.runtime-manifest.gitblob"
+          echo 'P07 restored manifest: validate active release87 and untouched previous release86'
+          test "$("$root/vfops" --build-id)" = '0.1.0-release88'
+          test "$(cat "$root/previous/BUILD_ID")" = '0.1.0-release87'
+          test "$(cat "$root/untouched-user-data")" = SAFE_SENTINEL
+          test ! -e "$root/installed.new"
+          echo 'P07 release87 idempotence/corruption recovery PASS; beginning manual isolated rollback'
+          # Isolated rollback to the immutable previous-runtime copy, no host service touches.
+          sudo mv "$root/installed" "$root/failed-upgrade"
+          sudo mv "$root/previous" "$root/installed"
+          echo 'P07 rollback moved directories; verify restored previous build'
+          test "$("$root/vfops" --build-id)" = '0.1.0-release87'
+          test "$(cat "$root/untouched-user-data")" = SAFE_SENTINEL
+          echo P07_RELEASE86_CLEAN_UPGRADE_IDEMPOTENT_FAILURE_ROLLBACK_MACHINE_PASS

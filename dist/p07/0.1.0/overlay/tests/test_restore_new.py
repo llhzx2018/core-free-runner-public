@@ -274,6 +274,41 @@ sys.exit(0)
             self.assertFalse((base / "clpctl.log").exists())
             self.assertFalse((target / "home").exists())
 
+    def test_unavailable_site_inventory_blocks_creation_without_side_effects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            package = self.make_package(base)
+            target = self.make_target(base)
+            fake = self.make_fake_clpctl(base)
+            with mock.patch.object(restore_engine.inventory, "build_manifest",
+                                   side_effect=PermissionError("private inventory error")):
+                with self.assertRaisesRegex(restore_engine.NewSiteRestoreError,
+                                            "cannot confirm target site absence"):
+                    restore_engine.restore_new_site(
+                        package, target, str(fake), self.confirmation(package))
+            self.assertFalse((base / "clpctl.log").exists())
+            self.assertFalse((target / "home").exists())
+
+    def test_unverified_cloudpanel_database_fallback_blocks_before_site_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            package = self.make_package(base)
+            target = self.make_target(base)
+            fake = self.make_fake_clpctl(base)
+            incomplete = {
+                "schema": restore_engine.inventory.SCHEMA,
+                "sites": [],
+                "warnings": ["CloudPanel database query failed; using vhost fallback"],
+            }
+            with mock.patch.object(restore_engine.inventory, "build_manifest",
+                                   return_value=incomplete):
+                with self.assertRaisesRegex(restore_engine.NewSiteRestoreError,
+                                            "cannot confirm target site absence"):
+                    restore_engine.restore_new_site(
+                        package, target, str(fake), self.confirmation(package))
+            self.assertFalse((base / "clpctl.log").exists())
+            self.assertFalse((target / "home").exists())
+
     def test_existing_target_site_is_never_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -367,6 +402,95 @@ sys.exit(0)
             self.assertNotEqual(proc.returncode, 0)
             self.assertEqual(keep.read_text(encoding="utf-8"), "never delete me")
             self.assertFalse((base / "clpctl.log").exists())
+
+    def test_double_file_swap_failure_keeps_bootstrap_and_staged_files_without_deletes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            package = self.make_package(base)
+            target = self.make_target(base)
+            fake = self.make_fake_clpctl(base)
+            env = self.env(base, target)
+            final_site = target / "home/alice/htdocs/example.com"
+            parent = final_site.parent
+            original_replace = os.replace
+
+            def fail_commit_and_rollback(source: os.PathLike[str] | str,
+                                         destination: os.PathLike[str] | str) -> None:
+                source_path, destination_path = Path(source), Path(destination)
+                if destination_path == final_site and (
+                    source_path.name == "site"
+                    or source_path.name.startswith(".vfops-bootstrap-")
+                ):
+                    raise OSError("simulated commit and bootstrap rollback failure")
+                original_replace(source, destination)
+
+            with mock.patch.dict(os.environ, env), \
+                    mock.patch.object(restore_engine.os, "replace", side_effect=fail_commit_and_rollback):
+                with self.assertRaisesRegex(
+                    restore_engine.NewSiteRestoreError,
+                    "DATABASE_DELETE_SKIPPED_RECOVERY_PROTECTION;"
+                    "SITE_DELETE_SKIPPED_RECOVERY_PROTECTION",
+                ):
+                    restore_engine.restore_new_site(
+                        package, target, str(fake), self.confirmation(package)
+                    )
+
+            bootstrap = parent / f".vfops-bootstrap-{package.name}"
+            self.assertEqual((bootstrap / "index.html").read_text(encoding="utf-8"),
+                             "cloudpanel bootstrap\n")
+            staged = list(parent.glob(".vfops-restore-*"))
+            self.assertEqual(len(staged), 1, "failed new site must remain recoverable")
+            self.assertTrue((staged[0] / "site/public/index.php").is_file())
+            self.assertFalse(final_site.exists())
+            commands = [json.loads(line)["command"] for line in
+                        (base / "clpctl.log").read_text(encoding="utf-8").splitlines()]
+            self.assertNotIn("site:delete", commands)
+            self.assertNotIn("db:delete", commands)
+
+    def test_post_commit_bootstrap_rollback_failure_preserves_recovery_points(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            package = self.make_package(base)
+            target = self.make_target(base)
+            fake = self.make_fake_clpctl(base)
+            env = self.env(base, target)
+            final_site = target / "home/alice/htdocs/example.com"
+            parent = final_site.parent
+            original_replace = os.replace
+
+            def fail_bootstrap_rollback(source: os.PathLike[str] | str,
+                                        destination: os.PathLike[str] | str) -> None:
+                if (Path(destination) == final_site
+                        and Path(source).name.startswith(".vfops-bootstrap-")):
+                    raise OSError("simulated post-commit rollback failure")
+                original_replace(source, destination)
+
+            with mock.patch.dict(os.environ, env), \
+                    mock.patch.object(restore_engine.os, "replace", side_effect=fail_bootstrap_rollback), \
+                    mock.patch.object(restore_engine.verify_engine, "verify_restore",
+                                      return_value={"status": "FAIL", "failed_components": ["mysql"]}):
+                with self.assertRaisesRegex(
+                    restore_engine.NewSiteRestoreError,
+                    "DATABASE_DELETE_SKIPPED_RECOVERY_PROTECTION;"
+                    "SITE_DELETE_SKIPPED_RECOVERY_PROTECTION",
+                ):
+                    restore_engine.restore_new_site(
+                        package, target, str(fake), self.confirmation(package)
+                    )
+
+            bootstrap = parent / f".vfops-bootstrap-{package.name}"
+            failed = parent / f".vfops-failed-{package.name}"
+            self.assertEqual((bootstrap / "index.html").read_text(encoding="utf-8"),
+                             "cloudpanel bootstrap\n")
+            self.assertTrue((failed / "public/index.php").is_file())
+            self.assertTrue(
+                (target / "var/lib/vf-server-ops/restored-metadata" / package.name).exists(),
+                "pending recovery evidence must not be deleted"
+            )
+            commands = [json.loads(line)["command"] for line in
+                        (base / "clpctl.log").read_text(encoding="utf-8").splitlines()]
+            self.assertNotIn("site:delete", commands)
+            self.assertNotIn("db:delete", commands)
 
     def test_backup_id_path_traversal_rejected_before_side_effects(self) -> None:
         for unsafe in ("../outside", "/etc", "bad/name", "..", "a\\b", ""):

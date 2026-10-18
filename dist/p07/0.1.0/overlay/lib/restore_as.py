@@ -52,6 +52,10 @@ def expected_confirm(manifest: dict[str, Any], target_domain: str) -> str:
     target_domain = cloudpanel.validate_domain(target_domain)
     if not source_domain or not backup_id:
         raise RestoreAsError("backup identity is incomplete")
+    # The backup ID also names recovery and staging paths. Never accept
+    # separators or traversal values from a package manifest.
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,199}", backup_id):
+        raise RestoreAsError("backup id contains unsafe path characters")
     return f"RESTORE_AS:{source_domain}:{target_domain}:{backup_id}"
 
 
@@ -353,6 +357,12 @@ def restore_as(
     identity = site_lifecycle.derive_target_identity(target_domain, backup_id)
     final_site = restore_plan.target_path(target_root, identity.site_root)
     parent = final_site.parent
+    bootstrap_candidate = parent / f".vfops-bootstrap-as-{backup_id}"
+    failed_candidate = parent / f".vfops-failed-as-{backup_id}"
+    # Do not allow an earlier failed attempt's recovery assets to be
+    # overwritten or mistaken for files created by this transaction.
+    if os.path.lexists(bootstrap_candidate) or os.path.lexists(failed_candidate):
+        raise RestoreAsError("Restore-As recovery path already exists; refuses overwrite")
     archive_rel = str(manifest.get("contents", {}).get("files_archive", ""))
     archive = restore_plan.safe_package_path(package_dir, archive_rel)
     archive_check = restore_plan.inspect_archive(archive)
@@ -370,6 +380,7 @@ def restore_as(
     staging: Path | None = None
     bootstrap_dir: Path | None = None
     committed = False
+    recovery_protection_required = False
     failure_stage = "TARGET_PREFLIGHT"
     app_kind = "NO_DATABASE"
     config_rel: str | None = None
@@ -452,8 +463,8 @@ def restore_as(
         restore_new.reconcile_site_ownership(staged_site, final_site)
 
         failure_stage = "SITE_ATOMIC_COMMIT"
-        bootstrap_dir = parent / f".vfops-bootstrap-as-{backup_id}"
-        if bootstrap_dir.exists():
+        bootstrap_dir = bootstrap_candidate
+        if os.path.lexists(bootstrap_dir):
             raise RestoreAsError("bootstrap recovery point already exists")
         os.replace(final_site, bootstrap_dir)
         try:
@@ -510,22 +521,63 @@ def restore_as(
             "secrets_emitted": False,
         }
     except Exception as exc:
-        if committed and final_site.exists():
-            shutil.rmtree(final_site, ignore_errors=True)
-        if bootstrap_dir and bootstrap_dir.exists() and not final_site.exists():
-            try:
-                os.replace(bootstrap_dir, final_site)
-                bootstrap_dir = None
-            except OSError:
-                pass
-        for database in reversed(created_databases):
-            site_lifecycle.cleanup_database(database, clpctl=clpctl)
-        if created_site:
-            site_lifecycle.cleanup_site(target_domain, clpctl=clpctl)
+        if bootstrap_dir is not None and os.path.lexists(bootstrap_dir):
+            # Never destroy the restored target before moving it to a
+            # separate private recovery point. If either replace fails,
+            # retain both site copies and the database for manual recovery.
+            if os.path.lexists(final_site):
+                try:
+                    if os.path.lexists(failed_candidate):
+                        raise RestoreAsError("failed-restore recovery point is protected")
+                    os.replace(final_site, failed_candidate)
+                    os.replace(bootstrap_dir, final_site)
+                    bootstrap_dir = None
+                    shutil.rmtree(failed_candidate, ignore_errors=True)
+                except OSError:
+                    pass
+            else:
+                try:
+                    os.replace(bootstrap_dir, final_site)
+                    bootstrap_dir = None
+                except OSError:
+                    pass
+
+        # Failure after file commit is especially dangerous if the original
+        # bootstrap recovery point was lost during cleanup. There is then no
+        # trustworthy rollback basis, so do not delete the created site or DB.
+        recovery_protection_required = (
+            (bootstrap_dir is not None and os.path.lexists(bootstrap_dir))
+            or (committed and bootstrap_dir is not None)
+        )
+        if recovery_protection_required:
+            cleanup_status = (
+                "DATABASE_DELETE_SKIPPED_RECOVERY_PROTECTION;"
+                "SITE_DELETE_SKIPPED_RECOVERY_PROTECTION"
+            )
+        else:
+            db_outcomes = [
+                site_lifecycle.cleanup_database(database, clpctl=clpctl)
+                for database in reversed(created_databases)
+            ]
+            database_cleanup = (
+                "DATABASE_DELETE_NOT_REQUIRED" if not created_databases
+                else "DATABASE_DELETE_REQUESTED" if all(db_outcomes)
+                else "DATABASE_DELETE_PARTIAL_OR_UNVERIFIED"
+            )
+            site_cleanup = (
+                "SITE_DELETE_REQUESTED" if created_site and
+                site_lifecycle.cleanup_site(target_domain, clpctl=clpctl)
+                else "SITE_DELETE_FAILED_OR_UNVERIFIED" if created_site
+                else "SITE_DELETE_NOT_REQUIRED"
+            )
+            cleanup_status = f"{database_cleanup};{site_cleanup}"
+
         reason = exc if isinstance(exc, RestoreAsError) else exc.__class__.__name__
-        raise RestoreAsError(f"Restore-As failed; stage={failure_stage}; reason={reason}") from exc
+        raise RestoreAsError(
+            f"Restore-As failed; stage={failure_stage}; cleanup={cleanup_status}; reason={reason}"
+        ) from exc
     finally:
-        if staging and staging.exists():
+        if staging and staging.exists() and not recovery_protection_required:
             shutil.rmtree(staging, ignore_errors=True)
 
 
