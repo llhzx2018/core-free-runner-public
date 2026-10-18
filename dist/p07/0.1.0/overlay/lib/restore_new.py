@@ -73,17 +73,11 @@ def require_target(target_root: Path, manifest: dict, confirm: str) -> Path:
 
 
 def target_has_site(target_root: Path, domain: str, site_root: str) -> bool:
-    final_site = restore_plan.target_path(target_root, site_root)
-    if os.path.lexists(final_site):
-        return True
+    # Reuse the single fail-closed inventory/ownership gate used by dry runs.
     try:
-        manifest = inventory.build_manifest(target_root)
-    except Exception:
-        return False
-    for site in manifest.get("sites", []):
-        if isinstance(site, dict) and (site.get("domain") == domain or domain in site.get("domains", [])):
-            return True
-    return False
+        return restore_plan.target_has_site(target_root, domain, site_root)
+    except restore_plan.RestorePlanError as exc:
+        raise NewSiteRestoreError("cannot confirm target site absence") from exc
 
 
 def safe_cleanup_site(clpctl: str, domain: str) -> str:
@@ -180,6 +174,7 @@ def restore_new_site(package_dir: Path, target_root: Path, clpctl: str, confirm:
     if any(os.path.lexists(path) for path in (evidence_root, bootstrap_candidate, failed_candidate)):
         raise NewSiteRestoreError("backup recovery/evidence path already exists")
     evidence_created = False
+    recovery_protection_required = False
     cleanup_status = "NOT_REQUIRED"
     failure_stage = "CLOUDPANEL_SITE_CREATE"
     steps: list[str] = []
@@ -368,26 +363,39 @@ def restore_new_site(package_dir: Path, target_root: Path, clpctl: str, confirm:
                 shutil.rmtree(failed_dir, ignore_errors=True)
             except OSError:
                 pass
-        if evidence_created and evidence_root.is_dir() and not evidence_root.is_symlink():
-            shutil.rmtree(evidence_root, ignore_errors=True)
-
-        database_cleanup = "DATABASE_DELETE_NOT_REQUIRED"
-        if created_databases:
-            outcomes = [safe_cleanup_database(clpctl, database) for database in reversed(created_databases)]
-            database_cleanup = (
-                "DATABASE_DELETE_REQUESTED"
-                if all(item == "DATABASE_DELETE_REQUESTED" for item in outcomes)
-                else "DATABASE_DELETE_PARTIAL_OR_UNVERIFIED"
+        # If a file swap or its rollback failed, the CloudPanel bootstrap
+        # recovery point is still present. Neither site:delete nor DB deletion
+        # is safe: preserve all transaction-owned files and metadata for a
+        # controlled, manual recovery instead of compounding partial failure.
+        recovery_protection_required = bool(
+            bootstrap_dir is not None and os.path.lexists(bootstrap_dir)
+        )
+        if recovery_protection_required:
+            cleanup_status = (
+                "DATABASE_DELETE_SKIPPED_RECOVERY_PROTECTION;"
+                "SITE_DELETE_SKIPPED_RECOVERY_PROTECTION"
             )
-        site_cleanup = safe_cleanup_site(clpctl, domain) if created else "SITE_DELETE_NOT_REQUIRED"
-        cleanup_status = f"{database_cleanup};{site_cleanup}"
+        else:
+            if evidence_created and evidence_root.is_dir() and not evidence_root.is_symlink():
+                shutil.rmtree(evidence_root, ignore_errors=True)
+
+            database_cleanup = "DATABASE_DELETE_NOT_REQUIRED"
+            if created_databases:
+                outcomes = [safe_cleanup_database(clpctl, database) for database in reversed(created_databases)]
+                database_cleanup = (
+                    "DATABASE_DELETE_REQUESTED"
+                    if all(item == "DATABASE_DELETE_REQUESTED" for item in outcomes)
+                    else "DATABASE_DELETE_PARTIAL_OR_UNVERIFIED"
+                )
+            site_cleanup = safe_cleanup_site(clpctl, domain) if created else "SITE_DELETE_NOT_REQUIRED"
+            cleanup_status = f"{database_cleanup};{site_cleanup}"
 
         reason = exc.__class__.__name__
         raise NewSiteRestoreError(
             f"new-site restore failed; stage={failure_stage}; cleanup={cleanup_status}; reason={reason}"
         ) from exc
     finally:
-        if staging and staging.exists():
+        if staging and staging.exists() and not recovery_protection_required:
             shutil.rmtree(staging, ignore_errors=True)
 
 

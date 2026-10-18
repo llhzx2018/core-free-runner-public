@@ -12,9 +12,31 @@ Historical / retained Machine evidence (exact source only):
 - `docs/evidence/P07_REAL_GATE_CLOSURE_20260906.md` — historical Real engineering closure for its exact older identities
 - `docs/evidence/P07_FULL_SERVER_MIGRATION_REAL_PRODUCTION_PASS_20261005.md` — current Owner real 16-site full-server migration Production closure on release68
 
-## Current release86 identity and acceptance · 2026-10-17
+## Current release87 identity and acceptance · 2026-10-17
 
-Release current comes from product `main/BUILD_ID=0.1.0-release86` and the live public Toolbox / immutable distribution. The earlier guided-init16 / release28–release69 rows below are **historical / exact-source evidence**, not a blanket claim about current release86 or a new MariaDB VPS.
+Product `main/BUILD_ID=0.1.0-release87`, public released `release87` with System Care `rc56`; release86 below is **historical**, not current.
+
+| Area | Released identity | Evidence | Acceptance |
+|---|---|---|---|
+| Public toolbox | V0.1.0; five menus / four modules | release87 published, Owner build-id/menu observed | **PUBLISHED / MACHINE_PASS / OWNER_VERSION_ONLY_PASS** |
+| Network Node | 0.1.0-rc13 | existing routed public installer | **PUBLIC_DISTRIBUTED / OWNER_RELEASE87_FLOW_NOT_RUN** |
+| VPS audit | V2.1.0 / rc7-field | existing pinned public script | **PUBLIC_DISTRIBUTED / OWNER_RELEASE87_FLOW_NOT_RUN** |
+| Slot 3 Website/Data | 0.1.0-release87 | security hardening + exact-source tests | **MACHINE_PASS / OWNER_FEATURES_PARTIAL** |
+| System Care | 0.1.0-rc56 | public smoke PASS; no separate Owner install readback | **PUBLIC_DISTRIBUTED / OWNER_INSTALLED_UNKNOWN** |
+| New-VPS MariaDB 10.11 | release87 | live initialize / database function | **NOT_RUN** |
+| MySQL/Percona → MariaDB | release87 | live migration/data equivalence | **NOT_RUN** |
+| Backup / Restore-As / scheduler | release87 | owner current-source operation | **NOT_RUN / HISTORICAL_SEPARATE** |
+| CloudPanel password CLI argv | release87 | exceptions scrubbed; OS process arguments remain | **PARTIAL_HARDENING / RESIDUAL_ARGV_RISK** |
+| 16-site whole-server migration | release68 | 2026-10-05 real old-engine path | **HISTORICAL_OWNER_REAL_PASS_FOR_EXACT_SOURCE** |
+| Exact-source machine | 669/669, 56 modules | [six jobs SUCCESS](https://github.com/llhzx2018/core-free-runner-public/actions/runs/39016204444) | **MACHINE_PASS / native-CI BLOCKED_INFRA_JOB_START** |
+| Formal distribution | release87 | [published workflow SUCCESS](https://github.com/llhzx2018/core-free-runner-public/actions/runs/39018906649) | **PUBLIC_DISTRIBUTION_PASS** |
+| Full Owner real | release87 | five visible menu entries | **PARTIAL / NOT_BLANKET_PASS** |
+
+No current machine proof transfers to MariaDB/Restore/Migration Owner real acceptance, nor authorizes DNS/old-server deletion. CloudPanel process-argument exposure is retained as residual risk.
+
+## Historical release86 identity and acceptance · 2026-10-17
+
+Release86 historical snapshot came from product `main/BUILD_ID=0.1.0-release86` and its then-current Toolbox / immutable distribution. The earlier guided-init16 / release28–release69 rows below are **historical / exact-source evidence**, not a blanket claim about current release86 or a new MariaDB VPS.
 
 | Area | Released identity | Acceptance scope | State |
 |---|---|---|---|

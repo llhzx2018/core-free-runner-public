@@ -128,6 +128,47 @@ class AutoBackupTests(unittest.TestCase):
             with self.assertRaises(auto_backup.AutoBackupError):
                 auto_backup.validate_config(cfg)
 
+    def test_configure_invalid_input_preserves_existing_config_and_no_new_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            original = self._write_config(root)
+            before = original.read_bytes()
+            arguments = {
+                "sites": ["example.com"],
+                "daily_at": "03:30",
+                "storage_config": str(root / "storage.json"),
+                "backup_dir": str(root / "backups"),
+                "keep_last": 1,
+            }
+            bad_cases = [
+                {"sites": ["not-a-domain"]},
+                {"daily_at": "25:99"},
+                {"keep_last": 0},
+                {"storage_config": "relative/path"},
+            ]
+            for invalid in bad_cases:
+                with self.subTest(invalid=invalid):
+                    with self.assertRaises(auto_backup.AutoBackupError):
+                        auto_backup.configure(original, **(arguments | invalid))
+                    self.assertEqual(original.read_bytes(), before,
+                                     "invalid settings must not damage active backup configuration")
+
+            fresh = root / "never-created.json"
+            with self.assertRaises(auto_backup.AutoBackupError):
+                auto_backup.configure(fresh, **(arguments | {"keep_last": 101}))
+            self.assertFalse(fresh.exists(), "invalid configuration must not be written")
+
+            result = auto_backup.configure(original, **arguments)
+            self.assertEqual(result["sites"], ["example.com"])
+            self.assertEqual(auto_backup.validate_config(original)["local_keep_last"], 1)
+
+    def test_invalid_utf8_config_returns_controlled_error(self):
+        with tempfile.TemporaryDirectory() as td:
+            config = Path(td) / "auto-backup.json"
+            config.write_bytes(bytes([255]))
+            with self.assertRaisesRegex(auto_backup.AutoBackupError, "invalid automatic-backup config"):
+                auto_backup.validate_config(config)
+
     def test_schedule_collision_recommends_stagger(self):
         with tempfile.TemporaryDirectory() as td:
             cron = Path(td) / "backup"
@@ -358,6 +399,34 @@ class AutoBackupTests(unittest.TestCase):
             self.assertFalse(old.exists())
             self.assertTrue(new.exists())
 
+
+    def test_prune_skips_invalid_utf8_backup_records_without_deletion(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            invalid = root / "corrupt-automatic"
+            invalid.mkdir()
+            manifest = invalid / "manifest.json"
+            verification = invalid / "verification.json"
+            valid_manifest = json.dumps({
+                "backup_kind": "automatic",
+                "backup_id": invalid.name,
+                "site": {"domain": "example.com"},
+            }).encode("utf-8")
+            valid_verification = b'{"status":"PASS"}'
+            for manifest_bytes, verification_bytes in (
+                (bytes([255]), valid_verification),
+                (valid_manifest, bytes([254])),
+            ):
+                with self.subTest(manifest_bytes=manifest_bytes):
+                    manifest.write_bytes(manifest_bytes)
+                    verification.write_bytes(verification_bytes)
+                    with mock.patch.object(auto_backup.package_engine, "verify_package") as verify:
+                        self.assertFalse(
+                            auto_backup._verified_automatic_for_domain(invalid, "example.com")
+                        )
+                        self.assertEqual(auto_backup.prune_local(root, "example.com", 1), [])
+                    verify.assert_not_called()
+                    self.assertTrue(invalid.is_dir(), "corrupt backup must be retained")
 
     def test_prune_skips_parseable_nonobject_backup_records(self):
         with tempfile.TemporaryDirectory() as td:

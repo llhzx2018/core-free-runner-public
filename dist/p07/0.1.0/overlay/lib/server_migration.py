@@ -1541,6 +1541,26 @@ def target_db_marker(mid: str, domain: str, database: str, index: int) -> Path:
     return target_tx_root(mid) / f"db-{token}.json"
 
 
+def read_target_ownership_marker(
+    marker: Path,
+    expected: dict[str, str],
+) -> dict[str, Any] | None:
+    """Require a valid private transaction ownership proof before any deletion."""
+    if not os.path.lexists(marker):
+        return None
+    if marker.is_symlink() or not marker.is_file():
+        raise ServerMigrationError("target transaction marker is unsafe")
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise ServerMigrationError("target transaction marker is unreadable") from None
+    if not isinstance(payload, dict) or any(
+        payload.get(key) != value for key, value in expected.items()
+    ):
+        raise ServerMigrationError("target transaction marker ownership is unverified")
+    return payload
+
+
 def target_site_creation_mismatches(
     source_site: dict[str, Any],
     target_site: dict[str, Any],
@@ -1613,7 +1633,10 @@ def target_create_site_local(mid: str, site_file: Path) -> dict[str, Any]:
     domain = str(site.get("domain", ""))
     site_root = Path(str(site.get("site_root", "")))
     marker = target_site_marker(mid, domain)
-    if marker.is_file():
+    ownership = read_target_ownership_marker(
+        marker, {"domain": domain, "created_by_migration": mid}
+    )
+    if ownership is not None:
         if not site_root.is_dir():
             raise ServerMigrationError(
                 "target site transaction marker exists but site root is missing"
@@ -1631,6 +1654,18 @@ def target_create_site_local(mid: str, site_file: Path) -> dict[str, Any]:
             "web_contract_mismatches": [],
             "secrets_emitted": False,
         }
+
+    # Read-only, fail-closed check on the actual target immediately before
+    # site:add. A previous failed attempt or unrelated existing site must
+    # never be re-created or removed by subsequent failure cleanup.
+    try:
+        site_lifecycle.ensure_domain_available(Path("/"), domain)
+    except site_lifecycle.SiteLifecycleError:
+        raise ServerMigrationError(
+            "target CloudPanel domain absence cannot be confirmed"
+        ) from None
+    if os.path.lexists(site_root):
+        raise ServerMigrationError("target site path already exists")
 
     try:
         restore_apply.run_clpctl("clpctl", restore_apply.site_add_args(site))
@@ -1674,21 +1709,16 @@ def target_create_database_local(
         raise ServerMigrationError("target database staging input is unavailable")
     marker = target_db_marker(migration_id_value, domain, database, index)
     created_now = False
-    if marker.is_file():
-        try:
-            private = json.loads(marker.read_text(encoding="utf-8"))
-            username = str(private["username"])
-            password = str(private["password"])
-            if (
-                str(private.get("domain")) != domain
-                or str(private.get("database")) != database
-                or str(private.get("created_by_migration")) != migration_id_value
-            ):
-                raise ServerMigrationError(
-                    "target database transaction marker ownership is inconsistent"
-                )
-        except (OSError, json.JSONDecodeError, KeyError) as exc:
-            raise ServerMigrationError("target database transaction marker is invalid") from exc
+    private = read_target_ownership_marker(
+        marker,
+        {"domain": domain, "database": database,
+         "created_by_migration": migration_id_value},
+    )
+    if private is not None:
+        username = private.get("username")
+        password = private.get("password")
+        if not isinstance(username, str) or not username or not isinstance(password, str) or not password:
+            raise ServerMigrationError("target database transaction credentials are invalid")
 
         # A previous import may have been interrupted after partially writing rows.
         # Because the private marker proves this database is owned by this migration,
@@ -1766,18 +1796,30 @@ def target_cleanup_site_local(
     domain: str,
     databases: list[str],
 ) -> dict[str, Any]:
-    db_ok = True
+    # Validate *all* ownership records before the first destructive call,
+    # so a forged, corrupt or foreign marker cannot cause partial deletion.
+    owned_databases: list[tuple[str, Path]] = []
     for index, database in enumerate(databases, 1):
         marker = target_db_marker(mid, domain, database, index)
-        if not marker.is_file():
-            continue
+        if read_target_ownership_marker(
+            marker,
+            {"domain": domain, "database": database,
+             "created_by_migration": mid},
+        ) is not None:
+            owned_databases.append((database, marker))
+    site_marker = target_site_marker(mid, domain)
+    owned_site = read_target_ownership_marker(
+        site_marker, {"domain": domain, "created_by_migration": mid}
+    ) is not None
+
+    db_ok = True
+    for database, marker in owned_databases:
         cleaned = site_lifecycle.cleanup_database(database, clpctl="clpctl")
         db_ok = cleaned and db_ok
         if cleaned:
             marker.unlink(missing_ok=True)
-    site_marker = target_site_marker(mid, domain)
     site_ok = True
-    if site_marker.is_file():
+    if owned_site:
         site_ok = site_lifecycle.cleanup_site(domain, clpctl="clpctl")
         if site_ok:
             site_marker.unlink(missing_ok=True)

@@ -543,6 +543,120 @@ class ServerMigrationAutomationTests(unittest.TestCase):
             saved = json.loads((state_root / result["migration_id"] / "state.json").read_text(encoding="utf-8"))
             self.assertEqual(saved["status"], "PREPARED")
 
+    def test_target_site_create_refuses_unverified_domain_before_clpctl(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            site = self.source_inventory()["sites"][0]
+            site_file = base / "site.json"
+            site_file.write_text(json.dumps(site), encoding="utf-8")
+            with mock.patch.object(engine, "STATE_ROOT", base / "state"), \
+                 mock.patch.object(
+                     engine.site_lifecycle, "ensure_domain_available",
+                     side_effect=engine.site_lifecycle.SiteLifecycleError(
+                         "CloudPanel site inventory cannot be verified")
+                 ), \
+                 mock.patch.object(engine.restore_apply, "run_clpctl") as clpctl, \
+                 mock.patch.object(engine.site_lifecycle, "cleanup_site") as cleanup:
+                with self.assertRaisesRegex(
+                    engine.ServerMigrationError, "absence cannot be confirmed"
+                ):
+                    engine.target_create_site_local("test-mid", site_file)
+                clpctl.assert_not_called()
+                cleanup.assert_not_called()
+
+    def test_target_site_create_refuses_unmarked_existing_site_path(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            site = self.source_inventory()["sites"][0]
+            site["site_root"] = str(base / "existing")
+            (base / "existing").mkdir()
+            site_file = base / "site.json"
+            site_file.write_text(json.dumps(site), encoding="utf-8")
+            with mock.patch.object(engine, "STATE_ROOT", base / "state"), \
+                 mock.patch.object(engine.site_lifecycle, "ensure_domain_available"), \
+                 mock.patch.object(engine.restore_apply, "run_clpctl") as clpctl, \
+                 mock.patch.object(engine.site_lifecycle, "cleanup_site") as cleanup:
+                with self.assertRaisesRegex(engine.ServerMigrationError,
+                                            "site path already exists"):
+                    engine.target_create_site_local("test-mid", site_file)
+                clpctl.assert_not_called()
+                cleanup.assert_not_called()
+
+    def test_target_cleanup_rejects_foreign_or_malformed_marker_before_any_delete(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            mid = "test-mid"
+            domain = "a.example.com"
+            for bad in (
+                {"domain": domain, "created_by_migration": "other-id"},
+                {"domain": "other.example.com", "created_by_migration": mid},
+                {},
+            ):
+                with self.subTest(bad=bad):
+                    with mock.patch.object(engine, "STATE_ROOT", base / "state"):
+                        site = engine.target_site_marker(mid, domain)
+                        site.write_text(json.dumps(bad), encoding="utf-8")
+                        with mock.patch.object(engine.site_lifecycle, "cleanup_site") as cleanup_site, \
+                             mock.patch.object(engine.site_lifecycle, "cleanup_database") as cleanup_db:
+                            with self.assertRaisesRegex(
+                                engine.ServerMigrationError,
+                                "ownership is unverified",
+                            ):
+                                engine.target_cleanup_site_local(mid, domain, ["db1"])
+                            cleanup_site.assert_not_called()
+                            cleanup_db.assert_not_called()
+
+    def test_target_cleanup_validates_all_database_markers_before_deleting_any(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            mid = "test-mid"
+            domain = "a.example.com"
+            with mock.patch.object(engine, "STATE_ROOT", base / "state"):
+                engine.atomic_private_json(
+                    engine.target_site_marker(mid, domain),
+                    {"domain": domain, "created_by_migration": mid}
+                )
+                engine.atomic_private_json(
+                    engine.target_db_marker(mid, domain, "db1", 1),
+                    {"domain": domain, "database": "db1",
+                     "created_by_migration": mid}
+                )
+                engine.atomic_private_json(
+                    engine.target_db_marker(mid, domain, "db2", 2),
+                    {"domain": domain, "database": "db2",
+                     "created_by_migration": "foreign"}
+                )
+                with mock.patch.object(engine.site_lifecycle, "cleanup_site") as site_delete, \
+                     mock.patch.object(engine.site_lifecycle, "cleanup_database") as db_delete:
+                    with self.assertRaisesRegex(
+                        engine.ServerMigrationError, "ownership is unverified"
+                    ):
+                        engine.target_cleanup_site_local(mid, domain, ["db1", "db2"])
+                    db_delete.assert_not_called()
+                    site_delete.assert_not_called()
+
+    def test_target_cleanup_with_owned_markers_cleans_only_transaction_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            mid = "test-mid"
+            domain = "a.example.com"
+            with mock.patch.object(engine, "STATE_ROOT", base / "state"):
+                site_marker = engine.target_site_marker(mid, domain)
+                db_marker = engine.target_db_marker(mid, domain, "db1", 1)
+                engine.atomic_private_json(site_marker, {
+                    "domain": domain, "created_by_migration": mid})
+                engine.atomic_private_json(db_marker, {
+                    "domain": domain, "database": "db1",
+                    "created_by_migration": mid})
+                with mock.patch.object(engine.site_lifecycle, "cleanup_site", return_value=True) as site_delete, \
+                     mock.patch.object(engine.site_lifecycle, "cleanup_database", return_value=True) as db_delete:
+                    result = engine.target_cleanup_site_local(mid, domain, ["db1"])
+                self.assertEqual(result["status"], "CLEANED")
+                db_delete.assert_called_once_with("db1", clpctl="clpctl")
+                site_delete.assert_called_once_with(domain, clpctl="clpctl")
+                self.assertFalse(site_marker.exists())
+                self.assertFalse(db_marker.exists())
+
     def test_target_database_transaction_marker_is_private_and_resumable(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

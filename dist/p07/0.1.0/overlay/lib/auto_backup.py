@@ -73,15 +73,14 @@ def _secret_paths(value: Any, prefix: str = "") -> list[str]:
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise AutoBackupError(f"invalid automatic-backup config: {path}") from exc
     if not isinstance(payload, dict) or payload.get("schema") != CONFIG_SCHEMA:
         raise AutoBackupError("unsupported automatic-backup config schema")
     return payload
 
 
-def validate_config(path: Path) -> dict[str, Any]:
-    payload = _read_json(path)
+def _validate_config_payload(payload: dict[str, Any]) -> dict[str, Any]:
     if _secret_paths(payload):
         raise AutoBackupError("automatic-backup config contains forbidden secret-like fields")
     sites = payload.get("sites")
@@ -120,6 +119,10 @@ def validate_config(path: Path) -> dict[str, Any]:
     }
 
 
+def validate_config(path: Path) -> dict[str, Any]:
+    return _validate_config_payload(_read_json(path))
+
+
 def _atomic_json(path: Path, payload: dict[str, Any], mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     os.chmod(path.parent, 0o700)
@@ -135,7 +138,7 @@ def _atomic_json(path: Path, payload: dict[str, Any], mode: int = 0o600) -> None
 
 
 def configure(config_path: Path, sites: list[str], daily_at: str, storage_config: str, backup_dir: str, keep_last: int) -> dict[str, Any]:
-    _atomic_json(config_path, {
+    payload = {
         "schema": CONFIG_SCHEMA,
         "enabled": True,
         "sites": sites,
@@ -146,8 +149,12 @@ def configure(config_path: Path, sites: list[str], daily_at: str, storage_config
         "remote_targets": list(REMOTE_TARGETS),
         "local_keep_last": keep_last,
         "manual_backups_protected": True,
-    })
-    return validate_config(config_path)
+    }
+    # Never replace a working scheduled-backup configuration with an invalid
+    # replacement. Validation must finish before the first filesystem write.
+    checked = _validate_config_payload(payload)
+    _atomic_json(config_path, payload)
+    return checked
 
 
 def storage_structure(config: dict[str, Any]) -> dict[str, Any]:
@@ -295,7 +302,9 @@ def _verified_automatic_for_domain(path: Path, domain: str) -> bool:
     try:
         manifest = json.loads((path / "manifest.json").read_text(encoding="utf-8"))
         verification = json.loads((path / "verification.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        # A corrupt UTF-8 manifest or verification record is untrusted data,
+        # not a reason to abort the automatic job or delete other backups.
         return False
     # Malformed but parseable JSON must never crash retention or authorize a
     # deletion. The historical verification record is not current proof.

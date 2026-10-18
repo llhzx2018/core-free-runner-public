@@ -90,6 +90,12 @@ def validate_file(path: str | Path, label: str) -> str:
     return str(candidate)
 
 
+def _safe_operation_label(value: str) -> str:
+    # Diagnostic labels are not arbitrary command text. No password flags,
+    # embedded arguments or control characters may reach exception messages.
+    return value if re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_:-]{0,63}", value) else "unknown"
+
+
 def run(
     args: Sequence[str],
     *,
@@ -100,7 +106,7 @@ def run(
     if not args:
         raise ValueError("CloudPanel command is required")
     command = [_scalar(clpctl, "clpctl"), *[_scalar(item, "argument") for item in args]]
-    op = operation or args[0]
+    op = _safe_operation_label(operation or args[0])
     env = os.environ.copy()
     # CloudPanel database import/export authorization resolves the caller from
     # SUDO_USER. A direct root shell commonly has no SUDO_USER, which can make
@@ -116,10 +122,10 @@ def run(
             timeout=timeout,
             env=env,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        # TimeoutExpired embeds its argv command, including CloudPanel's
-        # mandatory --password flags. Never chain the original exception into
-        # an error that might be rendered by a CLI or troubleshooting report.
+    except (OSError, subprocess.SubprocessError, UnicodeError):
+        # Some SubprocessError classes embed argv, stdout or stderr; decode
+        # exceptions can embed raw output bytes. All may contain passwords.
+        # Never chain any of these exceptions into diagnostics.
         raise CloudPanelError(op) from None
     if proc.returncode != 0:
         # Never include stderr/stdout in the raised exception: CloudPanel commands can

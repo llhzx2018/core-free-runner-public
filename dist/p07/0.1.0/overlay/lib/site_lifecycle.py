@@ -9,7 +9,7 @@ import secrets
 from typing import Any
 
 import cloudpanel
-import inventory
+import restore as restore_plan
 
 
 class SiteLifecycleError(RuntimeError):
@@ -61,14 +61,15 @@ def derive_database_identity(domain: str, seed: str, index: int) -> tuple[str, s
 def find_site(root: Path, domain: str) -> dict[str, Any] | None:
     domain = cloudpanel.validate_domain(domain)
     try:
-        manifest = inventory.build_manifest(root.resolve())
-    except Exception as exc:
-        raise SiteLifecycleError("CloudPanel inventory is unavailable") from exc
-    for site in manifest.get("sites", []):
-        if not isinstance(site, dict):
-            continue
-        domains = site.get("domains", []) if isinstance(site.get("domains"), list) else []
-        if site.get("domain") == domain or domain in domains:
+        sites = restore_plan.trusted_target_sites(root.resolve())
+    except restore_plan.RestorePlanError:
+        # Inventory exceptions may include internal/credential-bearing content;
+        # never expose their context through the site-creation preflight.
+        raise SiteLifecycleError("CloudPanel site inventory cannot be verified") from None
+    for site in sites:
+        if site["domain"].casefold() == domain or any(
+            name.casefold() == domain for name in site["domains"]
+        ):
             return site
     return None
 
