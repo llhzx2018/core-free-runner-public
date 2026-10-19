@@ -32,9 +32,10 @@ const { chromium } = require('playwright');
       for (const key of ['section_intro','tool_body','faq_body','steps_body']) {
         if (check.sizes[key] !== 16) throw new Error(route + ' ' + key + ' expected 16px got ' + check.sizes[key]);
       }
-      for (const key of ['footer_intro','footer_link']) {
+      for (const key of ['footer_intro']) {
         if (check.sizes[key] !== 15) throw new Error(route + ' ' + key + ' expected 15px got ' + check.sizes[key]);
       }
+      if (check.sizes.footer_link !== 14) throw new Error(route + ' preserved footer link contract expected 14px got ' + check.sizes.footer_link);
       if (check.viewportOverflow) throw new Error(route + ' desktop horizontal overflow');
       if (check.cards !== 6) throw new Error(route + ' homepage expected 6 tools got ' + check.cards);
       if (!check.title || !check.h1) throw new Error(route + ' title/h1 missing');
