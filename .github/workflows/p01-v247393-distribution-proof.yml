@@ -1,0 +1,106 @@
+name: P01 V2.47.393 exact distribution proof (temporary)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247393-distribution-proof.yml'
+permissions:
+  contents: read
+jobs:
+  verify-distribution:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact core-updates HEAD into transient runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/core-updates
+          ref: 972090d8fa197b5adc10d327267c2481b609441b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Setup PHP and required extensions
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, mbstring
+          coverage: none
+
+      - name: Exact source and all manifest contract validation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "972090d8fa197b5adc10d327267c2481b609441b"
+          python3 scripts/check_manifest_contract.py >/tmp/p01-manifest-audit.json
+          python3 - <<'PY'
+          import json
+          audit=json.load(open('/tmp/p01-manifest-audit.json'))
+          assert audit['status']=='PASS', audit
+          assert any(row['path']=='projects/P01.json' and not row['failures'] for row in audit['results'])
+          m=json.load(open('projects/P01.json',encoding='utf-8'))
+          assert m['project_id']=='P01' and m['component_id']=='APP'
+          assert m['current_version']=='2.47.391' and m['target_version']=='2.47.393'
+          assert m['from_versions']==['2.47.391'] and m['update_type']=='ATOMIC'
+          assert m['schema_from']==m['schema_to']=='2026090401'
+          assert m['product_identity']=='bc0aa01688d7c1b92df6b3df8ed427d23108d7e8'
+          assert m['release_id']==417366736 and m['release_tag']=='v2.47.393'
+          assert m['asset_name']=='VF_Start_V2.47.393_UPDATE.zip'
+          assert m['asset_bytes']==2585856
+          assert m['asset_sha256']=='303d87ad0afa5803b4a505fb143b9982f69bae79d610d7c983b433aeb0224c68'
+          assert m['backup_required'] is True and m['rollback_supported'] is True
+          print('P01_DISTRIBUTION_MANIFEST_CONTRACT=PASS')
+          PY
+
+      - name: Native PHP Update Core and exact discovery allowlist
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find update-core/php -name '*.php' -type f -print0 | xargs -0 -n1 php -l >/dev/null
+          php update-core/php/tests/run.php >/tmp/p01-update-core-tests.log
+          php -r '
+            require "update-core/php/src/UpdateCore.php";
+            $m=json_decode(file_get_contents("projects/P01.json"),true,512,JSON_THROW_ON_ERROR);
+            $c=new \CoreUpdates\UpdateCore("P01","APP");
+            $tests=[
+              ["2.47.391","2026090401","AVAILABLE"],
+              ["2.47.390","2026090401","BLOCKED_SOURCE_VERSION"],
+              ["2.47.391","2026090400","BLOCKED_SCHEMA"],
+              ["2.47.393","2026090401","UP_TO_DATE"],
+            ];
+            foreach($tests as [$version,$schema,$expected]){
+              $r=$c->check($version,$schema,$m);
+              if(($r["status"]??"")!==$expected){fwrite(STDERR,"Update Core result mismatch for $version/$schema\n");exit(1);}
+            }
+            echo "P01_V247391_TO_V247393_DISCOVERY_CONTRACT=PASS\n";
+          '
+          echo 'P01_UPDATE_CORE_NATIVE_REGRESSION=PASS'
+
+      - name: Cross-check exact GitHub Release and downloaded asset bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.47.393 > /tmp/p01-release.json
+          mkdir -p "$RUNNER_TEMP/p01-asset"
+          gh release download v2.47.393 -R llhzx2018/vf-start -D "$RUNNER_TEMP/p01-asset" -p VF_Start_V2.47.393_UPDATE.zip
+          python3 - <<'PY'
+          import json,hashlib,os,pathlib
+          m=json.load(open('projects/P01.json',encoding='utf-8'))
+          r=json.load(open('/tmp/p01-release.json'))
+          assert r['id']==m['release_id'] and r['tag_name']==m['release_tag']
+          assert not r['draft'] and not r['prerelease']
+          matches=[a for a in r['assets'] if a['name']==m['asset_name']]
+          assert len(matches)==1
+          a=matches[0]
+          assert a['size']==m['asset_bytes']
+          assert a['digest']=='sha256:'+m['asset_sha256']
+          f=pathlib.Path(os.environ['RUNNER_TEMP'])/'p01-asset'/m['asset_name']
+          assert f.stat().st_size==m['asset_bytes']
+          assert hashlib.sha256(f.read_bytes()).hexdigest()==m['asset_sha256']
+          print('P01_V247393_RELEASE_ASSET_FINAL_BYTES_SHA256=PASS')
+          PY
+          rm -f "$RUNNER_TEMP/p01-asset/VF_Start_V2.47.393_UPDATE.zip"
+          echo 'P01_V247393_PUBLIC_RUNNER_DISTRIBUTION_PROOF=PASS'
