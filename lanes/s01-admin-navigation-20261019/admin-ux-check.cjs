@@ -2,7 +2,7 @@ const {chromium}=require('playwright');
 const fs=require('fs');
 (async()=>{
  const browser=await chromium.launch();const checks=[],pages=[];let complete=false;
- const check=(id,ok,detail)=>{checks.push({id,ok:!!ok,detail});if(!ok)throw Error(id+': '+JSON.stringify(detail));};
+ const check=(id,ok,detail)=>{checks.push({id,ok:!!ok,detail});if(!ok)console.error('FAILED_CHECK',id,JSON.stringify(detail));};
  try{
   const page=await browser.newPage({viewport:{width:1440,height:1000}});
   const errors=[];page.on('pageerror',e=>errors.push(e.message));
@@ -52,6 +52,6 @@ const fs=require('fs');
    check(tab+'-unsaved-retained',JSON.stringify(before)===JSON.stringify(await formState()),await field.inputValue());
    page.once('dialog',d=>d.accept());
   }
-  check('no-browser-errors',errors.length===0,errors);complete=true;
+  check('no-browser-errors',errors.length===0,errors);complete=true;if(checks.some(c=>!c.ok))throw Error(JSON.stringify(checks.filter(c=>!c.ok)));
  }finally{fs.writeFileSync('proof/admin-ux-check.json',JSON.stringify({status:complete&&checks.every(c=>c.ok)?'PASS':'FAIL',complete,checks,pages,scope:'8 Theme backoffice page bodies, two desktop widths; no Production or mobile acceptance'},null,2));await browser.close();}
 })().catch(e=>{console.error(e);process.exit(1)});
