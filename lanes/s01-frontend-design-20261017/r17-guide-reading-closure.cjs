@@ -14,7 +14,7 @@ const cases=JSON.parse(fs.readFileSync('proof/cases.json','utf8')).cases;
     const authored=[...document.querySelectorAll('.vf-reading-article h2')].map(n=>n.textContent.trim());
     const actual=[...document.querySelectorAll('.vf-reading-toc a[href^="#"],.vf-reading-section-index a[href^="#"]')].map(n=>n.getAttribute('href'));
     const relatedTools=document.querySelectorAll('.vf-reading-related-tools a[href]').length;
-    const genericCta=[...document.querySelectorAll('.vf-theme-module-frame--cta a[href]')].filter(a=>/^\\/(?:zh\\/)?tools\\/$/.test(new URL(a.href).pathname)).length;
+    const genericCta=[...document.querySelectorAll('.vf-theme-module-frame--cta a[href]')].filter(a=>['/tools/','/zh/tools/'].includes(new URL(a.href).pathname)).length;
     return {h1:document.querySelectorAll('main h1').length,authorFAQ:authored.some(x=>/^(FAQ|常见问题)$/.test(x)),authorWorkflow:authored.some(x=>/^(Recommended workflow|建议检查顺序)$/.test(x)),
       tocLinks:actual.length,badTOC:actual.filter(h=>!document.getElementById(decodeURIComponent(h.slice(1)))),
       tocOverflow:css?.overflowY||null,tocMaxHeight:css?.maxHeight||null,
