@@ -1,5 +1,7 @@
 <?php
 if (!defined('ABSPATH')) { exit(1); }
+// The module is lazy-loaded during template rendering, so load its definition explicitly for WP-CLI fixture tests.
+if (!function_exists('vf_theme_guide_task_key')) { require_once get_template_directory() . '/inc/modules/module-post-list.php'; }
 $cases = [
  ['what-is-m3u8','What Is M3U8? A Practical Guide to HLS Playlists','start'],
  ['hls-streaming-guide','HLS Streaming Guide: How M3U8 Playlists Work in Browsers','start'],
