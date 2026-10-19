@@ -10,11 +10,11 @@ const cases=JSON.parse(fs.readFileSync('proof/cases.json','utf8')).cases;
    await page.setViewportSize({width,height:900});
    const response=await page.goto(cases[lang].guide_detail,{waitUntil:'networkidle'});
    const v=await page.evaluate(()=>{
-    const el=document.querySelector('.vf-reading-toc nav'),css=el?getComputedStyle(el):null;
+    const el=document.querySelector('.vf-reading-toc nav')||document.querySelector('.vf-reading-section-index'),css=el?getComputedStyle(el):null;
     const authored=[...document.querySelectorAll('.vf-reading-article h2')].map(n=>n.textContent.trim());
-    const actual=[...document.querySelectorAll('.vf-reading-toc a[href^="#"]')].map(n=>n.getAttribute('href'));
+    const actual=[...document.querySelectorAll('.vf-reading-toc a[href^="#"],.vf-reading-section-index a[href^="#"]')].map(n=>n.getAttribute('href'));
     const relatedTools=document.querySelectorAll('.vf-reading-related-tools a[href]').length;
-    const genericCta=[...document.querySelectorAll('.vf-theme-module-frame--cta a[href]')].filter(a=>new URL(a.href).pathname==='/tools/').length;
+    const genericCta=[...document.querySelectorAll('.vf-theme-module-frame--cta a[href]')].filter(a=>/^\\/(?:zh\\/)?tools\\/$/.test(new URL(a.href).pathname)).length;
     return {h1:document.querySelectorAll('main h1').length,authorFAQ:authored.some(x=>/^(FAQ|常见问题)$/.test(x)),authorWorkflow:authored.some(x=>/^(Recommended workflow|建议检查顺序)$/.test(x)),
       tocLinks:actual.length,badTOC:actual.filter(h=>!document.getElementById(decodeURIComponent(h.slice(1)))),
       tocOverflow:css?.overflowY||null,tocMaxHeight:css?.maxHeight||null,
@@ -31,7 +31,7 @@ const cases=JSON.parse(fs.readFileSync('proof/cases.json','utf8')).cases;
    const item={lang,width,status:response.status(),pass,...v};
    checks.push(item);
    if(!pass)throw Error('GUIDE_READING_139_FAIL '+JSON.stringify(item));
-   await page.locator('.vf-reading-toc a[href^="#"]').first().click();
+   await page.locator('.vf-reading-toc a[href^="#"],.vf-reading-section-index a[href^="#"]').first().click();
    if(!new URL(page.url()).hash)throw Error('Guide TOC activation failed '+lang+' '+width);
   }
   fs.writeFileSync('proof/guide-reading-v135139.json',JSON.stringify({status:'PASS',checks,source:'SYNTHETIC_WORDPRESS_MARIADB_CHROMIUM',mobile:'DEFERRED'},null,2));
