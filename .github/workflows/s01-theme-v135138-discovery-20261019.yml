@@ -1,0 +1,104 @@
+name: S01-C01 v1.35.138 WordPress native discovery main
+on:
+  push:
+    branches: [task/s01-guide-detail-v135138-20261019]
+    paths: ['.github/workflows/s01-theme-v135138-discovery-20261019.yml']
+permissions:
+  contents: read
+jobs:
+  discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    steps:
+      - name: Retrieve private old release and candidate manifest
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh release download v1.35.137 --repo llhzx2018/vf-tools-theme --pattern vf-tools-theme_V1.35.137.zip
+          echo 'dd49714fe58028837f2ae079e90a14a473a1d02f6ed2221383d7b992f710fc60  vf-tools-theme_V1.35.137.zip' | sha256sum -c
+          gh api repos/llhzx2018/core-updates/contents/projects/S01-C01.json?ref=main --jq .content | base64 -d > manifest.json
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: updates
+      - name: Core-updates manifest Schema and exact private Release identity
+        run: |
+          set -Eeuo pipefail
+          (cd updates && python3 scripts/check_manifest_contract.py)
+          python3 - <<'PY'
+          import json
+          m=json.load(open('manifest.json'))
+          assert m['target_version']=='1.35.138'
+          assert m['release_tag']=='v1.35.138'
+          assert m['asset_name']=='vf-tools-theme_V1.35.138.zip'
+          assert m['asset_bytes']==1953931
+          assert m['asset_sha256']=='986eea087832d8817501ebfbd5b18f2e96b3b4de13781baa91fe340c61bae7bb'
+          assert m['runtime_files']==476 and '1.35.137' in m['from_versions']
+          assert 'runtime_fingerprint' not in m
+          print('V135138_CORE_UPDATES_MAIN_SCHEMA=PASS')
+          PY
+      - name: Verify candidate discoverability on real WordPress theme update transient
+        run: |
+          set -Eeuo pipefail
+          docker run -d --name s01-discovery-db -e MARIADB_ROOT_PASSWORD=synthetic -e MARIADB_DATABASE=wordpress -e MARIADB_USER=wp -e MARIADB_PASSWORD=synthetic mariadb:11.8.8
+          docker run -d --name s01-discovery-wp --link s01-discovery-db:db -e WORDPRESS_DB_HOST=db -e WORDPRESS_DB_USER=wp -e WORDPRESS_DB_PASSWORD=synthetic -e WORDPRESS_DB_NAME=wordpress wordpress:7.1.2-php8.3-apache
+          for i in $(seq 1 80); do docker exec s01-discovery-db mariadb-admin ping -uroot -psynthetic --silent >/dev/null 2>&1 && break; sleep 2; done
+          curl -fsSLo wp.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          docker cp wp.phar s01-discovery-wp:/usr/local/bin/wp
+          docker cp vf-tools-theme_V1.35.137.zip s01-discovery-wp:/tmp/old.zip
+          wp(){ docker exec --user www-data s01-discovery-wp php /usr/local/bin/wp "$@" --path=/var/www/html; }
+          for i in $(seq 1 80); do if docker exec s01-discovery-wp sh -c 'test -s /var/www/html/wp-config.php && grep -q "wp-settings.php" /var/www/html/wp-config.php' >/dev/null 2>&1; then break; fi; sleep 2; done
+          docker exec s01-discovery-wp sh -c 'test -s /var/www/html/wp-config.php && grep -q "wp-settings.php" /var/www/html/wp-config.php'
+          wp core install --url=http://example.test --title=Synthetic --admin_user=admin --admin_password=synthetic-test-only --admin_email=synthetic@example.invalid --skip-email
+          wp theme install /tmp/old.zip --activate
+          python3 - <<'PY'
+          import json
+          m=json.load(open('manifest.json'))
+          assert m['target_version']=='1.35.138' and m['package_slug']=='vf-tools-theme'
+          # Explicitly do not claim WordPress native updater discovery until the real registered updater is invoked.
+          print('CANDIDATE_MANIFEST_DISCOVERY_PRECONDITION=PASS')
+          PY
+          wp theme get vf-tools-theme --field=version | grep -qx '1.35.137'
+          echo 'WORDPRESS_137_INSTALLED=PASS'
+          cat > native-discovery.php <<'PHP'
+          <?php
+          $manifest=json_decode(file_get_contents('/tmp/manifest.json'),true,512,JSON_THROW_ON_ERROR);
+          if (!is_array($manifest)) { throw new RuntimeException('no candidate manifest'); }
+          update_option('vf_private_update_credential_v1','synthetic_read_only_credential_123456789',false);
+          add_filter('pre_http_request',static function($pre,$args,$url) use ($manifest) {
+              if (str_contains($url,'/contents/projects/S01-C01.json')) {
+                  return ['headers'=>[],'body'=>json_encode($manifest),'response'=>['code'=>200,'message'=>'OK'],'cookies'=>[],'filename'=>null];
+              }
+              if (str_contains($url,'/releases/tags/v1.35.138')) {
+                  $release=['tag_name'=>'v1.35.138','assets'=>[['name'=>'vf-tools-theme_V1.35.138.zip','size'=>1953931,'url'=>'https://api.github.com/repos/llhzx2018/vf-tools-theme/releases/assets/655475194']]];
+                  return ['headers'=>[],'body'=>json_encode($release),'response'=>['code'=>200,'message'=>'OK'],'cookies'=>[],'filename'=>null];
+              }
+              return $pre;
+          },10,3);
+          delete_site_transient('vf_s01_c01_update_manifest_v1');
+          delete_site_transient('update_themes');
+          wp_update_themes();
+          $t=get_site_transient('update_themes');
+          $offer=$t->response['vf-tools-theme']??null;
+          if (!is_array($offer) || ($offer['new_version']??'')!=='1.35.138') {
+              $st=get_option('vf_s01_c01_update_status_v1',[]);
+              throw new RuntimeException('native update not registered: '.json_encode(['offer'=>$offer,'state'=>$st]));
+          }
+          $status=get_option('vf_s01_c01_update_status_v1',[]);
+          if (($status['state']??'')!=='UPDATE_AVAILABLE') { throw new RuntimeException('missing native state'); }
+          echo 'REAL_WORDPRESS_NATIVE_UPDATE_TRANSIENT=PASS'.PHP_EOL;
+          PHP
+          docker cp manifest.json s01-discovery-wp:/tmp/manifest.json
+          docker cp native-discovery.php s01-discovery-wp:/tmp/native-discovery.php
+          wp eval-file /tmp/native-discovery.php
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f s01-discovery-wp s01-discovery-db >/dev/null 2>&1 || true
+          rm -rf updates
+          rm -f vf-tools-theme_V1.35.137.zip wp.phar manifest.json native-discovery.php
