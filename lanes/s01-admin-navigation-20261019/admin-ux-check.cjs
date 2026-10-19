@@ -32,7 +32,7 @@ const fs=require('fs');
     await page.goto(base+tab,{waitUntil:'networkidle'});
     const metrics=await page.evaluate(()=>({height:document.documentElement.scrollHeight,overflow:document.documentElement.scrollWidth>innerWidth+1}));
     check(id+'-no-overflow',!metrics.overflow,metrics);
-    if(tab==='layout')check(id+'-compact-directory',metrics.height<(width===1440?6000:7300),metrics);
+    if(tab==='layout'){check(id+'-compact-directory',metrics.height<(width===1440?6000:7300),metrics);if(width===1024)check(id+'-intro-alignment',await page.locator('.vf-frontend-pages__intro').evaluate(e=>getComputedStyle(e).alignItems)==='stretch','Narrow desktop intro must align to content edge');}
     if(tab==='overview')check(id+'-preview-entry',new URL(await page.locator('.vf-overview-check-entry a').getAttribute('href')).searchParams.get('tab')==='preview',await page.locator('.vf-overview-check-entry a').getAttribute('href'));
     pages.push({tab,width,entries:options,...metrics});
     await page.screenshot({path:`proof/admin-ux-${tab}-${width}.png`,fullPage:true});
