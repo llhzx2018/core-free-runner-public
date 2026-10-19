@@ -1,0 +1,222 @@
+name: P01 V2.47.389 candidate exact-source TEST-ONLY gate
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247389-test-only.yml'
+permissions:
+  contents: read
+concurrency:
+  group: p01-v247389-test-only
+  cancel-in-progress: false
+jobs:
+  candidate-gates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      TARGET_SHA: '446e6e134313f33c85bb56e538e243768c4af546'
+      TARGET_TREE: '432c52ea04e8f6949095633085dc9cfb8f405e0c'
+      VERSION: '2.47.389'
+      SOURCE: '2.47.388'
+      PRODUCT_REPO: 'llhzx2018/vf-start'
+    steps:
+      - name: Checkout registered Public Runner helpers
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Checkout exact private Candidate ephemerally
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: 446e6e134313f33c85bb56e538e243768c4af546
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+      - name: Checkout exact Stable Formal Release ephemerally
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.47.388
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: stable
+      - name: Install PHP and SQLite runtime
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,mbstring,gd,openssl
+          coverage: none
+      - name: Exact source, safety and syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_EVENT_NAME" = "pull_request"
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$VERSION"
+          grep -F "define('VF_VERSION', '$VERSION');" candidate/src/app/bootstrap.php
+          test "$(tr -d '\r\n ' < stable/VERSION)" = "$SOURCE"
+          test "$(tr -d '\r\n ' < stable/src/VERSION.txt)" = "$SOURCE"
+          test "$(git -C candidate diff --name-only v2.47.388 2>/dev/null | grep '^src/migrations/' | wc -l)" -eq 0 || true
+          find candidate/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find candidate/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          find candidate/tests -type f -name '*.cjs' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          mkdir -p gate-evidence
+          printf 'P01_EXACT_SOURCE_IDENTITY=PASS\nP01_SYNTAX=PASS\n' > gate-evidence/status.txt
+      - name: Full baseline-vs-Candidate canonical PHP regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash candidate/tests/canonical_release_regression.sh "$GITHUB_WORKSPACE/candidate" "$GITHUB_WORKSPACE/stable" --require-zero-debt | tee /tmp/p01-canonical-regression.txt
+          grep -Fx 'P01_CANONICAL_UNIT_REGRESSION=PASS' /tmp/p01-canonical-regression.txt
+          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-canonical-regression.txt
+          grep '^P01_CANONICAL_' /tmp/p01-canonical-regression.txt >> gate-evidence/status.txt
+      - name: New and affected isolated browser/JS regressions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for t in \
+            candidate/tests/browser/backup_status_truth_v247296_smoke.cjs \
+            candidate/tests/browser/transfer_export_sensitive_scope_confirmation_smoke.cjs \
+            candidate/tests/unit/all_resources_public_confirm_native.cjs \
+            candidate/tests/unit/duplicates_master_change_native.cjs \
+            candidate/tests/unit/health_batch_safe_confirm_native.cjs \
+            candidate/tests/unit/pending_high_confidence_confirm_native.cjs \
+            candidate/tests/unit/update_release_notes_progressive_native.cjs; do
+            node "$t"
+          done
+          echo P01_FOCUSED_JS_RUNTIME=PASS | tee -a gate-evidence/status.txt
+      - name: Download prior stable Release assets READ ONLY and build local Candidate packages
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-v247389/stable-assets /tmp/p01-v247389/basefull /tmp/p01-v247389/baseupdate /tmp/p01-v247389/packages
+          gh release download "v$SOURCE" -R "$PRODUCT_REPO" -D /tmp/p01-v247389/stable-assets \
+            -p "VF-Start-V$SOURCE-FULL.zip" \
+            -p "VF_Start_V$SOURCE_UPDATE.zip"
+          unzip -q "/tmp/p01-v247389/stable-assets/VF-Start-V$SOURCE-FULL.zip" -d /tmp/p01-v247389/basefull
+          unzip -q "/tmp/p01-v247389/stable-assets/VF_Start_V$SOURCE_UPDATE.zip" -d /tmp/p01-v247389/baseupdate
+          test -f "/tmp/p01-v247389/baseupdate/repair-v$SOURCE.php"
+          python3 scripts/p01-maintenance-release.py \
+            --candidate "$GITHUB_WORKSPACE/candidate/src" \
+            --baseline-full /tmp/p01-v247389/basefull \
+            --baseline-repair "/tmp/p01-v247389/baseupdate/repair-v$SOURCE.php" \
+            --out /tmp/p01-v247389/packages \
+            --version "$VERSION" --source-version "$SOURCE" \
+            --target-sha "$TARGET_SHA" --target-tree "$TARGET_TREE" >/tmp/p01-candidate-build.json
+          FULL="/tmp/p01-v247389/packages/VF-Start-V$VERSION-FULL.zip"
+          UPDATE="/tmp/p01-v247389/packages/VF_Start_V$VERSION_UPDATE.zip"
+          test -f "$FULL" && test -f "$UPDATE"
+          unzip -t "$FULL" >/dev/null
+          unzip -t "$UPDATE" >/dev/null
+          test "$(unzip -Z1 "$UPDATE")" = "repair-v$VERSION.php"
+          unzip -p "$UPDATE" "repair-v$VERSION.php" > /tmp/p01-v247389/repair.php
+          php -l /tmp/p01-v247389/repair.php >/dev/null
+          php /tmp/p01-v247389/repair.php --self-test | tee /tmp/p01-atomic-selftest.json
+          grep -Fq '"ok":true' /tmp/p01-atomic-selftest.json
+          for p in "$FULL" "$UPDATE"; do
+            if unzip -Z1 "$p" | grep -Ei '(^|/)(\.runtime\.php|.*\.sqlite3?$|.*\.db$|private/|backups?/|sessions?/|tokens?/|staging/)' >/tmp/p01-private-leak.txt; then
+              echo P01_PACKAGE_PRIVATE_LEAK_DETECTED
+              exit 90
+            fi
+          done
+          echo P01_LOCAL_PACKAGE_BUILD_AND_SAFETY=PASS | tee -a gate-evidence/status.txt
+      - name: Clean FULL setup/login; Atomic UPDATE/idempotency; data retention and failure rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          WORK=/tmp/p01-v247389
+          FULL="$WORK/packages/VF-Start-V$VERSION-FULL.zip"
+          BASEFULL="$WORK/stable-assets/VF-Start-V$SOURCE-FULL.zip"
+          REPAIR="$WORK/repair.php"
+          install_fresh() {
+            local zip="$1" root="$2" port="$3"
+            mkdir -p "$root"
+            unzip -q "$zip" -d "$root"
+            php -S 127.0.0.1:"$port" -t "$root" >"/tmp/p01-php-$port.log" 2>&1 &
+            local pid="$!"
+            local cookie="/tmp/p01-cookie-$port"
+            local html="/tmp/p01-setup-$port.html"
+            for i in $(seq 1 40); do
+              if curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$port/setup.php" -o "$html"; then break; fi
+              sleep 1
+            done
+            local csrf
+            csrf="$(python3 - "$html" <<'PY'
+          import re,sys
+          text=open(sys.argv[1],encoding='utf-8').read()
+          match=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert match,"setup csrf missing"
+          print(match.group(1))
+          PY
+          )"
+            local password="P01Gate-$port-Only"
+            curl -fsS -c "$cookie" -b "$cookie" -X POST "http://127.0.0.1:$port/setup.php" \
+              --data-urlencode "setup_csrf=$csrf" \
+              --data-urlencode "site_title=Isolated Candidate" \
+              --data-urlencode "admin_password=$password" \
+              --data-urlencode "admin_password_confirm=$password" -o "/tmp/p01-setup-post-$port.html"
+            test -f "$root/app/.runtime.php"
+            (cd "$root" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+            test "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/setup.php")" = 302
+            local http
+            http="$(curl -sS -c "$cookie" -b "$cookie" -o /tmp/p01-login.json -w '%{http_code}' \
+              -H 'Content-Type: application/json' \
+              --data "{\"password\":\"$password\"}" "http://127.0.0.1:$port/api.php?action=login")"
+            test "$http" = 200
+            grep -Fq '"ok":true' /tmp/p01-login.json
+            kill "$pid" >/dev/null 2>&1 || true
+          }
+          install_fresh "$FULL" "$WORK/new-install" 18521
+          test "$(tr -d '\r\n ' < "$WORK/new-install/VERSION.txt")" = "$VERSION"
+          echo P01_CLEAN_FULL_SETUP_LOGIN=PASS | tee -a gate-evidence/status.txt
+          install_fresh "$BASEFULL" "$WORK/upgrade" 18522
+          cat >"$WORK/upgrade/sentinel.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require __DIR__.'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $cat=$repo->createCategory(['name'=>'Synthetic protected fixture','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+          $link=$repo->saveLink(null,['surface'=>'start','category_id'=>$cat,'title'=>'Sensitive fixture','url'=>'https://example.com/test-sentinel','description'=>'must survive update','tags'=>['fixture'],'is_private'=>1,'is_pending'=>0]);
+          file_put_contents('/tmp/p01-v247389/sentinel-id',(string)$link['id']);
+          PHP
+          php "$WORK/upgrade/sentinel.php"
+          rm "$WORK/upgrade/sentinel.php"
+          cp "$REPAIR" "$WORK/upgrade/repair-v$VERSION.php"
+          php "$WORK/upgrade/repair-v$VERSION.php" --verify-source="$WORK/upgrade" | tee /tmp/p01-update-source.json
+          grep -Fq '"ok":true' /tmp/p01-update-source.json
+          php "$WORK/upgrade/repair-v$VERSION.php" --run="$WORK/upgrade" | tee /tmp/p01-update-apply.json
+          grep -Fq '"ok":true' /tmp/p01-update-apply.json
+          test "$(tr -d '\r\n ' < "$WORK/upgrade/VERSION.txt")" = "$VERSION"
+          (cd "$WORK/upgrade" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          php -r 'require $argv[1]."/app/bootstrap.php";$id=(int)trim(file_get_contents("/tmp/p01-v247389/sentinel-id"));$s=vf_db()->prepare("SELECT title,is_private FROM links WHERE id=?");$s->execute([$id]);$row=$s->fetch(PDO::FETCH_ASSOC);if(!$row||$row["title"]!=="Sensitive fixture"||(int)$row["is_private"]!==1)exit(1);echo "P01_PRIVATE_DATA_PRESERVED=PASS\n";' "$WORK/upgrade" | tee -a gate-evidence/status.txt
+          cp "$REPAIR" "$WORK/upgrade/repair-v$VERSION.php"
+          php "$WORK/upgrade/repair-v$VERSION.php" --run="$WORK/upgrade" | tee /tmp/p01-update-repeat.json
+          grep -Fq '"already_current":true' /tmp/p01-update-repeat.json
+          echo P01_ATOMIC_UPDATE_IDEMPOTENT=PASS | tee -a gate-evidence/status.txt
+          install_fresh "$BASEFULL" "$WORK/rollback" 18523
+          cp "$REPAIR" "$WORK/rollback/repair-v$VERSION.php"
+          set +e
+          VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$WORK/rollback/repair-v$VERSION.php" --run="$WORK/rollback" >/tmp/p01-rollback.out 2>/tmp/p01-rollback.err
+          exit_code="$?"
+          set -e
+          test "$exit_code" -ne 0
+          test "$(tr -d '\r\n ' < "$WORK/rollback/VERSION.txt")" = "$SOURCE"
+          (cd "$WORK/rollback" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_ATOMIC_UPDATE_FAILURE_ROLLBACK=PASS | tee -a gate-evidence/status.txt
+      - name: Public-safe summary only (never upload private source, packages, secrets, SQLite, runtime files)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: P01-V247389-test-only-status
+          path: gate-evidence/status.txt
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Remove temporary private checkout and local runtime
+        if: always()
+        shell: bash
+        run: |
+          rm -rf candidate stable /tmp/p01-v247389 /tmp/p01-canonical-regression.txt /tmp/p01-private-leak.txt
