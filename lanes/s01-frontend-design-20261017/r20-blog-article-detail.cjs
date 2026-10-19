@@ -17,7 +17,7 @@ for(const lang of ['en','zh'])for(const width of [1440,1024]){
     const anchors=toc.filter(a=>!document.getElementById(decodeURIComponent(a.getAttribute('href').slice(1)))).map(x=>x.href);
     const ld=[...document.querySelectorAll('head script[type="application/ld+json"]')];
     const badld=ld.filter(x=>{try{JSON.parse(x.textContent);return false}catch{return true}}).length;
-    const content=document.querySelector('.vf-reading-entry');
+    const content=document.querySelector('article.vf-reading-article');
     return {pageTitle:document.title,h1:document.querySelectorAll('main h1').length,hasShell:!!shell,hasReading:!!content,headings:content?.querySelectorAll('h2').length||0,toc:toc.length,badAnchors:anchors,
        bodyCopy:content?.innerText.length||0,hasTool:!!content?.querySelector('a[href*="m3u8-checker"]'),
        canon:[...document.querySelectorAll('head link[rel="canonical"]')].map(x=>x.href),
