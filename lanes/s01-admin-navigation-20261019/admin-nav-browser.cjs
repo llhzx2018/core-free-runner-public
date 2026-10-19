@@ -25,8 +25,12 @@ const url=(host,tab,extra={})=>base(host)+'&'+new URLSearchParams({tab,...extra}
     check(`${host}/${tab} desktop no page overflow`,await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
     inventory.push({surface_id:tab,host,status:'canonical',discoverable:true,reachable:true,title:await page.locator('.vf-theme-admin h1').innerText()});
     if(tab==='overview'){
+     for(const t of ['overview','brand','layout','navigation','render','seo']){check(`${host} main menu ${t} visible`,await nav.locator(`a[data-vf-admin-tab="${t}"]`).isVisible());}
+     await nav.locator('.vf-theme-maintenance-menu>summary').click();
+     for(const t of ['preview','recovery']){check(`${host} maintenance menu ${t} discoverable`,await nav.locator(`a[href*="tab=${t}"]`).isVisible());}
+     await nav.locator('.vf-theme-maintenance-menu>summary').click();
      const links=await page.locator('[data-workspace-id]').evaluateAll(xs=>xs.map(x=>x.href));
-     check(`${host} dashboard links stay in host`,links.length>=6&&links.every(h=>new URL(h).searchParams.get('page')===(host==='embedded'?'synthetic-theme-host':'vf-theme-modules')));
+     check(`${host} dashboard links stay in host`,links.length===5&&links.every(h=>new URL(h).searchParams.get('page')===(host==='embedded'?'synthetic-theme-host':'vf-theme-modules')),links);
     }
    }
    await page.goto(url(host,'layout'),{waitUntil:'networkidle'});
