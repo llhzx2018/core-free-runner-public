@@ -13,7 +13,7 @@ const url=(host,tab,extra={})=>base(host)+'&'+new URLSearchParams({tab,...extra}
  try{
   const context=await browser.newContext({viewport:{width:1440,height:1000}});
   const page=await context.newPage();page.on('dialog',dialog=>dialog.accept());
-  await page.goto(origin+'/wp-login.php');await page.locator('#user_login').fill('admin');await page.locator('#user_pass').fill('Synthetic-Only-Update-54!');await page.locator('#wp-submit').click();await page.waitForURL('**/wp-admin/**');
+  await page.goto(origin+'/wp-login.php');await page.locator('#user_login').fill('admin');await page.locator('#user_pass').fill('Synthetic-Only-Update-54!');await page.locator('input[name=redirect_to]').evaluate((e,value)=>e.value=value,url('appearance','layout'));await page.locator('#wp-submit').click();await page.waitForURL('**/wp-admin/**');
   const tailOnly=process.env.VF_NAV_TAIL_ONLY==='1';
   if(!tailOnly){
   for(const host of ['appearance','embedded']){
