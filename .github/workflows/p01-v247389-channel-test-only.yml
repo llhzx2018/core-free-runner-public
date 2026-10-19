@@ -1,0 +1,86 @@
+name: P01 V247389 channel exact-asset test-only
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247389-channel-test-only.yml'
+permissions:
+  contents: read
+jobs:
+  exact-channel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Exact ephemeral channel checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-updates
+          ref: 1bf43bab35b5789ce7daeafe1439927792078b85
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: channel
+      - name: Exact ephemeral product checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: faf6303b259681ef6be72ee4aae0402b25577e10
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,mbstring
+          coverage: none
+      - name: Validate remote Release asset, channel bytes and native Update Core
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C channel rev-parse HEAD)" = "1bf43bab35b5789ce7daeafe1439927792078b85"
+          test "$(git -C product rev-parse HEAD)" = "faf6303b259681ef6be72ee4aae0402b25577e10"
+          mkdir -p /tmp/p01-channel
+          gh release download v2.47.389 -R llhzx2018/vf-start -D /tmp/p01-channel -p VF_Start_V2.47.389_UPDATE.zip
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.47.389 > /tmp/p01-channel/release.json
+          python3 - <<'PY'
+          import hashlib,json,pathlib
+          m=json.loads(pathlib.Path('channel/projects/P01.json').read_text())
+          r=json.loads(pathlib.Path('/tmp/p01-channel/release.json').read_text())
+          asset=pathlib.Path('/tmp/p01-channel')/m['asset_name']
+          assert m['project_id']=='P01' and m['component_id']=='APP'
+          assert m['target_version']=='2.47.389' and m['current_version']=='2.47.388'
+          assert m['from_versions']==['2.47.388'] and m['update_type']=='ATOMIC'
+          assert m['product_identity']=='faf6303b259681ef6be72ee4aae0402b25577e10'
+          assert m['schema_from']==m['schema_to']=='2026090401'
+          assert m['backup_required'] and m['rollback_supported']
+          assert m['release_id']==r['id']==416808316 and m['release_tag']==r['tag_name']=='v2.47.389'
+          a=[x for x in r['assets'] if x['name']==m['asset_name']]
+          assert len(a)==1 and a[0]['size']==m['asset_bytes']==asset.stat().st_size
+          h=hashlib.sha256(asset.read_bytes()).hexdigest()
+          assert h==m['asset_sha256']==a[0]['digest'].removeprefix('sha256:')
+          print('P01_CHANNEL_REMOTE_ASSET_SHA_BYTES=PASS')
+          PY
+          php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require 'product/src/app/CoreUpdates/UpdateCore.php';
+          $m=json_decode((string)file_get_contents('channel/projects/P01.json'),true,512,JSON_THROW_ON_ERROR);
+          $c=new CoreUpdates\UpdateCore('P01','APP');
+          foreach ([['2.47.388','2026090401','AVAILABLE'],['2.47.389','2026090401','UP_TO_DATE'],['2.47.387','2026090401','BLOCKED_SOURCE_VERSION'],['2.47.388','0000000000','BLOCKED_SCHEMA']] as [$ver,$schema,$expected]){
+            $status=$c->check($ver,$schema,$m)['status']??'';
+            if($status!==$expected)throw new RuntimeException("$ver / $schema: $status != $expected");
+          }
+          $file='/tmp/p01-channel/'.$m['asset_name'];
+          if(($c->verifyPackage($file,$m)['status']??'')!=='VERIFIED')throw new RuntimeException('package verify failed');
+          $bad=$m;$bad['asset_sha256']=str_repeat('0',64);
+          if(($c->verifyPackage($file,$bad)['status']??'')!=='ASSET_HASH_MISMATCH')throw new RuntimeException('hash mismatch must block');
+          echo "P01_CHANNEL_NATIVE_DISCOVERY_FAIL_CLOSED=PASS\n";
+          PHP
+      - name: Clear temporary local source, credentials and artifacts
+        if: always()
+        shell: bash
+        run: rm -rf channel product /tmp/p01-channel
