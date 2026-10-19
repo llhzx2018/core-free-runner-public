@@ -1,4 +1,4 @@
-name: P01 frontend canonical and maintenance preflight test-only
+name: P01 V2.47.390 candidate exact-source preflight TEST ONLY
 on:
   pull_request:
     branches: [main]
@@ -8,21 +8,27 @@ permissions:
 jobs:
   p01-preflight:
     runs-on: ubuntu-24.04
-    timeout-minutes: 38
+    timeout-minutes: 45
+    env:
+      VERSION: '2.47.390'
+      SOURCE: '2.47.389'
+      TARGET_SHA: 'aece4d64c9350276af24d0648e74bd05ff073131'
+      ART: /tmp/p01-candidate-stage-only-artifacts
+      REL: /tmp/p01-candidate-stage-only-baseline
     steps:
-      - name: Checkout registered public Runner
+      - name: Checkout original registered public Runner
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Checkout exact current P01 main
+      - name: Checkout pinned product release candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-start
-          ref: 38cec870bce622d25b1cda806e5f7e55664cd95a
+          ref: 'aece4d64c9350276af24d0648e74bd05ff073131'
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           path: candidate
-      - name: Checkout exact last stable release baseline
+      - name: Checkout last formal source version
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-start
@@ -30,36 +36,194 @@ jobs:
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           path: stable
-      - name: Setup PHP 8.3, SQLite, Node
+      - name: Prepare PHP runtime
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.3'
-          extensions: pdo_sqlite,sqlite3,curl,mbstring,zip,gd,openssl
+          extensions: pdo_sqlite,sqlite3,mbstring,curl,zip,gd,openssl
           coverage: none
-      - name: Exact-source Canonical baseline, zero debt and maintenance boundary
+      - name: Exact-source Canonical 704/704 and migration/updater gate
         shell: bash
         run: |
           set -Eeuo pipefail
-          test "$(git -C candidate rev-parse HEAD)" = "38cec870bce622d25b1cda806e5f7e55664cd95a"
-          test "$(cat candidate/VERSION)" = 2.47.389
-          test "$(cat candidate/src/VERSION.txt)" = 2.47.389
-          test "$(cat stable/VERSION)" = 2.47.389
-          test "$(cat stable/src/VERSION.txt)" = 2.47.389
-          node --version
-          php --version | head -n 2
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          echo "TARGET_TREE=$(git -C candidate rev-parse HEAD^{tree})" >> "$GITHUB_ENV"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$VERSION"
+          test "$(tr -d '\r\n ' < stable/VERSION)" = "$SOURCE"
           test -z "$(git -C candidate status --porcelain)"
-          echo P01_EXACT_SOURCE_PRECHECK=PASS
-          bash candidate/tests/canonical_release_regression.sh candidate stable --require-zero-debt | tee /tmp/p01-canonical.txt
-          grep -Fx 'P01_CANONICAL_UNIT_REGRESSION=PASS' /tmp/p01-canonical.txt
-          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-canonical.txt
-          for file in src/app/UpdateManager.php src/app/CoreUpdates/UpdateCore.php src/app/CoreUpdates/GitHubClient.php; do
-            cmp "stable/$file" "candidate/$file"
-          done
-          diff -qr stable/src/migrations candidate/src/migrations >/tmp/p01-migrations-diff.txt
-          echo P01_MAINTENANCE_SCHEMA_UPDATER_UNCHANGED=PASS
-          test -z "$(git -C candidate status --porcelain)"
-          echo P01_FRONTEND_PRE_RELEASE_CANONICAL=PASS
-      - name: Remove private source from runner workspace
+          bash candidate/tests/canonical_release_regression.sh candidate stable --require-zero-debt | tee /tmp/p01-canonical-390.txt
+          grep -Fx 'P01_CANONICAL_UNIT_REGRESSION=PASS' /tmp/p01-canonical-390.txt
+          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-canonical-390.txt
+          for file in src/app/UpdateManager.php src/app/CoreUpdates/UpdateCore.php src/app/CoreUpdates/GitHubClient.php; do cmp "stable/$file" "candidate/$file"; done
+          diff -qr stable/src/migrations candidate/src/migrations >/tmp/p01-candidate-migrations-diff.txt
+          echo P01_CANDIDATE_EXACT_SOURCE_SCHEMA_UPDATER=PASS
+      - name: Fetch read-only previous formal FULL and Atomic zip
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$REL" "$REL/full" "$REL/update" "$ART"
+          gh release download "v$SOURCE" -R llhzx2018/vf-start -D "$REL" -p "VF-Start-V${SOURCE}-FULL.zip" -p "VF_Start_V${SOURCE}_UPDATE.zip"
+          unzip -t "$REL/VF-Start-V${SOURCE}-FULL.zip" >/dev/null
+          unzip -t "$REL/VF_Start_V${SOURCE}_UPDATE.zip" >/dev/null
+          unzip -q "$REL/VF-Start-V${SOURCE}-FULL.zip" -d "$REL/full"
+          unzip -q "$REL/VF_Start_V${SOURCE}_UPDATE.zip" -d "$REL/update"
+          test -f "$REL/update/repair-v${SOURCE}.php"
+          test "$(tr -d '\r\n ' < "$REL/full/VERSION.txt")" = "$SOURCE"
+          echo P01_LAST_FORMAL_BINARY_BASELINE=PASS
+      - name: Build exact maintenance artifacts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ART"
+          python3 scripts/p01-maintenance-release.py             --candidate candidate/src             --baseline-full "$REL/full"             --baseline-repair "$REL/update/repair-v${SOURCE}.php"             --out "$ART"             --version "$VERSION"             --source-version "$SOURCE"             --target-sha "$TARGET_SHA"             --target-tree "$TARGET_TREE" | tee /tmp/p01-maintenance-build.json
+
+          test -f "$ART/VF-Start-V${VERSION}-FULL.zip"
+          test -f "$ART/VF_Start_V${VERSION}_UPDATE.zip"
+          test -f "$ART/P01_MAINTENANCE_ARTIFACT_RECEIPT.json"
+          echo P01_MAINTENANCE_BUILD=PASS
+
+      - name: Verify clean FULL and Atomic UPDATE
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FULL="$ART/VF-Start-V${VERSION}-FULL.zip"
+          UPDATE="$ART/VF_Start_V${VERSION}_UPDATE.zip"
+          WORK="/tmp/p01-maintenance-gate"
+          rm -rf "$WORK"
+          mkdir -p "$WORK/update"
+          unzip -q "$UPDATE" -d "$WORK/update"
+          REPAIR="$WORK/update/repair-v${VERSION}.php"
+
+          test -f "$REPAIR"
+          test "$(unzip -Z1 "$UPDATE")" = "repair-v${VERSION}.php"
+          unzip -t "$FULL" >/dev/null
+          unzip -t "$UPDATE" >/dev/null
+          php -l "$REPAIR" >/dev/null
+          php "$REPAIR" --self-test | tee /tmp/p01-atomic-selftest.json
+          grep -Fq '"ok":true' /tmp/p01-atomic-selftest.json
+
+          assert_no_private_payload() {
+            local zip="$1"
+            if unzip -Z1 "$zip" | grep -Ei '(^|/)(\.runtime\.php|.*\.sqlite3?$|.*\.db$|private/|backups?/|sessions?/|tokens?/|staging/)' >/tmp/p01-private-hits.txt; then
+              cat /tmp/p01-private-hits.txt
+              echo PRIVATE_PAYLOAD_LEAK
+              exit 90
+            fi
+          }
+          assert_no_private_payload "$FULL"
+          assert_no_private_payload "$UPDATE"
+
+          install_full() {
+            local zip="$1" root="$2" port="$3" title="$4"
+            local cookie="/tmp/cookie-$port.txt"
+            rm -rf "$root" "$cookie"
+            mkdir -p "$root"
+            unzip -q "$zip" -d "$root"
+            (
+              cd "$root"
+              php -S 127.0.0.1:"$port" -t . >"/tmp/server-$port.log" 2>&1 &
+              echo $! >"/tmp/server-$port.pid"
+            )
+            local pid
+            pid="$(cat "/tmp/server-$port.pid")"
+            trap 'kill "$pid" >/dev/null 2>&1 || true' RETURN
+            for _ in $(seq 1 50); do
+              if curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$port/setup.php" -o "/tmp/setup-$port.html"; then break; fi
+              sleep 1
+            done
+            local csrf
+            csrf="$(python3 - "/tmp/setup-$port.html" <<'PY'
+          import re,sys
+          text=open(sys.argv[1],encoding="utf-8").read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert m
+          print(m.group(1))
+          PY
+          )"
+            local pass="ReleaseGate!${port}"
+            curl -fsS -c "$cookie" -b "$cookie" -X POST "http://127.0.0.1:$port/setup.php"               --data-urlencode "setup_csrf=$csrf"               --data-urlencode "site_title=$title"               --data-urlencode "admin_password=$pass"               --data-urlencode "admin_password_confirm=$pass"               -o "/tmp/setup-post-$port.html"
+            (cd "$root" && php cli/verify.php) | tee "/tmp/verify-$port.txt"
+            grep -Fx 'VERIFY_PASS=YES' "/tmp/verify-$port.txt"
+            local revisit
+            revisit="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/setup.php")"
+            test "$revisit" = 302
+            local body status
+            body="$(php -r 'echo json_encode(["password"=>$argv[1]], JSON_UNESCAPED_SLASHES);' "$pass")"
+            status="$(curl -sS -c "$cookie" -b "$cookie" -o "/tmp/login-$port.json" -w '%{http_code}' -H 'Content-Type: application/json' --data "$body" "http://127.0.0.1:$port/api.php?action=login")"
+            test "$status" = 200
+            grep -Fq '"ok":true' "/tmp/login-$port.json"
+            kill "$pid" >/dev/null 2>&1 || true
+            trap - RETURN
+          }
+
+          install_full "$FULL" "$WORK/target-full" 18511 "VF Start V$VERSION FULL Gate"
+          test "$(tr -d '\r\n ' < "$WORK/target-full/VERSION.txt")" = "$VERSION"
+          echo P01_CLEAN_FULL_INSTALL=PASS
+
+          install_full "$REL/VF-Start-V${SOURCE}-FULL.zip" "$WORK/upgrade" 18512 "VF Start V$SOURCE Upgrade Source"
+          cat >"$WORK/upgrade/sentinel.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require __DIR__.'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $cat=$repo->createCategory(['name'=>'Release Sentinel','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+          $link=$repo->saveLink(null,['surface'=>'start','category_id'=>$cat,'title'=>'Release Sentinel Link','url'=>'https://example.com/release-sentinel','description'=>'must survive atomic','tags'=>['release-sentinel'],'is_private'=>1,'is_pending'=>0]);
+          file_put_contents('/tmp/p01-sentinel-id.txt',(string)$link['id']);
+          PHP
+          php "$WORK/upgrade/sentinel.php"
+          rm "$WORK/upgrade/sentinel.php"
+          cp "$REPAIR" "$WORK/upgrade/repair-v${VERSION}.php"
+          php "$WORK/upgrade/repair-v${VERSION}.php" --verify-source="$WORK/upgrade" | tee /tmp/p01-source-verify.json
+          grep -Fq '"ok":true' /tmp/p01-source-verify.json
+          php "$WORK/upgrade/repair-v${VERSION}.php" --run="$WORK/upgrade" | tee /tmp/p01-atomic-success.json
+          grep -Fq '"ok":true' /tmp/p01-atomic-success.json
+          test "$(tr -d '\r\n ' < "$WORK/upgrade/VERSION.txt")" = "$VERSION"
+          (cd "$WORK/upgrade" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          php -r 'require $argv[1]."/app/bootstrap.php"; $id=(int)trim(file_get_contents("/tmp/p01-sentinel-id.txt")); $s=vf_db()->prepare("SELECT title,is_private FROM links WHERE id=?"); $s->execute([$id]); $r=$s->fetch(PDO::FETCH_ASSOC); if(!$r||$r["title"]!=="Release Sentinel Link"||(int)$r["is_private"]!==1) exit(1); echo "SENTINEL_PRESERVED\n";' "$WORK/upgrade"
+
+          cp "$REPAIR" "$WORK/upgrade/repair-v${VERSION}.php"
+          php "$WORK/upgrade/repair-v${VERSION}.php" --run="$WORK/upgrade" | tee /tmp/p01-atomic-repeat.json
+          grep -Fq '"already_current":true' /tmp/p01-atomic-repeat.json
+          echo P01_ATOMIC_UPGRADE_AND_IDEMPOTENCY=PASS
+
+          install_full "$REL/VF-Start-V${SOURCE}-FULL.zip" "$WORK/rollback" 18513 "VF Start V$SOURCE Rollback Source"
+          cat >"$WORK/rollback/sentinel.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require __DIR__.'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $cat=$repo->createCategory(['name'=>'Rollback Sentinel','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+          $link=$repo->saveLink(null,['surface'=>'start','category_id'=>$cat,'title'=>'Rollback Sentinel Link','url'=>'https://example.com/rollback-sentinel','description'=>'must survive rollback','tags'=>['rollback-sentinel'],'is_private'=>1,'is_pending'=>0]);
+          file_put_contents('/tmp/p01-rollback-id.txt',(string)$link['id']);
+          PHP
+          php "$WORK/rollback/sentinel.php"
+          rm "$WORK/rollback/sentinel.php"
+          cp "$REPAIR" "$WORK/rollback/repair-v${VERSION}.php"
+          set +e
+          VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$WORK/rollback/repair-v${VERSION}.php" --run="$WORK/rollback" >/tmp/p01-rollback.out 2>/tmp/p01-rollback.err
+          rollback_rc=$?
+          set -e
+          test "$rollback_rc" -ne 0
+          test "$(tr -d '\r\n ' < "$WORK/rollback/VERSION.txt")" = "$SOURCE"
+          (cd "$WORK/rollback" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          php -r 'require $argv[1]."/app/bootstrap.php"; $id=(int)trim(file_get_contents("/tmp/p01-rollback-id.txt")); $s=vf_db()->prepare("SELECT title FROM links WHERE id=?"); $s->execute([$id]); if($s->fetchColumn()!=="Rollback Sentinel Link") exit(1); echo "ROLLBACK_SENTINEL_PRESERVED\n";' "$WORK/rollback"
+          echo P01_ATOMIC_ROLLBACK=PASS
+
+          unzip -p "$FULL" VERSION.txt | tr -d '\r\n ' | grep -Fx "$VERSION"
+          unzip -p "$FULL" release-manifest.json | php -r '$m=json_decode(stream_get_contents(STDIN),true); if(($m["version"]??"")!==$argv[1]||($m["source_version"]??"")!==$argv[2]||empty($m["maintenance_release"]["schema_unchanged"])) exit(1); echo "P01_RELEASE_MANIFEST=PASS\n";' "$VERSION" "$SOURCE"
+          echo P01_MAINTENANCE_ARTIFACT_GATE=PASS
+
+
+      - name: Final read-only candidate evidence and cleanup
         if: always()
         shell: bash
-        run: rm -rf candidate stable
+        run: |
+          set -Eeuo pipefail
+          if test -f "$ART/P01_MAINTENANCE_ARTIFACT_RECEIPT.json"; then
+            sha256sum "$ART"/VF-Start-V${VERSION}-FULL.zip "$ART"/VF_Start_V${VERSION}_UPDATE.zip
+            echo P01_CANDIDATE_ONLY_NOT_PUBLISHED=PASS
+          fi
+          rm -rf candidate stable "$REL" "$ART" /tmp/p01-maintenance-gate
