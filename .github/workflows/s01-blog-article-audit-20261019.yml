@@ -1,0 +1,103 @@
+name: S01-C01 Blog article detail 1.35.140 isolated desktop gate
+on:
+  push:
+    branches: [task/s01-blog-article-audit-20261019]
+    paths: ['.github/workflows/s01-blog-article-audit-20261019.yml']
+permissions:
+  contents: read
+jobs:
+  review:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      TARGET_SHA: 5f06dc81978ef86e6c774c779e08fac515308683
+      BASE_SHA: 5f06dc81978ef86e6c774c779e08fac515308683
+      VF_REVIEW_ONLY_STATE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: runner
+      - name: Use established isolated frontend test lane
+        run: |
+          mkdir -p proof
+          cp -a runner/lanes/s01-frontend-design-20261017 lane
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: 5f06dc81978ef86e6c774c779e08fac515308683
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Verify exact Theme ownership and runtime CSS bundle
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(cat target/VERSION)" = 1.35.140
+          grep -q '^Version: 1.35.140$' target/src/style.css
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess,json
+          root=Path('target')
+          base='5f06dc81978ef86e6c774c779e08fac515308683'
+          src='src/assets/css/public/pages/families/public-family-03-content-list-operations-closure.css'
+          bundle='src/assets/css/public/vf-theme-public-runtime.css'
+          expected=[]
+          assert sorted(changed)==expected,changed
+          src='src/assets/css/public/pages/families/public-family-04-content-detail-reading-closure.css'
+          old=subprocess.check_output(['git','-C','target','show',base+':'+src])
+          old_bundle=subprocess.check_output(['git','-C','target','show',base+':'+bundle])
+          now=(root/src).read_bytes()
+          now_bundle=(root/bundle).read_bytes()
+          assert old_bundle.count(old)==1,'source was not exact contained canonical fragment'
+          assert now_bundle==old_bundle.replace(old,now,1),'unowned changes to runtime CSS'
+          assert now.count(b'.vf-theme-post-list--blog_index .vf-directory-card p{')>=1
+          (Path('proof')/'blog-source.json').write_text(json.dumps({'status':'PASS','sha':'5f06dc81978ef86e6c774c779e08fac515308683','files':changed,'css_bundle':'BYTE_EXACT'}))
+          print('BLOG_SCOPE_EXACT_RUNTIME_CSS_PASS')
+          PY
+          php -l target/tests/blog-list-readability-contract.php
+          php target/tests/blog-list-readability-contract.php
+          node --check lane/r18-blog-index-audit.cjs
+          node --check lane/r19-blog-reading.cjs
+          node --check lane/r20-blog-article-detail.cjs
+          php -l lane/article-detail-fixture.php
+          find target/src -name '*.php' -print0 | xargs -0 -n1 php -l > /tmp/blog-php-lint.txt
+      - name: Exact M3U8 plugin fixture
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          mkdir -p provider
+          gh release download v1.25.91 --repo llhzx2018/vf-tools-m3u8 --pattern vf-tools-m3u8_V1.25.91.zip --dir provider
+          echo 'fcb56d605550c5b04a3ff8b3b78b8bf86ca11b77e0aa22334fa67e675b01d6df  provider/vf-tools-m3u8_V1.25.91.zip' | sha256sum -c
+      - name: Install isolated Chromium
+        run: |
+          npm install --no-audit --no-fund playwright@1.62.1
+          npx playwright install chromium
+          mkdir -p "$HOME/.local/share/fonts"
+          curl -g -fsSL --retry 2 'https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc/NotoSansSC[wght].ttf' -o "$HOME/.local/share/fonts/NotoSansSC.ttf"
+          fc-cache -f
+      - name: Real WordPress MariaDB Chromium EN ZH and SEO gate
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          script=Path('lane/native.sh').read_text()
+          seed='docker cp lane/extra-seed.php "$WP:/tmp/extra-seed.php"'
+          assert script.count(seed)==1
+          script=script.replace(seed,'docker cp lane/article-detail-fixture.php "$WP:/tmp/article-detail-fixture.php";cli eval-file /tmp/article-detail-fixture.php > proof/article-detail-fixture.json\\n'+seed)
+          end='cli eval-file /tmp/snapshot.php > proof/state-after.sha256'
+          assert script.count(end)==1
+          script=script.replace(end,'node lane/r18-blog-index-audit.cjs\nnode lane/r20-blog-article-detail.cjs\nnode lane/r10-technical-head.cjs\n'+end)
+          Path('lane/blog-native.sh').write_text(script)
+          PY
+          bash lane/blog-native.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: blog-article-v135140-proof-${{ github.run_id }}
+          path: proof/
+          retention-days: 14
+      - name: Erase temporary private source
+        if: always()
+        run: rm -rf target provider
