@@ -18,7 +18,7 @@ const cases=JSON.parse(fs.readFileSync('proof/cases.json','utf8')).cases;
       const style=(selector)=>{const el=document.querySelector(selector);return el?parseFloat(getComputedStyle(el).fontSize):null;};
       return {count:rows.length,ids:rows.map(el=>el.getAttribute('data-vf-directory-category')),h1:document.querySelectorAll('main h1').length,title:document.title,
         cardCopy:style('.vf-theme-post-list--guide_index .vf-directory-card p'),search:style('.vf-theme-post-list--guide_index .vf-directory-search input'),
-        links:rows.filter(el=>!!el.querySelector('a[href]')).length,
+        links:rows.filter(el=>el.matches('a[href]')||!!el.querySelector('a[href]')).length,
         overflow:document.documentElement.scrollWidth>innerWidth+1,
         pager:document.querySelectorAll('.vf-theme-post-list--guide_index .vf-theme-pagination--internal .next').length};
     });
