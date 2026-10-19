@@ -14,6 +14,8 @@ const url=(host,tab,extra={})=>base(host)+'&'+new URLSearchParams({tab,...extra}
   const context=await browser.newContext({viewport:{width:1440,height:1000}});
   const page=await context.newPage();page.on('dialog',dialog=>dialog.accept());
   await page.goto(origin+'/wp-login.php');await page.locator('#user_login').fill('admin');await page.locator('#user_pass').fill('Synthetic-Only-Update-54!');await page.locator('#wp-submit').click();await page.waitForURL('**/wp-admin/**');
+  const tailOnly=process.env.VF_NAV_TAIL_ONLY==='1';
+  if(!tailOnly){
   for(const host of ['appearance','embedded']){
    for(const tab of tabs){
     const response=await page.goto(url(host,tab),{waitUntil:'networkidle'});
@@ -85,9 +87,10 @@ const url=(host,tab,extra={})=>base(host)+'&'+new URLSearchParams({tab,...extra}
    ['preview','[data-vf-preview-target-open]','[data-vf-preview-target-dialog]','[data-vf-preview-target-close]'],
   ];
   for(const [tab,trigger,dialog,close] of dialogs){await page.goto(url('appearance',tab),{waitUntil:'networkidle'});await page.locator(trigger).first().click();const panel=page.locator(dialog);check(`${tab} ${dialog} discoverable and opens`,await panel.isVisible());await panel.locator('button'+close).first().click();check(`${tab} ${dialog} closes`,!await panel.isVisible());}
+  }
   await page.goto(url('appearance','recovery'),{waitUntil:'networkidle'});
   for(const task of ['status','export','import','restore']){await page.locator(`[data-vf-recovery-workflow-step="${task}"]`).click();check(`recovery task ${task} reachable`,await page.locator(`[data-vf-recovery-workflow-section="${task}"]`).isVisible());}
-  await page.locator('.vf-recovery-danger-zone summary').click();await page.locator('[data-vf-recovery-default-open]').click();check('recovery defaults confirmation reachable',await page.locator('[data-vf-recovery-dialog="defaults"]').isVisible());await page.locator('[data-vf-recovery-dialog="defaults"] [data-vf-recovery-dialog-close]').first().click();
+  await page.locator('.vf-recovery-danger-zone summary').click();await page.locator('[data-vf-recovery-default-open]').click();check('recovery defaults confirmation reachable',await page.locator('[data-vf-recovery-dialog="defaults"]').isVisible());await page.locator('[data-vf-recovery-dialog="defaults"] button[data-vf-recovery-dialog-close]').first().click();check('recovery defaults closes without writing',!await page.locator('[data-vf-recovery-dialog="defaults"]').isVisible());
   await page.goto(url('appearance','ads'),{waitUntil:'networkidle'});check('legacy ads successor visible',await page.locator('[data-vf-admin-workspace][data-vf-admin-tab="render"]').count()===1);
   const nojs=await browser.newContext({javaScriptEnabled:false,storageState:await context.storageState(),viewport:{width:1440,height:1000}});const native=await nojs.newPage();await native.goto(url('appearance','layout',{vf_pages_q:'指南'}));check('directory remains navigable without JavaScript',await native.locator('[data-vf-page-context]').count()===2);await native.locator('[data-vf-page-context="guide_index"] a.button').click();check('native editor and return path',await native.locator('[data-vf-layout-context="guide_index"]').count()===1&&await native.locator('[data-vf-layout-directory-link]').count()===1);await nojs.close();
   completed=true;
