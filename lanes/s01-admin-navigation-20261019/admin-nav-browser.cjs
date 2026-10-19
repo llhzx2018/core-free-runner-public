@@ -8,6 +8,7 @@ const contexts=['home','tool','tool_hub','blog_index','article_detail','guide_in
 const base=host=>origin+'/wp-admin/'+(host==='embedded'?'admin.php?page=synthetic-theme-host&component=theme':'themes.php?page=vf-theme-modules');
 const url=(host,tab,extra={})=>base(host)+'&'+new URLSearchParams({tab,...extra});
 (async()=>{
+ let completed=false;
  const browser=await chromium.launch();
  try{
   const context=await browser.newContext({viewport:{width:1440,height:1000}});
@@ -83,12 +84,13 @@ const url=(host,tab,extra={})=>base(host)+'&'+new URLSearchParams({tab,...extra}
    ['seo','[data-vf-seo-add-route]','[data-vf-seo-add-dialog]','[data-vf-seo-dialog-close]'],
    ['preview','[data-vf-preview-target-open]','[data-vf-preview-target-dialog]','[data-vf-preview-target-close]'],
   ];
-  for(const [tab,trigger,dialog,close] of dialogs){await page.goto(url('appearance',tab),{waitUntil:'networkidle'});await page.locator(trigger).first().click();const panel=page.locator(dialog);check(`${tab} ${dialog} discoverable and opens`,await panel.isVisible());await panel.locator(close).first().click();check(`${tab} ${dialog} closes`,!await panel.isVisible());}
+  for(const [tab,trigger,dialog,close] of dialogs){await page.goto(url('appearance',tab),{waitUntil:'networkidle'});await page.locator(trigger).first().click();const panel=page.locator(dialog);check(`${tab} ${dialog} discoverable and opens`,await panel.isVisible());await panel.locator('button'+close).first().click();check(`${tab} ${dialog} closes`,!await panel.isVisible());}
   await page.goto(url('appearance','recovery'),{waitUntil:'networkidle'});
   for(const task of ['status','export','import','restore']){await page.locator(`[data-vf-recovery-workflow-step="${task}"]`).click();check(`recovery task ${task} reachable`,await page.locator(`[data-vf-recovery-workflow-section="${task}"]`).isVisible());}
   await page.locator('.vf-recovery-danger-zone summary').click();await page.locator('[data-vf-recovery-default-open]').click();check('recovery defaults confirmation reachable',await page.locator('[data-vf-recovery-dialog="defaults"]').isVisible());await page.locator('[data-vf-recovery-dialog="defaults"] [data-vf-recovery-dialog-close]').first().click();
   await page.goto(url('appearance','ads'),{waitUntil:'networkidle'});check('legacy ads successor visible',await page.locator('[data-vf-admin-workspace][data-vf-admin-tab="render"]').count()===1);
   const nojs=await browser.newContext({javaScriptEnabled:false,storageState:await context.storageState(),viewport:{width:1440,height:1000}});const native=await nojs.newPage();await native.goto(url('appearance','layout',{vf_pages_q:'指南'}));check('directory remains navigable without JavaScript',await native.locator('[data-vf-page-context]').count()===2);await native.locator('[data-vf-page-context="guide_index"] a.button').click();check('native editor and return path',await native.locator('[data-vf-layout-context="guide_index"]').count()===1&&await native.locator('[data-vf-layout-directory-link]').count()===1);await nojs.close();
+  completed=true;
   console.log('ADMIN_NAVIGATION_PASS',checks.length);
- }finally{fs.writeFileSync('proof/admin-navigation.json',JSON.stringify({status:checks.every(x=>x.pass)?'PASS':'FAIL',checks,inventory,mobile:'NOT_RUN_OWNER_DEFERRED',scope:'Theme navigation/discoverability, not all business actions'},null,2));await browser.close();}
+ }finally{fs.writeFileSync('proof/admin-navigation.json',JSON.stringify({status:completed&&checks.every(x=>x.pass)?'PASS':'FAIL',checks,inventory,mobile:'NOT_RUN_OWNER_DEFERRED',scope:'Theme navigation/discoverability, not all business actions'},null,2));await browser.close();}
 })().catch(e=>{console.error(e);process.exit(1)});
