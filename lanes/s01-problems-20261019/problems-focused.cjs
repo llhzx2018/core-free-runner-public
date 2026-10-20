@@ -1,5 +1,6 @@
 const {chromium}=require('playwright');const fs=require('fs');
 const checks=[];function check(name,pass,detail){checks.push({name,pass:!!pass,detail});if(!pass)throw Error(name+': '+JSON.stringify(detail));}
+const fixtures=JSON.parse(fs.readFileSync('proof/problems-fixture.json','utf8'));
 const oldCss=fs.readFileSync('/tmp/prior-reading.css','utf8');
 async function metrics(page){return page.evaluate(()=>{
  const root=document.querySelector('.vf-theme-module-stack--problem_detail');
@@ -11,14 +12,15 @@ async function metrics(page){return page.evaluate(()=>{
  const origin='http://127.0.0.1:18880';
  const old=await browser.newPage({viewport:{width:1440,height:1000}});
  await old.route('**/public-reading-final-owner.css*',route=>route.fulfill({status:200,contentType:'text/css',body:oldCss}));
- await old.goto(origin+'/problems/hls-audio-out-of-sync/?vf_detail_mode=inline',{waitUntil:'networkidle'});
+ await old.goto(fixtures.en[0].url+'?vf_detail_mode=inline',{waitUntil:'networkidle'});
  const baseline=await metrics(old);const spread=Math.max(...baseline.rows.map(x=>x.x))-Math.min(...baseline.rows.map(x=>x.x));
  check('146 reproduces misaligned reading columns',spread>24,baseline);
  await old.screenshot({path:'proof/detail-before-1440.png',fullPage:true});await old.close();
  for(const lang of ['en','zh'])for(const width of [1440,1024])for(const mode of ['inline','sidebar','off','wide','short']){
   const page=await browser.newPage({viewport:{width,height:1000}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
-  const url=origin+(lang==='zh'?'/zh':'')+'/problems/hls-audio-out-of-sync/?vf_detail_mode='+mode;
+  const url=fixtures[lang][0].url+'?vf_detail_mode='+mode;
   const response=await page.goto(url,{waitUntil:'networkidle'});const m=await metrics(page);const label=`${lang}/${width}/${mode}`;
+  check(label+' correct published language title',(await page.locator('h1').innerText()).trim()===fixtures[lang][0].title);
   check(label+' HTTP and module surfaces',response.status()===200&&m.rows.length>=5,m.rows);
   check(label+' common left edge',m.rows.every(r=>Math.abs(r.x-m.main.x)<=1.5),m);
   check(label+' common right edge',m.rows.every(r=>Math.abs(r.right-m.main.right)<=1.5),m);
@@ -35,6 +37,7 @@ async function metrics(page){return page.evaluate(()=>{
    await page.goto(url,{waitUntil:'networkidle'});
    const faq=page.locator('.vf-reading-faq-list details').last();if(await faq.count()){await faq.locator('summary').click();check(label+' FAQ disclosure',await faq.getAttribute('open')!==null);}
    const links=await page.locator('.vf-reading-tool-links a,.vf-problem-diagnostic-tool').evaluateAll(xs=>xs.map(x=>x.href));check(label+' tool routes',links.length>0&&links.every(x=>x.startsWith('http://127.0.0.1:18880/')));
+   await page.evaluate(()=>scrollTo(0,0));await page.waitForTimeout(150);
    await page.screenshot({path:`proof/detail-${lang}-${width}.png`,fullPage:true});
   }
   check(label+' no script errors',errors.length===0,errors);await page.close();
