@@ -1,0 +1,155 @@
+name: S01 Theme V1.35.151 FAQ bounded formal release
+on:
+  push:
+    branches: [candidate/s01-theme-135151-release-20261020]
+permissions:
+  contents: read
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact private Theme source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: 326e73072ae58f22b31ca900e87aaad2fd59d732
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: theme
+      - name: Exact-source version, syntax and FAQ gates
+        shell: bash
+        working-directory: theme
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "326e73072ae58f22b31ca900e87aaad2fd59d732"
+          test "$(cat VERSION)" = "1.35.151"
+          grep -q '^Version: 1.35.151$' src/style.css
+          grep -q "define('VF_THEME_VERSION', '1.35.151')" src/inc/runtime-constants.php
+          find src -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/vf-theme-php-lint.log
+          node --check src/assets/js/main.js
+          node tests/faq-public-navigation-contract.js
+          node tests/faq-a11y-contrast-heading-contract.js
+          php tests/faq-public-description-contract.php
+          echo 'THEME_V1.35.151_BOUNDED_SOURCE_GATES=PASS'
+      - name: Build deterministic WordPress theme ZIP
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import pathlib,hashlib,json,zipfile,os
+          src=pathlib.Path('theme/src')
+          out=pathlib.Path('vf-tools-theme_V1.35.151.zip')
+          files=sorted(f for f in src.rglob('*') if f.is_file())
+          assert len(files)>400, 'unexpectedly small theme source'
+          with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for p in files:
+                  rel='vf-tools-theme/'+p.relative_to(src).as_posix()
+                  info=zipfile.ZipInfo(rel,date_time=(1980,1,1,0,0,0))
+                  info.compress_type=zipfile.ZIP_DEFLATED
+                  info.external_attr=(p.stat().st_mode & 0o777)<<16
+                  z.writestr(info,p.read_bytes(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+          with zipfile.ZipFile(out) as z:
+              assert z.testzip() is None
+              names=z.namelist()
+              assert len(names)==len(files) and len(set(names))==len(names)
+              assert 'vf-tools-theme/style.css' in names and 'vf-tools-theme/functions.php' in names
+              assert all(p.startswith('vf-tools-theme/') and '..' not in pathlib.PurePosixPath(p).parts for p in names)
+              assert all(not p.startswith(('vf-tools-theme/.git/','vf-tools-theme/.github/','vf-tools-theme/tests/','vf-tools-theme/docs/')) for p in names)
+              assert 'Version: 1.35.151' in z.read('vf-tools-theme/style.css').decode()
+          d={'version':'1.35.151','source_sha':'326e73072ae58f22b31ca900e87aaad2fd59d732','asset':'vf-tools-theme_V1.35.151.zip','bytes':out.stat().st_size,'sha256':hashlib.sha256(out.read_bytes()).hexdigest(),'runtime_files':len(files)}
+          pathlib.Path('vf-theme-release-proof.json').write_text(json.dumps(d,indent=2)+'\n')
+          print('LOCAL_ZIP_GATE=PASS '+json.dumps(d))
+          PY
+      - name: Create formal release and authenticate remote ZIP identity
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          REPO=llhzx2018/vf-tools-theme
+          TAG=v1.35.151
+          SOURCE_SHA=326e73072ae58f22b31ca900e87aaad2fd59d732
+          ASSET=vf-tools-theme_V1.35.151.zip
+          test "$(gh api "repos/$REPO/git/ref/heads/main" --jq '.object.sha')" = "$SOURCE_SHA"
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            echo "Release exists; verifying identity rather than replacing assets."
+          else
+            gh release create "$TAG" "$ASSET" -R "$REPO" --target "$SOURCE_SHA" --title "VF Tools Theme V1.35.151" --notes "FAQ English visitor-facing copy and scoped WCAG AA contrast + heading semantics. No Schema or updater changes. Production upgrade is OWNER-only. Mobile/production visual acceptance pending."
+          fi
+          test "$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.sha')" = "$SOURCE_SHA"
+          gh api "repos/$REPO/releases/tags/$TAG" > release-remote.json
+          python3 - <<'PY'
+          import json
+          p=json.load(open('vf-theme-release-proof.json'))
+          r=json.load(open('release-remote.json'))
+          assert r['tag_name']=='v1.35.151' and not r['draft'] and not r['prerelease']
+          asset=[x for x in r['assets'] if x['name']==p['asset']]
+          assert len(asset)==1 and len(r['assets'])==1
+          assert asset[0]['size']==p['bytes']
+          if asset[0].get('digest'): assert asset[0]['digest']=='sha256:'+p['sha256']
+          print('REMOTE_RELEASE_METADATA=PASS')
+          PY
+          mkdir -p /tmp/theme-151-readback
+          gh release download "$TAG" -R "$REPO" -p "$ASSET" -D /tmp/theme-151-readback
+          python3 - <<'PY'
+          import pathlib,hashlib,json,zipfile
+          p=json.load(open('vf-theme-release-proof.json'))
+          b=pathlib.Path('/tmp/theme-151-readback')/p['asset']
+          assert b.stat().st_size==p['bytes']
+          assert hashlib.sha256(b.read_bytes()).hexdigest()==p['sha256']
+          with zipfile.ZipFile(b) as z:
+              assert z.testzip() is None and 'vf-tools-theme/style.css' in z.namelist()
+          print('REMOTE_ZIP_BYTES_SHA256_AND_PACKAGE=PASS')
+          PY
+      - name: Publish core-updates manifest with exact Release evidence
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          gh api "repos/llhzx2018/core-updates/contents/projects/S01-C01.json?ref=main" > manifest-current-api.json
+          python3 - <<'PY'
+          import json,base64,pathlib
+          a=json.load(open('manifest-current-api.json'))
+          m=json.loads(base64.b64decode(a['content']).decode())
+          p=json.load(open('vf-theme-release-proof.json'))
+          r=json.load(open('release-remote.json'))
+          if m['target_version']=='1.35.151':
+              assert m['asset_sha256']==p['sha256'] and m['asset_bytes']==p['bytes']
+              print('DISTRIBUTION_ALREADY_IDENTICAL=PASS')
+              pathlib.Path('distribution-noop').touch()
+          else:
+              assert m['target_version']=='1.35.150', 'manifest changed unexpectedly'
+              assert m['component_id']=='S01-C01' and m['component_type']=='THEME' and m['package_slug']=='vf-tools-theme'
+              m['target_version']='1.35.151'
+              if '1.35.150' not in m['from_versions']: m['from_versions'].append('1.35.150')
+              m['release_tag']='v1.35.151'
+              m['asset_name']=p['asset']
+              m['asset_bytes']=p['bytes']
+              m['asset_sha256']=p['sha256']
+              m['runtime_files']=p['runtime_files']
+              m['released_at']=r['published_at']
+              m['notes']='1.35.151：FAQ英文访客说明纠正；FAQ页专用WCAG AA绿色文字对比度、页尾标题层级修复。仅UI语义与文案，不修改其他页面、插件、Schema或Updater。Production由OWNER手工升级。'
+              content=(json.dumps(m,ensure_ascii=False,indent=2)+'\n').encode()
+              payload={'message':'release(s01-c01): distribute Theme v1.35.151 FAQ closure','content':base64.b64encode(content).decode(),'sha':a['sha'],'branch':'main'}
+              pathlib.Path('manifest-write-payload.json').write_text(json.dumps(payload))
+              print('DISTRIBUTION_SAFE_PAYLOAD=PASS')
+          PY
+          if [ ! -f distribution-noop ]; then
+            gh api --method PUT "repos/llhzx2018/core-updates/contents/projects/S01-C01.json" --input manifest-write-payload.json >/tmp/manifest-publish-receipt.json
+          fi
+          gh api "repos/llhzx2018/core-updates/contents/projects/S01-C01.json?ref=main" > manifest-remote-api.json
+          python3 - <<'PY'
+          import json,base64
+          raw=json.load(open('manifest-remote-api.json'))
+          m=json.loads(base64.b64decode(raw['content']))
+          p=json.load(open('vf-theme-release-proof.json'))
+          assert m['target_version']=='1.35.151' and m['release_tag']=='v1.35.151'
+          assert m['asset_bytes']==p['bytes'] and m['asset_sha256']==p['sha256']
+          assert m['asset_name']==p['asset'] and m['runtime_files']==p['runtime_files']
+          assert '1.35.150' in m['from_versions'] and m['enabled'] is True
+          print('CORE_UPDATES_REMOTE_READBACK=PASS')
+          PY
