@@ -14,13 +14,13 @@ async function metrics(page,context){return page.evaluate(context=>{
  const origin='http://127.0.0.1:18880';
  const before=await browser.newPage({viewport:{width:1440,height:1000}});
  await before.route('**/public-reading-final-owner.css*',r=>r.fulfill({status:200,contentType:'text/css',body:oldCss}));
- await before.goto(cases.en.problem_detail+'?vf_detail_mode=inline',{waitUntil:'networkidle'});
+ await before.goto(cases.en.problem_detail+'?vf_detail_mode=inline',{waitUntil:'load'});
  const baseline=await metrics(before,'problem_detail');check('148 baseline uses header rail',Math.abs(baseline.rows[0].x-baseline.header.x)<2,baseline);
  await before.screenshot({path:'proof/reference-before-1440.png',fullPage:true});await before.close();
  for(const context of ['article_detail','guide_detail','problem_detail','glossary_detail'])for(const lang of ['en','zh'])for(const width of [1920,1440,1319,1024])for(const mode of ['inline','sidebar','off','wide','short','always']){
   const page=await browser.newPage({viewport:{width,height:1000}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
   const url=cases[lang][context]+'?vf_detail_mode='+mode;
-  const response=await page.goto(url,{waitUntil:'networkidle'});const m=await metrics(page,context),label=`${context}/${lang}/${width}/${mode}`;
+  const response=await page.goto(url,{waitUntil:'load'});await page.evaluate(()=>document.fonts.ready);const m=await metrics(page,context),label=`${context}/${lang}/${width}/${mode}`;
   check(label+' correct route and language',response.status()===200&&(lang==='zh'?m.lang.startsWith('zh'):m.lang.startsWith('en'))&&await page.locator('body.vf-page-family-context--'+context).count()===1,m.lang);
   check(label+' shared left baseline',m.rows.length>=3&&m.rows.every(r=>Math.abs(r.x-m.rows[0].x)<2),m);
   check(label+' centered content group',Math.abs(m.rows[0].x-(width-m.rows[0].width)/2)<2,m);
@@ -29,7 +29,7 @@ async function metrics(page,context){return page.evaluate(context=>{
   check(label+' saved reading width',Math.abs(m.article.width-Math.min(m.shell.width-(['sidebar','always'].includes(mode)?308:0),mode==='wide'?900:820))<2,m);
   check(label+' body and diagnostic column agree',Math.abs(m.main.width-m.article.width)<2,m);
   check(label+' no horizontal overflow',!m.overflow,m);
-  if(mode!=='short')check(label+' table label stays readable',await page.locator('.vf-reading-article th').first().evaluate(x=>x.getBoundingClientRect().height<50));
+  if(mode!=='short')check(label+' table labels do not split',await page.locator('.vf-reading-article tr > :first-child').evaluateAll(xs=>xs.every(x=>{const r=document.createRange();r.selectNodeContents(x);return r.getClientRects().length===1;})));
   if(mode==='always')check(label+' explicit always sidebar preserved',m.className.includes('has-sidebar')&&await page.locator('.vf-sidebar').count()===1&&await tocCount(page)===1,m.className);
   check(label+' H1 and canonical',await page.locator('h1').count()===1&&await page.locator('link[rel=canonical]').count()===1);
   const toc=page.locator('.vf-reading-toc');
@@ -49,8 +49,8 @@ async function metrics(page,context){return page.evaluate(context=>{
  }
  // Reading final owner must not change unrelated families.
  for(const context of ['home','problem_index','basic_page']){
-  const old=await browser.newPage({viewport:{width:1440,height:1000}});await old.route('**/public-reading-final-owner.css*',r=>r.fulfill({status:200,contentType:'text/css',body:oldCss}));await old.goto(cases.en[context],{waitUntil:'networkidle'});
-  const now=await browser.newPage({viewport:{width:1440,height:1000}});await now.goto(cases.en[context],{waitUntil:'networkidle'});
+  const old=await browser.newPage({viewport:{width:1440,height:1000}});await old.route('**/public-reading-final-owner.css*',r=>r.fulfill({status:200,contentType:'text/css',body:oldCss}));await old.goto(cases.en[context],{waitUntil:'load'});
+  const now=await browser.newPage({viewport:{width:1440,height:1000}});await now.goto(cases.en[context],{waitUntil:'load'});
   const rect=p=>p.locator('#content').evaluate(x=>{const r=x.getBoundingClientRect();return[r.x,r.width,r.height]});
   check(context+' geometry unchanged',JSON.stringify(await rect(old))===JSON.stringify(await rect(now)));await old.close();await now.close();
  }
