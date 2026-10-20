@@ -29,7 +29,7 @@ async function escapeReset(page,key,clearFirst=false){const root=directory(page)
       await load(p,url(row.url,{vf_letter:'a'}));check(key+' native letter scope',await root.locator('[data-vf-directory-item]').evaluateAll(xs=>xs.length>0&&xs.every(x=>x.getAttribute('data-vf-directory-letter')==='a')));await escapeReset(p,key+' letter Escape');
      }
      const next=p.locator('.vf-theme-pagination a.next').first();if(await next.count()){
-      const dest=await next.getAttribute('href');await load(p,dest);const second=await identities(p);check(key+' pages have disjoint cards',second.length>0&&second.every(x=>!original.includes(x)),{original,second});
+      const dest=await next.getAttribute('href');await load(p,dest);const second=await identities(p);const disjoint=second.length>0&&second.every(x=>!original.includes(x));const info={dest,actual:p.url(),original,second,diag:(await p.content()).match(/search-archive-diag:([\s\S]*?) -->/)?.[1]};checks.push({name:key+' pages have disjoint cards',pass:disjoint,detail:info});if(!disjoint){fs.writeFileSync(`proof/pagination-${row.context}-${lang}.html`,await p.content());console.log('CATALOG_PAGINATION_DIAG',JSON.stringify(info));}
       const word=(await root.locator('[data-vf-directory-item] h3').first().textContent()).trim().split(/\s+/)[0];await load(p,url(row.url,{vf_q:word,paged:'2'}));await escapeReset(p,key+' paginated Escape');
      }
     }
@@ -46,5 +46,6 @@ async function escapeReset(page,key,clearFirst=false){const root=directory(page)
    const row=seed.archives[lang][kind],p=await browser.newPage({viewport:{width:1440,height:1000}}),key=`${lang}/archive/${kind}`;await load(p,url(row.url));await geometry(p,key);const cards=await identities(p);check(key+' bounded current archive',cards.length>0&&cards.every(x=>row.urls.includes(x)),{cards,allowed:row.urls});await load(p,url(row.url,{vf_q:'vf-no-match-xyz'}));await escapeReset(p,key+' empty Escape');check(key+' scope retained after reset',(await identities(p)).every(x=>row.urls.includes(x)));await p.close();
   }
  }
+ if(checks.some(x=>!x.pass))throw Error('Catalog diagnostic collected failing assertions');
  console.log('CATALOG_RECOVERY_PASS',checks.length);
 }finally{fs.writeFileSync('proof/catalog-focused.json',JSON.stringify({status:checks.every(x=>x.pass)?'PASS':'FAIL',checks},null,2));await browser.close();}})().catch(e=>{console.error(e);process.exit(1)});
