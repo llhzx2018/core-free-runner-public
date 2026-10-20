@@ -3,18 +3,19 @@
 $detail_layout = static function($raw) {
  if (!isset($_GET['vf_detail_mode'])) { return $raw; }
  $raw=is_array($raw)?$raw:[];$mode=(string)$_GET['vf_detail_mode'];
- $raw['problemReading']=array_replace((array)($raw['problemReading']??[]),[
+ foreach(['articleReading','guideReading','problemReading','glossaryReading'] as $key){
+ $raw[$key]=array_replace((array)($raw[$key]??[]),[
   'tocPosition'=>$mode==='off'?'off':($mode==='sidebar'?'sidebar':'inline'),
   'sidebarMode'=>$mode==='off'?'off':'contextual',
   'reading_width'=>$mode==='wide'?'relaxed':'focused',
   'sidebar_width'=>'balanced',
- ]);
+ ]);}
  return $raw;
 };
 add_filter('option_vf_theme_layout',$detail_layout,10001);
 add_filter('default_option_vf_theme_layout',$detail_layout,10001);
 add_filter('the_content',static function($html) {
- if(get_post_type()!=='vf_problem')return $html;
+ if(!in_array(get_post_type(),['post','vf_guide','vf_problem','vf_glossary'],true))return $html;
  $zh=function_exists('vf_theme_public_is_zh')&&vf_theme_public_is_zh();
  if(($_GET['vf_detail_mode']??'')==='short')return '<p>'.($zh?'简短问题说明。':'Short problem explanation.').'</p>';
  $title=$zh?'检查音画不同步':'Check audio synchronization';
