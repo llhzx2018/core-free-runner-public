@@ -1,0 +1,133 @@
+name: P01 V2.47.395 exact distribution proof (temporary)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247395-distribution-proof.yml'
+      - 'lane-specs/p01-v247395-distribution.json'
+permissions:
+  contents: read
+jobs:
+  verify-distribution:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      TARGET_VERSION: '2.47.395'
+      TARGET_SHA: '54970cb259e31f2368e42a90ce6559a8e2b1ba89'
+    steps:
+      - name: Checkout registered Runner control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Validate lane-spec and rendered exact identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          spec=lane-specs/p01-v247395-distribution.json
+          python3 scripts/ephemeral_lane_spec.py validate --spec "$spec" >/tmp/p01-lane-validate.json
+          python3 scripts/ephemeral_lane_spec.py audit-rendered --spec "$spec" --input .github/workflows/p01-v247395-distribution-proof.yml >/tmp/p01-lane-audit.json
+          python3 - <<'PY'
+          import json
+          assert json.load(open('/tmp/p01-lane-validate.json'))['status']=='PASS'
+          assert json.load(open('/tmp/p01-lane-audit.json'))['status']=='PASS'
+          print('P01_DISTRIBUTION_LANE_IDENTITY_AUDIT=PASS')
+          PY
+      - name: Checkout exact core-updates candidate transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-updates
+          ref: '54970cb259e31f2368e42a90ce6559a8e2b1ba89'
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: candidate
+          persist-credentials: false
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, zip, mbstring
+          coverage: none
+      - name: Validate all manifest contracts and exact P01 identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = '42ab0704abfecee15a88a737e09d8789fa053264'
+          cd candidate
+          python3 scripts/check_manifest_contract.py >/tmp/p01-all-manifests.json
+          python3 - <<'PY'
+          import json
+          a=json.load(open('/tmp/p01-all-manifests.json'))
+          assert a['status']=='PASS',a
+          assert any(x['path']=='projects/P01.json' and not x['failures'] for x in a['results'])
+          m=json.load(open('projects/P01.json'))
+          assert (m['project_id'],m['component_id'])==('P01','APP')
+          assert m['current_version']=='2.47.394'
+          assert m['target_version']=='2.47.395'
+          assert m['from_versions']==['2.47.394']
+          assert m['update_type']=='ATOMIC'
+          assert m['schema_from']==m['schema_to']=='2026090401'
+          assert m['product_identity']=='0ed288190b22336e3745a1e15e69c136fd29ae1b'
+          assert m['release_tag']=='v2.47.395' and m['release_id']==417942096
+          assert m['asset_name']=='VF_Start_V2.47.395_UPDATE.zip'
+          assert m['asset_bytes']==2586613
+          assert m['asset_sha256']=='b4b89fe394464956abc5c7eb4164cbcdb460419fd866a4bd42cc4b7d1fa3a035'
+          assert m['backup_required'] is True and m['rollback_supported'] is True
+          print('P01_DISTRIBUTION_MANIFEST_CONTRACT=PASS')
+          PY
+      - name: Native Update Core tests and from_versions discovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          find update-core/php -name '*.php' -type f -print0 | xargs -0 -n1 php -l >/dev/null
+          php update-core/php/tests/run.php >/tmp/p01-update-core-tests.log
+          php <<'PHP'
+          <?php
+          require 'update-core/php/src/UpdateCore.php';
+          $m=json_decode(file_get_contents('projects/P01.json'),true,512,JSON_THROW_ON_ERROR);
+          $core=new \CoreUpdates\UpdateCore('P01','APP');
+          foreach([
+            ['2.47.394','2026090401','AVAILABLE'],
+            ['2.47.393','2026090401','BLOCKED_SOURCE_VERSION'],
+            ['2.47.394','2026090400','BLOCKED_SCHEMA'],
+            ['2.47.395','2026090401','UP_TO_DATE']
+          ] as [$current,$schema,$expected]){
+            $actual=$core->check($current,$schema,$m);
+            if(($actual['status']??'')!==$expected){fwrite(STDERR,"Discovery mismatch for $current/$schema\n");exit(1);}
+          }
+          echo "P01_V247394_TO_V247395_DISCOVERY_CONTRACT=PASS\n";
+          PHP
+          echo P01_UPDATE_CORE_NATIVE_REGRESSION=PASS
+      - name: Download real formal Update asset and verify bytes and digest
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.47.395 >/tmp/p01-release.json
+          mkdir -p "$RUNNER_TEMP/p01-asset"
+          gh release download v2.47.395 -R llhzx2018/vf-start -D "$RUNNER_TEMP/p01-asset" -p VF_Start_V2.47.395_UPDATE.zip
+          cd candidate
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          m=json.load(open('projects/P01.json'))
+          rel=json.load(open('/tmp/p01-release.json'))
+          assert rel['id']==m['release_id'] and rel['tag_name']==m['release_tag']
+          assert not rel['draft'] and not rel['prerelease']
+          assets=[x for x in rel['assets'] if x['name']==m['asset_name']]
+          assert len(assets)==1
+          asset=assets[0]
+          assert asset['size']==m['asset_bytes']
+          assert asset['digest']=='sha256:'+m['asset_sha256']
+          p=pathlib.Path(os.environ['RUNNER_TEMP'])/'p01-asset'/m['asset_name']
+          assert p.stat().st_size==m['asset_bytes']
+          assert hashlib.sha256(p.read_bytes()).hexdigest()==m['asset_sha256']
+          print('P01_V247395_RELEASE_ASSET_FINAL_BYTES_SHA256=PASS')
+          PY
+          rm -f "$RUNNER_TEMP/p01-asset/VF_Start_V2.47.395_UPDATE.zip"
+          echo P01_V247395_PUBLIC_RUNNER_DISTRIBUTION_PROOF=PASS
+      - name: Delete transient checkout and downloaded materials
+        if: always()
+        run: rm -rf candidate "$RUNNER_TEMP/p01-asset"
