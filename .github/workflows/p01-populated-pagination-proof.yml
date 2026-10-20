@@ -1,0 +1,112 @@
+name: P01 isolated populated multi-page pagination proof (temporary)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p01-populated-pagination-proof.yml']
+permissions:
+  contents: read
+jobs:
+  nine-entry-proof:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      TARGET_VERSION: '2.47.395'
+      TARGET_SHA: 'a1941ef2e6768e9b98bcc72417a9c578ff3f4d54'
+    steps:
+      - name: Checkout Public Runner lane control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Audit exact candidate identity before private checkout
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_spec.py validate --spec lane-specs/p01-populated-pagination.json >/tmp/p01-lane.json
+          python3 scripts/ephemeral_lane_spec.py audit-rendered --spec lane-specs/p01-populated-pagination.json --input .github/workflows/p01-populated-pagination-proof.yml >/tmp/p01-audit.json
+          python3 - <<'PY'
+          import json
+          assert json.load(open('/tmp/p01-lane.json'))['status']=='PASS'
+          assert json.load(open('/tmp/p01-audit.json'))['status']=='PASS'
+          print('P01_POPULATED_PAGING_LANE_IDENTITY=PASS')
+          PY
+      - name: Transient exact P01 candidate checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: a1941ef2e6768e9b98bcc72417a9c578ff3f4d54
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: candidate
+          persist-credentials: false
+      - name: Prepare PHP and browser dependencies
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,zip,mbstring,gd
+          coverage: none
+      - name: Exact source syntax and pagination fixture guard
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "a1941ef2e6768e9b98bcc72417a9c578ff3f4d54"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "2.47.395"
+          php -l candidate/src/app/ChannelLibraryPage.php
+          php candidate/tests/unit/channels_guest_readonly_layout_v247390_contract.php
+          php candidate/tests/unit/topics_v247154_production_density_contract.php
+          php -l candidate/tests/integration/p01_populated_pagination_fixture.php
+          node --check candidate/tests/integration/p01_populated_pagination_browser.mjs
+          php -l candidate/src/app/TopicLibraryPage.php
+          php candidate/tests/unit/frontend_shared_owner_guest_visibility_v247390_contract.php
+          php candidate/tests/integration/p01_nine_entry_auth_shell_contract.php
+          echo P01_PAGING_SOURCE_CONTRACT=PASS
+      - name: Install clean synthetic instance locally
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          (cd candidate/src && php -S 127.0.0.1:18621 -t . >/tmp/p01-nine-browser-server.log 2>&1 & echo $! >/tmp/p01-nine-browser.pid)
+          for n in $(seq 1 40); do
+            if curl -fsS -c /tmp/p01-nine-cookie -b /tmp/p01-nine-cookie http://127.0.0.1:18621/setup.php -o /tmp/p01-nine-setup.html; then break; fi
+            sleep 1
+          done
+          python3 - <<'PY' > /tmp/p01-nine-csrf
+          import re
+          s=open('/tmp/p01-nine-setup.html').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m, "No CSRF setup token"
+          print(m.group(1))
+          PY
+          csrf="$(cat /tmp/p01-nine-csrf)"
+          curl -fsS -c /tmp/p01-nine-cookie -b /tmp/p01-nine-cookie -X POST http://127.0.0.1:18621/setup.php --data-urlencode "setup_csrf=$csrf" --data-urlencode "site_title=VF Start Synthetic" --data-urlencode "admin_password=P01LocalSyntheticPass_771" --data-urlencode "admin_password_confirm=P01LocalSyntheticPass_771" -o /tmp/p01-nine-setup-result.html
+          (cd candidate/src && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_NINE_ENTRY_SYNTHETIC_INSTALL=PASS
+      - name: Seed standalone multi-page fixture after clean install
+        shell: bash
+        env:
+          P01_SYNTHETIC_PAGINATION: 'YES'
+        run: |
+          set -Eeuo pipefail
+          php candidate/tests/integration/p01_populated_pagination_fixture.php | tee /tmp/p01-populated-fixture.log
+          grep -Fx 'P01_POPULATED_PAGINATION_FIXTURE=PASS' /tmp/p01-populated-fixture.log
+          echo P01_ISOLATED_PAGING_SEED=PASS
+      - name: Install isolated chromium test binary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          npm install --no-save --ignore-scripts playwright@1.56.1 >/dev/null
+          npx playwright install chromium --with-deps >/tmp/p01-browser-install.log
+          echo P01_NINE_ENTRY_BROWSER_READY=PASS
+      - name: Real Chromium populated pagination contract
+        shell: bash
+        env:
+          P01_TEST_PASSWORD: P01LocalSyntheticPass_771
+          P01_TEST_ORIGIN: http://127.0.0.1:18621
+        run: |
+          set -Eeuo pipefail
+          node candidate/tests/integration/p01_populated_pagination_browser.mjs | tee /tmp/p01-multipage-browser.log
+          grep -Fx 'P01_POPULATED_PAGINATION_TWO_AUTH_BROWSER=PASS' /tmp/p01-multipage-browser.log
+          echo P01_POPULATED_PAGINATION_FULL_MATRIX=PASS
+      - name: Cleanup synthetic runtime
+        if: always()
+        run: |
+          if test -f /tmp/p01-nine-browser.pid; then kill "$(cat /tmp/p01-nine-browser.pid)" >/dev/null 2>&1 || true; fi
