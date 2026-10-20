@@ -4,7 +4,7 @@ root=Path('target');sha=os.environ['TARGET_SHA'];v=os.environ['TARGET_VERSION']
 base='326e73072ae58f22b31ca900e87aaad2fd59d732'
 assert subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()==sha
 changed=subprocess.check_output(['git','-C',str(root),'diff','--name-only',base,'HEAD'],text=True).splitlines()
-assert set(changed)=={'src/assets/js/main.js','src/inc/runtime-constants.php','VERSION','src/style.css'},changed
+assert set(changed)=={'src/assets/js/main.js','src/inc/runtime-constants.php','VERSION','src/style.css','src/inc/modules/module-post-list.php','src/inc/services/post-list-query-service.php','tests/search-archive-wordpress-check.php'},changed
 assert (root/'VERSION').read_text()==v+'\n'
 for path in ['src/style.css','src/inc/runtime-constants.php']:
  before=subprocess.check_output(['git','-C',str(root),'show',base+':'+path],text=True)
