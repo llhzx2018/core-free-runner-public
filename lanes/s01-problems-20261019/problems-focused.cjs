@@ -1,65 +1,34 @@
 const {chromium}=require('playwright');const fs=require('fs');
 const checks=[];function check(name,pass,detail){checks.push({name,pass:!!pass,detail});if(!pass)throw Error(name+': '+JSON.stringify(detail));}
-const oldCss=fs.readFileSync('/tmp/prior-reading.css','utf8');
+const oldCss=fs.readFileSync('/tmp/prior-public.css','utf8');
 const cases=JSON.parse(fs.readFileSync('proof/cases.json','utf8')).cases;
-async function tocCount(page){return page.locator('.vf-reading-toc').count();}
-async function metrics(page,context){return page.evaluate(context=>{
- const root=document.querySelector('.vf-theme-module-stack--'+context);
- const box=x=>{const r=x.getBoundingClientRect();return{x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width,height:r.height}};
- const rows=['.vf-article-hero-inner','.vf-reading-main','.vf-reading-support-shell','.vf-theme-module-frame--steps .container-wide','.vf-theme-module-frame--problems .container-wide','.vf-data-cta-box'].flatMap(sel=>[...root.querySelectorAll(sel)].filter(x=>x.getBoundingClientRect().height>0).map(x=>({sel,...box(x)})));
- const shell=root.querySelector('.vf-reading-shell');
- return{rows,article:box(root.querySelector('.vf-reading-article')),shell:box(shell),main:box(root.querySelector('.vf-reading-main')),className:shell.className,header:box(document.querySelector('#vf-site-header .vf-header-inner')),overflow:document.documentElement.scrollWidth>innerWidth+1,lang:document.documentElement.lang};
-},context);}
+async function setup(page,lang,width,baseline=false){if(baseline)await page.route('**/vf-theme-public-runtime.css*',r=>r.fulfill({status:200,contentType:'text/css',body:oldCss}));await page.setViewportSize({width,height:1000});await page.goto(cases[lang].home,{waitUntil:'load'});await page.evaluate(()=>document.fonts.ready);}
+async function variant(page,mode){await page.evaluate(mode=>{const w=document.querySelector('.vf-production-footer-wrap');if(['one','two','three','four'].includes(mode)){for(const c of [...w.classList])if(c.startsWith('vf-footer-columns-'))w.classList.remove(c);w.classList.add('vf-footer-columns-'+mode);}if(['simple','seo'].includes(mode)){for(const c of [...w.classList])if(c.startsWith('vf-footer-variant-'))w.classList.remove(c);w.classList.add('vf-footer-variant-'+mode);}if(mode==='short')document.querySelectorAll('[data-vf-menu-location=footer_tools] .vf-footer-section-panel > :nth-child(n+3)').forEach(x=>x.remove());if(mode==='missing')document.querySelector('[data-vf-menu-location=footer_company]').remove();},mode);}
+async function metrics(page){return page.evaluate(()=>{const f=document.querySelector('[data-site-footer]'),w=f.querySelector('.vf-production-footer-wrap'),g=f.querySelector('.vf-production-footer-grid'),t=f.querySelector('[data-vf-menu-location=footer_tools] .vf-footer-section-panel');const box=x=>{const r=x.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height,right:r.right,bottom:r.bottom}};return{height:f.getBoundingClientRect().height,grid:box(g),tools:box(t),links:[...t.querySelectorAll('a')].map(x=>({text:x.textContent,url:x.href,target:x.target,rel:x.rel,...box(x)})),content:box(document.querySelector('#content')),header:box(document.querySelector('#vf-site-header')),overflow:document.documentElement.scrollWidth>innerWidth+1,classes:w.className};});}
+const identity=m=>m.links.map(({text,url,target,rel})=>({text,url,target,rel}));
 (async()=>{const browser=await chromium.launch();try{
- const origin='http://127.0.0.1:18880';
- const before=await browser.newPage({viewport:{width:1440,height:1000}});
- await before.route('**/public-reading-final-owner.css*',r=>r.fulfill({status:200,contentType:'text/css',body:oldCss}));
- await before.goto(cases.en.problem_detail+'?vf_detail_mode=inline',{waitUntil:'load'});
- const baseline=await metrics(before,'problem_detail');check('148 baseline uses header rail',Math.abs(baseline.rows[0].x-baseline.header.x)<2,baseline);
- await before.screenshot({path:'proof/reference-before-1440.png',fullPage:true});await before.close();
- for(const context of ['article_detail','guide_detail','problem_detail','glossary_detail'])for(const lang of ['en','zh'])for(const width of [1920,1440,1319,1024])for(const mode of ['inline','sidebar','off','wide','short','always']){
-  const page=await browser.newPage({viewport:{width,height:1000}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
-  const url=cases[lang][context]+'?vf_detail_mode='+mode;
-  const response=await page.goto(url,{waitUntil:'load'});await page.evaluate(()=>document.fonts.ready);const m=await metrics(page,context),label=`${context}/${lang}/${width}/${mode}`;
-  check(label+' correct route and language',response.status()===200&&(lang==='zh'?m.lang.startsWith('zh'):m.lang.startsWith('en'))&&await page.locator('body.vf-page-family-context--'+context).count()===1,m.lang);
-  check(label+' shared left baseline',m.rows.length>=3&&m.rows.every(r=>Math.abs(r.x-m.rows[0].x)<2),m);
-  check(label+' centered content group',Math.abs(m.rows[0].x-(width-m.rows[0].width)/2)<2,m);
-  check(label+' group follows saved columns within site rail',Math.abs(m.rows[0].width-Math.min(m.header.width,(mode==='wide'?900:820)+308))<2,m);
-  check(label+' reading stylesheet loaded',await page.locator('link#vf-theme-reading-final-owner-css').count()===1);
-  check(label+' saved reading width',Math.abs(m.article.width-Math.min(m.shell.width-(['sidebar','always'].includes(mode)?308:0),mode==='wide'?900:820))<2,m);
-  check(label+' body and diagnostic column agree',Math.abs(m.main.width-m.article.width)<2,m);
-  check(label+' no horizontal overflow',!m.overflow,m);
-  if(mode!=='short')check(label+' table labels do not split',await page.locator('.vf-reading-article tr > :first-child').evaluateAll(xs=>xs.every(x=>{const r=document.createRange();r.selectNodeContents(x);return r.getClientRects().length===1;})));
-  if(mode==='always')check(label+' explicit always sidebar preserved',m.className.includes('has-sidebar')&&await page.locator('.vf-sidebar').count()===1&&await tocCount(page)===1,m.className);
-  check(label+' H1 and canonical',await page.locator('h1').count()===1&&await page.locator('link[rel=canonical]').count()===1);
-  const toc=page.locator('.vf-reading-toc');
-  if(['inline','wide'].includes(mode)){
-   check(label+' inline directory before main',await toc.count()===1&&(await toc.boundingBox()).y+(await toc.boundingBox()).height<=m.main.y+1,m);
-   check(label+' inline directory has no nested scroll',await toc.locator('nav').evaluate(x=>x.scrollHeight<=x.clientHeight+1));
-  }
-  if(mode==='sidebar')check(label+' directory right of body',(await page.locator('.vf-sidebar').boundingBox()).x>=m.main.right+40,m);
-  if(mode==='off'||mode==='short')check(label+' no spurious directory',await toc.count()===0,m.className);
-  if(mode==='inline'){
-   const target=await toc.locator('a').first().getAttribute('href');await toc.locator('a').first().click();check(label+' directory anchor works',await page.evaluate(()=>decodeURIComponent(location.hash))===target);
-   const faq=page.locator('.vf-reading-faq-list details').last();if(await faq.count()){const was=await faq.getAttribute('open')!==null;await faq.locator('summary').click();check(label+' FAQ disclosure changes',was!==(await faq.getAttribute('open')!==null));}
-   const links=await page.locator('.vf-reading-tool-links a').evaluateAll(xs=>xs.map(x=>x.href));check(label+' existing tool routes',links.every(x=>x.startsWith('http://127.0.0.1:18880/')));
-  }
-  if(width===1440&&['inline','sidebar'].includes(mode)){await page.evaluate(()=>scrollTo(0,0));await page.waitForTimeout(150);await page.screenshot({path:`proof/reference-${context}-${lang}-${mode}.png`,fullPage:true});}
-  check(label+' no script errors',errors.length===0,errors);await page.close();
+ for(const lang of ['en','zh'])for(const width of [1920,1440,1319,1024])for(const mode of ['three','four','one','two','seo','simple','short','missing']){
+  const before=await browser.newPage(),now=await browser.newPage();await setup(before,lang,width,true);await setup(now,lang,width);await variant(before,mode);await variant(now,mode);const a=await metrics(before),b=await metrics(now),label=`${lang}/${width}/${mode}`;
+  check(label+' no link removed or reordered',JSON.stringify(identity(a))===JSON.stringify(identity(b)),{a:identity(a),b:identity(b)});
+  check(label+' no horizontal overflow',!b.overflow,b);
+  check(label+' header and content geometry unchanged',JSON.stringify(a.header)===JSON.stringify(b.header)&&JSON.stringify(a.content)===JSON.stringify(b.content),{a,b});
+  if(['three','four'].includes(mode)){
+   const xs=[...new Set(b.links.map(x=>Math.round(x.x)))];check(label+' 15 links use two columns',b.links.length===15&&xs.length===2,{xs,b});
+   check(label+' footer height reduced at least 20 percent',b.height<=a.height*.8,{old:a.height,new:b.height});
+   check(label+' links contained by tools region',b.links.every(x=>x.x>=b.tools.x-1&&x.right<=b.tools.right+1),b);
+   check(label+' original column reading order',b.links.every((x,i)=>!i||x.x>b.links[i-1].x+10||x.y>=b.links[i-1].bottom-1),b.links);
+   if(width===1440&&mode==='three'){
+    await before.locator('[data-site-footer]').screenshot({path:`proof/footer-before-${lang}.png`});await now.locator('[data-site-footer]').screenshot({path:`proof/footer-after-${lang}.png`});
+    const links=now.locator('[data-vf-menu-location=footer_tools] .vf-footer-section-panel a');await links.first().focus();for(let i=1;i<15;i++){await now.keyboard.press('Tab');check(label+' keyboard menu order '+i,await links.nth(i).evaluate(x=>x===document.activeElement));}
+    const href=await links.last().getAttribute('href');await links.last().click();check(label+' existing tool destination opens',now.url()===href);
+   }
+  }else{check(label+' alternate layout geometry unchanged',JSON.stringify(a)===JSON.stringify(b),{a,b});}
+  await before.close();await now.close();
  }
- // Reading final owner must not change unrelated families.
- for(const context of ['home','problem_index','basic_page']){
-  const old=await browser.newPage({viewport:{width:1440,height:1000}});await old.route('**/public-reading-final-owner.css*',r=>r.fulfill({status:200,contentType:'text/css',body:oldCss}));await old.goto(cases.en[context],{waitUntil:'load'});
-  const now=await browser.newPage({viewport:{width:1440,height:1000}});await now.goto(cases.en[context],{waitUntil:'load'});
-  const rect=p=>p.locator('#content').evaluate(x=>{const r=x.getBoundingClientRect();return[r.x,r.width,r.height]});
-  check(context+' geometry unchanged',JSON.stringify(await rect(old))===JSON.stringify(await rect(now)));await old.close();await now.close();
+ // Shared-footer coverage uses the canonical case inventory, not a second route list.
+ for(const lang of ['en','zh'])for(const [context,url]of Object.entries(cases[lang])){
+  const page=await browser.newPage({viewport:{width:1440,height:1000}});const errors=[];page.on('pageerror',e=>errors.push(e.message));await page.goto(url,{waitUntil:'load'});await page.evaluate(()=>document.fonts.ready);
+  const m=await metrics(page);check(`${lang}/${context} one footer and all 15 links`,await page.locator('[data-site-footer]').count()===1&&m.links.length===15);check(`${lang}/${context} no overflow or script errors`,!m.overflow&&errors.length===0,{overflow:m.overflow,errors});await page.close();
  }
- const admin=await browser.newPage({viewport:{width:1440,height:1000}});const target=origin+'/wp-admin/themes.php?page=vf-theme-modules&tab=layout&vf_review_tools=1';
- await admin.goto(origin+'/wp-login.php');await admin.locator('#user_login').fill('admin');await admin.locator('#user_pass').fill('Synthetic-Only-Update-54!');await admin.locator('input[name=redirect_to]').evaluate((e,v)=>e.value=v,target);await admin.locator('#wp-submit').click();await admin.waitForURL('**/wp-admin/**');await admin.waitForLoadState('networkidle');
- check('canonical directory has all 20 types',await admin.locator('[data-vf-page-context]').count()===20);
- const records=admin.locator('.vf-frontend-pages__progress-record');check('20 types plus 2 shared surfaces have criteria',await records.count()===22&&await records.locator('ul[aria-label="原型采用与检查要点"]').count()===22);
- const refs=await records.locator('a[target=_blank]').evaluateAll(xs=>xs.map(x=>x.href));check('all records have primary reference URL',refs.length===22&&refs.every(x=>/^https:\/\/(www.iloveimg.com|cloudconvert.com|www.cloudflare.com|developers.cloudflare.com)\//.test(x)),refs);
- check('mapping does not assert human acceptance',await admin.locator('.vf-frontend-pages__review-overview').innerText().then(x=>x.includes('本版人工确认 0 / 20')));
- await admin.locator('#vf-review-problem_detail > details > summary').click();await admin.locator('#vf-review-problem_detail .vf-frontend-pages__progress-record details > summary').click();await admin.screenshot({path:'proof/reference-admin-1440.png',fullPage:true});await admin.close();
- console.log('REFERENCE_READING_PASS',checks.length);
-}finally{fs.writeFileSync('proof/reference-focused.json',JSON.stringify({status:checks.every(x=>x.pass)?'PASS':'FAIL',checks},null,2));await browser.close();}})().catch(e=>{console.error(e);process.exit(1)});
+ console.log('FOOTER_DENSITY_PASS',checks.length);
+}finally{fs.writeFileSync('proof/footer-focused.json',JSON.stringify({status:checks.every(x=>x.pass)?'PASS':'FAIL',checks},null,2));await browser.close();}})().catch(e=>{console.error(e);process.exit(1)});
