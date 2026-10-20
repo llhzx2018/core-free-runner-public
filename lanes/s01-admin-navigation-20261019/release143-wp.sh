@@ -9,6 +9,7 @@ for i in $(seq 1 80);do docker exec "$DB" mariadb-admin ping -uroot -psynthetic 
 curl -fsSLo wp.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
 docker cp wp.phar "$WP:/usr/local/bin/wp"
 for i in $(seq 1 80);do docker exec "$WP" sh -c 'test -s /var/www/html/wp-config.php && grep -q "wp-settings.php" /var/www/html/wp-config.php' >/dev/null 2>&1 && break;sleep 2;done
+docker exec "$WP" sh -c 'echo "opcache.enable=0" > /usr/local/etc/php/conf.d/release-check.ini;apachectl graceful' >/dev/null
 cli(){ docker exec --user www-data "$WP" php /usr/local/bin/wp "$@" --path=/var/www/html; }
 cli config set DISABLE_WP_CRON true --raw >/dev/null
 cli config set VF_WP_UPDATE_TEST_MODE true --raw >/dev/null
@@ -46,7 +47,7 @@ for step in upgrade rollback reapply idempotent;do
  curl -fsS -b /tmp/s01-cookie "$admin" > /tmp/s01-admin.html
  grep -q 'data-vf-frontend-pages' /tmp/s01-admin.html
  cli eval-file /tmp/snapshot.php > "proof/data-$step.json"
- cmp proof/data-before.json "proof/data-$step.json"
+ if ! cmp proof/data-before.json "proof/data-$step.json";then diff -u proof/data-before.json "proof/data-$step.json";exit 1;fi
  echo "NATIVE_THEME_${step}_DATA_PRESERVED=PASS"
 done
 python3 - <<'PY'
