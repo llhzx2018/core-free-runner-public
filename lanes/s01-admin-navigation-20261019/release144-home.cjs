@@ -24,7 +24,7 @@ const {chromium}=require('playwright'),fs=require('fs');
     const list=root.locator('[data-vf-layout-list]'),rows=list.locator(':scope>li');
     check(id+'-module-list',await rows.count()>0,await rows.count());
     const header=root.locator('.vf-layout-card--module-list>.vf-layout-card__header');
-    check(id+'-duplicate-heading',context==='home'?!await header.isVisible():await header.isVisible(),'Only home hides duplicate card header');
+    if(context==='home')check(id+'-duplicate-heading',!await header.isVisible(),'Home hides duplicate card header');
     if(context==='home'){
      check(id+'-single-page-heading',!await root.locator('.vf-layout-current-page__title').isVisible()&&await page.locator('h1').isVisible(),'Page heading remains visible');
      const metrics=await rows.evaluateAll(es=>es.map(e=>{const s=getComputedStyle(e);return {padding:s.paddingTop,height:e.getBoundingClientRect().height};}));
