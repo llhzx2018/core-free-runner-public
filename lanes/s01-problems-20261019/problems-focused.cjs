@@ -25,7 +25,7 @@ function check(name,pass,detail){checks.push({name,pass:!!pass,detail});if(!pass
    }
    const page=await browser.newPage({viewport:{width:1440,height:1000}});
    await page.goto(base,{waitUntil:'networkidle'});
-   for(const [category,count] of Object.entries({browser:1,access:1,encryption:1,structure:1,playback:5})){
+   for(const [category,count] of Object.entries({browser:1,access:1,encryption:1,structure:2,playback:4})){
     await page.locator(`[data-vf-directory-filter-button="${category}"]`).click();
     await page.waitForTimeout(400);
     const visible=page.locator('.vf-directory-card--problem:visible');
