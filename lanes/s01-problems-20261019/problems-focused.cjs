@@ -20,7 +20,7 @@ const identity=m=>m.links.map(({text,url,target,rel})=>({text,url,target,rel}));
    if(width===1440&&mode==='three'){
     await before.locator('[data-site-footer]').screenshot({path:`proof/footer-before-${lang}.png`});await now.locator('[data-site-footer]').screenshot({path:`proof/footer-after-${lang}.png`});
     const links=now.locator('[data-vf-menu-location=footer_tools] .vf-footer-section-panel a');await links.first().focus();for(let i=1;i<15;i++){await now.keyboard.press('Tab');check(label+' keyboard menu order '+i,await links.nth(i).evaluate(x=>x===document.activeElement));}
-    const href=await links.last().getAttribute('href');await links.last().click();check(label+' existing tool destination opens',now.url()===href);
+    const href=await links.last().getAttribute('href');await links.last().click();check(label+' existing destination opens',now.url()===href);
    }
   }else{check(label+' alternate layout geometry unchanged',JSON.stringify(a)===JSON.stringify(b),{a,b});}
   await before.close();await now.close();
