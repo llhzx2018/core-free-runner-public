@@ -24,6 +24,8 @@ async function metrics(page){return page.evaluate(()=>{
   check(label+' HTTP and module surfaces',response.status()===200&&m.rows.length>=5,m.rows);
   check(label+' common left edge',m.rows.every(r=>Math.abs(r.x-m.main.x)<=1.5),m);
   check(label+' common right edge',m.rows.every(r=>Math.abs(r.right-m.main.right)<=1.5),m);
+  const captions=await page.locator('.vf-theme-module-stack--problem_detail .vf-family-section-head :is(h2,p),.vf-theme-module-stack--problem_detail .vf-reading-support-head :is(h2,p)').evaluateAll(xs=>xs.filter(x=>x.getBoundingClientRect().height>0).map(x=>({text:x.textContent,x:x.getBoundingClientRect().x})));
+  check(label+' section heading and description alignment',captions.length>=4&&captions.every(r=>Math.abs(r.x-m.main.x)<=1.5),{main:m.main.x,captions});
   check(label+' no horizontal overflow',!m.overflow);
   check(label+' H1 and canonical',await page.locator('h1').count()===1&&await page.locator('link[rel=canonical]').count()===1);
   check(label+' saved reading width',mode!=='wide'||Math.abs(m.main.width-900)<2,m.main.width);
