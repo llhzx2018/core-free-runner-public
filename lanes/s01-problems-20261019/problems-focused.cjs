@@ -2,6 +2,7 @@ const {chromium}=require('playwright');const fs=require('fs');
 const checks=[];function check(name,pass,detail){checks.push({name,pass:!!pass,detail});if(!pass)throw Error(name+': '+JSON.stringify(detail));}
 const oldCss=fs.readFileSync('/tmp/prior-reading.css','utf8');
 const cases=JSON.parse(fs.readFileSync('proof/cases.json','utf8')).cases;
+async function tocCount(page){return page.locator('.vf-reading-toc').count();}
 async function metrics(page,context){return page.evaluate(context=>{
  const root=document.querySelector('.vf-theme-module-stack--'+context);
  const box=x=>{const r=x.getBoundingClientRect();return{x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width,height:r.height}};
@@ -16,7 +17,7 @@ async function metrics(page,context){return page.evaluate(context=>{
  await before.goto(cases.en.problem_detail+'?vf_detail_mode=inline',{waitUntil:'networkidle'});
  const baseline=await metrics(before,'problem_detail');check('148 baseline uses header rail',Math.abs(baseline.rows[0].x-baseline.header.x)<2,baseline);
  await before.screenshot({path:'proof/reference-before-1440.png',fullPage:true});await before.close();
- for(const context of ['article_detail','guide_detail','problem_detail','glossary_detail'])for(const lang of ['en','zh'])for(const width of [1920,1440,1319,1024])for(const mode of ['inline','sidebar','off','wide','short']){
+ for(const context of ['article_detail','guide_detail','problem_detail','glossary_detail'])for(const lang of ['en','zh'])for(const width of [1920,1440,1319,1024])for(const mode of ['inline','sidebar','off','wide','short','always']){
   const page=await browser.newPage({viewport:{width,height:1000}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
   const url=cases[lang][context]+'?vf_detail_mode='+mode;
   const response=await page.goto(url,{waitUntil:'networkidle'});const m=await metrics(page,context),label=`${context}/${lang}/${width}/${mode}`;
@@ -25,9 +26,11 @@ async function metrics(page,context){return page.evaluate(context=>{
   check(label+' centered content group',Math.abs(m.rows[0].x-(width-m.rows[0].width)/2)<2,m);
   check(label+' group follows saved columns within site rail',Math.abs(m.rows[0].width-Math.min(m.header.width,(mode==='wide'?900:820)+308))<2,m);
   check(label+' reading stylesheet loaded',await page.locator('link#vf-theme-reading-final-owner-css').count()===1);
-  check(label+' saved reading width',Math.abs(m.article.width-Math.min(m.shell.width-(mode==='sidebar'?308:0),mode==='wide'?900:820))<2,m);
+  check(label+' saved reading width',Math.abs(m.article.width-Math.min(m.shell.width-(['sidebar','always'].includes(mode)?308:0),mode==='wide'?900:820))<2,m);
   check(label+' body and diagnostic column agree',Math.abs(m.main.width-m.article.width)<2,m);
   check(label+' no horizontal overflow',!m.overflow,m);
+  if(mode!=='short')check(label+' table label stays readable',await page.locator('.vf-reading-article th').first().evaluate(x=>x.getBoundingClientRect().height<50));
+  if(mode==='always')check(label+' explicit always sidebar preserved',m.className.includes('has-sidebar')&&await page.locator('.vf-sidebar').count()===1&&await tocCount(page)===1,m.className);
   check(label+' H1 and canonical',await page.locator('h1').count()===1&&await page.locator('link[rel=canonical]').count()===1);
   const toc=page.locator('.vf-reading-toc');
   if(['inline','wide'].includes(mode)){
