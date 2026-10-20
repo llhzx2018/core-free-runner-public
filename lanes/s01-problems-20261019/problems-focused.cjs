@@ -23,7 +23,8 @@ async function metrics(page,context){return page.evaluate(context=>{
   check(label+' correct route and language',response.status()===200&&(lang==='zh'?m.lang.startsWith('zh'):m.lang.startsWith('en'))&&await page.locator('body.vf-page-family-context--'+context).count()===1,m.lang);
   check(label+' shared left baseline',m.rows.length>=3&&m.rows.every(r=>Math.abs(r.x-m.rows[0].x)<2),m);
   check(label+' centered content group',Math.abs(m.rows[0].x-(width-m.rows[0].width)/2)<2,m);
-  if(width>=1319)check(label+' reading group independent from header',m.rows[0].x>m.header.x+10,m);
+  check(label+' group follows saved columns within site rail',Math.abs(m.rows[0].width-Math.min(m.header.width,(mode==='wide'?900:820)+308))<2,m);
+  check(label+' reading stylesheet loaded',await page.locator('link#vf-theme-reading-final-owner-css').count()===1);
   check(label+' saved reading width',Math.abs(m.article.width-Math.min(m.shell.width-(mode==='sidebar'?308:0),mode==='wide'?900:820))<2,m);
   check(label+' body and diagnostic column agree',Math.abs(m.main.width-m.article.width)<2,m);
   check(label+' no horizontal overflow',!m.overflow,m);
