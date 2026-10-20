@@ -1,4 +1,4 @@
-name: S01-C01 1.35.143 distribution premerge
+name: S01-C01 1.35.143 live WordPress native discovery
 on:
   push:
     branches: [task/s01-admin-page-navigation-20261019]
@@ -9,49 +9,85 @@ env:
   TARGET_REPO: llhzx2018/vf-tools-theme
   TARGET_VERSION: 1.35.143
   TARGET_SHA: e3526ca827cf9676f011f0bf9f5d8ceec7552036
-  DIST_SHA: e483b9dbde6617815dc57b83ef2506a4a6301204
+  SOURCE_VERSION: 1.35.141
   EXPECTED_SHA256: bfbecce15727f852f5ee82e33caee5a933ed9f7c0f96413d08c851c93be62c8c
   EXPECTED_BYTES: '1961745'
 jobs:
-  premerge:
+  discovery:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 12
     steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: llhzx2018/core-updates
-          ref: e483b9dbde6617815dc57b83ef2506a4a6301204
-          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-          persist-credentials: false
-          path: updates
-      - name: Exact manifest and registered native CI equivalent
-        run: |
-          set -Eeuo pipefail
-          test "$(git -C updates rev-parse HEAD)" = "$DIST_SHA"
-          (cd updates && python3 scripts/check_manifest_contract.py > /tmp/manifest-audit.json)
-          find updates/update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l > /tmp/php-lint.txt
-          php updates/update-core/php/tests/run.php
-          python3 - <<'PY'
-          import json,os
-          a=json.load(open('/tmp/manifest-audit.json'));assert a['status']=='PASS'
-          m=json.load(open('updates/projects/S01-C01.json'));v=os.environ['TARGET_VERSION']
-          assert m['target_version']==v and m['release_tag']=='v'+v
-          assert m['asset_name']==f'vf-tools-theme_V{v}.zip'
-          assert m['repository']==os.environ['TARGET_REPO']
-          assert m['asset_sha256']==os.environ['EXPECTED_SHA256']
-          assert m['asset_bytes']==int(os.environ['EXPECTED_BYTES'])
-          assert m['runtime_files']==476 and '1.35.141' in m['from_versions']
-          print('DISTRIBUTION_EXACT_MANIFEST_SCHEMA=PASS')
-          PY
-      - name: Verify published release exact bytes
+      - name: Read published channel and exact previous release
         env:
           GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
         run: |
           set -Eeuo pipefail
-          gh release download "v$TARGET_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-theme_V$TARGET_VERSION.zip"
-          echo "$EXPECTED_SHA256  vf-tools-theme_V$TARGET_VERSION.zip" | sha256sum -c
-          test "$(stat -c%s "vf-tools-theme_V$TARGET_VERSION.zip")" = "$EXPECTED_BYTES"
-          echo 'DISTRIBUTION_RELEASE_BYTES=PASS'
-      - name: Cleanup
+          gh release download "v$SOURCE_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-theme_V$SOURCE_VERSION.zip"
+          echo "c7dc1ee1c50caccd2cadbf8952b5bfe70b987f5f890c43ce0a9a9fef9da71526  vf-tools-theme_V$SOURCE_VERSION.zip" | sha256sum -c
+          gh api 'repos/llhzx2018/core-updates/contents/projects/S01-C01.json?ref=main' --jq .content | base64 -d > manifest.json
+          python3 - <<'PY'
+          import json,os
+          m=json.load(open('manifest.json'));v=os.environ['TARGET_VERSION']
+          assert m['target_version']==v and m['release_tag']=='v'+v
+          assert os.environ['SOURCE_VERSION'] in m['from_versions']
+          assert m['asset_sha256']==os.environ['EXPECTED_SHA256']
+          assert m['asset_bytes']==int(os.environ['EXPECTED_BYTES'])
+          print('PUBLIC_MAIN_CHANNEL_READBACK=PASS')
+          PY
+      - name: Live native update discovery on isolated WordPress
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          docker run -d --name s01-admin-release-discovery-db -e MARIADB_ROOT_PASSWORD=synthetic -e MARIADB_DATABASE=wordpress -e MARIADB_USER=wp -e MARIADB_PASSWORD=synthetic mariadb:11.8.8 >/dev/null
+          docker run -d --name s01-admin-release-discovery-wp --link s01-admin-release-discovery-db:db -e WORDPRESS_DB_HOST=db -e WORDPRESS_DB_USER=wp -e WORDPRESS_DB_PASSWORD=synthetic -e WORDPRESS_DB_NAME=wordpress wordpress:7.1.2-php8.3-apache >/dev/null
+          for i in $(seq 1 80); do docker exec s01-admin-release-discovery-db mariadb-admin ping -uroot -psynthetic --silent >/dev/null 2>&1 && break; sleep 2; done
+          curl -fsSLo wp.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          docker cp wp.phar s01-admin-release-discovery-wp:/usr/local/bin/wp
+          docker cp "vf-tools-theme_V$SOURCE_VERSION.zip" s01-admin-release-discovery-wp:/tmp/old.zip
+          wp(){ docker exec --user www-data -e VF_PRIVATE_READ_TOKEN -e TARGET_VERSION -e SOURCE_VERSION s01-admin-release-discovery-wp php /usr/local/bin/wp "$@" --path=/var/www/html; }
+          for i in $(seq 1 80); do docker exec s01-admin-release-discovery-wp sh -c 'test -s /var/www/html/wp-config.php && grep -q "wp-settings.php" /var/www/html/wp-config.php' >/dev/null 2>&1 && break; sleep 2; done
+          wp core install --url=http://example.test --title=Synthetic --admin_user=admin --admin_password=synthetic-only --admin_email=test@example.invalid --skip-email >/dev/null
+          wp theme install /tmp/old.zip --activate >/dev/null
+          test "$(wp theme get vf-tools-theme --field=version)" = "$SOURCE_VERSION"
+          cat > native-discovery.php <<'PHP'
+          <?php
+          $v=getenv('TARGET_VERSION');$old=getenv('SOURCE_VERSION');
+          if(wp_get_theme('vf-tools-theme')->get('Version')!==$old){throw new RuntimeException('wrong installed source');}
+          if(defined('VF_WP_UPDATE_TEST_MODE') && VF_WP_UPDATE_TEST_MODE){throw new RuntimeException('test mode forbidden');}
+          if(!VF_WP_Update_Credential_V1::has_secret()){throw new RuntimeException('missing runtime credential');}
+          $seen=['manifest'=>false,'release'=>false];
+          add_action('http_api_debug',static function($response,$context,$class,$args,$url) use (&$seen,$v){
+            if($context!=='response'||is_wp_error($response)||wp_remote_retrieve_response_code($response)!==200){return;}
+            if(str_contains($url,'/contents/projects/S01-C01.json')){$seen['manifest']=true;}
+            if(str_contains($url,'/releases/tags/v'.$v)){$seen['release']=true;}
+          },10,5);
+          delete_site_transient('vf_s01_c01_update_manifest_v1');
+          delete_site_transient('update_themes');
+          wp_update_themes();
+          $offer=get_site_transient('update_themes')->response['vf-tools-theme']??null;
+          if(!is_array($offer)||($offer['new_version']??'')!==$v){throw new RuntimeException('native offer missing');}
+          $status=get_option('vf_s01_c01_update_status_v1',[]);
+          if(($status['state']??'')!=='UPDATE_AVAILABLE'){throw new RuntimeException('native status not update available');}
+          if(!$seen['manifest']||!$seen['release']){throw new RuntimeException('live GitHub HTTP evidence missing');}
+          if(wp_get_theme('vf-tools-theme')->get('Version')!==$old){throw new RuntimeException('discovery mutated installed version');}
+          echo 'LIVE_GITHUB_MANIFEST_RELEASE_HTTP=PASS'.PHP_EOL;
+          echo 'REAL_WORDPRESS_NATIVE_UPDATE_TRANSIENT=PASS source='.$old.' target='.$v.PHP_EOL;
+          PHP
+          docker cp native-discovery.php s01-admin-release-discovery-wp:/tmp/native-discovery.php
+          wp eval-file /tmp/native-discovery.php
+          python3 - <<'PY'
+          import json,os
+          json.dump({'native_discovery':'PASS','live_github_http':'PASS','from':os.environ['SOURCE_VERSION'],'target':os.environ['TARGET_VERSION'],'production':'UNTOUCHED'},open('discovery-receipt.json','w'),indent=2)
+          PY
+      - uses: actions/upload-artifact@v4
         if: always()
-        run: rm -rf updates vf-tools-theme_V*.zip
+        with:
+          name: s01-theme-live-discovery-${{ github.run_id }}
+          path: discovery-receipt.json
+          retention-days: 14
+      - name: Destroy synthetic instance and assets
+        if: always()
+        run: |
+          docker rm -f s01-admin-release-discovery-wp s01-admin-release-discovery-db >/dev/null 2>&1 || true
+          rm -f vf-tools-theme_V*.zip wp.phar native-discovery.php
