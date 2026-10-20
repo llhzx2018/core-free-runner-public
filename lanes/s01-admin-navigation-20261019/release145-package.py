@@ -1,14 +1,14 @@
 import hashlib,json,os,subprocess,zipfile,re
 from pathlib import Path,PurePosixPath
 root=Path('target');sha=os.environ['TARGET_SHA'];v=os.environ['TARGET_VERSION']
-base='8b2dfcb41cd59567e37a57960a1da430b8c0c7df'
+base='326e73072ae58f22b31ca900e87aaad2fd59d732'
 assert subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()==sha
 changed=subprocess.check_output(['git','-C',str(root),'diff','--name-only',base,'HEAD'],text=True).splitlines()
-assert set(changed)=={'src/assets/css/public/vf-theme-public-runtime.css', 'src/inc/runtime-constants.php', 'VERSION', 'src/style.css', 'src/assets/css/public/responsive/header-footer/public-responsive-footer.css'},changed
+assert set(changed)=={'src/assets/js/main.js','src/inc/runtime-constants.php','VERSION','src/style.css'},changed
 assert (root/'VERSION').read_text()==v+'\n'
 for path in ['src/style.css','src/inc/runtime-constants.php']:
  before=subprocess.check_output(['git','-C',str(root),'show',base+':'+path],text=True)
- expected=before.replace('1.35.149',v).replace('V'+v+'_REFERENCE_READING_GRID','V'+v+'_FOOTER_DENSITY')
+ expected=before.replace('1.35.151',v).replace('V'+v+'_FAQ_ACCESSIBILITY','V'+v+'_DIRECTORY_ESCAPE_RECOVERY')
  assert (root/path).read_text()==expected,path
 dest=Path('vf-tools-theme_V'+v+'.zip');src=root/'src';files=sorted(p for p in src.rglob('*') if p.is_file())
 assert len(files)==476
