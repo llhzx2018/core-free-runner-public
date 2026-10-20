@@ -33,10 +33,11 @@ const {chromium}=require('playwright'),fs=require('fs');
     for(const action of ['返回页面总览','切换页型','查看前台'])check(id+'-action-'+action,await root.getByRole(action==='切换页型'?'button':'link',{name:action,exact:true}).isVisible(),action);
     check(id+'-no-overflow',await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'Desktop width');
     await page.screenshot({path:'proof/home-polish-'+id+'.png',fullPage:true});
-    const editable=rows.locator('[data-vf-layout-edit-module]').first();await editable.click();
-    const editor=root.locator('[data-vf-layout-module-editor]');await editor.waitFor({state:'visible'});
-    check(id+'-editor-opens',await editor.isVisible(),'Existing modal');
-    await page.keyboard.press('Escape');check(id+'-editor-closes',!await editor.isVisible(),'Escape');
+    const opener=root.locator('[data-vf-layout-module-library-open]');await opener.click();
+    const library=root.locator('[data-vf-layout-module-library]');await library.waitFor({state:'visible'});
+    check(id+'-library-opens',await library.isVisible(),'Existing module library');
+    await page.keyboard.press('Escape');await library.waitFor({state:'hidden'});
+    check(id+'-library-closes-focus',await opener.evaluate(e=>document.activeElement===e),'Escape returns to visible opener');
     const candidate=rows.locator('[data-vf-layout-move="down"]:not([disabled])').first();
     if(await candidate.count()){
      const key=await candidate.locator('xpath=ancestor::li').getAttribute('data-module');
