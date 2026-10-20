@@ -1,17 +1,15 @@
 import hashlib,json,os,subprocess,zipfile,re
 from pathlib import Path,PurePosixPath
 root=Path('target');sha=os.environ['TARGET_SHA'];v=os.environ['TARGET_VERSION']
-base='27248c1469c1949dbc84c4c2818cd4b1e88c45c1'
+base='93f4b2608a4b54610a534232768d8fd9921f5bd9'
 assert subprocess.check_output(['git','-C',str(root),'rev-parse','HEAD'],text=True).strip()==sha
 changed=subprocess.check_output(['git','-C',str(root),'diff','--name-only',base,'HEAD'],text=True).splitlines()
-assert set(changed)=={'VERSION','src/style.css','src/inc/runtime-constants.php','src/inc/modules/module-post-list.php','tests/problem-subject-classification-contract.php'},changed
+assert set(changed)=={'VERSION','src/style.css','src/inc/runtime-constants.php','src/assets/css/public/public-reading-final-owner.css'},changed
 assert (root/'VERSION').read_text()==v+'\n'
 for path in ['src/style.css','src/inc/runtime-constants.php']:
  before=subprocess.check_output(['git','-C',str(root),'show',base+':'+path],text=True)
- expected=before.replace('1.35.145',v).replace('V'+v+'_PROBLEMS_SUBJECT_LABELS','V'+v+'_PROBLEMS_CHECKLIST_LABELS')
+ expected=before.replace('1.35.146',v).replace('V'+v+'_PROBLEMS_CHECKLIST_LABELS','V'+v+'_PROBLEM_DETAIL_ALIGNMENT')
  assert (root/path).read_text()==expected,path
-assert subprocess.check_output(['git','-C',str(root),'hash-object','src/inc/modules/module-post-list.php'],text=True).strip()=='ddc92046761c0e1588385aec6fa3683a0a00db85'
-assert subprocess.check_output(['git','-C',str(root),'rev-parse',base+':src/inc/modules/module-post-list.php'],text=True).strip()=='aff6b671c5ac6fcc92f46aae58800e98b28152f1'
 dest=Path('vf-tools-theme_V'+v+'.zip');src=root/'src';files=sorted(p for p in src.rglob('*') if p.is_file())
 assert len(files)==476
 with zipfile.ZipFile(dest,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
