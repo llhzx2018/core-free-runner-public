@@ -30,6 +30,13 @@ async function escapeReset(page,key,clearFirst=false){const root=directory(page)
      }
      const next=p.locator('.vf-theme-pagination a.next').first();if(await next.count()){
       const dest=await next.getAttribute('href');await load(p,dest);const second=await identities(p);const disjoint=second.length>0&&second.every(x=>!original.includes(x));const info={dest,actual:p.url(),original,second,diag:(await p.content()).match(/search-archive-diag:([\s\S]*?) -->/)?.[1]};checks.push({name:key+' pages have disjoint cards',pass:disjoint,detail:info});if(!disjoint){fs.writeFileSync(`proof/pagination-${row.context}-${lang}.html`,await p.content());console.log('CATALOG_PAGINATION_DIAG',JSON.stringify(info));}
+      if(['guide_index','problem_index','glossary_index'].includes(row.context)){
+       const seen=[...original,...second];let more=p.locator('.vf-theme-pagination a.next').first();let pages=2;
+       while(await more.count()){
+        check(key+' bounded next-page traversal',pages<10);await load(p,await more.getAttribute('href'));const part=await identities(p);check(key+' later pages remain disjoint',part.length>0&&part.every(x=>!seen.includes(x)),{pages,part,seen});seen.push(...part);pages++;more=p.locator('.vf-theme-pagination a.next').first();
+       }
+       check(key+' all-page results unique',seen.length===new Set(seen).size,{seen,pages});
+      }
       const word=(await root.locator('[data-vf-directory-item] h3').first().textContent()).trim().split(/\s+/)[0];await load(p,url(row.url,{vf_q:word,paged:'2'}));await escapeReset(p,key+' paginated Escape');
      }
     }
