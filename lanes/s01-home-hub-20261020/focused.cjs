@@ -13,7 +13,7 @@ async function geometry(page){return page.evaluate(()=>({overflow:document.docum
   if(context==='home'){
    const links=await page.locator('.vf-home-tools-grid a').evaluateAll(xs=>xs.map(x=>({href:x.href,label:x.textContent.trim()})));check(key+' available tools have direct links',links.length>0&&links.every(x=>x.href.startsWith(locationOrigin(cases[lang].home))&&x.label),links);
    const quick=page.locator('.vf-home-quick-start a');check(key+' first tool discoverable',await quick.count()>0);
-   if(width===1440){const first=quick.first(),url=await first.getAttribute('href');await first.focus();await page.keyboard.press('Enter');check(key+' keyboard quick entry works',page.url()===url||page.url()===new URL(url,cases[lang].home).href,{url,actual:page.url()});}
+   if(width===1440){const first=quick.first(),url=await first.getAttribute('href');await first.focus();await Promise.all([page.waitForURL(new URL(url,cases[lang].home).href),page.keyboard.press('Enter')]);check(key+' keyboard quick entry works',page.url()===url||page.url()===new URL(url,cases[lang].home).href,{url,actual:page.url()});}
   }else{
    const root=page.locator('[data-vf-directory-context="tool_hub"]');const query=root.locator('[data-vf-directory-query]');
    check(key+' directory initialized',await root.getAttribute('data-vf-directory-enhanced')==='true');
