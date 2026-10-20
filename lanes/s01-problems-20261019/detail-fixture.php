@@ -6,7 +6,7 @@ $detail_layout = static function($raw) {
  foreach(['articleReading','guideReading','problemReading','glossaryReading'] as $key){
  $raw[$key]=array_replace((array)($raw[$key]??[]),[
   'tocPosition'=>$mode==='off'?'off':($mode==='sidebar'?'sidebar':'inline'),
-  'sidebarMode'=>$mode==='off'?'off':'contextual',
+  'sidebarMode'=>$mode==='off'?'off':($mode==='always'?'always':'contextual'),
   'reading_width'=>$mode==='wide'?'relaxed':'focused',
   'sidebar_width'=>'balanced',
  ]);}
