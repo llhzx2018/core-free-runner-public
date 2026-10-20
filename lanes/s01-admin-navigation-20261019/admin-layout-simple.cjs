@@ -1,0 +1,47 @@
+const {chromium}=require('playwright');const fs=require('fs');
+(async()=>{
+ const browser=await chromium.launch();const checks=[],pages=[];let complete=false;
+ const check=(id,ok,detail)=>{checks.push({id,ok:!!ok,detail});if(!ok)console.error('FAILED_CHECK',id,JSON.stringify(detail));};
+ const base='http://127.0.0.1:18880/wp-admin/themes.php?page=vf-theme-modules&tab=layout';
+ try{
+  const context=await browser.newContext({viewport:{width:1440,height:1000}}),page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
+  await page.goto('http://127.0.0.1:18880/wp-login.php');await page.locator('#user_login').fill('admin');await page.locator('#user_pass').fill('Synthetic-Only-Update-54!');await page.locator('input[name=redirect_to]').evaluate((e,u)=>e.value=u,base);await page.locator('#wp-submit').click();await page.waitForURL('**/wp-admin/**');
+  for(const width of [1440,1024]){
+   await page.setViewportSize({width,height:1000});await page.goto(base,{waitUntil:'networkidle'});const root=page.locator('[data-vf-frontend-pages]'),rows=root.locator('[data-vf-page-context]'),id='desktop-'+width;
+   check(id+'-all-types',await rows.count()===20,await rows.count());check(id+'-single-search',await page.locator('[data-vf-page-finder]').count()===0&&await root.locator('input[name=vf_pages_q]:visible').count()===1,'Directory uses its own search');
+   check(id+'-default-secondary-closed',await root.locator('details[open]').count()===0,await root.locator('details[open]').count());
+   check(id+'-primary-edit-actions',await rows.locator(':scope > .vf-frontend-pages__actions a').filter({hasText:'编辑布局'}).count()===20,'Each type has a direct editor link');
+   const metrics=await page.evaluate(()=>({height:document.documentElement.scrollHeight,overflow:document.documentElement.scrollWidth>innerWidth+1,rowHeights:[...document.querySelectorAll('[data-vf-page-context]')].map(e=>e.getBoundingClientRect().height)}));
+   check(id+'-compact',metrics.height<(width===1440?3300:3900)&&Math.max(...metrics.rowHeights)<130,metrics);check(id+'-no-overflow',!metrics.overflow,metrics);pages.push({width,...metrics});
+   await page.screenshot({path:`proof/layout-simple-${width}.png`,fullPage:true});
+   const before=await root.locator('input,select,textarea').evaluateAll(es=>es.map(e=>[e.name,e.value,e.checked]));
+   for(let i=0;i<20;i++){
+    const row=rows.nth(i),key=await row.getAttribute('data-vf-page-context');await row.locator(':scope > details > summary').click();
+    check(id+'-'+key+'-more-visible',await row.locator('.vf-frontend-pages__progress-record').isVisible(),'Progress stays available behind More');
+    await row.locator('.vf-frontend-pages__progress-record > details > summary').click();
+    check(id+'-'+key+'-record-reachable',await row.locator('textarea[name=vf_review_note]').isVisible()&&await row.locator('button[type=submit]').isVisible(),'Record form can be reached with native disclosure');
+    await row.locator(':scope > details').locator('details').filter({has:page.locator('summary',{hasText:'状态与检查要点'})}).last().locator('summary').click();
+    check(id+'-'+key+'-states-reachable',await row.locator('.vf-frontend-pages__more-body ul').isVisible(),'Applicable state checks remain discoverable');
+    await row.locator(':scope > details > summary').click();
+   }
+   const after=await root.locator('input,select,textarea').evaluateAll(es=>es.map(e=>[e.name,e.value,e.checked]));check(id+'-disclosures-read-only',JSON.stringify(before)===JSON.stringify(after),'Opening secondary panels preserves all form values');
+   await root.locator('.vf-frontend-pages__review-tools > summary').click();check(id+'-shared-records',await root.locator('.vf-frontend-pages__shared article').count()===2&&await root.locator('.vf-frontend-pages__shared').isVisible(),'Shared records remain in one secondary section');
+   await page.screenshot({path:`proof/layout-simple-review-${width}.png`,fullPage:true});
+   await page.goto(base,{waitUntil:'networkidle'});const form=page.locator('[data-vf-frontend-pages] > form');await form.locator('input[name=vf_pages_q]').fill('blog');await form.locator('select[name=vf_pages_language]').selectOption('zh');await form.locator('button').click();await page.waitForLoadState('networkidle');
+   const selected=page.locator('[data-vf-page-context]').first(),key=await selected.getAttribute('data-vf-page-context'),edit=selected.locator('.vf-frontend-pages__actions a').first(),url=await edit.getAttribute('href');
+   check(id+'-filtered-edit-url',new URL(url).searchParams.get('vf_pages_q')==='blog'&&new URL(url).searchParams.get('vf_pages_language')==='zh',{key,url});
+   await edit.click();await page.waitForLoadState('networkidle');await page.locator('[data-vf-layout-directory-link]').first().click();await page.waitForLoadState('networkidle');
+   check(id+'-return-retains-filter',await page.locator('[data-vf-frontend-pages] > form input[name=vf_pages_q]').inputValue()==='blog'&&await page.locator('[data-vf-frontend-pages] > form select[name=vf_pages_language]').inputValue()==='zh'&&new URL(page.url()).hash==='#vf-review-'+key,page.url());
+  }
+  await page.goto(base,{waitUntil:'networkidle'});await page.getByRole('link',{name:'查找具体文章或页面 →'}).click();await page.waitForLoadState('networkidle');check('content-link-opens-disclosure',await page.locator('[data-vf-frontend-content-form]').isVisible(),'Direct link works through server GET, including without JavaScript');
+  await page.locator('[data-vf-content-submit]').click();await page.waitForLoadState('networkidle');check('content-results-auto-open',await page.locator('#vf-frontend-pages-content').getAttribute('open')!==null&&await page.locator('.vf-frontend-pages__content-list li').count()>0,await page.locator('.vf-frontend-pages__content-list li').count());
+  const next=page.getByRole('button',{name:'下一页',exact:true});if(await next.count()){await next.click();await page.waitForLoadState('networkidle');check('content-pagination-open',await page.locator('[data-vf-frontend-content-form]').isVisible()&&await page.locator('button[name=vf_content_page][value="1"]').count()>0,'Native POST pagination remains open');}
+  await page.screenshot({path:'proof/layout-simple-content.png',fullPage:true});
+  await page.goto(base,{waitUntil:'networkidle'});const row=page.locator('[data-vf-page-context=home]');await row.locator(':scope > details > summary').click();await row.locator('.vf-frontend-pages__progress-record > details > summary').click();await row.locator('textarea[name=vf_review_note]').fill('Synthetic failed record stays visible');await row.locator('input[name=_wpnonce]').evaluate(e=>e.value='synthetic-invalid-nonce');await row.locator('button[type=submit]').click();await page.waitForLoadState('networkidle');
+  check('failed-review-retained-and-revealed',await page.locator('[data-vf-page-context=home] textarea[name=vf_review_note]').isVisible()&&await page.locator('[data-vf-page-context=home] textarea[name=vf_review_note]').inputValue()==='Synthetic failed record stays visible'&&await page.locator('[role=alert]').count()>0,'Failed save cannot disappear inside collapsed ancestors');
+  await page.goto(base+'&vf_pages_q=NO_MATCH_SYNTHETIC_39',{waitUntil:'networkidle'});check('empty-filter-recovery',await page.locator('.vf-frontend-pages__empty').isVisible()&&await page.getByRole('link',{name:'恢复全部页型'}).count()===1,'Empty filter has a direct reset');
+  await page.goto(base,{waitUntil:'networkidle'});await page.locator('.vf-frontend-pages__review-tools > summary').click();await page.locator('select[name=vf_review_device]').selectOption('mobile');await page.getByRole('button',{name:'切换记录'}).click();await page.waitForLoadState('networkidle');check('device-switch-keeps-tools-open',await page.locator('.vf-frontend-pages__review-tools select').isVisible()&&await page.locator('.vf-frontend-pages__review-tools select').inputValue()==='mobile','Mobile remains deferred; no acceptance generated');
+  const native=await browser.newContext({javaScriptEnabled:false,storageState:await context.storageState(),viewport:{width:1024,height:1000}}),np=await native.newPage();await np.goto(base);await np.locator('[data-vf-page-context=home] > details > summary').click();check('no-js-more',await np.locator('[data-vf-page-context=home] .vf-frontend-pages__progress-record').isVisible(),'Native secondary actions work without script');await np.getByRole('link',{name:'查找具体文章或页面 →'}).click();check('no-js-content',await np.locator('[data-vf-frontend-content-form]').isVisible(),'Content link opens on server render');await np.locator('[data-vf-content-submit]').click();check('no-js-content-post',await np.locator('.vf-frontend-pages__content-list li').count()>0,'Content lookup remains native POST');await native.close();
+  check('no-browser-errors',errors.length===0,errors);complete=true;if(checks.some(c=>!c.ok))throw Error('Simple directory regression failed');
+ }finally{fs.writeFileSync('proof/admin-layout-simple.json',JSON.stringify({status:complete&&checks.every(c=>c.ok)?'PASS':'FAIL',complete,targetSha:process.env.TARGET_SHA,reference:'https://wordpress.org/documentation/article/template-editor/',scope:'Simplified directory only; two desktop widths; native disclosure/search/return/content and failure recovery; no Production writes or full frontend rerun',checks,pages},null,2));await browser.close();}
+})().catch(e=>{console.error(e);process.exit(1)});
