@@ -63,4 +63,68 @@ jobs:
           PY
           php -l repair-v2.47.407.php
           php repair-v2.47.407.php --self-test | python3 -c 'import json,sys; x=json.load(sys.stdin); assert x.get("ok"); print("P01_BASE_ATOMIC_SELFTEST=PASS")'
-          rm -rf "$RUNNER_TEMP/multisource"
+          echo "P01_ALT_STRUCTURAL_INSPECTION=PASS"
+
+      - name: Black-box test of exact formal 405/406 alternate compatibility
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          ROOT="$RUNNER_TEMP/p01-multisource-405"
+          mkdir -p "$ROOT"
+          for v in 2.47.405 2.47.406 2.47.407; do
+            mkdir -p "$ROOT/$v/full" "$ROOT/$v/repair"
+            gh release download "v$v" -R llhzx2018/vf-start -D "$ROOT/$v" -p "VF-Start-V$v-FULL.zip" -p "VF_Start_V${v}_UPDATE.zip"
+            unzip -q "$ROOT/$v/VF-Start-V$v-FULL.zip" -d "$ROOT/$v/full"
+            unzip -q "$ROOT/$v/VF_Start_V${v}_UPDATE.zip" -d "$ROOT/$v/repair"
+            test -f "$ROOT/$v/repair/repair-v$v.php"
+          done
+          git clone -q --depth 1 "https://x-access-token:${GH_TOKEN}@github.com/llhzx2018/vf-start.git" "$ROOT/source"
+          git -C "$ROOT/source" remote set-url origin https://github.com/llhzx2018/vf-start.git
+          test "$(tr -d '\\r\\n ' < "$ROOT/source/src/VERSION.txt")" = 2.47.407
+          printf '2.47.408\\n' > "$ROOT/source/src/VERSION.txt"
+          mkdir -p "$ROOT/out"
+          python3 scripts/p01-maintenance-release.py --candidate "$ROOT/source/src" --baseline-full "$ROOT/2.47.407/full" --baseline-repair "$ROOT/2.47.407/repair/repair-v2.47.407.php" --out "$ROOT/out" --version 2.47.408 --source-version 2.47.407 --target-sha 0000000000000000000000000000000000000000 --target-tree 0000000000000000000000000000000000000000 > /dev/null
+          unzip -q "$ROOT/out/VF_Start_V2.47.408_UPDATE.zip" -d "$ROOT/out"
+          python3 - "$ROOT" <<'PY'
+          import re,base64,json,pathlib,sys,hashlib
+          root=pathlib.Path(sys.argv[1])
+          target=root/'out/repair-v2.47.408.php'
+          php=target.read_text()
+          versions=('2.47.405','2.47.406')
+          manifests=[]
+          for v in versions:
+              older=(root/v/'repair'/f'repair-v{v}.php').read_text()
+              m=re.search(r"private const TARGET_MANIFEST='([^']+)';",older)
+              assert m
+              manifest=json.loads(base64.b64decode(m.group(1)))
+              assert isinstance(manifest,dict) and len(manifest)>0
+              for rel,expected in manifest.items():
+                  p=root/v/'full'/rel
+                  assert p.is_file() and hashlib.sha256(p.read_bytes()).hexdigest()==expected
+              manifests.append(manifest)
+          val=base64.b64encode(json.dumps(manifests,separators=(',',':'),sort_keys=True).encode()).decode()
+          php,n=re.subn(r"(private const SOURCE_ALTERNATES=)'[^']*';",lambda m:m.group(1)+"'"+val+"';",php)
+          assert n==1
+          target.write_text(php)
+          print('P01_ALT_MANIFESTS_VERIFIED=PASS')
+          PY
+          php -l "$ROOT/out/repair-v2.47.408.php" >/dev/null
+          for v in 2.47.405 2.47.406 2.47.407; do
+            if php "$ROOT/out/repair-v2.47.408.php" "--verify-source=$ROOT/$v/full" > "$ROOT/verify-$v.json" 2>&1; then
+              echo "P01_ATOMIC_SOURCE_$v=PASS"
+            else
+              echo "P01_ATOMIC_SOURCE_$v=FAIL"
+              python3 - "$ROOT/verify-$v.json" <<'PY'
+          import json,sys
+          try:
+              d=json.load(open(sys.argv[1]))
+              print('P01_ALT_VERIFY_ERROR_KIND='+str(d.get('code') or d.get('error_code') or d.get('reason') or 'unspecified')[:70])
+          except Exception:
+              print('P01_ALT_VERIFY_ERROR_KIND=non_json')
+          PY
+            fi
+          done
+          rm -rf "$ROOT"
+
