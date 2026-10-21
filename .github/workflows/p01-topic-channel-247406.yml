@@ -1,0 +1,90 @@
+name: p01-topic-channel-247406
+# Ephemeral fallback for core-updates private-hosted zero-step CI.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-topic-channel-247406.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      CORE_SHA: 3f4f7c0bee39e559df056bc87b1ea6f4f6465144
+      PRODUCT_SHA: fd4520e52e047663990d8a34f31ed781dcb0d763
+    steps:
+      - name: Resolve exact channel candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GH_TOKEN:-}"
+          gh auth setup-git >/dev/null
+          git clone -q https://github.com/llhzx2018/core-updates.git core-updates
+          git -C core-updates fetch -q origin "$CORE_SHA"
+          git -C core-updates checkout -q --detach "$CORE_SHA"
+          test "$(git -C core-updates rev-parse HEAD)" = "$CORE_SHA"
+          echo P01_DIST_EXACT_SHA=PASS
+      - name: Validate all manifests and update-core
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip >/dev/null
+          cd core-updates
+          python3 scripts/check_manifest_contract.py
+          find update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php update-core/php/tests/run.php
+          echo P01_DIST_UPDATE_CORE_GATES=PASS
+      - name: Verify exact formal asset and updater identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GH_TOKEN:-}"
+          cd core-updates
+          jq -e --arg sha "$PRODUCT_SHA" '
+            .project_id=="P01" and .component_id=="APP" and
+            .enabled==true and .current_version=="2.47.405" and .target_version=="2.47.406" and
+            .update_type=="ATOMIC" and .from_versions==["2.47.405"] and
+            .release_tag=="v2.47.406" and .product_identity==$sha and
+            .schema_from==.schema_to and .backup_required==true and .rollback_supported==true
+          ' projects/P01.json >/dev/null
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.47.406 > /tmp/topic-formal-metadata.json
+          gh api repos/llhzx2018/vf-start/git/ref/tags/v2.47.406 > /tmp/topic-formal-tag.json
+          test "$(jq -r '.object.sha' /tmp/topic-formal-tag.json)" = "$PRODUCT_SHA"
+          jq -e --slurpfile m projects/P01.json '
+            .draft==false and .prerelease==false and
+            .id==$m[0].release_id and .published_at==$m[0].released_at and
+            ([.assets[] | select(.name==$m[0].asset_name) | select(.size==$m[0].asset_bytes) |
+              select(.digest==("sha256:"+$m[0].asset_sha256))] | length)==1
+          ' /tmp/topic-formal-metadata.json >/dev/null
+          echo P01_DIST_RELEASE_TAG_ASSET_SHA256=PASS
+          echo P01_DIST_PRODUCTION_AUTO_UPGRADE=NO
+      - name: P01 native PHP updater real channel discovery and exact ZIP verification
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh auth setup-git >/dev/null
+          git clone -q --depth 1 --branch v2.47.405 https://github.com/llhzx2018/vf-start.git stable-p01
+          php -r '
+            require "stable-p01/src/app/CoreUpdates/GitHubClient.php";
+            require "stable-p01/src/app/CoreUpdates/UpdateCore.php";
+            $token=getenv("GH_TOKEN");
+            if(!is_string($token) || $token==="") exit(20);
+            $client=new \CoreUpdates\GitHubClient($token);
+            $manifest=$client->fetchProjectManifest("llhzx2018/core-updates","P01.json","main");
+            $core=new \CoreUpdates\UpdateCore("P01","APP");
+            $result=$core->check("2.47.405","2026090401",$manifest);
+            if(($result["status"]??"")!=="AVAILABLE" || ($result["target_version"]??"")!=="2.47.406") exit(21);
+            echo "P01_V247404_NATIVE_DISCOVERY_AVAILABLE=PASS\n";
+            $tmp=sys_get_temp_dir()."/p01-247406-native-".getmypid().".zip";
+            try {
+                $asset=$client->downloadReleaseAsset("llhzx2018/vf-start","v2.47.406",$manifest["asset_name"],$tmp);
+                $verify=$core->verifyPackage($tmp,$manifest);
+                if(($verify["status"]??"")!=="VERIFIED") exit(22);
+                echo "P01_V247406_NATIVE_ASSET_BYTES_SHA256=PASS\n";
+            } finally { @unlink($tmp); }
+          '
