@@ -10,13 +10,13 @@ function check(name,pass,detail){checks.push({name,pass:!!pass,detail});if(!pass
  check('review subjects remain 20 types plus shared header and footer',await root.locator('.vf-frontend-pages__progress-record').count()===22);
  if(baseline){check('159 reproduces missing coverage explanations',await root.locator('.vf-frontend-pages__coverage').count()===0);console.log('159_BASELINE_PASS');return;}
  check('type count is explicitly distinguished from page count',await root.locator('.vf-frontend-pages__scope').innerText().then(x=>x.includes('20 种页型，不是只有 20 个页面')&&x.includes('中英文')&&x.includes('页眉')&&x.includes('不代表')));
- for(const width of [1440,1024])for(const lang of ['en','zh']){
+ for(const width of [1920,1440,1319,1024])for(const lang of ['en','zh']){
   await page.setViewportSize({width,height:1000});await page.goto(target+'&vf_pages_language='+lang,{waitUntil:'networkidle'});await page.evaluate(()=>document.fonts.ready);
   const rows=root.locator('[data-vf-page-context]');
   check(`${width}/${lang} all 20 explanations always visible`,await rows.count()===20&&await rows.locator('.vf-frontend-pages__coverage').evaluateAll(xs=>xs.length===20&&xs.every(x=>x.getBoundingClientRect().height>0&&x.innerText.includes('包含页面：')&&x.innerText.includes('同类状态 / 检查范围：'))));
   check(`${width}/${lang} no horizontal overflow`,await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
   check(`${width}/${lang} disclosures initially closed`,await rows.locator('details[open]').count()===0);
-  check(`${width}/${lang} content remains explicitly unloaded`,await root.locator('#vf-frontend-pages-content').innerText().then(x=>x.includes('尚未加载')&&x.includes('不是全站只有 20 个页面')&&x.includes('动态搜索、归档'))&&await root.locator('.vf-frontend-pages__content-list li').count()===0);
+  check(`${width}/${lang} content remains explicitly unloaded`,await root.locator('#vf-frontend-pages-content').textContent().then(x=>x.includes('尚未加载')&&x.includes('不是全站只有 20 个页面')&&x.includes('动态搜索、归档'))&&await root.locator('.vf-frontend-pages__content-list li').count()===0);
   check(`${width}/${lang} existing actions stay readable beside explanations`,await rows.evaluateAll(xs=>xs.every(x=>{const a=x.querySelector('.vf-frontend-pages__actions').getBoundingClientRect(),n=x.querySelector('.vf-frontend-pages__name').getBoundingClientRect();return a.width>150&&n.right<=a.x+1;})));
   const hub=root.locator('[data-vf-page-context=tool_hub] .vf-frontend-pages__actions a[target=_blank]');check(`${width}/${lang} public language link preserved`,(await hub.getAttribute('href')).includes(lang==='zh'?'/zh/tools/':'/tools/'));
   await page.screenshot({path:`proof/overview-${lang}-${width}.png`,fullPage:true});
