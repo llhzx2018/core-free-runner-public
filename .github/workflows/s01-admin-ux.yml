@@ -47,13 +47,92 @@ jobs:
           node --check target/src/assets/js/main.js
           php -l lane/tool-fixture.php
           php -l target/src/inc/modules/module-related-tools.php
-      - name: Exact plugin fixture
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: cc970631876adc1ec52425e33bb534a6b743edf2
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: provider-candidate
+      - name: Exact M3U8 1.25.92 candidate package from previous release
         env:
           GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
         run: |
           mkdir -p provider
           gh release download v1.25.91 --repo llhzx2018/vf-tools-m3u8 --pattern vf-tools-m3u8_V1.25.91.zip --dir provider
           echo 'fcb56d605550c5b04a3ff8b3b78b8bf86ca11b77e0aa22334fa67e675b01d6df  provider/vf-tools-m3u8_V1.25.91.zip' | sha256sum -c
+          node --check provider-candidate/src/public/js/modules/converter.js
+          node --check provider-candidate/src/public/dist/converter.js
+          php -l provider-candidate/src/includes/i18n.php
+          python3 - <<'PYCANDIDATE'
+          from pathlib import Path, PurePosixPath
+          import subprocess,zipfile,hashlib,json,io
+          root=Path('provider-candidate')
+          sha='cc970631876adc1ec52425e33bb534a6b743edf2'
+          tree='f5087fc259c9de736b731016dc9398fa88ff9e67'
+          base='2494010394a424112bd4cb7d70c60b0481e21313'
+          v='1.25.92'
+          def git(*args):
+              return subprocess.check_output(['git','-C',str(root),*args])
+          assert git('rev-parse','HEAD').decode().strip()==sha
+          assert git('rev-parse','HEAD^{tree}').decode().strip()==tree
+          assert (root/'VERSION').read_text().strip()==v
+          changed=set(git('diff','--name-only',base,'HEAD').decode().splitlines())
+          expected={'CHANGELOG.md','VERSION','src/PACKAGE_PROFILE.json','src/config/performance-bundles.php','src/includes/i18n.php','src/plugin-manifest.json','src/public/dist/converter.js','src/public/js/modules/converter.js','src/vf-tool-m3u8.php'}
+          assert changed==expected,(changed^expected)
+          oldsrc=git('show',base+':src/public/js/modules/converter.js').decode()
+          newsrc=(root/'src/public/js/modules/converter.js').read_text()
+          olddist=git('show',base+':src/public/dist/converter.js').decode()
+          newdist=(root/'src/public/dist/converter.js').read_text()
+          def sample(s):
+              a=s.index('  function sample(r,options){')
+              b=s.index('  function clear(r){',a)
+              return s[a:b]
+          before,after=sample(oldsrc),sample(newsrc)
+          assert oldsrc.replace(before,after,1)==newsrc
+          assert olddist.count(before)==1
+          assert olddist.replace(before,after,1)==newdist
+          print('M3U8_SOURCE_DIST_EXACT_CLOSURE=PASS')
+          oldzip=Path('provider/vf-tools-m3u8_V1.25.91.zip')
+          newzip=Path('provider/vf-tool-m3u8_V1.25.92.zip')
+          required={'vf-tool-m3u8.php','includes/i18n.php','plugin-manifest.json','config/performance-bundles.php','public/dist/converter.js','public/js/modules/converter.js'}
+          runtime_changed={p[4:] for p in expected if p.startswith('src/')}
+          def build():
+              b=io.BytesIO()
+              changed_actual=[]
+              with zipfile.ZipFile(oldzip) as zin,zipfile.ZipFile(b,'w') as zout:
+                  names=zin.namelist()
+                  files=[n for n in names if not n.endswith('/')]
+                  assert len(files)==568,len(files)
+                  assert all(n.startswith('vf-tool-m3u8/') and '..' not in PurePosixPath(n).parts for n in names)
+                  found={n[len('vf-tool-m3u8/'):] for n in files}
+                  assert required<=found,sorted(required-found)
+                  for info in zin.infolist():
+                      data=zin.read(info.filename)
+                      rel=info.filename[len('vf-tool-m3u8/'):]
+                      if rel in runtime_changed:
+                          baseline=git('show',base+':src/'+rel)
+                          assert data==baseline,rel+' differs from previous release'
+                          data=(root/'src'/rel).read_bytes()
+                          changed_actual.append(rel)
+                      zout.writestr(info,data)
+              assert required<=set(changed_actual),sorted(required-set(changed_actual))
+              return b.getvalue(),changed_actual
+          a,files=build()
+          b,_=build()
+          assert a==b
+          newzip.write_bytes(a)
+          with zipfile.ZipFile(newzip) as z:
+              assert z.testzip() is None
+              assert len([n for n in z.namelist() if not n.endswith('/')])==568
+              header=z.read('vf-tool-m3u8/vf-tool-m3u8.php').decode()
+              assert 'Version: 1.25.92' in header
+              assert '1.25.91' not in header[:3000]
+          record={'status':'PASS','version':v,'source':sha,'tree':tree,'file_count':568,'changed_runtime_files':files,'bytes':len(a),'sha256':hashlib.sha256(a).hexdigest(),'source_dist_closure':'PASS','reproducible':'PASS','root':'vf-tool-m3u8/','production':'UNTOUCHED'}
+          Path('proof/m3u8-candidate-package.json').write_text(json.dumps(record,indent=2))
+          print('M3U8_CANDIDATE_PACKAGE',json.dumps(record))
+          PYCANDIDATE
       - name: Chromium and Chinese font
         run: |
           npm install --no-audit --no-fund playwright@1.62.1
@@ -74,6 +153,9 @@ jobs:
           marker_fixture='docker cp lane/fixture.php "$WP:/var/www/html/wp-content/mu-plugins/progress-fixture.php"'
           assert script.count(marker_fixture)==1
           script=script.replace(marker_fixture,marker_fixture+'\ndocker cp lane/tool-fixture.php "$WP:/var/www/html/wp-content/mu-plugins/tool-fixture.php"')
+          old_provider='docker cp provider/vf-tools-m3u8_V1.25.91.zip "$WP:/tmp/provider.zip"'
+          assert script.count(old_provider)==1
+          script=script.replace(old_provider,'docker cp provider/vf-tool-m3u8_V1.25.92.zip "$WP:/tmp/provider.zip"')
           marker='if [ "${VF_REVIEW_ONLY_STATE:-0}" = "1" ];then'
           assert script.count(marker)==1
           script=script.split(marker)[0]+'status=0;node lane/tool-focused.cjs || status=$?\ncli eval-file /tmp/snapshot.php > proof/state-after.sha256\ncmp proof/state-before.sha256 proof/state-after.sha256\necho PROTECTED_STATE_BYTE_IDENTICAL\nexit "$status"\n'
@@ -88,5 +170,5 @@ jobs:
           retention-days: 14
       - name: Remove temporary private source
         if: always()
-        run: rm -rf target provider
+        run: rm -rf target provider provider-candidate
 
