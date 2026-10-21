@@ -1,0 +1,207 @@
+name: S01 M3U8 exact native update rollback
+on:
+  push:
+    branches: [task/s01-tool-results-20261021]
+    paths: ['.github/workflows/s01-tool-native-upgrade.yml']
+permissions:
+  contents: read
+env:
+  TARGET_REPO: llhzx2018/vf-tools-theme
+  TARGET_VERSION: 1.35.155
+  TARGET_SHA: 8b3a97697871c14789ebb89d2f3cee8dfc2420ef
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: control
+      - uses: actions/checkout@v4
+        with:
+          ref: 02d4591eed025a3d3a67bc0a150b3ddc448c2ab8
+          persist-credentials: false
+          path: established
+      - name: Select established WordPress lane and focused fixtures
+        run: |
+          mkdir -p proof
+          cp -a established/lanes/s01-frontend-design-20261017 lane
+          cp control/lanes/s01-problems-20261019/* lane/
+          cp control/lanes/s01-tool-results-20261021/* lane/
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: 8b3a97697871c14789ebb89d2f3cee8dfc2420ef
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Exact source boundary and regression contract
+        run: |
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(cat target/VERSION)" = "$TARGET_VERSION"
+          grep -q "^Version: $TARGET_VERSION$" target/src/style.css
+          test "$(git -C target rev-parse HEAD^{tree})" = "a4fdbe793cd1d97ab5944b9e6f877d843eb96cde"
+          node --check lane/tool-focused.cjs
+          node --check target/src/assets/js/main.js
+          php -l lane/tool-fixture.php
+          php -l target/src/inc/modules/module-related-tools.php
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: e1bb445cbd08acdd2cfe8b847fb27e1f22340cb5
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: provider-candidate
+      - name: Exact M3U8 1.25.92 candidate package from previous release
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          mkdir -p provider
+          gh release download v1.25.91 --repo llhzx2018/vf-tools-m3u8 --pattern vf-tools-m3u8_V1.25.91.zip --dir provider
+          echo 'fcb56d605550c5b04a3ff8b3b78b8bf86ca11b77e0aa22334fa67e675b01d6df  provider/vf-tools-m3u8_V1.25.91.zip' | sha256sum -c
+          node --check provider-candidate/src/public/js/modules/converter.js
+          node --check provider-candidate/src/public/dist/converter.js
+          php -l provider-candidate/src/includes/i18n.php
+          python3 - <<'PYCANDIDATE'
+          from pathlib import Path, PurePosixPath
+          import subprocess,zipfile,hashlib,json,io
+          root=Path('provider-candidate')
+          sha='e1bb445cbd08acdd2cfe8b847fb27e1f22340cb5'
+          tree='c3b1dde4f9e53ddc93c67aad6586c20ea7ebf271'
+          base='2494010394a424112bd4cb7d70c60b0481e21313'
+          v='1.25.92'
+          def git(*args):
+              return subprocess.check_output(['git','-C',str(root),*args])
+          assert git('rev-parse','HEAD').decode().strip()==sha
+          assert git('rev-parse','HEAD^{tree}').decode().strip()==tree
+          assert (root/'VERSION').read_text().strip()==v
+          changed=set(git('diff','--name-only',base,'HEAD').decode().splitlines())
+          expected={'CHANGELOG.md','VERSION','src/PACKAGE_PROFILE.json','src/config/performance-bundles.php','src/includes/i18n.php','src/plugin-manifest.json','src/public/dist/converter.js','src/public/js/modules/converter.js','src/vf-tool-m3u8.php'}
+          assert changed==expected,(changed^expected)
+          oldsrc=git('show',base+':src/public/js/modules/converter.js').decode()
+          newsrc=(root/'src/public/js/modules/converter.js').read_text()
+          olddist=git('show',base+':src/public/dist/converter.js').decode()
+          newdist=(root/'src/public/dist/converter.js').read_text()
+          def sample(s):
+              a=s.index('  function sample(r,options){')
+              b=s.index('  function clear(r){',a)
+              return s[a:b]
+          before,after=sample(oldsrc),sample(newsrc)
+          inject_start=newsrc.index('  function applyIncoming(r){')
+          inject_end=newsrc.index('  function bootRoot(r){',inject_start)
+          inject=newsrc[inject_start:inject_end]
+          assert inject and newdist.count(inject)==1
+          boot_old='  function bootRoot(r){'
+          boot_new=inject+'  function bootRoot(r){applyIncoming(r);'
+          assert oldsrc.replace(before,after,1).replace(boot_old,boot_new,1)==newsrc
+          assert olddist.count(before)==1
+          assert olddist.replace(before,after,1).replace(boot_old,boot_new,1)==newdist
+          print('M3U8_SOURCE_DIST_EXACT_CLOSURE=PASS')
+          oldzip=Path('provider/vf-tools-m3u8_V1.25.91.zip')
+          newzip=Path('provider/vf-tool-m3u8_V1.25.92.zip')
+          required={'vf-tool-m3u8.php','includes/i18n.php','plugin-manifest.json','config/performance-bundles.php','public/dist/converter.js','public/js/modules/converter.js'}
+          runtime_changed={p[4:] for p in expected if p.startswith('src/')}
+          def build():
+              b=io.BytesIO()
+              changed_actual=[]
+              with zipfile.ZipFile(oldzip) as zin,zipfile.ZipFile(b,'w') as zout:
+                  names=zin.namelist()
+                  files=[n for n in names if not n.endswith('/')]
+                  assert len(files)==568,len(files)
+                  assert all(n.startswith('vf-tool-m3u8/') and '..' not in PurePosixPath(n).parts for n in names)
+                  found={n[len('vf-tool-m3u8/'):] for n in files}
+                  assert required<=found,sorted(required-found)
+                  for info in zin.infolist():
+                      data=zin.read(info.filename)
+                      rel=info.filename[len('vf-tool-m3u8/'):]
+                      if rel in runtime_changed:
+                          baseline=git('show',base+':src/'+rel)
+                          assert data==baseline,rel+' differs from previous release'
+                          data=(root/'src'/rel).read_bytes()
+                          changed_actual.append(rel)
+                      zout.writestr(info,data)
+              assert required<=set(changed_actual),sorted(required-set(changed_actual))
+              return b.getvalue(),changed_actual
+          a,files=build()
+          b,_=build()
+          assert a==b
+          newzip.write_bytes(a)
+          with zipfile.ZipFile(newzip) as z:
+              assert z.testzip() is None
+              assert len([n for n in z.namelist() if not n.endswith('/')])==568
+              header=z.read('vf-tool-m3u8/vf-tool-m3u8.php').decode()
+              assert 'Version: 1.25.92' in header
+              assert '1.25.91' not in header[:3000]
+          record={'status':'PASS','version':v,'source':sha,'tree':tree,'file_count':568,'changed_runtime_files':files,'bytes':len(a),'sha256':hashlib.sha256(a).hexdigest(),'source_dist_closure':'PASS','reproducible':'PASS','root':'vf-tool-m3u8/','production':'UNTOUCHED'}
+          Path('proof/m3u8-candidate-package.json').write_text(json.dumps(record,indent=2))
+          print('M3U8_CANDIDATE_PACKAGE',json.dumps(record))
+          PYCANDIDATE
+      - name: Native WordPress 1.25.91 to 1.25.92 upgrade, rollback, retry, repeat and state preservation
+        run: |
+          cat > lane/m3u8-data-proof.php <<'PHPDATA'
+          <?php
+          global $wpdb;
+          $options=[];
+          foreach(['vf_m3u8_settings','vf_m3u8_mounts'] as $key){$options[$key]=get_option($key,'__NOT_PRESENT__');}
+          $tables=[];
+          foreach((array)$wpdb->get_col("SHOW TABLES") as $table){
+            if(!str_starts_with($table,$wpdb->prefix.'vf_m3u8_'))continue;
+            $name=str_replace('`','``',$table);
+            $rows=(array)$wpdb->get_results("SELECT * FROM `".$name."`",ARRAY_A);
+            usort($rows,static function($a,$b){return strcmp(wp_json_encode($a),wp_json_encode($b));});
+            $tables[$table]=$rows;
+          }
+          ksort($tables);
+          echo hash('sha256',wp_json_encode(['options'=>$options,'tables'=>$tables]))."\n";
+          PHPDATA
+          python3 - <<'PY_NATIVE'
+          from pathlib import Path
+          script=Path('lane/native.sh').read_text()
+          installed='cli plugin install polylang --version=3.8.10 --activate >/dev/null'
+          assert script.count(installed)==1
+          script=script.replace(installed,'for attempt in 1 2 3; do '+installed+' && break; test "$attempt" -lt 3 || exit 1; sleep 3; done')
+          script=script.replace('node lane/warm-admin.cjs','true')
+          marker='if [ "${VF_REVIEW_ONLY_STATE:-0}" = "1" ];then'
+          assert script.count(marker)==1
+          script=script.split(marker)[0]+"""
+          docker cp provider/vf-tool-m3u8_V1.25.92.zip "$WP:/tmp/provider-next.zip"
+          docker cp lane/m3u8-data-proof.php "$WP:/tmp/m3u8-data-proof.php"
+          check_plugin_version(){ test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$1"; echo NATIVE_PLUGIN_VERSION_VERIFIED="$1"; }
+          snapshot_m3u8(){ cli eval-file /tmp/m3u8-data-proof.php | tail -n 1; }
+          check_plugin_version 1.25.91
+          snapshot_m3u8 > proof/m3u8-data-before.sha256
+          cli plugin install /tmp/provider-next.zip --force --activate >/dev/null
+          check_plugin_version 1.25.92
+          snapshot_m3u8 > proof/m3u8-data-after-upgrade.sha256
+          cmp proof/m3u8-data-before.sha256 proof/m3u8-data-after-upgrade.sha256
+          cli plugin install /tmp/provider.zip --force --activate >/dev/null
+          check_plugin_version 1.25.91
+          snapshot_m3u8 > proof/m3u8-data-after-rollback.sha256
+          cmp proof/m3u8-data-before.sha256 proof/m3u8-data-after-rollback.sha256
+          cli plugin install /tmp/provider-next.zip --force --activate >/dev/null
+          check_plugin_version 1.25.92
+          snapshot_m3u8 > proof/m3u8-data-after-reupgrade.sha256
+          cmp proof/m3u8-data-before.sha256 proof/m3u8-data-after-reupgrade.sha256
+          cli plugin install /tmp/provider-next.zip --force --activate >/dev/null
+          check_plugin_version 1.25.92
+          snapshot_m3u8 > proof/m3u8-data-after-idempotent.sha256
+          cmp proof/m3u8-data-before.sha256 proof/m3u8-data-after-idempotent.sha256
+          cli eval-file /tmp/snapshot.php > proof/state-after.sha256
+          cmp proof/state-before.sha256 proof/state-after.sha256
+          echo M3U8_NATIVE_UPDATE_ROLLBACK_REPEAT_DATA_PRESERVED_PASS
+          """
+          Path('lane/m3u8-native.sh').write_text(script)
+          PY_NATIVE
+          bash lane/m3u8-native.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s01-m3u8-native-${{ github.run_id }}
+          path: proof/
+          retention-days: 14
+      - name: Remove temporary private source
+        if: always()
+        run: rm -rf target provider provider-candidate
