@@ -54,8 +54,8 @@ const sample=await run(p,'VFM3U8BackupRestoreLab','load-sample-backup');check(la
 const pre=await run(p,'VFM3U8BackupRestoreLab','preview-import');check(lang+' backup preview real conflict diff',pre.result?.ok&&pre.result.diff?.requiredConfirm==='RESTORE',pre.result?.diff?{stores:pre.result.diff.stores?.length,confirm:pre.result.diff.requiredConfirm}:pre.result);
 const denied=await run(p,'VFM3U8BackupRestoreLab','restore-backup');check(lang+' backup confirmation rejects unapproved restore',!denied.result?.ok,denied.result);
 }catch(e){check(lang+' backup scenario',false,String(e));}
-if(process.env.FOCUS_CASE==='deep'){
-try{
+if(['deep','restore'].includes(process.env.FOCUS_CASE)){
+if(process.env.FOCUS_CASE==='deep')try{
 await open(p,urls.iptv);
 const sample=await run(p,'VFM3U8IPTVLab','sample');check(lang+' IPTV deep sample',sample.result?.ok,sample.result);
 const rows=await p.evaluate(()=>window.VFM3U8IPTVLab.read());
@@ -64,7 +64,7 @@ const exported=await grab(p,()=>p.evaluate(()=>window.VFM3U8IPTVLab.run('exportM
 if(exported){await p.locator('[data-vf-iptv-import]').fill(exported.content);const imported=await run(p,'VFM3U8IPTVLab','import');const after=await p.evaluate(()=>window.VFM3U8IPTVLab.read());check(lang+' IPTV export and reimport same channels without duplicates',imported.result?.ok&&after.length===rows.length,{before:rows.length,after:after.length,imported:imported.result});}
 await p.screenshot({path:'proof/'+lang+'-iptv-deep.png',fullPage:true});
 }catch(e){check(lang+' IPTV deep scenario',false,String(e));}
-try{
+if(process.env.FOCUS_CASE==='deep')try{
 await open(p,urls.links);
 const sample=await run(p,'VFM3U8TestLinksLab','sample');check(lang+' test links deep sample',sample.result?.ok);
 await p.locator('[data-vf-test-links-mode-button="pro"]').click();await p.locator('.vf-tl-pro').evaluate(n=>{if(n.tagName==='DETAILS')n.open=true});
@@ -90,7 +90,7 @@ const preview=await run(p,'VFM3U8BackupRestoreLab','preview-import');
 check(lang+' backup deep preflight before restore',sample.result?.ok&&preview.result?.ok,{sample:sample.result,pre:preview.result?.ok});
 await p.locator('[data-vf-backup-confirm]').fill('RESTORE');
 const restored=await run(p,'VFM3U8BackupRestoreLab','restore-backup');
-check(lang+' backup deep actual restore and verification',restored.result?.ok===true&&restored.result?.verification?.ok===true,restored.result);
+const restorationDiagnostics=await p.evaluate(()=>({report:document.querySelector('[data-vf-backup-output]')?.textContent,recovery:document.querySelector('[data-vf-backup-recovery-text]')?.textContent,status:document.querySelector('[data-vf-backup-status]')?.textContent,workspaceAvailable:!!window.VFM3U8Workspace}));fs.writeFileSync('proof/'+lang+'-restore-diagnostics.json',JSON.stringify(restorationDiagnostics,null,2));check(lang+' backup deep actual restore and verification',restored.result?.ok===true&&restored.result?.verification?.ok===true,{result:restored.result,diagnostics:restorationDiagnostics});
 if(restored.result?.ok){
 const next=await collect();check(lang+' backup deep restored real sample data',Array.isArray(next.channels)&&next.channels.some(x=>x.name.includes('Demo')||x.name.includes('示例')),{channels:next.channels?.length});
 const rollback=await run(p,'VFM3U8BackupRestoreLab','rollback-last-change');
