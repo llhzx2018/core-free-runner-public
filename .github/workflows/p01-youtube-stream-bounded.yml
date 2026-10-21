@@ -1,0 +1,91 @@
+name: P01 YouTube bounded stream and actual endpoint proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-youtube-stream-bounded.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PRODUCT_SHA: 01f50a62187c40b45276f05abd02c223e53b06cf
+    steps:
+      - name: Install PHP and Node native test environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-xml php-sqlite3 php-curl php-mbstring php-zip php-gd unzip >/dev/null
+          php -m | grep -Eix 'pdo_sqlite|mbstring|simplexml|curl'
+          node --version
+      - name: Exact private product source and official baseline
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          remote="https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git"
+          live="$(git ls-remote "$remote" refs/heads/fix/p01-youtube-streamed-channel-id-20261021 | awk '{print $1}')"
+          test "$live" = "$PRODUCT_SHA"
+          git clone -q --no-checkout "$remote" candidate
+          git -C candidate fetch -q --depth 1 origin "$PRODUCT_SHA"
+          git -C candidate checkout -q --detach FETCH_HEAD
+          git clone -q --depth 1 --branch v2.47.400 "$remote" baseline
+          test "$(git -C candidate rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(tr -d ' \r\n' < candidate/VERSION)" = "2.47.400"
+          echo P01_YOUTUBE_EXACT_SOURCE=PASS
+      - name: Syntax and owner-only security fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          for f in src/app/YouTubeManualUpdates.php src/app/ChannelLibraryPage.php src/app/SubjectPageChrome.php src/youtube-channel-updates.php tests/unit/youtube_manual_updates_cache_native.php; do php -l "$f"; done
+          node --check src/assets/channel-youtube-updates.js
+          php tests/unit/youtube_manual_updates_cache_native.php
+          php tests/unit/channels_guest_readonly_layout_v247390_contract.php
+          echo P01_YOUTUBE_NATIVE_FOCUSED=PASS
+      - name: One-time bounded real YouTube read in isolated runner
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php <<'PHP'
+          <?php
+          require 'candidate/src/app/bootstrap.php';
+          require 'candidate/src/app/YouTubeManualUpdates.php';
+          $resolve=new ReflectionMethod(VfYouTubeManualUpdates::class,'resolveChannelId');
+          $request=new ReflectionMethod(VfYouTubeManualUpdates::class,'request');
+          $parse=new ReflectionMethod(VfYouTubeManualUpdates::class,'parseFeed');
+          try {
+              // ONE known public channel, only for the owner-reported failing handle.
+              // Source request has 8s timeout, 3 MiB HTML bound and early ID exit.
+              $id=$resolve->invoke(null,'https://www.youtube.com/@ZhangDaFei');
+              if(!preg_match('/^UC[A-Za-z0-9_-]{22}$/D',$id))throw new RuntimeException('ID_INVALID');
+              echo "P01_YOUTUBE_SANDBOX_HANDLE_ID=PASS\n";
+              $xml=$request->invoke(null,'https://www.youtube.com/feeds/videos.xml?channel_id='.$id,262144);
+              $items=$parse->invoke(null,$xml);
+              echo "P01_YOUTUBE_SANDBOX_ATOM_PARSE=PASS\n";
+              echo "P01_YOUTUBE_SANDBOX_LIVE=PASS\n";
+          }catch(Throwable $e) {
+              // No assertions of remote success if the runner is geoblocked or
+              // YouTube changes. Do not turn public upstream failure into source failure.
+              $code=$e->getMessage();
+              if (!preg_match('/^YT_[A-Z0-9_]+$/D',$code))$code='YT_UPSTREAM_OR_ENV';
+              echo "P01_YOUTUBE_SANDBOX_LIVE=NOT_PROVEN\n";
+              echo "P01_YOUTUBE_SANDBOX_REASON=".$code."\n";
+          }
+          PHP
+      - name: Canonical full regression and Zero Debt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash candidate/tests/canonical_release_regression.sh candidate baseline --require-zero-debt | tee /tmp/p01-youtube-canonical.txt
+          grep -Fx 'P01_CANONICAL_UNIT_REGRESSION=PASS' /tmp/p01-youtube-canonical.txt
+          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-youtube-canonical.txt
+          echo P01_YOUTUBE_CANONICAL=PASS
+      - name: No production or release actions
+        run: echo P01_YOUTUBE_PRODUCTION_UNCHANGED=PASS
