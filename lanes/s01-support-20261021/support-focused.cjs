@@ -33,6 +33,11 @@ async function geometry(p,key){const g=await p.evaluate(()=>({overflow:document.
    if(state==='empty')check(lang+' empty contact explicit help',await p.locator('.vf-contact-no-channel a').count()>=2);
    else {check(lang+' contact instructions retained',text.includes('Owner informational guidance only'));check(lang+' informational content has no channel promise',!text.includes('Use a channel below')&&!text.includes('通过以下渠道发送'));}
   }
-  await load(p,url(cases[lang].legal,'empty'));check(lang+' missing policy explicit state',await p.locator('.vf-policy-missing').count()===1);check(lang+' missing policy no invented text',await p.locator('.vf-policy-user-content').count()===0);await p.close();
+  await load(p,url(cases[lang].legal,'empty'));check(lang+' missing policy explicit state',await p.locator('.vf-policy-missing').count()===1);check(lang+' missing policy no invented text',await p.locator('.vf-policy-user-content').count()===0);
+  for(const state of ['stale-description','authored-description']){
+   await load(p,url(cases[lang].problem_index,state));const text=await p.locator('.vf-theme-post-list--problem_index .vf-family-section-head p').textContent();
+   check(lang+' problem '+state,state==='stale-description'?!text.includes('real recovery center')&&text.length>20:text==='Owner authored diagnostic description retained.',text);
+  }
+  await p.close();
  }
 }finally{fs.writeFileSync('proof/support-focused.json',JSON.stringify({status:checks.every(x=>x.pass)?'PASS':'FAIL',checks},null,2));console.log('SUPPORT_RESULTS',checks.length,'FAIL',checks.filter(x=>!x.pass));await browser.close();}if(checks.some(x=>!x.pass))throw Error('Support focused checks failed');})().catch(e=>{console.error(e);process.exit(1)});
