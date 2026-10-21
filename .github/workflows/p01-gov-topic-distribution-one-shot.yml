@@ -1,0 +1,63 @@
+name: p01-gov-topic-distribution-one-shot
+# Ephemeral fallback for core-updates private-hosted zero-step CI.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-gov-topic-distribution-one-shot.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      CORE_SHA: daec5ba06d8bdb609592e366c80734ce60bed9a1
+      PRODUCT_SHA: d641a3a1f5efc733201dc223c010115736a2bb2a
+    steps:
+      - name: Resolve exact channel candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone -q https://github.com/llhzx2018/core-updates.git core-updates
+          git -C core-updates fetch -q origin "$CORE_SHA"
+          git -C core-updates checkout -q --detach "$CORE_SHA"
+          test "$(git -C core-updates rev-parse HEAD)" = "$CORE_SHA"
+          echo P01_DIST_EXACT_SHA=PASS
+      - name: Validate all manifests and update-core
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip >/dev/null
+          cd core-updates
+          python3 scripts/check_manifest_contract.py
+          find update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php update-core/php/tests/run.php
+          echo P01_DIST_UPDATE_CORE_GATES=PASS
+      - name: Verify exact formal asset and updater identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${GH_TOKEN:-}"
+          cd core-updates
+          jq -e --arg sha "$PRODUCT_SHA" '
+            .project_id=="P01" and .component_id=="APP" and
+            .enabled==true and .current_version=="2.47.404" and .target_version=="2.47.405" and
+            .update_type=="ATOMIC" and .from_versions==["2.47.404"] and
+            .release_tag=="v2.47.405" and .product_identity==$sha and
+            .schema_from==.schema_to and .backup_required==true and .rollback_supported==true
+          ' projects/P01.json >/dev/null
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.47.405 > /tmp/topic-formal-metadata.json
+          gh api repos/llhzx2018/vf-start/git/ref/tags/v2.47.405 > /tmp/topic-formal-tag.json
+          test "$(jq -r '.object.sha' /tmp/topic-formal-tag.json)" = "$PRODUCT_SHA"
+          jq -e --slurpfile m projects/P01.json '
+            .draft==false and .prerelease==false and
+            .id==$m[0].release_id and .published_at==$m[0].released_at and
+            ([.assets[] | select(.name==$m[0].asset_name) | select(.size==$m[0].asset_bytes) |
+              select(.digest==("sha256:"+$m[0].asset_sha256))] | length)==1
+          ' /tmp/topic-formal-metadata.json >/dev/null
+          echo P01_DIST_RELEASE_TAG_ASSET_SHA256=PASS
+          echo P01_DIST_PRODUCTION_AUTO_UPGRADE=NO
