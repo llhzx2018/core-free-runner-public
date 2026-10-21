@@ -8,8 +8,11 @@ assert git('rev-parse', 'HEAD') == os.environ['TARGET_SHA']
 assert git('rev-parse', 'HEAD^{tree}') == os.environ['TARGET_TREE']
 version = os.environ['TARGET_VERSION']
 assert (root / 'VERSION').read_text().strip() == version
-expected = {'CHANGELOG.md','VERSION','src/style.css','src/inc/runtime-constants.php','src/assets/js/main.js','src/assets/css/public/pages/families/public-family-03-content-list-operations-closure.css'}
+expected = {'CHANGELOG.md','VERSION','src/style.css','src/inc/runtime-constants.php','src/assets/js/main.js','src/assets/css/public/vf-theme-public-runtime.css','src/inc/public-css-owner-registry.php','src/assets/css/public/pages/families/public-family-03-content-list-operations-closure.css'}
 assert set(git('diff', '--name-only', os.environ['BASE_SHA'], 'HEAD').splitlines()) == expected
+bundle=(root/'src/assets/css/public/vf-theme-public-runtime.css').read_bytes()
+registry=(root/'src/inc/public-css-owner-registry.php').read_text()
+assert hashlib.sha256(bundle).hexdigest() in registry
 files = sorted(p for p in (root / 'src').rglob('*') if p.is_file())
 assert len(files) == 476
 def bundle():
