@@ -102,6 +102,67 @@ jobs:
           php candidate-update/repair-v2.47.404.php --self-test | grep -F '"ok":true' >/dev/null
           test "$(cat candidate-full/VERSION.txt)" = "2.47.404"
           echo P01_TOPIC_SYNTHETIC_FULL_ATOMIC_PACKAGE=PASS
+      - name: Synthetic clean install, Atomic UPDATE and rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          setup_full() {
+            local archive="$1" root="$2" port="$3" pid="" csrf=""
+            mkdir -p "$root"
+            unzip -q "$archive" -d "$root"
+            php -S "127.0.0.1:$port" -t "$root" >"/tmp/p01-setup-$port.log" 2>&1 &
+            pid=$!
+            local cookie="/tmp/p01-topic-cookie-$port"
+            for attempt in $(seq 1 40); do
+              if curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$port/setup.php" -o "/tmp/p01-topic-setup-$port.html"; then break; fi
+              sleep 0.15
+            done
+            csrf="$(python3 - "/tmp/p01-topic-setup-$port.html" <<'PY'
+          import re,sys
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',open(sys.argv[1],encoding='utf-8').read())
+          assert m
+          print(m.group(1))
+          PY
+          )"
+            curl -fsS -c "$cookie" -b "$cookie" -X POST "http://127.0.0.1:$port/setup.php" \
+                --data-urlencode "setup_csrf=$csrf" \
+                --data-urlencode "site_title=P01 topic synthetic gate" \
+                --data-urlencode "admin_password=SyntheticGate!$port" \
+                --data-urlencode "admin_password_confirm=SyntheticGate!$port" \
+                -o "/tmp/p01-topic-result-$port.html"
+            (cd "$root" && php cli/verify.php) | grep -Fx VERIFY_PASS=YES
+            test "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/setup.php")" = 302
+            kill "$pid"; wait "$pid" 2>/dev/null || true
+          }
+          setup_full "$PWD/candidate-out/VF-Start-V2.47.404-FULL.zip" "$PWD/gate-full" 19611
+          echo P01_TOPIC_CLEAN_FULL=PASS
+          setup_full "$PWD/release-base/VF-Start-V2.47.403-FULL.zip" "$PWD/gate-upgrade" 19612
+          cat >gate-upgrade/sentinel.php <<'PHP'
+          <?php
+          require __DIR__.'/app/bootstrap.php';
+          $r=new VfRepository(vf_db());
+          $cat=$r->createCategory(['name'=>'Gate protected','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+          $a=$r->saveLink(null,['surface'=>'start','category_id'=>$cat,'title'=>'Gate sentinel','url'=>'https://example.com/topic-gate-sentinel','is_private'=>1,'description'=>'keep data','tags'=>['sentinel'],'is_pending'=>0]);
+          file_put_contents('/tmp/p01-topic-sentinel.txt',(string)$a['id']);
+          PHP
+          php gate-upgrade/sentinel.php
+          rm gate-upgrade/sentinel.php
+          cp candidate-update/repair-v2.47.404.php gate-upgrade/repair-v2.47.404.php
+          php gate-upgrade/repair-v2.47.404.php --verify-source="$PWD/gate-upgrade" | grep -F '"ok":true'
+          php gate-upgrade/repair-v2.47.404.php --run="$PWD/gate-upgrade" | grep -F '"ok":true'
+          test "$(cat gate-upgrade/VERSION.txt)" = 2.47.404
+          (cd gate-upgrade && php cli/verify.php) | grep -Fx VERIFY_PASS=YES
+          php -r 'require $argv[1]."/app/bootstrap.php"; $id=(int)trim(file_get_contents("/tmp/p01-topic-sentinel.txt")); $q=vf_db()->prepare("SELECT is_private,title FROM links WHERE id=?"); $q->execute([$id]); $r=$q->fetch(PDO::FETCH_ASSOC); if(!$r || (int)$r["is_private"]!==1 || $r["title"]!=="Gate sentinel") exit(4);' "$PWD/gate-upgrade"
+          php gate-upgrade/repair-v2.47.404.php --run="$PWD/gate-upgrade" | grep -F '"already_current":true'
+          echo P01_TOPIC_ATOMIC_UPGRADE_IDEMPOTENCY_DATA=PASS
+          setup_full "$PWD/release-base/VF-Start-V2.47.403-FULL.zip" "$PWD/gate-rollback" 19613
+          cp candidate-update/repair-v2.47.404.php gate-rollback/repair-v2.47.404.php
+          if VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php gate-rollback/repair-v2.47.404.php --run="$PWD/gate-rollback" >/tmp/p01-topic-rollback.out 2>/tmp/p01-topic-rollback.err; then
+            echo 'Rollback failpoint unexpectedly succeeded'; exit 1
+          fi
+          test "$(cat gate-rollback/VERSION.txt)" = 2.47.403
+          (cd gate-rollback && php cli/verify.php) | grep -Fx VERIFY_PASS=YES
+          echo P01_TOPIC_ATOMIC_ROLLBACK=PASS
       - name: Real PHP-cURL private GOV-TOPIC read
         shell: bash
         env:
