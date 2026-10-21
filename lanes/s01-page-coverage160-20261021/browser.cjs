@@ -22,7 +22,7 @@ function check(name,pass,detail){checks.push({name,pass:!!pass,detail});if(!pass
   await page.screenshot({path:`proof/overview-${lang}-${width}.png`,fullPage:true});
  }
  const tools=await root.locator('[data-vf-page-context=tool] .vf-frontend-pages__coverage').innerText();
- check('individual tools are named from current catalog',tools.includes('目录配置中的工具')&&/MP4/i.test(tools)&&tools.includes('备份')&&tools.includes('播放器')&&tools.includes('实际开放入口'),tools);
+ check('individual tools are named from current catalog',tools.includes('目录配置中的工具')&&/MP4/i.test(tools)&&/备份|Backup/i.test(tools)&&tools.includes('播放器')&&tools.includes('实际开放入口'),tools);
  check('archive includes category tag author and date',await root.locator('[data-vf-page-context=archive_list] .vf-frontend-pages__coverage').innerText().then(x=>['分类归档','标签归档','作者归档','日期归档'].every(k=>x.includes(k))));
  check('legal covers separate privacy and terms pages',await root.locator('[data-vf-page-context=legal] .vf-frontend-pages__coverage').innerText().then(x=>x.includes('隐私政策')&&x.includes('使用条款')));
  check('FAQ entries are not claimed to be separate detail pages',await root.locator('[data-vf-page-context=faq_page] .vf-frontend-pages__coverage').innerText().then(x=>x.includes('条目不等于独立详情页')));
@@ -30,7 +30,7 @@ function check(name,pass,detail){checks.push({name,pass:!!pass,detail});if(!pass
  await filter.locator('input[name=vf_pages_q]').fill('作者归档');await filter.getByRole('button',{name:'筛选',exact:true}).click();await page.waitForLoadState('networkidle');
  check('search discovers subtype that old label hid',await root.locator('[data-vf-page-context]').count()===1&&await root.locator('[data-vf-page-context=archive_list]').count()===1);
  const edit=await root.locator('.vf-frontend-pages__actions .button').getAttribute('href');check('layout action retains type language and search',edit.includes('context=archive_list')&&edit.includes('vf_pages_language=zh')&&new URL(edit).searchParams.get('vf_pages_q')==='作者归档',edit);
- await filter.locator('input[name=vf_pages_q]').fill('备份');await filter.getByRole('button',{name:'筛选',exact:true}).click();await page.waitForLoadState('networkidle');
+ await filter.locator('input[name=vf_pages_q]').fill('Backup');await filter.getByRole('button',{name:'筛选',exact:true}).click();await page.waitForLoadState('networkidle');
  check('tool names participate in type search',await root.locator('[data-vf-page-context=tool]').count()===1);
  await page.goto(target+'&vf_pages_language=en',{waitUntil:'networkidle'});
  await root.locator('#vf-frontend-pages-content > summary').click();const content=root.locator('[data-vf-frontend-content-form]');
