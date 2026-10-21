@@ -54,6 +54,52 @@ const sample=await run(p,'VFM3U8BackupRestoreLab','load-sample-backup');check(la
 const pre=await run(p,'VFM3U8BackupRestoreLab','preview-import');check(lang+' backup preview real conflict diff',pre.result?.ok&&pre.result.diff?.requiredConfirm==='RESTORE',pre.result?.diff?{stores:pre.result.diff.stores?.length,confirm:pre.result.diff.requiredConfirm}:pre.result);
 const denied=await run(p,'VFM3U8BackupRestoreLab','restore-backup');check(lang+' backup confirmation rejects unapproved restore',!denied.result?.ok,denied.result);
 }catch(e){check(lang+' backup scenario',false,String(e));}
+if(process.env.FOCUS_CASE==='deep'){
+try{
+await open(p,urls.iptv);
+const sample=await run(p,'VFM3U8IPTVLab','sample');check(lang+' IPTV deep sample',sample.result?.ok,sample.result);
+const rows=await p.evaluate(()=>window.VFM3U8IPTVLab.read());
+check(lang+' IPTV group and favorite metadata preserved',rows.some(x=>x.favorite)&&rows.some(x=>x.group),rows.map(x=>({name:x.name,group:x.group,favorite:x.favorite})).slice(0,5));
+const exported=await grab(p,()=>p.evaluate(()=>window.VFM3U8IPTVLab.run('exportM3u')),lang+' IPTV deep M3U');
+if(exported){await p.locator('[data-vf-iptv-import]').fill(exported.content);const imported=await run(p,'VFM3U8IPTVLab','import');const after=await p.evaluate(()=>window.VFM3U8IPTVLab.read());check(lang+' IPTV export and reimport same channels without duplicates',imported.result?.ok&&after.length===rows.length,{before:rows.length,after:after.length,imported:imported.result});}
+await p.screenshot({path:'proof/'+lang+'-iptv-deep.png',fullPage:true});
+}catch(e){check(lang+' IPTV deep scenario',false,String(e));}
+try{
+await open(p,urls.links);
+const sample=await run(p,'VFM3U8TestLinksLab','sample');check(lang+' test links deep sample',sample.result?.ok);
+await p.locator('[data-vf-test-links-mode-button="pro"]').click();await p.locator('.vf-tl-pro').evaluate(n=>{if(n.tagName==='DETAILS')n.open=true});
+const csv=await grab(p,()=>p.locator('[data-vf-test-links-download-csv]').click(),lang+' test links deep CSV');
+if(csv)check(lang+' test links CSV real entries',csv.content.includes('name')&&csv.content.includes('url')&&csv.content.split('\n').length>=4,{rows:csv.content.split('\n').length});
+const txt=await grab(p,()=>p.locator('[data-vf-test-links-download-txt]').click(),lang+' test links deep TXT');
+if(txt)check(lang+' test links TXT has real sample paths',txt.content.includes('.m3u8'),txt.content.slice(0,250));
+await p.evaluate(()=>{window.__vfBatchPromise=window.VFM3U8TestLinksLab.batchTest()});
+await p.waitForTimeout(50);
+const cancelled=await p.evaluate(()=>window.VFM3U8TestLinksLab.cancel());
+check(lang+' test links cancellation is available',cancelled!==undefined,cancelled);
+await p.evaluate(()=>window.__vfBatchPromise);
+check(lang+' test links batch settled',await p.locator('[data-vf-module="test-links"]').getAttribute('data-vf-test-links-batch-running')!=='1');
+await p.screenshot({path:'proof/'+lang+'-test-links-deep.png',fullPage:true});
+}catch(e){check(lang+' test links deep scenario',false,String(e));}
+try{
+await open(p,urls.backup);
+const root=p.locator('[data-vf-module="backup-restore"]'); const collect=()=>p.evaluate(async()=>window.VFM3U8BackupRestoreLab.collect());
+const before=await collect();
+const original=await p.evaluate(async()=>{const l=window.VFM3U8BackupRestoreLab;return l.workspaceFingerprint(await l.collect())});
+const sample=await run(p,'VFM3U8BackupRestoreLab','load-sample-backup');
+const preview=await run(p,'VFM3U8BackupRestoreLab','preview-import');
+check(lang+' backup deep preflight before restore',sample.result?.ok&&preview.result?.ok,{sample:sample.result,pre:preview.result?.ok});
+await p.locator('[data-vf-backup-confirm]').fill('RESTORE');
+const restored=await run(p,'VFM3U8BackupRestoreLab','restore-backup');
+check(lang+' backup deep actual restore and verification',restored.result?.ok===true&&restored.result?.verification?.ok===true,restored.result);
+if(restored.result?.ok){
+const next=await collect();check(lang+' backup deep restored real sample data',Array.isArray(next.channels)&&next.channels.some(x=>x.name.includes('Demo')||x.name.includes('示例')),{channels:next.channels?.length});
+const rollback=await run(p,'VFM3U8BackupRestoreLab','rollback-last-change');
+check(lang+' backup deep rollback completed',rollback.result?.ok===true,rollback.result);
+if(rollback.result?.ok){const after=await p.evaluate(async()=>{const l=window.VFM3U8BackupRestoreLab;return l.workspaceFingerprint(await l.collect())});check(lang+' backup deep original workspace fingerprint recovered',after===original,{before:original,after});}
+}
+await p.screenshot({path:'proof/'+lang+'-backup-deep.png',fullPage:true});
+}catch(e){check(lang+' backup deep scenario',false,String(e));}
+}
 await context.close();
 }
 }finally{await browser.close();}
