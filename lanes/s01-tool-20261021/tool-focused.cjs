@@ -14,9 +14,14 @@ const media='#EXTM3U\n#EXT-X-TARGETDURATION:3\n#EXTINF:3,\nsegment.ts\n#EXT-X-EN
   await load(p,cases[lang].tool_hub);const tools=await p.locator('.vf-directory-tool-card .vf-directory-card-action').evaluateAll(xs=>xs.map(x=>x.href));check(lang+' canonical tool catalog has 11 unique tools',tools.length===11&&new Set(tools).size===11,tools);
   for(const width of [1920,1440,1319,1024])for(const href of tools){
    errors=[];await p.setViewportSize({width,height:1000});await load(p,href);const route=new URL(href).pathname,key=lang+'/'+width+route;await geometry(p,key);const stage=p.locator('[data-vf-tool-runtime-stage="1"]');check(key+' one real workspace',await stage.count()===1);check(key+' Provider controls mounted',await stage.locator('button,input,textarea,select,a').count()>0);check(key+' no script errors',!errors.length,errors);
-   if(width===1440&&['m3u8-player','m3u8-browser-stream-test','m3u8-playlist-checker'].some(x=>route.endsWith('/'+x+'/'))){await p.screenshot({path:`proof/tool-${lang}-${route.split('/').filter(Boolean).pop()}-initial.png`});await stage.screenshot({path:`proof/workspace-${lang}-${route.split('/').filter(Boolean).pop()}-initial.png`});}
+   if(['m3u8-player','m3u8-browser-stream-test','m3u8-playlist-checker'].some(x=>route.endsWith('/'+x+'/'))){
+    check(key+' single Provider workspace introduction',await p.locator('[data-vf-workspace-intro="provider"]').count()===1&&await p.locator('.vf-tool-runtime-head,.vf-tool-runtime-stage-label').count()===0);
+    const placement=await stage.evaluate(el=>{const q=el.querySelector('[data-vf-player-url],[data-vf-browser-stream-url],[data-vf-playlist-url]'),b=el.querySelector('[data-vf-primary-action]');return{input:q?.getBoundingClientRect().toJSON(),button:b?.getBoundingClientRect().toJSON(),height:innerHeight};});check(key+' input and primary action reachable in first desktop viewport',placement.input?.top>=0&&placement.input?.bottom<=placement.height&&placement.button?.top>=0&&placement.button?.bottom<=placement.height,placement);
+    if(width===1440){await p.screenshot({path:`proof/tool-${lang}-${route.split('/').filter(Boolean).pop()}-initial.png`});await stage.screenshot({path:`proof/workspace-${lang}-${route.split('/').filter(Boolean).pop()}-initial.png`});}
+   }
   }
   await p.setViewportSize({width:1440,height:1000});
+  {const u=new URL(cases[lang].tool);u.searchParams.set('vf_tool_review','customintro');await load(p,u.href);check(lang+' authored workspace introduction retained',(await p.locator('.vf-tool-runtime-head').textContent()).includes('Owner custom workspace heading'));}
   try{
    const base=new URL(cases[lang].tool);base.searchParams.set('vf_tool_review','missing');await load(p,base.href);const root=p.locator('[data-vf-tool-runtime-stage="1"]');await root.screenshot({path:`proof/missing-${lang}.png`});
    check(lang+' missing renderer shows explicit status',await root.locator('[data-vf-module-fallback="missing-tool-plugin"][role="status"]').isVisible());check(lang+' missing renderer has real recovery links',await root.locator('.vf-tool-unavailable-actions a').count()>=2);
