@@ -1,0 +1,127 @@
+name: S01 M3U8 1.25.93 formal Release exact tested bytes
+on:
+  push:
+    branches: [task/s01-four-tools-20261021]
+    paths: ['.github/workflows/s01-four-tools-formal93.yml']
+permissions:
+  contents: read
+jobs:
+  formal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: 8438b505a695f246546b50ff4c378cf1a1f34fff
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: provider-candidate
+      - name: Verify tested tree and current merged main
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          test "$(git -C provider-candidate rev-parse HEAD)" = '8438b505a695f246546b50ff4c378cf1a1f34fff'
+          test "$(git -C provider-candidate rev-parse HEAD^{tree})" = '0c77adaf348b86171c1b0810153207aca099b15a'
+          test "$(gh api repos/llhzx2018/vf-tools-m3u8/commits/main --jq .sha)" = '19a6f27b5f7fa402c326d283a1a2eac072c777c3'
+          test "$(gh api repos/llhzx2018/vf-tools-m3u8/git/commits/19a6f27b5f7fa402c326d283a1a2eac072c777c3 --jq .tree.sha)" = '0c77adaf348b86171c1b0810153207aca099b15a'
+          mkdir -p proof provider
+          echo MERGED_MAIN_TESTED_TREE_IDENTICAL_PASS
+      - name: Retrieve exact 1.25.92 baseline asset
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          gh release download v1.25.92 --repo llhzx2018/vf-tools-m3u8 --pattern vf-tools-m3u8_V1.25.92.zip --dir provider
+          echo '6bf23229781134dfb387bd2f9c1bc59de7a6ed535e069e642be808b6bf269517  provider/vf-tools-m3u8_V1.25.92.zip' | sha256sum -c
+      - name: Build M3U8 1.25.93 exact candidate replacing only changed runtime files
+        run: |
+          node --check provider-candidate/src/public/js/modules/backup-restore.js
+          node --check provider-candidate/src/public/dist/backup-restore.js
+          php -l provider-candidate/src/vf-tool-m3u8.php
+          python3 - <<'PY_CANDIDATE'
+          from pathlib import Path
+          import io,zipfile,hashlib,subprocess,json
+          repo=Path('provider-candidate')
+          head='8438b505a695f246546b50ff4c378cf1a1f34fff'
+          tree='0c77adaf348b86171c1b0810153207aca099b15a'
+          base='ff767c337ad9dc0b0246cc63e5eb555380319a57'
+          expected={'CHANGELOG.md','VERSION','src/vf-tool-m3u8.php','src/plugin-manifest.json','src/PACKAGE_PROFILE.json','src/config/performance-bundles.php','src/public/js/modules/backup-restore.js','src/public/dist/backup-restore.js'}
+          def git(*args):return subprocess.check_output(['git','-C',str(repo),*args])
+          assert git('rev-parse','HEAD').decode().strip()==head
+          assert git('rev-parse','HEAD^{tree}').decode().strip()==tree
+          assert set(git('diff','--name-only',base,'HEAD').decode().splitlines())==expected
+          assert (repo/'VERSION').read_text().strip()=='1.25.93'
+          oldsrc=git('show',base+':src/public/js/modules/backup-restore.js')
+          newsrc=(repo/'src/public/js/modules/backup-restore.js').read_bytes()
+          olddist=git('show',base+':src/public/dist/backup-restore.js')
+          newdist=(repo/'src/public/dist/backup-restore.js').read_bytes()
+          assert olddist.count(oldsrc)==1
+          assert olddist.replace(oldsrc,newsrc,1)==newdist
+          config=(repo/'src/config/performance-bundles.php').read_text()
+          assert '"rawScriptBytes":276703' in config
+          print('BACKUP_SOURCE_DIST_EXACT_CLOSURE_AND_BUNDLE_METADATA_PASS')
+          updates={p[4:]:repo/p for p in expected if p.startswith('src/') and p!='src/PACKAGE_PROFILE.json'}
+          oldzip=Path('provider/vf-tools-m3u8_V1.25.92.zip')
+          newzip=Path('provider/vf-tools-m3u8_V1.25.93.zip')
+          def build():
+            b=io.BytesIO()
+            with zipfile.ZipFile(oldzip) as z,zipfile.ZipFile(b,'w') as out:
+              items=z.infolist()
+              count=sum(not x.is_dir() for x in items)
+              assert count==568,count
+              encountered=set()
+              for info in items:
+                rel=info.filename.removeprefix('vf-tool-m3u8/')
+                assert info.filename.startswith('vf-tool-m3u8/') and '..' not in rel.split('/')
+                data=z.read(info)
+                if rel in updates:
+                  assert data==git('show',base+':src/'+rel),rel
+                  data=updates[rel].read_bytes()
+                  encountered.add(rel)
+                out.writestr(info,data)
+              assert encountered==set(updates),(encountered,set(updates))
+            return b.getvalue()
+          a,b=build(),build()
+          assert a==b
+          newzip.write_bytes(a)
+          with zipfile.ZipFile(newzip) as z:
+            assert z.testzip() is None
+            assert len([n for n in z.namelist() if not n.endswith('/')])==568
+            assert 'Version: 1.25.93' in z.read('vf-tool-m3u8/vf-tool-m3u8.php').decode()
+          report={'status':'PASS','version':'1.25.93','source':head,'tree':tree,'fileCount':568,'bytes':len(a),'sha256':hashlib.sha256(a).hexdigest(),'updated':sorted(updates),'production':'UNTOUCHED'}
+          Path('proof/m3u8-backup93-candidate.json').write_text(json.dumps(report,indent=2))
+          print('M3U8_BACKUP93_EXACT_PACKAGE_PASS '+json.dumps(report))
+          
+          PY_CANDIDATE
+      - name: Publish exact tested M3U8 1.25.93 Release
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          cp provider/vf-tools-m3u8_V1.25.93.zip vf-tools-m3u8_V1.25.93.zip
+          echo '4e032449f4581115a33e4e5b122ec0eef7651ac7a1f23937102a49cd0a7e5815  vf-tools-m3u8_V1.25.93.zip' | sha256sum -c
+          test "$(stat -c %s vf-tools-m3u8_V1.25.93.zip)" = 3603974
+          if ! gh release view v1.25.93 --repo llhzx2018/vf-tools-m3u8 >/dev/null 2>&1; then
+            gh release create v1.25.93 vf-tools-m3u8_V1.25.93.zip --repo llhzx2018/vf-tools-m3u8 --target 19a6f27b5f7fa402c326d283a1a2eac072c777c3 --title 'VF Tools M3U8 V1.25.93' --notes '修复备份恢复 IndexedDB 自动更新时间戳导致的回读误报失败，同时保留对实际数据篡改的严格拦截。四工具双语定向验收通过，真实恢复和回滚 92/92 PASS；WordPress 原生升级、回退、重升、幂等及数据保留 PASS。568 runtime files，物理插件根 vf-tool-m3u8 保持，Production 必须由 OWNER 手工升级。' --latest
+          fi
+      - name: Authenticated formal release asset readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p proof/remote-asset
+          gh release download v1.25.93 --repo llhzx2018/vf-tools-m3u8 --pattern vf-tools-m3u8_V1.25.93.zip --dir proof/remote-asset
+          cmp vf-tools-m3u8_V1.25.93.zip proof/remote-asset/vf-tools-m3u8_V1.25.93.zip
+          test "$(gh release view v1.25.93 --repo llhzx2018/vf-tools-m3u8 --json isDraft,isPrerelease --jq '.isDraft or .isPrerelease')" = false
+          echo M3U8_1_25_93_FORMAL_ASSET_BYTE_IDENTICAL_PASS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s01-m3u8-formal93-${{ github.run_id }}
+          path: proof/m3u8-backup93-candidate.json
+          retention-days: 14
+      - name: Cleanup private source and ZIP
+        if: always()
+        run: rm -rf provider-candidate provider vf-tools-m3u8_V1.25.93.zip proof/remote-asset
