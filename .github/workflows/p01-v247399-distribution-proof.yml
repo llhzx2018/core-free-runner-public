@@ -1,0 +1,111 @@
+name: P01 V2.47.399 independent online discovery and distribution proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247399-distribution-proof.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      DIST_SHA: 77949bc3036f66baf9f13976b8c930b886540e87
+      DIST_REF: dist/p01-v247399-youtube-diagnostics-20261021
+      RELEASE_SHA: 5a6df6b0b11c05b015db90ffcc10615e713eac69
+      RELEASE_ID: '419016486'
+      RELEASE_ASSET: VF_Start_V2.47.399_UPDATE.zip
+    steps:
+      - name: Checkout temporary public Runner control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Prepare independent PHP and manifest test runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-curl php-mbstring jq unzip >/dev/null
+          php -m | grep -Fxi curl
+      - name: Fetch exact core-updates distribution candidate
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          url="https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/core-updates.git"
+          live="$(git ls-remote "$url" "refs/heads/$DIST_REF" | awk '{print $1}')"
+          test "$live" = "$DIST_SHA"
+          git clone -q --no-checkout "$url" updates
+          git -C updates fetch -q --depth 1 origin "$DIST_SHA"
+          git -C updates checkout -q --detach FETCH_HEAD
+          test "$(git -C updates rev-parse HEAD)" = "$DIST_SHA"
+          echo P01_DISTRIBUTION_EXACT_SOURCE=PASS
+      - name: Manifest contracts, PHP syntax and native Update Core tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd updates
+          python3 scripts/check_manifest_contract.py | tee /tmp/manifest-contract-result.json
+          python3 -c 'import json; assert json.load(open("/tmp/manifest-contract-result.json"))["status"]=="PASS"'
+          find update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php update-core/php/tests/run.php | tee /tmp/update-core-native-result.txt
+          grep -Fx UPDATE_CORE_V1_TESTS_PASS /tmp/update-core-native-result.txt
+          echo P01_DISTRIBUTION_NATIVE_CONTRACT=PASS
+      - name: Real GitHub manifest discovery and source compatibility
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          php <<'PHP'
+          <?php
+          require 'updates/update-core/php/src/GitHubClient.php';
+          require 'updates/update-core/php/src/UpdateCore.php';
+          $c=new CoreUpdates\GitHubClient(getenv('READ_TOKEN'));
+          $m=$c->fetchProjectManifest('llhzx2018/core-updates','P01.json',getenv('DIST_REF'));
+          $local=json_decode(file_get_contents('updates/projects/P01.json'),true,512,JSON_THROW_ON_ERROR);
+          if($m!==$local)throw new RuntimeException('Manifest remote/raw mismatch');
+          foreach(['project_id'=>'P01','component_id'=>'APP','target_version'=>'2.47.399',
+                   'current_version'=>'2.47.398','update_type'=>'ATOMIC',
+                   'schema_from'=>'2026090401','schema_to'=>'2026090401',
+                   'release_tag'=>'v2.47.399','product_identity'=>getenv('RELEASE_SHA'),
+                   'release_id'=>419016486,'asset_bytes'=>2613814,
+                   'asset_sha256'=>'d900d20d7b10a94fb46b07a8675cf4590ff8a332510209b08b5157a7d7092a4a'] as $key=>$value){
+              if(($m[$key]??null)!==$value)throw new RuntimeException('Manifest identity mismatch: '.$key);
+          }
+          if($m['from_versions']!==['2.47.398'])throw new RuntimeException('Invalid source allowlist');
+          $u=new CoreUpdates\UpdateCore('P01','APP');
+          foreach([
+              ['2.47.398','2026090401','AVAILABLE'],
+              ['2.47.397','2026090401','BLOCKED_SOURCE_VERSION'],
+              ['2.47.398','2026090400','BLOCKED_SCHEMA'],
+              ['2.47.399','2026090401','UP_TO_DATE'],
+          ] as $case){
+              $actual=$u->check($case[0],$case[1],$m)['status'];
+              if($actual!==$case[2])throw new RuntimeException('Discovery status mismatch: '.$actual);
+          }
+          echo "P01_NATIVE_UPDATE_DISCOVERY=PASS\n";
+          PHP
+      - name: Remote Release identity and real UPDATE ZIP SHA-256
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          test "$(gh api repos/llhzx2018/vf-start/git/ref/tags/v2.47.399 --jq '.object.sha')" = "$RELEASE_SHA"
+          test "$(gh api repos/llhzx2018/vf-start/releases/tags/v2.47.399 --jq '.id')" = "$RELEASE_ID"
+          mkdir -p /tmp/p01-distribution-download
+          gh release download v2.47.399 -R llhzx2018/vf-start -D /tmp/p01-distribution-download -p "$RELEASE_ASSET"
+          asset="/tmp/p01-distribution-download/$RELEASE_ASSET"
+          test "$(stat -c %s "$asset")" = 2613814
+          test "$(sha256sum "$asset" | awk '{print $1}')" = d900d20d7b10a94fb46b07a8675cf4590ff8a332510209b08b5157a7d7092a4a
+          php -r 'require "updates/update-core/php/src/UpdateCore.php"; $m=json_decode(file_get_contents("updates/projects/P01.json"),true); $u=new CoreUpdates\UpdateCore("P01","APP"); if($u->verifyPackage($argv[1],$m)["status"]!=="VERIFIED")exit(1); echo "P01_NATIVE_ASSET_VERIFICATION=PASS\n";' "$asset"
+          echo P01_REMOTE_RELEASE_DOWNLOAD_HASH=PASS
+      - name: Read-only completion
+        run: echo P01_DISTRIBUTION_PROOF_NO_PRODUCTION_WRITE=PASS
