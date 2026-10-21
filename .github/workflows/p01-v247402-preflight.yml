@@ -1,0 +1,205 @@
+name: P01 V2.47.402 One-Shot Release Preflight (NO PUBLISH)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247402-preflight.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-v247402-one-shot
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      CANDIDATE_SHA: 19f7ca73d712679f483536fafb8396a15fd50773
+      TARGET_VERSION: '2.47.402'
+      SOURCE_VERSION: '2.47.401'
+    steps:
+      - name: Checkout already-authorized public maintenance builder
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Runtime
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,curl,simplexml,mbstring,zip,openssl,gd
+          coverage: none
+
+      - name: Exact private source plus immutable baseline (no public artifacts)
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          WORK="$RUNNER_TEMP/p01-v247402-preflight"
+          mkdir -p "$WORK"
+          chmod 700 "$WORK"
+          echo "P01_WORK=$WORK" >> "$GITHUB_ENV"
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "$WORK/candidate"
+          git -C "$WORK/candidate" checkout -q --detach "$CANDIDATE_SHA"
+          git -C "$WORK/candidate" remote set-url origin "https://github.com/${PRODUCT_REPO}.git"
+          test "$(git -C "$WORK/candidate" rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git clone -q --depth 1 --branch "v$SOURCE_VERSION" "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "$WORK/stable"
+          git -C "$WORK/stable" remote set-url origin "https://github.com/${PRODUCT_REPO}.git"
+          test "$(tr -d '\r\n ' < "$WORK/candidate/VERSION")" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n ' < "$WORK/candidate/src/VERSION.txt")" = "$TARGET_VERSION"
+          grep -F "define('VF_VERSION', '$TARGET_VERSION');" "$WORK/candidate/src/app/bootstrap.php"
+          test "$(tr -d '\r\n ' < "$WORK/stable/VERSION")" = "$SOURCE_VERSION"
+          echo "P01_PREFLIGHT_EXACT_SOURCE=PASS"
+
+      - name: Canonical zero-debt regression and focused real PHP extensions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$P01_WORK/candidate"
+          php -m | grep -Fx curl
+          php -m | grep -Fx mbstring
+          php -m | grep -Fx SimpleXML
+          find src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          node --check src/assets/channel-youtube-updates.js
+          php tests/unit/youtube_api_fallback_native.php
+          php tests/unit/youtube_manual_updates_cache_native.php
+          bash tests/canonical_release_regression.sh . "$P01_WORK/stable" --require-zero-debt \
+            | tee "$P01_WORK/canonical.log"
+          grep -Fx 'P01_CANONICAL_UNIT_REGRESSION=PASS' "$P01_WORK/canonical.log"
+          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' "$P01_WORK/canonical.log"
+          echo "P01_V247402_EXACT_CANDIDATE_REGRESSION=PASS"
+
+      - name: Fetch previously issued formal artifacts privately
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          mkdir -p "$P01_WORK/prior" "$P01_WORK/full-base" "$P01_WORK/update-base"
+          gh release download "v$SOURCE_VERSION" -R "$PRODUCT_REPO" -D "$P01_WORK/prior" \
+            -p "VF-Start-V${SOURCE_VERSION}-FULL.zip" -p "VF_Start_V${SOURCE_VERSION}_UPDATE.zip"
+          unzip -q "$P01_WORK/prior/VF-Start-V${SOURCE_VERSION}-FULL.zip" -d "$P01_WORK/full-base"
+          unzip -q "$P01_WORK/prior/VF_Start_V${SOURCE_VERSION}_UPDATE.zip" -d "$P01_WORK/update-base"
+          test -f "$P01_WORK/update-base/repair-v${SOURCE_VERSION}.php"
+          echo "P01_PREFLIGHT_STABLE_ARTIFACTS=PASS"
+
+      - name: Build FULL + UPDATE without publishing anything
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TREE="$(git -C "$P01_WORK/candidate" rev-parse HEAD^{tree})"
+          python3 scripts/p01-maintenance-release.py \
+            --candidate "$P01_WORK/candidate/src" \
+            --baseline-full "$P01_WORK/full-base" \
+            --baseline-repair "$P01_WORK/update-base/repair-v${SOURCE_VERSION}.php" \
+            --out "$P01_WORK/art" \
+            --version "$TARGET_VERSION" \
+            --source-version "$SOURCE_VERSION" \
+            --target-sha "$CANDIDATE_SHA" \
+            --target-tree "$TREE" | tee "$P01_WORK/build-result.json"
+          FULL="$P01_WORK/art/VF-Start-V${TARGET_VERSION}-FULL.zip"
+          UPDATE="$P01_WORK/art/VF_Start_V${TARGET_VERSION}_UPDATE.zip"
+          test -s "$FULL"
+          test -s "$UPDATE"
+          unzip -t "$FULL" >/dev/null
+          unzip -t "$UPDATE" >/dev/null
+          mkdir -p "$P01_WORK/repair"
+          unzip -q "$UPDATE" -d "$P01_WORK/repair"
+          test -f "$P01_WORK/repair/repair-v${TARGET_VERSION}.php"
+          php -l "$P01_WORK/repair/repair-v${TARGET_VERSION}.php"
+          php "$P01_WORK/repair/repair-v${TARGET_VERSION}.php" --self-test \
+            | tee "$P01_WORK/selftest.json"
+          grep -Fq '"ok":true' "$P01_WORK/selftest.json"
+          echo "P01_V247402_PACKAGE_AND_REPAIR_SELFTEST=PASS"
+
+      - name: Clean FULL install and existing-site Atomic UPDATE + rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export WORK="$P01_WORK"
+          cat > "$WORK/smoke.sh" <<'SHELL'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          install_one() {
+            local zip="$1" path="$2" port="$3"
+            mkdir -p "$path"
+            unzip -q "$zip" -d "$path"
+            (cd "$path" && php -S "127.0.0.1:$port" -t . >"$WORK/server-$port.log" 2>&1 & echo $! > "$WORK/server-$port.pid")
+            local cookie="$WORK/cookie-$port.txt"
+            for _ in $(seq 1 40); do
+              if curl -fsS -b "$cookie" -c "$cookie" "http://127.0.0.1:$port/setup.php" -o "$WORK/setup-$port.html"; then break; fi
+              sleep .5
+            done
+            local csrf
+            csrf=$(python3 - "$WORK/setup-$port.html" <<'PY'
+          import re,sys
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',open(sys.argv[1]).read())
+          assert m
+          print(m.group(1))
+          PY
+            )
+            curl -fsS -b "$cookie" -c "$cookie" -X POST "http://127.0.0.1:$port/setup.php" \
+              --data-urlencode "setup_csrf=$csrf" \
+              --data-urlencode "site_title=Preflight-$port" \
+              --data-urlencode 'admin_password=PreflightGate!2026' \
+              --data-urlencode 'admin_password_confirm=PreflightGate!2026' \
+              -o "$WORK/setup-done-$port.html"
+            test -f "$path/app/.runtime.php"
+            (cd "$path" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+            kill "$(cat "$WORK/server-$port.pid")" || true
+          }
+          install_one "$WORK/art/VF-Start-V2.47.402-FULL.zip" "$WORK/fresh" 18643
+          test "$(tr -d '\r\n ' < "$WORK/fresh/VERSION.txt")" = '2.47.402'
+          echo P01_V247402_FRESH_INSTALL=PASS
+          install_one "$WORK/prior/VF-Start-V2.47.401-FULL.zip" "$WORK/upgrade" 18644
+          cat > "$WORK/upgrade/sentinel.php" <<'PHP'
+          <?php
+          require __DIR__.'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $cat=$repo->createCategory(['name'=>'Preflight Sentinel','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+          $id=$repo->saveLink(null,['surface'=>'start','category_id'=>$cat,'title'=>'Preflight Sentinel Link','url'=>'https://example.org/keep-this','description'=>'must survive atomic','tags'=>['sentinel'],'is_private'=>1,'is_pending'=>0]);
+          file_put_contents(getenv('WORK').'/sentinel-id',(string)$id['id']);
+          PHP
+          php "$WORK/upgrade/sentinel.php"
+          rm "$WORK/upgrade/sentinel.php"
+          cp "$WORK/repair/repair-v2.47.402.php" "$WORK/upgrade/repair-v2.47.402.php"
+          php "$WORK/upgrade/repair-v2.47.402.php" --verify-source="$WORK/upgrade" | tee "$WORK/verify-source.json"
+          grep -Fq '"ok":true' "$WORK/verify-source.json"
+          php "$WORK/upgrade/repair-v2.47.402.php" --run="$WORK/upgrade" | tee "$WORK/update.json"
+          grep -Fq '"ok":true' "$WORK/update.json"
+          test "$(tr -d '\r\n ' < "$WORK/upgrade/VERSION.txt")" = '2.47.402'
+          (cd "$WORK/upgrade" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          php -r 'require $argv[1]."/app/bootstrap.php"; $id=(int)trim(file_get_contents(getenv("WORK")."/sentinel-id")); $p=vf_db()->prepare("SELECT title FROM links WHERE id=?");$p->execute([$id]); if($p->fetchColumn()!=="Preflight Sentinel Link")exit(99);' "$WORK/upgrade"
+          php "$WORK/upgrade/repair-v2.47.402.php" --run="$WORK/upgrade" | tee "$WORK/repeat.json"
+          grep -Fq '"already_current":true' "$WORK/repeat.json"
+          echo P01_V247402_ATOMIC_UPDATE_DATA_AND_IDEMPOTENCY=PASS
+          install_one "$WORK/prior/VF-Start-V2.47.401-FULL.zip" "$WORK/rollback" 18645
+          cp "$WORK/repair/repair-v2.47.402.php" "$WORK/rollback/repair-v2.47.402.php"
+          set +e
+          VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$WORK/rollback/repair-v2.47.402.php" --run="$WORK/rollback" >"$WORK/forced-failure.out" 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          test "$(tr -d '\r\n ' < "$WORK/rollback/VERSION.txt")" = '2.47.401'
+          (cd "$WORK/rollback" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_V247402_FORCED_ROLLBACK=PASS
+          SHELL
+          bash "$WORK/smoke.sh"
+          echo "P01_V247402_FULL_UPDATE_ROLLBACK_PREFLIGHT=PASS"
+
+      - name: Cleanup and no-public-artifact proof
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ -n "${P01_WORK:-}" ]; then rm -rf -- "$P01_WORK"; fi
+          echo 'P01_PREFLIGHT_NO_PRIVATE_ARTIFACT=PASS'
