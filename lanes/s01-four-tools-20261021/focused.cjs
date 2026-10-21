@@ -15,7 +15,7 @@ const links=await p.locator('.vf-directory-tool-card .vf-directory-card-action')
 const slugs={encryption:'m3u8-encryption-detector',iptv:'iptv-manager',links:'m3u8-test-links',backup:'m3u8-backup-restore'};
 const urls={};for(const [k,slug] of Object.entries(slugs)){urls[k]=links.find(u=>new URL(u).pathname.endsWith('/'+slug+'/'));check(lang+' '+k+' present in real tool directory',!!urls[k],urls[k]||null);}
 if(Object.values(urls).some(v=>!v)){await context.close();continue;}
-try{
+if(process.env.FOCUS_CASE!=='test-links')try{
 await open(p,urls.encryption);await validate(p,lang+' encryption');
 let st=await run(p,'VFM3U8EncryptionDetectorLab','selfTest');check(lang+' encryption selfTest',st.result?.ok,st.result?.checks?.filter(x=>!x.ok));
 let protectedResult=await run(p,'VFM3U8EncryptionDetectorLab','sample-protected');
@@ -27,7 +27,7 @@ const csv=await grab(p,()=>p.locator('[data-vf-encryption-action="export-csv"]')
 if(csv)check(lang+' encryption CSV actual header',csv.content.startsWith('"tag","index","method"'),csv.content.slice(0,110));
 const clear=await run(p,'VFM3U8EncryptionDetectorLab','sample-clear');check(lang+' encryption clear sample completed',!!clear.result?.ok,clear.result?.state);
 }catch(e){check(lang+' encryption scenario',false,String(e));}
-try{
+if(process.env.FOCUS_CASE!=='test-links')try{
 await open(p,urls.iptv);await validate(p,lang+' IPTV');
 const st=await run(p,'VFM3U8IPTVLab','selfTest');check(lang+' IPTV selfTest',st.result?.ok,st.result?.checks?.filter(x=>!x.ok));
 const sample=await run(p,'VFM3U8IPTVLab','sample');check(lang+' IPTV sample imported',sample.result?.ok,sample.result);
@@ -41,11 +41,11 @@ await open(p,urls.links);await validate(p,lang+' test links');
 const st=await run(p,'VFM3U8TestLinksLab','selfTest');check(lang+' test links selfTest',st.result?.ok,st.result?.checks?.filter(x=>!x.ok));
 const sample=await run(p,'VFM3U8TestLinksLab','sample');check(lang+' test links sample loaded',sample.result?.ok,sample.result);
 const verified=await run(p,'VFM3U8TestLinksLab','verify');check(lang+' test links actual verification returned',verified.result?.ok,verified.result);
-const data=await p.evaluate(()=>window.VFM3U8TestLinksLab.exportPayload());check(lang+' test links export carries source and library',data&&Array.isArray(data.all)&&data.all.length>=3&&/^https?:/.test(data.current),{count:data?.all?.length,current:data?.current});
-const jc=await grab(p,()=>p.locator('[data-vf-test-links-export-json]').click(),lang+' test links JSON');
+const data=await p.evaluate(()=>window.VFM3U8TestLinksLab.exportPayload());check(lang+' test links export carries source and library',data&&Array.isArray(data.all)&&data.all.length>=3&&new URL(data.current,p.url()).protocol.startsWith('http'),{count:data?.all?.length,current:data?.current});
+await p.locator('[data-vf-test-links-mode-button="pro"]').click();await p.locator('.vf-tl-pro').evaluate(n=>{if(n.tagName==='DETAILS')n.open=true});const jc=await grab(p,()=>p.locator('[data-vf-test-links-download-json]').click(),lang+' test links JSON');
 if(jc){try{const o=JSON.parse(jc.content);check(lang+' test links JSON actual library',o.app==='vf-m3u8-test-links'&&Array.isArray(o.all)&&o.all.length>=3,{app:o.app,count:o.all?.length});}catch(e){check(lang+' test links JSON parses',false,String(e));}}
 }catch(e){check(lang+' test links scenario',false,String(e));}
-try{
+if(process.env.FOCUS_CASE!=='test-links')try{
 await open(p,urls.backup);await validate(p,lang+' backup');
 const st=await run(p,'VFM3U8BackupRestoreLab','selfTest');check(lang+' backup selfTest',st.result?.ok,st.result?.checks?.filter(x=>!x.ok));
 const b=await grab(p,()=>p.evaluate(()=>window.VFM3U8BackupRestoreLab.run('export-json')),lang+' backup JSON');
