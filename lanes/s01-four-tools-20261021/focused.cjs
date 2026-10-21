@@ -85,6 +85,7 @@ await open(p,urls.backup);
 const root=p.locator('[data-vf-module="backup-restore"]'); const collect=()=>p.evaluate(async()=>window.VFM3U8BackupRestoreLab.collect());
 const before=await collect();
 const original=await p.evaluate(async()=>{const l=window.VFM3U8BackupRestoreLab;return l.workspaceFingerprint(await l.collect())});
+const guard=await p.evaluate(()=>{const lab=window.VFM3U8BackupRestoreLab,source=lab.sampleBackup(),row=structuredClone(source);row.playlists[0].updated_at='2030-01-01T00:00:00Z';const metadataOnly=lab.verifyRestored(row,source,'replace');row.playlists[0].name='INTENTIONAL_TAMPER';const corrupted=lab.verifyRestored(row,source,'replace');return{metadataOnly:metadataOnly.ok,materialTamperBlocked:!corrupted.ok,errors:corrupted.failures};});check(lang+' backup ignores storage-owned timestamp but detects altered content',guard.metadataOnly&&guard.materialTamperBlocked,guard);
 const sample=await run(p,'VFM3U8BackupRestoreLab','load-sample-backup');
 const preview=await run(p,'VFM3U8BackupRestoreLab','preview-import');
 check(lang+' backup deep preflight before restore',sample.result?.ok&&preview.result?.ok,{sample:sample.result,pre:preview.result?.ok});
@@ -95,7 +96,7 @@ if(restored.result?.ok){
 const next=await collect();check(lang+' backup deep restored real sample data',Array.isArray(next.channels)&&next.channels.some(x=>x.name.includes('Demo')||x.name.includes('示例')),{channels:next.channels?.length});
 const rollback=await run(p,'VFM3U8BackupRestoreLab','rollback-last-change');
 check(lang+' backup deep rollback completed',rollback.result?.ok===true,rollback.result);
-if(rollback.result?.ok){const after=await p.evaluate(async()=>{const l=window.VFM3U8BackupRestoreLab;return l.workspaceFingerprint(await l.collect())});check(lang+' backup deep original workspace fingerprint recovered',after===original,{before:original,after});}
+if(rollback.result?.ok){const confirmed=await p.evaluate(async(before)=>{const l=window.VFM3U8BackupRestoreLab;return l.verifyRestored(await l.collect(),before,'replace')},before);check(lang+' backup deep original material workspace verified after rollback',confirmed.ok,confirmed);}
 }
 await p.screenshot({path:'proof/'+lang+'-backup-deep.png',fullPage:true});
 }catch(e){check(lang+' backup deep scenario',false,String(e));}
