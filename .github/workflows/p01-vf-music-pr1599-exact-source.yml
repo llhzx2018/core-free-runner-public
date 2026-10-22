@@ -130,9 +130,84 @@ jobs:
           SOURCE_FULL="/tmp/p01-music-packages/VF-Start-V$SOURCE_VERSION-FULL.zip" \
           bash scripts/p01-music-schema-atomic-probe.sh
           echo P01_MUSIC_SCHEMA_ARTIFACT_TEST=PASS
+      - name: Publish exact formal GitHub tag and assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          TAG="v$VERSION"
+          test "$(gh api "repos/$TARGET_REPO/git/ref/heads/main" --jq '.object.sha')" = "$TARGET_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n ' <candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n ' <candidate/src/VERSION.txt)" = "$VERSION"
+          test "$(gh api "repos/$TARGET_REPO/releases/latest" --jq '.tag_name')" = "v$SOURCE_VERSION"
+          test "$(gh api "repos/$TARGET_REPO/pulls/1599" --jq '.merged')" = true
+          gh api "repos/$TARGET_REPO/pulls/1599" --jq '.body' | grep -F "OWNER_WAIVED_PRE_RELEASE_ONCE" >/dev/null
+          FULL="/tmp/p01-music-packages/probe/VF-Start-V$VERSION-FULL.zip"
+          UPDATE="/tmp/p01-music-packages/probe/VF_Start_V$VERSION""_UPDATE.zip"
+          test -s "$FULL" && test -s "$UPDATE"
+          FULL_SHA="$(sha256sum "$FULL" | awk '{print $1}')"
+          UPDATE_SHA="$(sha256sum "$UPDATE" | awk '{print $1}')"
+          FULL_SIZE="$(stat -c %s "$FULL")"
+          UPDATE_SIZE="$(stat -c %s "$UPDATE")"
+          unzip -t "$FULL" >/dev/null
+          unzip -t "$UPDATE" >/dev/null
+          test "$(unzip -p "$FULL" VERSION.txt | tr -d '\r\n ')" = "$VERSION"
+          if gh api "repos/$TARGET_REPO/git/ref/tags/$TAG" >/tmp/p01-music-tag.json 2>/dev/null; then
+            test "$(jq -r '.object.sha' /tmp/p01-music-tag.json)" = "$TARGET_SHA"
+          else
+            gh api --method POST "repos/$TARGET_REPO/git/refs" \
+              -f ref="refs/tags/$TAG" -f sha="$TARGET_SHA" >/tmp/p01-music-tag.json
+            test "$(jq -r '.object.sha' /tmp/p01-music-tag.json)" = "$TARGET_SHA"
+          fi
+          cat >/tmp/p01-music-release-notes.md <<EOF
+          # VF Start V$VERSION · VF Music
+          新增 P01 私人音乐中心、歌单/歌曲/收藏 CRUD、歌单导入和官方播放器。
+          - Previous Formal Release: v$SOURCE_VERSION
+          - Exact merged source: $TARGET_SHA
+          - Additive schema: 2026090401 → 2026102201
+          - Delivery: FULL + verified schema-aware Atomic UPDATE.
+          - Machine gates: SQLite, HTTP Auth/CSRF/CSP, Install, Migration, Backup, Atomic rollback = PASS.
+          - Owner preview: OWNER_WAIVED_PRE_RELEASE_ONCE (NOT PASS).
+          - Owner real use: POST_PRODUCTION_REQUIRED (NOT PASS).
+          - Production: NOT MODIFIED. OWNER upgrades manually.
+          - YouTube availability still depends on platform/browser restrictions.
+          EOF
+          if gh release view "$TAG" -R "$TARGET_REPO" >/dev/null 2>&1; then
+            gh api "repos/$TARGET_REPO/releases/tags/$TAG" >/tmp/p01-music-release.json
+          else
+            gh release create "$TAG" "$FULL" "$UPDATE" -R "$TARGET_REPO" \
+              --title "VF Start V$VERSION · VF Music" \
+              --notes-file /tmp/p01-music-release-notes.md --verify-tag
+            gh api "repos/$TARGET_REPO/releases/tags/$TAG" >/tmp/p01-music-release.json
+          fi
+          test "$(jq -r '.tag_name' /tmp/p01-music-release.json)" = "$TAG"
+          test "$(jq -r '.draft' /tmp/p01-music-release.json)" = false
+          test "$(jq -r '.prerelease' /tmp/p01-music-release.json)" = false
+          test "$(gh api "repos/$TARGET_REPO/git/ref/tags/$TAG" --jq '.object.sha')" = "$TARGET_SHA"
+          test "$(jq -r --arg n "VF-Start-V$VERSION-FULL.zip" '.assets[]|select(.name==$n)|.size' /tmp/p01-music-release.json)" = "$FULL_SIZE"
+          test "$(jq -r --arg n "VF_Start_V$VERSION""_UPDATE.zip" '.assets[]|select(.name==$n)|.size' /tmp/p01-music-release.json)" = "$UPDATE_SIZE"
+          mkdir -p /tmp/p01-music-release-readback
+          gh release download "$TAG" -R "$TARGET_REPO" -D /tmp/p01-music-release-readback \
+            -p "VF-Start-V$VERSION-FULL.zip" -p "VF_Start_V$VERSION""_UPDATE.zip"
+          test "$(sha256sum "/tmp/p01-music-release-readback/VF-Start-V$VERSION-FULL.zip" | awk '{print $1}')" = "$FULL_SHA"
+          test "$(sha256sum "/tmp/p01-music-release-readback/VF_Start_V$VERSION""_UPDATE.zip" | awk '{print $1}')" = "$UPDATE_SHA"
+          jq -n --arg tag "$TAG" --arg version "$VERSION" --arg prev "$SOURCE_VERSION" \
+            --arg sha "$TARGET_SHA" --arg fullsha "$FULL_SHA" --arg updatesha "$UPDATE_SHA" \
+            --argjson fullbytes "$FULL_SIZE" --argjson updatebytes "$UPDATE_SIZE" \
+            --argjson id "$(jq -r '.id' /tmp/p01-music-release.json)" \
+            --arg published "$(jq -r '.published_at' /tmp/p01-music-release.json)" \
+            '{tag:$tag,version:$version,source_version:$prev,sha:$sha,
+              full_sha256:$fullsha,update_sha256:$updatesha,
+              full_bytes:$fullbytes,update_bytes:$updatebytes,
+              release_id:$id,released_at:$published,production_changed:false}' >/tmp/P01_MUSIC_FORMAL_RECEIPT.json
+          cat /tmp/P01_MUSIC_FORMAL_RECEIPT.json
+          echo P01_MUSIC_FORMAL_GITHUB_RELEASE=PASS
       - name: Remove private checkout and logs
         if: always()
         shell: bash
         run: |
-          rm -rf candidate baseline /tmp/music-check.log /tmp/p01-music-packages
+          rm -rf candidate baseline /tmp/music-check.log /tmp/p01-music-packages /tmp/p01-music-release-readback /tmp/p01-music-release-notes.md /tmp/p01-music-tag.json /tmp/p01-music-release.json
           echo PUBLIC_RUNNER_PRIVATE_SOURCE_CLEANUP=PASS
