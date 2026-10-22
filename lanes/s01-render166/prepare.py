@@ -32,7 +32,13 @@ version_check 1.35.166
 cli eval-file /tmp/snapshot.php > proof/lifecycle-after-repeat.json
 cmp proof/lifecycle-before.json proof/lifecycle-after-repeat.json
 echo NATIVE_UPGRADE_ROLLBACK_REPEAT_DATA_PRESERVATION_PASS
-NODE_PATH="$PWD/node_modules" node lane/render166-browser.cjs
+# Exercise stored Theme renderer configuration in isolated WordPress without changing Production.
+cli eval 'require_once get_theme_file_path("inc/services/renderer-config-service.php"); $d=vf_tools_theme_renderer_defaults(); update_option(vf_tools_theme_renderer_option_key(),$d,false); $a=vf_tools_theme_renderer_readback(); if(!$a["stored"] || $a["source"]!=="database" || strlen($a["revision"])!==64) { exit(81); } echo "NATIVE_RENDERER_STORED_CONFIGURATION_PASS";' > proof/renderer-native.txt
+grep -q NATIVE_RENDERER_STORED_CONFIGURATION_PASS proof/renderer-native.txt
+cli eval 'require_once get_theme_file_path("inc/services/renderer-config-service.php"); $a=vf_tools_theme_renderer_readback(); $v=vf_tools_theme_renderer_runtime_verification($a["renderer"]); if($v["revision"]!==$a["revision"]) { exit(82); } echo "NATIVE_RENDERER_READONLY_REVISION_PASS";' >> proof/renderer-native.txt
+grep -q NATIVE_RENDERER_READONLY_REVISION_PASS proof/renderer-native.txt
+echo NATIVE_RENDERER_ACTUAL_DATABASE_READBACK_PASS
+
 cli eval-file /tmp/snapshot.php > proof/lifecycle-after-browser.json
 python3 - <<'PYDATA'
 import json
