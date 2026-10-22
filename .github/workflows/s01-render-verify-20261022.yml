@@ -110,3 +110,93 @@ jobs:
           echo "PASS no_write_for_all_eight_paths\n";
           PHP
           php /tmp/vf-readonly-verify.php
+      - name: Actual renderer JS in Chromium with mocked AJAX transport
+        run: |
+          set -euo pipefail
+          npm install --no-audit --no-fund playwright@1.62.1
+          npx playwright install chromium
+          cat > /tmp/vf-render-browser.cjs <<'JS'
+          const assert=require('node:assert/strict');
+          const {createHash}=require('node:crypto');
+          const {chromium}=require('playwright');
+          const kinds=['SUMMARY','METRIC','TEXT','CODE','TABLE','TREE','MEDIA_PREVIEW','RUNTIME_ARTIFACT','BATCH','DIAGNOSTIC'];
+          const checks=['databaseReadback','allResultKindsMapped','widgetIsolation','noJsContent','themeOnlySemantics','pageProjectionConsumer','standardHybridRenderer','fullProductPageRenderer','projectionTechnicalSeo','providerWidgetHost','runtimeDescriptorConsumer','runtimeAssetClosure','widgetAssetClosure','runtimePublicManifest','registeredConfiguration','renderPresentationConsumer'];
+          const renderer={
+            defaultMode:'STANDARD',allowedModes:['STANDARD','HYBRID','PROVIDER_WIDGET'],renderSchemaVersion:'1.0.0',
+            supportedProjectionSchemaRange:'>=1.0.0 <2.0.0',widgetHostApiVersion:'1.0.0',
+            primitiveProfile:'VF_TOOLS_STANDARD_V1',inputLayout:'STACKED',parameterLayout:'PROGRESSIVE_DISCLOSURE',
+            progressPresentation:'STAGE_OR_REAL_PERCENT',resultKinds:kinds,errorPresentation:'WHAT_WHY_NEXT',
+            widgetIsolation:true,widgetOwnsWholePage:false,mobileFallback:'HOST_CONTROLLED',
+            noJsProductContent:true,accessibilityProfile:'WCAG_KEYBOARD_FOCUS_ARIA_V1',lazyLoadRuntime:true,
+          };
+          function canonical(value){
+            if(Array.isArray(value))return value.map(canonical);
+            if(value && typeof value==='object')return Object.fromEntries(Object.keys(value).sort().map(k=>[k,canonical(value[k])]));
+            return value;
+          }
+          function reply(r){
+            const revision=createHash('sha256').update(JSON.stringify(canonical(r))).digest('hex');
+            return {ok:true,state:{stored:true,source:'database',errors:[],renderer:r,revision},
+              runtimeVerification:{ok:true,status:'PASS',revision,summary:'模拟接口检查通过',checks:Object.fromEntries(checks.map(k=>[k,true]))}};
+          }
+          const html=(revision,stored)=>'<section data-vf-render-page data-vf-render-stored="'+stored+'" data-vf-revision="'+revision+'">'
+          +'<div data-vf-render-status data-status="pass"><span data-vf-render-status-summary></span><span data-vf-render-status-note></span></div>'
+          +'<span data-vf-render-status-detail></span><span data-vf-render-verification-label></span><span data-vf-render-current-mode></span>'
+          +'<span data-vf-render-contract-revision></span><p data-vf-render-save-feedback hidden></p>'
+          +'<form data-vf-render-form><input type="hidden" data-vf-render-revision name="revision" value="'+revision+'">'
+          +'<select name="renderer[defaultMode]"><option value="STANDARD">标准</option><option value="HYBRID">混合</option><option value="PROVIDER_WIDGET">嵌入</option></select>'
+          +'<input type="checkbox" name="renderer[lazyLoadRuntime]" value="1" checked>'
+          +'<button type="button" data-vf-render-discard hidden>放弃</button>'
+          +'<button type="button" data-vf-render-verify hidden>重新检查</button>'
+          +'<button type="submit" data-vf-render-save>保存更改</button>'
+          +'<a href="/preview">视觉预览</a></form></section>';
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            try{
+              const first=reply(renderer),page=await browser.newPage();
+              await page.setContent(html(first.state.revision,'1'));
+              await page.evaluate(()=>{
+                window.VFThemeRender={ajaxUrl:'/wp-admin/admin-ajax.php',nonce:'test',saveAction:'vf_theme_render_save'};
+                window.__seen=[];
+                window.__reply=null;
+                window.__mode='ok';
+                window.fetch=async (_url,init)=>{
+                  window.__seen.push(init.body.get('action'));
+                  if(window.__mode==='offline')throw Error('network off');
+                  return {ok:true,json:async()=>({success:true,data:window.__reply})};
+                };
+              });
+              await page.addScriptTag({path:'target/src/assets/js/admin/admin-render.js'});
+              assert.equal(await page.locator('[data-vf-render-verify]').isHidden(),false);
+              await page.evaluate(data=>window.__reply=data,first);
+              await page.locator('[data-vf-render-verify]').click();
+              await page.waitForFunction(()=>document.querySelector('[data-vf-render-save-feedback]').textContent.includes('没有执行保存'));
+              assert.deepEqual(await page.evaluate(()=>window.__seen),['vf_theme_render_verify']);
+              console.log('PASS browser_readonly_action_success');
+              await page.evaluate(()=>window.__mode='offline');
+              await page.locator('[data-vf-render-verify]').click();
+              await page.waitForFunction(()=>document.querySelector('[data-vf-render-save-feedback]').textContent.includes('只读检查未完成'));
+              assert.notEqual(await page.locator('[data-vf-render-status]').getAttribute('data-status'),'unknown');
+              assert.equal(await page.evaluate(()=>{const e=new Event('beforeunload',{cancelable:true});window.dispatchEvent(e);return e.defaultPrevented;}),false);
+              console.log('PASS browser_readonly_failure_no_unknown_write_or_leave_guard');
+              const next={...renderer,defaultMode:'HYBRID'};
+              await page.evaluate(data=>{window.__mode='ok';window.__reply=data;},reply(next));
+              await page.locator('select[name="renderer[defaultMode]"]').selectOption('HYBRID');
+              assert.equal(await page.locator('[data-vf-render-verify]').isHidden(),true);
+              await page.locator('[data-vf-render-save]').click();
+              await page.waitForFunction(()=>document.querySelector('[data-vf-render-save-feedback]').textContent.includes('已保存并完成回读检查'));
+              assert.deepEqual(await page.evaluate(()=>window.__seen),['vf_theme_render_verify','vf_theme_render_verify','vf_theme_render_save']);
+              console.log('PASS browser_real_save_stays_on_original_action');
+              await page.close();
+              const p2=await browser.newPage();
+              await p2.setContent(html(first.state.revision,'0'));
+              await p2.evaluate(()=>window.VFThemeRender={ajaxUrl:'/wp-admin/admin-ajax.php',nonce:'test',saveAction:'vf_theme_render_save'});
+              await p2.addScriptTag({path:'target/src/assets/js/admin/admin-render.js'});
+              assert.equal(await p2.locator('[data-vf-render-verify]').isHidden(),true);
+              assert.equal(await p2.locator('[data-vf-render-save]').textContent(),'保存默认设置');
+              console.log('PASS browser_default_config_first_save_entry');
+              await p2.close();
+            }finally{await browser.close();}
+          })().catch(error=>{console.error(error);process.exit(1)});
+          JS
+          node /tmp/vf-render-browser.cjs
