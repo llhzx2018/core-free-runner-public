@@ -1,0 +1,106 @@
+name: P01 V2.47.428 Native Update Discovery Verification
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p01-v247428-native-discovery-20261022.yml']
+permissions:
+  contents: read
+jobs:
+  discovery:
+    if: >-
+      github.actor == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'verify/p01-v247428-native-discovery-20261022'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: PHP native update runtime
+        uses: shivammathur/setup-php@2.35.5
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,mbstring,curl,zip
+          coverage: none
+      - name: Read exact v2.47.427 installed client transiently
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          git clone -q --depth 1 --branch v2.47.427 \
+            "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" stable
+          git -C stable remote set-url origin "https://github.com/llhzx2018/vf-start.git"
+          test "$(tr -d '\r\n ' <stable/VERSION)" = "2.47.427"
+          echo P01_NATIVE_PREVIOUS_RELEASE_SOURCE=PASS
+      - name: Actual P01 GitHubClient, UpdateCore and VfUpdateManager discovery
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-v247428-discovery
+          cat >/tmp/p01-v247428-discovery/verify.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          function vf_write_storage_guards(string $dir): void {}
+          function vf_clean_text(string $value, int $limit): string {return mb_substr($value,0,$limit);}
+          class VfMigrationRunner {
+              public function __construct(private PDO $db) {}
+              public function schemaState(): array {return ['current_head'=>$GLOBALS['testSchemaHead']??''];}
+          }
+          define('VF_ROOT',getcwd().'/stable/src');
+          define('VF_PRIVATE_ROOT','/tmp/p01-v247428-discovery/private');
+          require_once 'stable/src/app/UpdateManager.php';
+          $client=new \CoreUpdates\GitHubClient((string)getenv('READ_TOKEN'));
+          $manifest=$client->fetchProjectManifest('llhzx2018/core-updates','P01.json','main');
+          $core=new \CoreUpdates\UpdateCore('P01','APP');
+          $core->validateManifest($manifest);
+          if (($manifest['target_version']??'')!=='2.47.428'
+              || ($manifest['from_versions']??[])!==['2.47.427']
+              || ($manifest['schema_from']??'')!=='2026102201'
+              || ($manifest['schema_to']??'')!=='2026102201'
+              || ($manifest['release_tag']??'')!=='v2.47.428'
+              || ($manifest['asset_sha256']??'')!=='9fe003a228894d747ffe887e405a525f6de3e7bcc458970aff95facb0d75b60e') {
+              throw new RuntimeException('canonical channel mismatch');
+          }
+          echo "P01_NATIVE_CANONICAL_FETCH=PASS\n";
+          function checkFor(string $version,string $schema,array $manifest): array {
+              $GLOBALS['testSchemaHead']=$schema;
+              $pdo=new PDO('sqlite::memory:');
+              $pdo->setAttribute(PDO::ATTR_ERRMODE,PDO::ERRMODE_EXCEPTION);
+              $pdo->exec("CREATE TABLE update_state(state_key TEXT PRIMARY KEY,state_value TEXT NOT NULL,updated_at TEXT NOT NULL)");
+              $manager=new VfUpdateManager($pdo,[
+                  'root'=>VF_ROOT,'private_root'=>VF_PRIVATE_ROOT,'current_version'=>$version,
+                  'manifest_fetcher'=>static fn(...$args)=>$manifest,
+              ]);
+              return $manager->check(true);
+          }
+          $ok=checkFor('2.47.427','2026102201',$manifest);
+          if (empty($ok['ok']) || empty($ok['available']) || empty($ok['can_update']) || ($ok['latest_version']??'')!=='2.47.428') {
+              throw new RuntimeException('native updater did not discover eligible update: '.json_encode($ok));
+          }
+          echo "P01_NATIVE_V247427_DISCOVERY_AVAILABLE=PASS\n";
+          $wrongSource=checkFor('2.47.426','2026102201',$manifest);
+          if (!empty($wrongSource['can_update'])) throw new RuntimeException('unapproved source accepted');
+          echo "P01_NATIVE_SOURCE_FAIL_CLOSED=PASS\n";
+          $wrongSchema=checkFor('2.47.427','2026080801',$manifest);
+          if (!empty($wrongSchema['can_update'])) throw new RuntimeException('mismatched schema accepted');
+          echo "P01_NATIVE_SCHEMA_FAIL_CLOSED=PASS\n";
+          $already=checkFor('2.47.428','2026102201',$manifest);
+          if (!empty($already['available']) || !empty($already['can_update'])) throw new RuntimeException('current version incorrectly offered update');
+          echo "P01_NATIVE_ALREADY_CURRENT=PASS\n";
+          $dest='/tmp/p01-v247428-discovery/update.zip';
+          $asset=$client->downloadReleaseAsset($manifest['repository'],$manifest['release_tag'],$manifest['asset_name'],$dest);
+          if ((int)($asset['size']??0)!==(int)$manifest['asset_bytes']
+              || ($core->verifyPackage($dest,$manifest)['status']??'')!=='VERIFIED') {
+              throw new RuntimeException('native asset bytes/hash mismatch');
+          }
+          echo "P01_NATIVE_REAL_RELEASE_DOWNLOAD_SHA256=PASS\n";
+          PHP
+          php /tmp/p01-v247428-discovery/verify.php
+      - name: Remove private source and downloaded package
+        if: always()
+        shell: bash
+        run: |
+          rm -rf stable /tmp/p01-v247428-discovery
+          echo P01_NATIVE_DISCOVERY_EPHEMERAL_CLEANUP=PASS
