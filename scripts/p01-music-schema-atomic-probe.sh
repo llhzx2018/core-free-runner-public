@@ -106,6 +106,9 @@ if((int)$d->query("SELECT COUNT(*) FROM sqlite_master WHERE type='\''table'\'' A
 if($d->query("PRAGMA integrity_check")->fetchColumn()!=="ok"||$d->query("PRAGMA foreign_key_check")->fetchAll(PDO::FETCH_ASSOC)!==[])exit(1);
 ' "$WORK/old"
 echo P01_MUSIC_SCHEMA_ATOMIC_UPGRADE=PASS
+# Normal Atomic flow deletes the repair script itself after success. A
+# second invocation is a fresh deliberate operator action, so recopy it.
+cp "$REPAIR" "$WORK/old/"
 php "$WORK/old/repair-v$VERSION.php" --run="$WORK/old" >"$WORK/repeat.json"
 grep -Fq '"already_current":true' "$WORK/repeat.json"
 echo P01_MUSIC_ATOMIC_IDEMPOTENT=PASS
