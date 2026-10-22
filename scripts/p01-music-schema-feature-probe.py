@@ -79,8 +79,10 @@ def main():
     repair=m.replace_public(repair,"SOURCE_VERSION",a.source_version)
     repair=m.replace_public(repair,"TARGET_VERSION",a.version)
     repair=m.replace_public(repair,"TARGET_SCHEMA",new_schema)
-    # A maintenance repair never migrated the database and used TARGET_SCHEMA to
-    # judge rollback to the source. Feature updates need two independent truths.
+    # The inherited maintenance template cannot apply new migrations. Its
+    # rollback verifier also assumes the TARGET schema, which is wrong after
+    # original SOURCE files + SQLite have been restored. Keep verification
+    # STRICT, choosing the expected schema from the actual on-disk version.
     def transform_once(needle, replacement):
         nonlocal repair
         count=repair.count(needle)
@@ -91,20 +93,12 @@ def main():
         "public const TARGET_SCHEMA='"+new_schema+"'; public const SOURCE_SCHEMA='"+old_schema+"';"
     )
     transform_once(
-        "private static function dbVerify(string $db): array",
-        "private static function dbVerify(string $db,string $expectedSchema=self::TARGET_SCHEMA): array"
-    )
-    transform_once(
         "$head!==self::TARGET_SCHEMA",
-        "$head!==$expectedSchema"
-    )
-    transform_once(
-        "self::dbVerify((string)$rt['db_file']);@unlink($journal);",
-        "self::dbVerify((string)$rt['db_file'],self::SOURCE_SCHEMA);@unlink($journal);"
-    )
-    transform_once(
-        "self::dbVerify((string)$rt['db_file']);if($journal!=='')",
-        "self::dbVerify((string)$rt['db_file'],self::SOURCE_SCHEMA);if($journal!=='')"
+        """$head!==(
+            defined('VF_ROOT') &&
+            trim((string)@file_get_contents(VF_ROOT.'/VERSION.txt'))===self::SOURCE_VERSION
+            ? self::SOURCE_SCHEMA : self::TARGET_SCHEMA
+        )"""
     )
     transform_once(
         "$dbv=self::dbVerify($db);self::jsonWrite($journal,",
