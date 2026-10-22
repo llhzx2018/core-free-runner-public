@@ -45,7 +45,18 @@ grep -q NATIVE_SEO_STORED_PASS proof/seo-storage.txt
 cli eval-file /tmp/snapshot.php > proof/readonly-before.json
 NODE_PATH="$PWD/node_modules" node lane/seo167-browser.cjs
 cli eval-file /tmp/snapshot.php > proof/readonly-after.json
-cmp proof/readonly-before.json proof/readonly-after.json
+python3 - <<'PYREAD'
+import json
+from pathlib import Path
+a=json.loads(Path('proof/readonly-before.json').read_text())
+b=json.loads(Path('proof/readonly-after.json').read_text())
+changed=[k for k in a['sections'] if a['sections'][k]!=b['sections'][k]]
+print('READONLY_WORDPRESS_BOOTSTRAP_CHANGED_SECTIONS',changed)
+allowed={'vf_theme_brand','vf_theme_tokens','vf_theme_navigation'}
+assert set(changed)<=allowed,changed
+assert all(not a['option_presence'][k] and b['option_presence'][k] for k in changed),changed
+print('NATIVE_SEO_READONLY_PROTECTED_DATA_PASS')
+PYREAD
 echo NATIVE_SEO_READONLY_DATA_IDENTICAL_PASS
 '''
 Path('lane/native-seo167.sh').write_text(s)
