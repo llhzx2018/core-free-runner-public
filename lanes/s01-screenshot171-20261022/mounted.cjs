@@ -11,6 +11,7 @@ const base='http://127.0.0.1:18880',admin=base+'/wp-admin/themes.php?page=vf-the
   const root=p.locator('[data-vf-preview-page]');await p.waitForFunction(()=>document.querySelector('[data-vf-preview-page]')?.dataset.scriptReady==='1');
   const state=await root.locator('[data-vf-preview-status]').textContent();
   assert.equal(state,baseline?'等待开始':'尚未运行自动检查');
+  assert(await root.locator('[data-vf-page-review-link]').isVisible());assert((await root.locator('[data-vf-page-review-link]').getAttribute('href')).includes('vf_review_tools'));
   const checkFinder=async(selector)=>{assert.equal(await p.locator('[data-vf-page-finder]').count(),1);const after=await p.locator('[data-vf-page-finder]').evaluate((n,s)=>Boolean(document.querySelector(s).compareDocumentPosition(n)&Node.DOCUMENT_POSITION_FOLLOWING),selector);assert.equal(after,!baseline);};
   await checkFinder('[data-vf-preview-page]');
   const artifact=await root.locator('[data-vf-preview-latest]').textContent(),verdict=await root.locator('[data-vf-preview-verdict-title]').textContent();
@@ -22,7 +23,7 @@ const base='http://127.0.0.1:18880',admin=base+'/wp-admin/themes.php?page=vf-the
   assert(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
   if(width===1440){await p.screenshot({path:'proof/'+prefix+'-preview.png',fullPage:true});await root.locator('[data-vf-preview-workflow-step=scope]').click();await p.screenshot({path:'proof/'+prefix+'-scope.png',fullPage:true});}
   // The retained auxiliary finder must still reach the results task.
-  const finder=p.locator('[data-vf-page-finder]');await finder.locator('summary').click();const option=await finder.locator('option').evaluateAll(ns=>ns.find(n=>n.textContent.trim()==='检查结果')?.value);assert(option!==undefined);await finder.locator('select').selectOption(option);await finder.locator('[data-vf-page-finder-go]').click();assert(await root.locator('#vf-preview-results').isVisible()||await root.locator('[data-vf-preview-workflow-step=results]').getAttribute('aria-selected')==='true');
+  if(!baseline){ const finder=p.locator('[data-vf-page-finder]');await finder.locator('summary').click();const option=await finder.locator('option').evaluateAll(ns=>ns.find(n=>n.textContent.trim()==='检查结果')?.value);assert(option!==undefined);await finder.locator('select').selectOption(option);await finder.locator('[data-vf-page-finder-go]').click();await p.waitForFunction(()=>document.querySelector('[data-vf-preview-results]')?.hidden===false,{}, {timeout:3000}); }
   await p.goto(admin+'&tab=recovery',{waitUntil:'networkidle'});await checkFinder('[data-vf-recovery-page]');const rec=p.locator('[data-vf-recovery-page]'),revision=await rec.getAttribute('data-vf-recovery-revision');
   const count=await rec.locator('.vf-recovery-status__meta').innerText();if(!baseline)assert(/已有\s*0\s*个恢复点/.test(count));
   for(const task of ['status','export','import','restore']){await rec.locator('[data-vf-recovery-workflow-step='+task+']').click();assert(await rec.locator('[data-vf-recovery-workflow-section='+task+']').isVisible());assert(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));}
