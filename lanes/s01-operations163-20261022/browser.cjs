@@ -1,0 +1,48 @@
+const{chromium}=require('playwright'),fs=require('fs');
+const mode=process.argv[2]||'focused',checks=[];function check(name,pass,detail){checks.push({name,pass:!!pass,detail});if(!pass)throw Error(name+': '+JSON.stringify(detail));}
+(async()=>{const b=await chromium.launch();try{
+const origin='http://127.0.0.1:18880',target=origin+'/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages',review=target+'&vf_review_tools=1';
+const p=await b.newPage({viewport:{width:1440,height:1000}}),errors=[];p.on('pageerror',e=>errors.push(e.message));
+await p.goto(origin+'/wp-login.php');await p.locator('#user_login').fill('admin');await p.locator('#user_pass').fill('Synthetic-Only-Update-54!');await p.locator('#wp-submit').click();await p.waitForURL('**/wp-admin/**');await p.goto(target,{waitUntil:'networkidle'});
+if(mode==='baseline'){
+const root=p.locator('[data-vf-frontend-pages]');check('162 reproduces engineering clutter on operations surface',await root.textContent().then(t=>t.includes('历史')&&t.includes('人工')&&t.includes('已有精修记录')));
+fs.writeFileSync('proof/baseline-metrics.json',JSON.stringify({height:await root.evaluate(e=>e.getBoundingClientRect().height)}));console.log('162_OPERATIONS_BASELINE_PASS');return;
+}
+if(mode==='save'){
+await p.goto(review+'&vf_pages_language=en',{waitUntil:'networkidle'});const row=p.locator('#vf-review-contact_page');await row.locator('.vf-frontend-pages__progress-record > details > summary').click();const form=row.locator('form');await form.locator('[name=vf_review_phase]').selectOption('complete');await form.locator('[name=vf_review_status]').selectOption('accepted');await form.locator('[name=vf_review_note]').fill('Synthetic operations record checked through maintenance');
+await form.getByRole('button',{name:'保存此项记录',exact:true}).click();await p.waitForLoadState('networkidle');
+check('save remains on maintenance surface',new URL(p.url()).searchParams.get('vf_review_tools')==='1'&&await p.locator('[data-vf-frontend-review-records]').count()===1);
+check('actual save confirms readback',await p.locator('.vf-frontend-pages__note').innerText().then(t=>t.includes('进度记录已保存并回读')));
+await p.reload({waitUntil:'networkidle'});check('saved note persists after reload',await p.locator('#vf-review-contact_page').textContent().then(t=>t.includes('Synthetic operations record checked through maintenance')&&t.includes('人工已确认')));
+await p.getByRole('link',{name:'返回页面总览',exact:false}).click();await p.waitForLoadState('networkidle');check('return after save restores clean operations',await p.locator('[data-vf-frontend-pages]').count()===1&&await p.locator('.vf-frontend-pages__progress-record').count()===0);
+console.log('MAINTENANCE_SAVE_RETURN_PASS',checks.length);return;
+}
+const forbidden=['已有精修记录','已有桌面精修','当时验证','人工复验','人工确认','原型','schema','Production','PASS','Theme 1.35.'];
+for(const width of[1920,1440,1319,1024])for(const lang of['en','zh']){
+await p.setViewportSize({width,height:1000});await p.goto(target+'&vf_pages_language='+lang,{waitUntil:'networkidle'});await p.evaluate(()=>document.fonts.ready);const root=p.locator('[data-vf-frontend-pages]');
+check(width+'/'+lang+' all 20 operational rows',await root.locator('[data-vf-page-context]').count()===20);
+const text=await root.textContent();check(width+'/'+lang+' no unrelated engineering material rendered',forbidden.every(t=>!text.includes(t))&&await root.locator('.vf-frontend-pages__progress-record,.vf-frontend-pages__scope,.vf-frontend-pages__review-tools').count()===0);
+check(width+'/'+lang+' one concise scope sentence and no duplicate section title',await root.locator('.vf-frontend-pages__intro').innerText().then(t=>t.includes('20 种页面布局')&&t.includes('分页'))&&await root.locator('header h2').count()===0);
+check(width+'/'+lang+' primary actions readable and aligned',await root.locator('[data-vf-page-context]').evaluateAll(xs=>xs.every(e=>{const a=e.querySelector('.vf-frontend-pages__actions').getBoundingClientRect(),n=e.querySelector('.vf-frontend-pages__name').getBoundingClientRect();return a.width>=200&&n.right<=a.x+1&&a.height>=38;})));
+check(width+'/'+lang+' no horizontal overflow',await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+check(width+'/'+lang+' page scope disclosures closed',await root.locator('.vf-frontend-pages__scope-detail[open]').count()===0);
+check(width+'/'+lang+' content remains explicitly unloaded',await root.locator('.vf-frontend-pages__content-list li').count()===0&&await root.locator('#vf-frontend-pages-content').textContent().then(t=>t.includes('尚未加载')));
+const hub=root.locator('[data-vf-page-context=tool_hub] .vf-frontend-pages__actions a[target=_blank]');check(width+'/'+lang+' correct language links',(await hub.getAttribute('href')).includes(lang==='zh'?'/zh/tools/':'/tools/'));
+if(width===1440){const old=JSON.parse(fs.readFileSync('proof/baseline-metrics.json'));const h=await root.evaluate(e=>e.getBoundingClientRect().height);check(lang+' compact overview substantially shorter than162',h<old.height*.8,{new:h,old:old.height});await p.screenshot({path:'proof/operations-'+lang+'-1440.png',fullPage:true});}
+}
+await p.setViewportSize({width:1440,height:1000});await p.goto(target+'&vf_pages_language=zh',{waitUntil:'networkidle'});let root=p.locator('[data-vf-frontend-pages]');
+await root.locator('#vf-review-tool .vf-frontend-pages__scope-detail > summary').click();check('actual tools available on request without workflow checklists',await root.locator('#vf-review-tool .vf-frontend-pages__scope-detail').innerText().then(t=>/MP4/i.test(t)&&/备份|Backup/i.test(t)&&!t.includes('须分别检查')));
+const filter=root.locator('form[method=get]').first();await filter.locator('[name=vf_pages_q]').fill('作者归档');await filter.getByRole('button',{name:'筛选',exact:true}).click();await p.waitForLoadState('networkidle');check('subtype remains discoverable',await root.locator('[data-vf-page-context]').count()===1&&await root.locator('#vf-review-archive_list').count()===1);
+const edit=await root.locator('.vf-frontend-pages__actions .button').getAttribute('href');check('existing edit route carries context language and search',edit.includes('context=archive_list')&&edit.includes('vf_pages_language=zh')&&new URL(edit).searchParams.get('vf_pages_q')==='作者归档');await p.goto(edit,{waitUntil:'networkidle'});check('layout editor reachable',p.url().includes('view=edit')&&await p.locator('body').innerText().then(t=>!t.includes('Fatal error')));
+await p.goto(target+'&vf_pages_language=zh&vf_pages_group=system',{waitUntil:'networkidle'});check('group filter still returns legal and404 only',await p.locator('[data-vf-page-context]').count()===2);
+await p.goto(origin+'/wp-admin/themes.php?page=vf-theme-modules&tab=preview',{waitUntil:'networkidle'});const link=p.locator('[data-vf-page-review-link]');check('review records discoverable under existing verification workspace',await link.count()===1);await link.click();await p.waitForLoadState('networkidle');
+const records=p.locator('[data-vf-frontend-review-records]');check('existing maintenance link opens separate22 records',await records.locator('.vf-frontend-pages__progress-record').count()===22&&await p.locator('[data-vf-frontend-pages]').count()===0);
+check('historical evidence and old notes preserved here',await records.textContent().then(t=>t.includes('已有桌面精修记录')&&t.includes('Synthetic existing owner record preserved')&&t.includes('上版记录')));
+await p.goto(review+'&vf_pages_language=zh&vf_review_device=mobile',{waitUntil:'networkidle'});const unknown=p.locator('#vf-review-about_page');check('unknown schema remains blocked in maintenance',await unknown.locator('button[type=submit]').isDisabled());check('mobile stays deferred',await unknown.textContent().then(t=>t.includes('手机验收暂缓')));
+const invalid=await p.request.post(review,{form:{vf_theme_action:'frontend_pages_review_save',vf_review_subject:'home',vf_pages_language:'en',vf_review_device:'desktop',vf_review_phase:'complete',vf_review_status:'accepted',vf_review_note:'Must not save',vf_review_revision:'a'.repeat(64),vf_review_version:'1.35.163',_wpnonce:'invalid-synthetic'}});
+check('moved form still rejects invalid nonce',(await invalid.text()).includes('页面已过期'));
+await p.goto(target,{waitUntil:'networkidle'});await p.locator('#vf-frontend-pages-content>summary').click();const cf=p.locator('[data-vf-frontend-content-form]');await cf.locator('[name=vf_content_q]').fill('Directory coverage fixture');await cf.locator('[name=vf_content_type]').selectOption('post');await cf.getByRole('button',{name:'加载已发布内容',exact:true}).click();await p.waitForLoadState('networkidle');check('explicit real content load remains20of25',await p.locator('.vf-frontend-pages__content-list li').count()===20);await cf.getByRole('button',{name:'下一页',exact:true}).click();await p.waitForLoadState('networkidle');check('content pagination still returns remaining5',await p.locator('.vf-frontend-pages__content-list li').count()===5);
+const cases=JSON.parse(fs.readFileSync('proof/cases.json')).cases;const r=await p.goto(cases.en.home,{waitUntil:'load'});check('public home unaffected',r.status()===200&&await p.locator('h1').count()===1);check('no browser errors',errors.length===0,errors);
+console.log('OPERATIONS_FOCUSED_PASS',checks.length);
+}finally{fs.writeFileSync('proof/'+(mode==='baseline'?'baseline-results':mode==='save'?'manual-save-results':'browser-results')+'.json',JSON.stringify({status:checks.every(x=>x.pass)?'PASS':'FAIL',count:checks.length,passed:checks.filter(x=>x.pass).length,checks},null,2));await b.close();}})().catch(e=>{console.error(e);process.exit(1)});
+
