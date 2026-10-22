@@ -1,0 +1,88 @@
+name: GOV-TOPIC KDP four-guide exact candidate gate
+# Transient one-shot PR; CLOSE WITHOUT MERGE. Private source read-only in runner workspace.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/gov-topic-kdp-four-v100-once.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      EXACT_SOURCE_SHA: 57c5dbb15c13cdb35c479a0afcaca845903859ea
+    steps:
+      - name: Require existing registered private Git read capability
+        shell: bash
+        env:
+          GIT_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$GIT_PRIVATE_READ_TOKEN" || { echo 'BLOCKED_CAPABILITY=PRIVATE_READ'; exit 78; }
+      - name: Read exact private candidate transiently
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/gov-topic
+          ref: ${{ env.EXACT_SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-src
+      - name: Execute exact repository tests and complete catalog checksum gate
+        working-directory: private-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXACT_SOURCE_SHA"
+          echo "GOV_TOPIC_EXACT_SHA=$EXACT_SOURCE_SHA"
+          python3 -m unittest discover -s tests -v
+          python3 tools/build_catalog.py --check
+          echo 'GOV_TOPIC_KDP_REPOSITORY_GATES=PASS'
+      - name: Cross-check all four publication identities and original covers
+        working-directory: private-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib,json,struct
+          from pathlib import Path
+          cat=json.loads(Path('distribution/p01/catalog.json').read_text(encoding='utf-8'))
+          wanted={
+            'kdp-ai-coloring-workflow',
+            'kdp-low-clicks-diagnosis',
+            'kdp-monochrome-mosaic-coloring',
+            'kdp-niche-research-beginners',
+          }
+          entries={t['topic_id']:t for t in cat['topics']}
+          assert len(entries)==7 and wanted<=entries.keys()
+          assert all(t.get('cover') for t in entries.values())
+          cover_digests=set()
+          for tid in sorted(wanted):
+              entry=entries[tid]
+              assert entry['topic_version']=='v1.0.0'
+              meta=json.loads(Path('topics',tid,'v1.0.0','topic.json').read_text(encoding='utf-8'))
+              assert meta['lifecycle']=='PRODUCTION_ARTIFACT'
+              assert meta['qualification']=='PASS'
+              assert meta['indexability']=='INDEXABLE_PUBLIC'
+              for k in ('html','sources','cover'):
+                  record=entry[k]; data=Path(record['path']).read_bytes()
+                  assert len(data)==record['bytes'],(tid,k,'bytes')
+                  assert hashlib.sha256(data).hexdigest()==record['sha256'],(tid,k,'sha')
+              cover=Path(entry['cover']['path']).read_bytes()
+              assert cover[:8]==b'\x89PNG\r\n\x1a\n'
+              assert struct.unpack('>II',cover[16:24])==(1200,900)
+              cover_digests.add(entry['cover']['sha256'])
+              html=Path(entry['html']['path']).read_text(encoding='utf-8').lower()
+              assert '<script' not in html and 'noindex' not in html
+          assert len(cover_digests)==4
+          print('KDP_FOUR_EXACT_ASSETS=PASS')
+          PY
+      - name: Destroy transient private checkout
+        if: always()
+        shell: bash
+        run: |
+          rm -rf private-src
+          echo 'PRIVATE_SOURCE_PERSISTED_IN_PUBLIC_ARTIFACT=NO'
