@@ -1,0 +1,86 @@
+name: S01 Theme Preview168 WordPress native update discovery
+on:
+  push:
+    branches: [task/s01-render-verify-20261022]
+    paths: ['.github/workflows/s01-preview168-discovery.yml']
+permissions:
+  contents: read
+jobs:
+  discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: control
+      - uses: actions/checkout@v4
+        with:
+          ref: 02d4591eed025a3d3a67bc0a150b3ddc448c2ab8
+          persist-credentials: false
+          path: established
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: e83159b14373b010f89a5dbedc6f102ab790ccfb
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: target
+      - name: Canonical channel & unaffected Provider readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p provider proof
+          test "$(gh api repos/llhzx2018/core-updates/contents/projects/S01-C01.json --jq .sha)" = 2efc6b1de96b2b8f6415b6d0ef2efa4d9ef2cc91
+          test "$(gh api repos/llhzx2018/core-updates/contents/projects/S01-C03.json --jq .sha)" = 2356bd3ddd189a7aa81e50c992b185684cbc2917
+          test "$(gh api repos/llhzx2018/vf-tools-theme/git/ref/tags/v1.35.168 --jq .object.sha)" = e83159b14373b010f89a5dbedc6f102ab790ccfb
+          gh release download v1.35.167 --repo llhzx2018/vf-tools-theme --pattern vf-tools-theme_V1.35.167.zip --dir provider
+          echo '5525d09da700e2051b1ca0521eaabdca21a11077a22c0de04a6de29514ee2a34  provider/vf-tools-theme_V1.35.167.zip' | sha256sum -c
+          gh release download v1.25.94 --repo llhzx2018/vf-tools-m3u8 --pattern vf-tools-m3u8_V1.25.94.zip --dir provider
+          echo '70b90d40da5d69fc7819bd7ada3f15fb0145e64822b788bd94956c7827b2df03  provider/vf-tools-m3u8_V1.25.94.zip' | sha256sum -c
+          echo THEME168_DISTRIBUTION_TARGET_PASS
+      - name: WordPress native discovery only, no apply or production write
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          cp -a established/lanes/s01-frontend-design-20261017 lane
+          cp control/lanes/s01-render166/discover.php lane/discover.php
+          sed -i 's/1.35.166/1.35.168/g;s/NATIVE_THEME166/NATIVE_THEME168/g' lane/discover.php
+          python3 - <<'PYPREP'
+          from pathlib import Path
+          s=Path('lane/native.sh').read_text().replace('provider/vf-tools-m3u8_V1.25.91.zip','provider/vf-tools-m3u8_V1.25.94.zip')
+          original='cli plugin install polylang --version=3.8.10 --activate >/dev/null'
+          assert s.count(original)==1
+          s=s.replace(original,'for attempt in 1 2 3; do '+original+' && break; test "$attempt" -lt 3 || exit 1; sleep 3; done')
+          s=s.replace('node lane/warm-admin.cjs','true')
+          marker='if [ "${VF_REVIEW_ONLY_STATE:-0}" = "1" ];then'
+          assert s.count(marker)==1
+          s=s.split(marker)[0]+"""
+          docker cp provider/vf-tools-theme_V1.35.167.zip "$WP:/tmp/theme167.zip"
+          cli theme install /tmp/theme167.zip --force >/dev/null
+          test "$(cli theme get vf-tools-theme --field=version)" = 1.35.167
+          test "$(cli plugin get vf-tool-m3u8 --field=version)" = 1.25.94
+          cli eval-file /tmp/snapshot.php > proof/before-discovery.json
+          docker cp lane/discover.php "$WP:/tmp/discover.php"
+          docker exec -e VF_PRIVATE_READ_TOKEN="$VF_PRIVATE_READ_TOKEN" --user www-data "$WP" php /usr/local/bin/wp eval-file /tmp/discover.php --path=/var/www/html > proof/native-discovery.txt
+          cat proof/native-discovery.txt
+          grep -qx NATIVE_THEME168_DISCOVERY_WITHOUT_APPLY_PASS proof/native-discovery.txt
+          test "$(cli theme get vf-tools-theme --field=version)" = 1.35.167
+          cli eval-file /tmp/snapshot.php > proof/after-discovery.json
+          cmp proof/before-discovery.json proof/after-discovery.json
+          echo NATIVE_THEME168_DISCOVERY_NO_PROTECTED_WRITE_PASS
+          """
+          Path('lane/native-preview168-discovery.sh').write_text(s)
+          PYPREP
+          bash lane/native-preview168-discovery.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s01-preview168-discovery
+          path: proof/
+          retention-days: 14
+      - name: Cleanup
+        if: always()
+        run: rm -rf target provider lane
