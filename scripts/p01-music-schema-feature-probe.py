@@ -51,7 +51,7 @@ def main():
     for path in m.UPDATER_PATHS:
         must(source.get(path)==target.get(path),"updater mechanism changed: "+path)
     must(b"'version' => '2026102201'" in target[migration],"Music schema id mismatch")
-    must(b"define('VF_VERSION', '2.47.422');" in cand["app/bootstrap.php"],"bootstrap version identity mismatch")
+    must(("define('VF_VERSION', '"+a.version+"');").encode() in cand["app/bootstrap.php"],"bootstrap version identity mismatch")
     old_manifest=json.loads(baseline["release-manifest.json"])
     must(str(old_manifest.get("schema_version"))==old_schema,"prior formal schema identity mismatch")
     manifest=dict(old_manifest)
