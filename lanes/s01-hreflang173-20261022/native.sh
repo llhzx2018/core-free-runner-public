@@ -27,7 +27,6 @@ docker exec "$WP" chown -R www-data:www-data /var/www/html/wp-content/themes/vf-
 cli theme activate vf-tools-theme >/dev/null
 for attempt in 1 2 3; do cli plugin install polylang --version=3.8.10 --activate >/dev/null && break; test "$attempt" -lt 3 || exit 1; sleep 3; done
 docker cp lane/languages.php "$WP:/tmp/languages.php";cli eval-file /tmp/languages.php >/dev/null
-for attempt in 1 2 3; do cli plugin install seo-by-rank-math --version=1.0.280 --activate >/dev/null && break; test "$attempt" -lt 3 || exit 1; sleep 3; done
 # Only initialize the existing admin capability; do not repeat unrelated review-service suites.
 cli user add-cap admin vf_manage_theme_profile >/dev/null
 cli rewrite structure '/%postname%/' --hard >/dev/null
@@ -48,6 +47,9 @@ assert set(changed)<= {'vf_theme_brand','vf_theme_tokens','vf_theme_navigation'}
 assert all(not a['option_presence'][k]and b['option_presence'][k]for k in changed)
 (r/'bootstrap.json').write_text(json.dumps({'status':'PASS','created_missing_options':changed,'existing_protected_records':'BYTE_IDENTICAL','scope':'fresh isolated installation initialization before review baseline'}))
 PYBOOT
+# Activate the SEO integration after clean admin intake, before all Head/lifecycle baselines.
+for attempt in 1 2 3; do cli plugin install seo-by-rank-math --version=1.0.280 --activate >/dev/null && break; test "$attempt" -lt 3 || exit 1; sleep 3; done
+curl -fsS http://127.0.0.1:18880/m3u8-player/ >/dev/null
 cli eval-file /tmp/snapshot.php > proof/state-before.sha256
 docker cp "control/lanes/$LANE_ID/contracts-snapshot.php" "$WP:/tmp/contracts-snapshot.php"
 cli eval-file /tmp/contracts-snapshot.php > proof/contracts-before.json
