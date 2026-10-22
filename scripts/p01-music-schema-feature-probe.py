@@ -101,14 +101,14 @@ def main():
         )"""
     )
     transform_once(
-        "$dbv=self::dbVerify($db);self::jsonWrite($journal,",
+        "$dbv=self::dbVerify($db);",
         """require_once $root.'/app/bootstrap.php';
             $p=new PDO('sqlite:'.$db,null,null,[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
             $p->exec('PRAGMA foreign_keys=ON');
             $migrator=new VfMigrationRunner($p);
             $migrator->migrate(self::SOURCE_VERSION,self::TARGET_VERSION);
             $p=null;
-            $dbv=self::dbVerify($db);self::jsonWrite($journal,"""
+            $dbv=self::dbVerify($db);"""
     )
 
     for name,obj in (("SOURCE_MANIFEST",source_manifest),("TARGET_MANIFEST",target_manifest),
