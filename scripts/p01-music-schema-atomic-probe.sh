@@ -67,7 +67,33 @@ $r->saveLink(null,["surface"=>"start","category_id"=>$c,"title"=>"Original Owner
 cp "$REPAIR" "$WORK/old/"
 php "$WORK/old/repair-v$VERSION.php" --verify-source="$WORK/old" >"$WORK/source.json"
 grep -Fq '"ok":true' "$WORK/source.json"
-php "$WORK/old/repair-v$VERSION.php" --run="$WORK/old" >"$WORK/apply.json"
+set +e
+php "$WORK/old/repair-v$VERSION.php" --run="$WORK/old" >"$WORK/apply.json" 2>"$WORK/apply.err"
+apply_rc=$?
+set -e
+if [[ "$apply_rc" -ne 0 ]]; then
+  python3 - "$WORK/apply.json" "$WORK/apply.err" <<'PY'
+import json,pathlib,re,sys
+def scrub(x):
+    x=str(x)[:600]
+    return re.sub(r'/tmp/[^\s\"\\]+','[isolated-path]',x)
+raw=pathlib.Path(sys.argv[1]).read_text(errors='replace')
+try:
+    x=json.loads(raw)
+    if isinstance(x,dict):
+        safe={k:scrub(x[k]) for k in ('ok','error','message','reason','rollback','rollback_verified','phase','code') if k in x}
+        print('P01_MUSIC_ATOMIC_DIAG='+json.dumps(safe))
+        print('P01_MUSIC_ATOMIC_RESULT_KEYS='+str(sorted(x.keys())))
+    else: print('P01_MUSIC_ATOMIC_RESULT_TYPE='+type(x).__name__)
+except Exception:
+    print('P01_MUSIC_ATOMIC_OUTPUT_INVALID_JSON')
+    print('P01_MUSIC_ATOMIC_OUTPUT_PREFIX='+scrub(raw[:250]))
+e=pathlib.Path(sys.argv[2]).read_text(errors='replace')
+print('P01_MUSIC_ATOMIC_STDERR='+scrub(e[-350:]))
+PY
+  test "$(tr -d '\r\n ' < "$WORK/old/VERSION.txt")" = "$SOURCE_VERSION" && echo 'P01_MUSIC_VERSION_ROLLBACK_RETAINED=YES' || echo 'P01_MUSIC_VERSION_ROLLBACK_RETAINED=NO'
+  exit 1
+fi
 grep -Fq '"ok":true' "$WORK/apply.json"
 test "$(tr -d '\r\n ' <"$WORK/old/VERSION.txt")" = "$VERSION"
 (cd "$WORK/old" && php cli/verify.php) >"$WORK/new-verify.txt"
