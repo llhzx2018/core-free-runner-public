@@ -16,7 +16,8 @@ const html='<section data-vf-preview-page data-revision="none" data-state="idle"
 +'<div data-vf-preview-target-current-path></div><a data-vf-preview-open-page target="_blank">Open</a>'
 +'<button type="button" data-vf-preview-load hidden>Load</button>'
 +'<div data-vf-preview-canvas hidden></div></section>';
-await page.setContent(html,{url:'https://test.example/preview/'});
+await page.route('https://test.example/preview/',route=>route.fulfill({status:200,contentType:'text/html',body:html}));
+await page.goto('https://test.example/preview/');
 await page.evaluate(()=>{window.VFThemePreview={};window.__writes=[];window.fetch=()=>{window.__writes.push('fetch');throw Error('unexpected write')}});
 const errors=[];page.on('pageerror',e=>errors.push(e.message));
 await page.addScriptTag({path:'theme/src/assets/js/admin/admin-preview.js'});
