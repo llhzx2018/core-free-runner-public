@@ -3,7 +3,7 @@ const mode=process.argv[2]||'focused',checks=[];function check(name,pass,detail)
 (async()=>{const b=await chromium.launch();let p;try{
 const origin='http://127.0.0.1:18880',target=origin+'/wp-admin/themes.php?page=vf-theme-modules&tab=layout&view=pages',review=target+'&vf_review_tools=1';
 p=await b.newPage({viewport:{width:1440,height:1000}});const errors=[];p.on('pageerror',e=>errors.push(e.message));
-await p.goto(origin+'/wp-login.php');await p.locator('#user_login').fill('admin');await p.locator('#user_pass').fill('Synthetic-Only-Update-54!');await p.locator('#wp-submit').click();await p.waitForURL('**/wp-admin/**');await p.goto(target,{waitUntil:'networkidle'});
+await p.goto(origin+'/wp-login.php');await p.locator('#user_login').fill('admin');await p.locator('#user_pass').fill('Synthetic-Only-Update-54!');await p.locator('input[name=redirect_to]').evaluate((e,v)=>e.value=v,target);await p.locator('#wp-submit').click();await p.waitForURL('**/wp-admin/**');await p.goto(target,{waitUntil:'networkidle'});
 if(mode==='baseline'){
 const root=p.locator('[data-vf-frontend-pages]');check('162 reproduces engineering clutter on operations surface',await root.textContent().then(t=>t.includes('历史')&&t.includes('人工')&&t.includes('已有精修记录')));
 fs.writeFileSync('proof/baseline-metrics.json',JSON.stringify({height:await root.evaluate(e=>e.getBoundingClientRect().height)}));console.log('162_OPERATIONS_BASELINE_PASS');return;
