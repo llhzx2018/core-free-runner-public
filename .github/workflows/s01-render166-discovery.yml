@@ -1,0 +1,86 @@
+name: S01 Theme render166 channel and native discovery
+on:
+  push:
+    branches: [task/s01-render-verify-20261022]
+    paths: ['.github/workflows/s01-render166-discovery.yml']
+permissions:
+  contents: read
+jobs:
+  discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: control
+      - uses: actions/checkout@v4
+        with:
+          ref: 02d4591eed025a3d3a67bc0a150b3ddc448c2ab8
+          persist-credentials: false
+          path: established
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: aab3b56765a9bdf5a8771a04adb134ff63933db4
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: target
+      - name: Verify canonical channel, formal release and unmodified M3U8
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p proof provider
+          test "$(gh api repos/llhzx2018/core-updates/commits/main --jq .sha)" = 606b2736e29e28a0ecb564b8845fa97e073cb35c
+          test "$(gh api repos/llhzx2018/core-updates/contents/projects/S01-C01.json --jq .sha)" = 67b308fdc8449b9f876752f07ba2f0710aea1b7f
+          test "$(gh api repos/llhzx2018/core-updates/contents/projects/S01-C03.json --jq .sha)" = 2356bd3ddd189a7aa81e50c992b185684cbc2917
+          test "$(gh api repos/llhzx2018/vf-tools-theme/git/ref/tags/v1.35.166 --jq .object.sha)" = aab3b56765a9bdf5a8771a04adb134ff63933db4
+          gh release download v1.35.165 --repo llhzx2018/vf-tools-theme --pattern vf-tools-theme_V1.35.165.zip --dir provider
+          echo 'f617fdfccd6fef7999bc17878c923bfad800fae714ec50fedce4f7fb343101e8  provider/vf-tools-theme_V1.35.165.zip' | sha256sum -c
+          gh release download v1.25.94 --repo llhzx2018/vf-tools-m3u8 --pattern vf-tools-m3u8_V1.25.94.zip --dir provider
+          echo '70b90d40da5d69fc7819bd7ada3f15fb0145e64822b788bd94956c7827b2df03  provider/vf-tools-m3u8_V1.25.94.zip' | sha256sum -c
+          echo CANONICAL_THEME166_CHANNEL_AND_PROVIDER_UNCHANGED_PASS
+      - name: Isolated native WordPress update discovery with no upgrade
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          cp -a established/lanes/s01-frontend-design-20261017 lane
+          cp control/lanes/s01-render166/discover.php lane/discover.php
+          python3 - <<'PYPREP'
+          from pathlib import Path
+          s=Path('lane/native.sh').read_text().replace('provider/vf-tools-m3u8_V1.25.91.zip','provider/vf-tools-m3u8_V1.25.94.zip')
+          installer='cli plugin install polylang --version=3.8.10 --activate >/dev/null'
+          assert s.count(installer)==1
+          s=s.replace(installer,'for attempt in 1 2 3; do '+installer+' && break; test "$attempt" -lt 3 || exit 1; sleep 3; done')
+          s=s.replace('node lane/warm-admin.cjs','true')
+          marker='if [ "'+'$'+'{VF_REVIEW_ONLY_STATE:-0}" = "1" ];then'
+          assert s.count(marker)==1
+          s=s.split(marker)[0]+"""
+          docker cp provider/vf-tools-theme_V1.35.165.zip "$WP:/tmp/theme165.zip"
+          cli theme install /tmp/theme165.zip --force >/dev/null
+          test "$(cli theme get vf-tools-theme --field=version)" = 1.35.165
+          test "$(cli plugin get vf-tool-m3u8 --field=version)" = 1.25.94
+          cli eval-file /tmp/snapshot.php > proof/discovery-before.json
+          docker cp lane/discover.php "$WP:/tmp/discover.php"
+          docker exec -e VF_PRIVATE_READ_TOKEN="$VF_PRIVATE_READ_TOKEN" --user www-data "$WP" php /usr/local/bin/wp eval-file /tmp/discover.php --path=/var/www/html > proof/native-discovery.txt
+          cat proof/native-discovery.txt
+          grep -qx NATIVE_THEME166_DISCOVERY_WITHOUT_APPLY_PASS proof/native-discovery.txt
+          test "$(cli theme get vf-tools-theme --field=version)" = 1.35.165
+          cli eval-file /tmp/snapshot.php > proof/discovery-after.json
+          cmp proof/discovery-before.json proof/discovery-after.json
+          echo NATIVE_DISCOVERY_PROTECTED_DATA_UNCHANGED_PASS
+          """
+          Path('lane/discovery166.sh').write_text(s)
+          PYPREP
+          bash lane/discovery166.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s01-render166-discovery
+          path: proof/
+          retention-days: 14
+      - name: Cleanup
+        if: always()
+        run: rm -rf target provider lane
