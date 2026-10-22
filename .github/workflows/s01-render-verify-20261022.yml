@@ -1,0 +1,112 @@
+name: S01 Theme renderer readonly recheck targeted proof
+on:
+  push:
+    branches: [task/s01-render-verify-20261022]
+    paths: ['.github/workflows/s01-render-verify-20261022.yml']
+permissions:
+  contents: read
+jobs:
+  readonly:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: control
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: ab5f1b705e6e1fdc080f4b5d65cec932c41141de
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: target
+      - name: Exact-source syntax and bounded existing contract
+        run: |
+          set -euo pipefail
+          test "$(git -C target rev-parse HEAD)" = "ab5f1b705e6e1fdc080f4b5d65cec932c41141de"
+          php -l target/src/inc/admin/admin-render-actions.php
+          php -l target/src/inc/admin/views/render.php
+          php -l target/tests/render-page-refinement-contract.php
+          node --check target/src/assets/js/admin/admin-render.js
+          php target/tests/render-page-refinement-contract.php
+          php target/tests/render-settings-human-language-contract.php
+      - name: Actual PHP ajax handler isolated fail-closed paths
+        run: |
+          set -euo pipefail
+          cat > /tmp/vf-readonly-verify.php <<'PHP'
+          <?php
+          define('ABSPATH', '/tmp');
+          class Reply extends Exception {
+              public function __construct(public bool $success, public array $data, public int $status) {
+                  parent::__construct('reply');
+              }
+          }
+          $GLOBALS['allow']=true;
+          $GLOBALS['nonce']=true;
+          $GLOBALS['stored']=true;
+          $GLOBALS['valid']=true;
+          $GLOBALS['errors']=[];
+          $GLOBALS['writes']=0;
+          function add_action($a,$b){}
+          function current_user_can($cap){return $GLOBALS['allow'] && $cap==='vf_manage_theme_profile';}
+          function check_ajax_referer($action,$key){
+              if($action!=='theme.render.save'||$key!=='nonce'||!$GLOBALS['nonce']){
+                  throw new Reply(false,['failureCode'=>'NONCE'],403);
+              }
+          }
+          function wp_unslash($x){return $x;}
+          function sanitize_text_field($x){return $x;}
+          function wp_send_json_error($data,$status=200){throw new Reply(false,$data,$status);}
+          function wp_send_json_success($data,$status=200){throw new Reply(true,$data,$status);}
+          function update_option(){++$GLOBALS['writes'];throw new Exception('WRITTEN');}
+          function delete_option(){++$GLOBALS['writes'];throw new Exception('DELETED');}
+          function vf_tools_theme_renderer_readback(){return [
+              'stored'=>$GLOBALS['stored'],
+              'source'=>$GLOBALS['stored']?'database':'registered_defaults',
+              'renderer'=>['defaultMode'=>'STANDARD'],
+              'revision'=>str_repeat('a',64),
+              'errors'=>$GLOBALS['errors'],
+          ];}
+          function vf_tools_theme_renderer_runtime_verification($expected){return [
+              'ok'=>$GLOBALS['valid'],
+              'status'=>$GLOBALS['valid']?'PASS':'BLOCKED',
+              'revision'=>str_repeat('a',64),
+              'checks'=>['databaseReadback'=>true],
+          ];}
+          require __DIR__.'/'.'../home/runner/work'.'/unreachable.php';
+          PHP
+          # Swap only the harness include placeholder: test executes actual checked-out handler.
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('/tmp/vf-readonly-verify.php')
+          s=p.read_text().replace("require __DIR__.'/'.'../home/runner/work'.'/unreachable.php';", "require getcwd().'/target/src/inc/admin/admin-render-actions.php';")
+          p.write_text(s)
+          PY
+          cat >> /tmp/vf-readonly-verify.php <<'PHP'
+          function probe($name, callable $setup, int $http, string $failure=''): void {
+              $GLOBALS['allow']=true;$GLOBALS['nonce']=true;
+              $GLOBALS['stored']=true;$GLOBALS['valid']=true;
+              $GLOBALS['errors']=[];
+              $_POST=['revision'=>str_repeat('a',64), 'renderer'=>['defaultMode'=>'MALICIOUS']];
+              $setup();
+              try{vf_theme_render_verify_ajax();throw new Exception($name.' NO RESPONSE');}
+              catch(Reply $reply){
+                  if($reply->status!==$http || ($failure!==''&&($reply->data['failureCode']??'')!==$failure)){
+                      throw new Exception($name.' BAD RESULT '.$reply->status.' '.json_encode($reply->data));
+                  }
+                  echo "PASS $name\n";
+              }
+          }
+          probe('stored_config_success',fn()=>null,200);
+          probe('permission_rejected',fn()=> $GLOBALS['allow']=false,403,'FORBIDDEN');
+          probe('nonce_rejected',fn()=> $GLOBALS['nonce']=false,403,'NONCE');
+          probe('default_config_not_saved',fn()=> $GLOBALS['stored']=false,422,'DEFAULT_NOT_STORED');
+          probe('missing_revision',fn()=> $_POST['revision']='',409,'REVISION_CONFLICT');
+          probe('revision_conflict',fn()=> $_POST['revision']=str_repeat('b',64),409,'REVISION_CONFLICT');
+          probe('runtime_contract_rejected',fn()=> $GLOBALS['valid']=false,422,'RUNTIME_CONTRACT_MISMATCH');
+          probe('stored_error_rejected',fn()=> $GLOBALS['errors']=['test'=>'bad'],422,'RUNTIME_CONTRACT_MISMATCH');
+          if($GLOBALS['writes']!==0) throw new Exception('NONZERO WRITES: '.$GLOBALS['writes']);
+          echo "PASS no_write_for_all_eight_paths\n";
+          PHP
+          php /tmp/vf-readonly-verify.php
