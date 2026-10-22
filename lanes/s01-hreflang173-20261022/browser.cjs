@@ -6,12 +6,17 @@ const assert=(ok,msg)=>{if(!ok)throw new Error(msg)};
 (async()=>{
  const browser=await chromium.launch(),context=await browser.newContext({viewport:{width:1440,height:1000}}),page=await context.newPage();
  const rows=[],errors=[],writes=[];
+ const fixture=JSON.parse(fs.readFileSync('proof/head-fixtures.json')).canonical_pairs;
  page.on('pageerror',e=>errors.push(String(e)));
  page.on('request',r=>{if(r.url().startsWith(origin+'/wp-')&&!['GET','HEAD','OPTIONS'].includes(r.method()))writes.push({method:r.method(),url:r.url().split('?')[0]})});
  for(const route of ['m3u8-test-links','m3u8-browser-stream-test','m3u8-player'])for(const language of ['en','zh']){
   const path=(language==='zh'?'/zh/':'/')+route+'/';
   const response=await page.goto(origin+path,{waitUntil:'domcontentloaded'});assert(response.status()===200,'Public route not200 '+path);await page.waitForTimeout(350);
-  const head=await page.evaluate(()=>({title:document.title,h1:[...document.querySelectorAll('h1')].map(x=>x.textContent.trim()),canonical:[...document.querySelectorAll('head link[rel=canonical]')].map(x=>x.href),hreflang:Object.fromEntries([...document.querySelectorAll('head link[hreflang]')].map(x=>[x.hreflang,x.href])),robots:[...document.querySelectorAll('meta[name=robots]')].map(x=>x.content),description:[...document.querySelectorAll('meta[name=description]')].map(x=>x.content)}));
+  const head=await page.evaluate(()=>({htmlLang:document.documentElement.lang,bodyClass:document.body.className,title:document.title,h1:[...document.querySelectorAll('h1')].map(x=>x.textContent.trim()),canonical:[...document.querySelectorAll('head link[rel=canonical]')].map(x=>x.href),hreflang:Object.fromEntries([...document.querySelectorAll('head link[hreflang]')].map(x=>[x.hreflang,x.href])),robots:[...document.querySelectorAll('meta[name=robots]')].map(x=>x.content),description:[...document.querySelectorAll('meta[name=description]')].map(x=>x.content)}));
+  fs.writeFileSync('proof/'+phase+'-observed.json',JSON.stringify({phase,rows:[...rows,{route,language,path,head,expected_post_id:fixture[route][language]}]},null,2));
+  const actualId=Number((head.bodyClass.match(/(?:^| )page-id-(\d+)(?: |$)/)||[])[1]||0);
+  assert(actualId===fixture[route][language],'Request selected wrong native language object '+path+' expected '+fixture[route][language]+' actual '+actualId);
+  assert(head.htmlLang.toLowerCase().startsWith(language),'HTML language mismatch '+path);
   assert(head.canonical.length===1&&head.canonical[0]===origin+path,'Unique exact canonical '+path);assert(head.h1.length===1,'One H1 '+path);
   if(baseline&&language==='en'&&route!=='m3u8-player')assert(Object.keys(head.hreflang).length===0,'Old actual WordPress missing hreflang not reproduced '+path);
   if(!baseline||route==='m3u8-player')assert(head.hreflang.en===origin+'/'+route+'/'&&head.hreflang.zh===origin+'/zh/'+route+'/','Actual paired head missing '+path);

@@ -33,5 +33,6 @@ foreach (['m3u8-test-links'=>'test-links','m3u8-browser-stream-test'=>'browser-s
     }
     $out[$route] = $pair;
 }
+update_option('vf_s01_canonical_head_fixture', $out, false);
 update_option('vf_theme_seo', ['searchIndexability'=>'noindex_follow','previewIndexability'=>'noindex_follow','notFoundRobots'=>'noindex_follow','virtualRoutePolicy'=>[['routeId'=>'tool_hub','pageFamily'=>'tool_hub','pathPattern'=>'tools','resolver'=>'vf_theme_url_resolver','canonicalPolicy'=>'self','hreflangPolicy'=>'paired','indexability'=>'index_follow','staticPathPolicy'=>'required']],'schemaVersion'=>'1.0.0'], false);
 echo wp_json_encode(['status'=>'PASS','canonical_pairs'=>$out,'seo_fixture'=>'production-equivalent registered tool-hub policy; no tool override','production'=>'UNTOUCHED']);

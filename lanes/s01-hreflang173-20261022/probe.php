@@ -1,5 +1,22 @@
 <?php
 if (!defined('ABSPATH')) { exit; }
+// Polylang Free cannot route Pro shared slugs after the established SQL fixture.
+// Bridge only native request selection for the three declared synthetic pairs;
+// do not replace the URL resolver, page-family classifier or SEO Head services.
+add_filter('request', static function (array $query): array {
+    if (is_admin()) { return $query; }
+    $path = (string)parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
+    if (!preg_match('#^/(zh/)?(m3u8-test-links|m3u8-browser-stream-test|m3u8-player)/$#', $path, $match)) { return $query; }
+    $language = !empty($match[1]) ? 'zh' : 'en';
+    $pairs = get_option('vf_s01_canonical_head_fixture', []);
+    $id = (int)($pairs[$match[2]][$language] ?? 0);
+    if ($id <= 0 || get_post_status($id) !== 'publish' || pll_get_post_language($id, 'slug') !== $language) { throw new RuntimeException('SYNTHETIC_SHARED_SLUG_QUERY_TARGET_INVALID'); }
+    unset($query['pagename'], $query['name'], $query['p']);
+    $query['page_id'] = $id;
+    $query['post_type'] = 'page';
+    $query['lang'] = $language;
+    return $query;
+}, 9999);
 // Synthetic isolated runtime only: observe after the unchanged request has rendered.
 add_action('shutdown', static function () {
     $path = (string)parse_url($_SERVER['REQUEST_URI'] ?? '', PHP_URL_PATH);
