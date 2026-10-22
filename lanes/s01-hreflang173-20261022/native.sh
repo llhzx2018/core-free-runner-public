@@ -27,12 +27,12 @@ docker exec "$WP" chown -R www-data:www-data /var/www/html/wp-content/themes/vf-
 cli theme activate vf-tools-theme >/dev/null
 for attempt in 1 2 3; do cli plugin install polylang --version=3.8.10 --activate >/dev/null && break; test "$attempt" -lt 3 || exit 1; sleep 3; done
 docker cp lane/languages.php "$WP:/tmp/languages.php";cli eval-file /tmp/languages.php >/dev/null
+for attempt in 1 2 3; do cli plugin install seo-by-rank-math --version=1.0.280 --activate >/dev/null && break; test "$attempt" -lt 3 || exit 1; sleep 3; done
 # Only initialize the existing admin capability; do not repeat unrelated review-service suites.
 cli user add-cap admin vf_manage_theme_profile >/dev/null
 cli rewrite structure '/%postname%/' --hard >/dev/null
 docker cp lane/mount-seed.php "$WP:/tmp/mount-seed.php";cli eval-file /tmp/mount-seed.php > proof/mounts.json
-docker cp lane/seed.php "$WP:/tmp/seed.php";cli eval-file /tmp/seed.php > proof/seed.json
-docker cp lane/extra-seed.php "$WP:/tmp/extra-seed.php";cli eval-file /tmp/extra-seed.php > proof/cases.json
+docker cp "control/lanes/$LANE_ID/head-seed.php" "$WP:/tmp/head-seed.php";cli eval-file /tmp/head-seed.php > proof/head-fixtures.json
 docker cp "control/lanes/$LANE_ID/seed.php" "$WP:/tmp/extra-protected.php";cli eval-file /tmp/extra-protected.php >/dev/null
 docker cp lane/snapshot.php "$WP:/tmp/snapshot.php"
 # Warm only public read-only boot paths before protected-state comparison.
