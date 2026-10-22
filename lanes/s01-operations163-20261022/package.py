@@ -8,7 +8,7 @@ assert git('rev-parse', 'HEAD') == os.environ['TARGET_SHA']
 assert git('rev-parse', 'HEAD^{tree}') == os.environ['TARGET_TREE']
 version = os.environ['TARGET_VERSION']
 assert (root / 'VERSION').read_text().strip() == version
-expected = {'src/style.css', 'src/inc/services/frontend-page-directory-service.php', 'src/inc/runtime-constants.php', 'CHANGELOG.md', 'src/assets/css/admin/pages/page-structure/admin-page-layout-refinement-v1.css', 'src/inc/admin/views/frontend-pages.php', 'src/inc/admin/views/preview.php', 'VERSION'}
+expected = {'src/inc/admin/views/frontend-pages.php', 'VERSION', 'src/assets/css/admin/pages/page-structure/admin-page-layout-refinement-v1.css', 'src/style.css', 'src/inc/services/frontend-page-directory-service.php', 'src/inc/runtime-constants.php', 'src/inc/admin/views/preview.php', 'src/inc/admin/admin-shell.php', 'CHANGELOG.md'}
 assert set(git('diff', '--name-only', os.environ['BASE_SHA'], 'HEAD').splitlines()) == expected
 old_service = subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':src/inc/services/frontend-page-progress-service.php']).decode()
 new_service = (root/'src/inc/services/frontend-page-progress-service.php').read_text()
