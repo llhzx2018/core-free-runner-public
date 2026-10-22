@@ -79,6 +79,44 @@ def main():
     repair=m.replace_public(repair,"SOURCE_VERSION",a.source_version)
     repair=m.replace_public(repair,"TARGET_VERSION",a.version)
     repair=m.replace_public(repair,"TARGET_SCHEMA",new_schema)
+    # A maintenance repair never migrated the database and used TARGET_SCHEMA to
+    # judge rollback to the source. Feature updates need two independent truths.
+    def transform_once(needle, replacement):
+        nonlocal repair
+        count=repair.count(needle)
+        must(count==1,"unexpected P01 repair template shape: "+needle[:70]+f" (found {count})")
+        repair=repair.replace(needle,replacement,1)
+    transform_once(
+        "public const TARGET_SCHEMA='"+new_schema+"';",
+        "public const TARGET_SCHEMA='"+new_schema+"'; public const SOURCE_SCHEMA='"+old_schema+"';"
+    )
+    transform_once(
+        "private static function dbVerify(string $db): array",
+        "private static function dbVerify(string $db,string $expectedSchema=self::TARGET_SCHEMA): array"
+    )
+    transform_once(
+        "$head!==self::TARGET_SCHEMA",
+        "$head!==$expectedSchema"
+    )
+    transform_once(
+        "self::dbVerify((string)$rt['db_file']);@unlink($journal);",
+        "self::dbVerify((string)$rt['db_file'],self::SOURCE_SCHEMA);@unlink($journal);"
+    )
+    transform_once(
+        "self::dbVerify((string)$rt['db_file']);if($journal!=='')",
+        "self::dbVerify((string)$rt['db_file'],self::SOURCE_SCHEMA);if($journal!=='')"
+    )
+    transform_once(
+        "$dbv=self::dbVerify($db);self::jsonWrite($journal,",
+        """require_once $root.'/app/bootstrap.php';
+            $p=new PDO('sqlite:'.$db,null,null,[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
+            $p->exec('PRAGMA foreign_keys=ON');
+            $migrator=new VfMigrationRunner($p);
+            $migrator->migrate(self::SOURCE_VERSION,self::TARGET_VERSION);
+            $p=null;
+            $dbv=self::dbVerify($db);self::jsonWrite($journal,"""
+    )
+
     for name,obj in (("SOURCE_MANIFEST",source_manifest),("TARGET_MANIFEST",target_manifest),
                      ("PAYLOAD",encoded),("REMOVED",sorted(set(source_manifest)-set(target_manifest))),
                      ("SOURCE_ALTERNATES",{})):
