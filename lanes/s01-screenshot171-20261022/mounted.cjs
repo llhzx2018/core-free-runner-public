@@ -1,0 +1,38 @@
+'use strict';
+const {chromium}=require('playwright'),assert=require('node:assert/strict'),fs=require('node:fs');
+const baseline=process.argv.includes('--baseline'),prefix=baseline?'before':'after';
+const base='http://127.0.0.1:18880',admin=base+'/wp-admin/themes.php?page=vf-theme-modules';
+(async()=>{const b=await chromium.launch(),rows=[],errors=[],writes=[];try{
+ const p=await b.newPage({viewport:{width:1440,height:1000}});
+ p.on('pageerror',e=>errors.push(e.message));p.on('request',r=>{if(r.method()==='POST'&&/admin-ajax|admin-post/.test(r.url()))writes.push({action:new URLSearchParams(r.postData()).get('action'),phase:new URLSearchParams(r.postData()).get('phase')});});
+ await p.goto(base+'/wp-login.php');await p.locator('#user_login').fill('admin');await p.locator('#user_pass').fill('Synthetic-Only-Update-54!');await p.locator('input[name=redirect_to]').evaluate((e,v)=>e.value=v,admin);await p.locator('#wp-submit').click();await p.waitForURL('**/wp-admin/**');
+ for(const width of [1440,1319,1024]){
+  await p.setViewportSize({width,height:1000});await p.goto(admin+'&tab=preview',{waitUntil:'networkidle'});
+  const root=p.locator('[data-vf-preview-page]');await p.waitForFunction(()=>document.querySelector('[data-vf-preview-page]')?.dataset.scriptReady==='1');
+  const state=await root.locator('[data-vf-preview-status]').textContent();
+  assert.equal(state,baseline?'等待开始':'尚未运行自动检查');
+  const checkFinder=async(selector)=>{assert.equal(await p.locator('[data-vf-page-finder]').count(),1);const after=await p.locator('[data-vf-page-finder]').evaluate((n,s)=>Boolean(document.querySelector(s).compareDocumentPosition(n)&Node.DOCUMENT_POSITION_FOLLOWING),selector);assert.equal(after,!baseline);};
+  await checkFinder('[data-vf-preview-page]');
+  const artifact=await root.locator('[data-vf-preview-latest]').textContent(),verdict=await root.locator('[data-vf-preview-verdict-title]').textContent();
+  await root.locator('[data-vf-preview-workflow-step=preview]').click();
+  const previewY=await root.locator('[data-vf-preview-stage]').count()?await root.locator('[data-vf-preview-stage]').evaluate(n=>n.getBoundingClientRect().top+scrollY):await root.locator('[data-vf-preview-load]').evaluate(n=>n.getBoundingClientRect().top+scrollY);
+  await root.locator('[data-vf-preview-load]').click();await p.waitForFunction(()=>document.querySelector('[data-vf-preview-page]').getAttribute('aria-busy')==='false');assert(await root.locator('[data-vf-preview-canvas]').isVisible());
+  assert.equal(await root.locator('[data-vf-preview-status]').textContent(),state);assert.equal(await root.locator('[data-vf-preview-latest]').textContent(),artifact);assert.equal(await root.locator('[data-vf-preview-verdict-title]').textContent(),verdict);
+  await root.locator('[data-vf-preview-view-mode]').click();assert.equal(await root.locator('[data-vf-preview-view-mode]').getAttribute('aria-pressed'),'true');await root.locator('[data-vf-preview-view-mode]').click();
+  assert(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+  if(width===1440){await p.screenshot({path:'proof/'+prefix+'-preview.png',fullPage:true});await root.locator('[data-vf-preview-workflow-step=scope]').click();await p.screenshot({path:'proof/'+prefix+'-scope.png',fullPage:true});}
+  // The retained auxiliary finder must still reach the results task.
+  const finder=p.locator('[data-vf-page-finder]');await finder.locator('summary').click();const option=await finder.locator('option').evaluateAll(ns=>ns.find(n=>n.textContent.trim()==='检查结果')?.value);assert(option!==undefined);await finder.locator('select').selectOption(option);await finder.locator('[data-vf-page-finder-go]').click();assert(await root.locator('#vf-preview-results').isVisible()||await root.locator('[data-vf-preview-workflow-step=results]').getAttribute('aria-selected')==='true');
+  await p.goto(admin+'&tab=recovery',{waitUntil:'networkidle'});await checkFinder('[data-vf-recovery-page]');const rec=p.locator('[data-vf-recovery-page]'),revision=await rec.getAttribute('data-vf-recovery-revision');
+  const count=await rec.locator('.vf-recovery-status__meta').innerText();if(!baseline)assert(/已有\s*0\s*个恢复点/.test(count));
+  for(const task of ['status','export','import','restore']){await rec.locator('[data-vf-recovery-workflow-step='+task+']').click();assert(await rec.locator('[data-vf-recovery-workflow-section='+task+']').isVisible());assert(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));}
+  await rec.locator('.vf-recovery-danger-zone > summary').click();await require(process.cwd()+'/target/tests/recovery-fresh-confirmation-browser-check.js')(p);assert.equal(await rec.getAttribute('data-vf-recovery-revision'),revision);
+  await rec.locator('[data-vf-recovery-workflow-step=status]').click();if(width===1440)await p.screenshot({path:'proof/'+prefix+'-recovery.png',fullPage:true});
+  await p.goto(admin+'&tab=layout&view=edit&context=home',{waitUntil:'networkidle'});
+  const link=p.locator('[data-vf-home-workspace] header a').first();assert.equal((await link.innerText()).trim(),baseline?'查看前台':'定位首页工具区');assert.equal(new URL(await link.getAttribute('href')).hash,'#vf-module-tool_grid');const popup=await p.request.get(await link.getAttribute('href'));assert.equal(popup.status(),200);assert((await popup.text()).includes('vf-module-tool_grid'));assert(await p.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));if(width===1440)await p.screenshot({path:'proof/'+prefix+'-layout.png',fullPage:true});
+  rows.push({width,status:'PASS',preview_control_y:previewY,preview_state_isolated:true,finder_works:true,recovery_four_tasks:true,original_fragment_preserved:true});
+ }
+ assert.deepEqual(errors,[]);assert.deepEqual(writes,[]);
+ if(!baseline){const old=JSON.parse(fs.readFileSync('proof/before-ui.json'));for(let i=0;i<rows.length;i++){rows[i].first_screen_space_saved_px=old.rows[i].preview_control_y-rows[i].preview_control_y;assert(rows[i].first_screen_space_saved_px>=60,'first-screen space did not improve');}}
+ fs.writeFileSync('proof/'+prefix+'-ui.json',JSON.stringify({status:'PASS',environment:'REAL_ISOLATED_WORDPRESS',rows,write_requests:0,production:'UNTOUCHED',owner_visual:'PENDING',mobile:'DEFERRED'},null,2));console.log(prefix.toUpperCase()+'_SCREENSHOT_RECHECK_REAL_WORDPRESS_PASS');
+}catch(e){fs.writeFileSync('proof/'+prefix+'-failure.json',JSON.stringify({error:e.message,rows,errors,writes}));throw e;}finally{await b.close();}})().catch(e=>{console.error(e);process.exit(1)});
