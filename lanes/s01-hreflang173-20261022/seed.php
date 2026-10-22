@@ -1,5 +1,7 @@
 <?php
 // Synthetic isolated review fixtures, before the protected-state snapshot.
+// Retain the established existing-installation marker without unrelated pages.
+$layout=get_option('vf_theme_layout',[]);$layout['s01_authored_keep']='retained';update_option('vf_theme_layout',$layout);set_theme_mod('s01_authored_keep','retained');
 $base=['schema'=>1,'phase'=>'complete','status'=>'accepted','note'=>'Synthetic existing owner record preserved','version'=>'1.35.162','updated'=>'2026-10-21 12:00:00','user'=>1,'token'=>'synthetic-record-162'];
 foreach ([['home','en','desktop'],['contact_page','en','desktop']] as [$subject,$language,$device]) {
     $value=array_merge($base,compact('subject','language','device'));
