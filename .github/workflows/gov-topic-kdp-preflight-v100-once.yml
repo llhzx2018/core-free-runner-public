@@ -1,0 +1,80 @@
+name: GOV-TOPIC KDP preflight one-shot exact-source machine proof
+# Temporary public-safe proof; close this PR without merging.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/gov-topic-kdp-preflight-v100-once.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      EXPECTED_GOV_TOPIC_SHA: ee984e5b073c2bc10e5b0cb11da6ff30b470554b
+    steps:
+      - name: Validate private source read token without printing value
+        shell: bash
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$PRIVATE_READ_TOKEN" || { echo "PRIVATE_CHECKOUT=BLOCKED_CAPABILITY"; exit 78; }
+          echo "PRIVATE_CHECKOUT=AVAILABLE"
+      - name: Checkout exact GOV-TOPIC PR head transiently
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/gov-topic
+          ref: ${{ env.EXPECTED_GOV_TOPIC_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-src
+      - name: Exact-source tests and catalog check
+        working-directory: private-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_GOV_TOPIC_SHA"
+          echo "EXACT_TOPIC_SHA=$EXPECTED_GOV_TOPIC_SHA"
+          python3 -m unittest discover -s tests -v
+          python3 tools/build_catalog.py --check
+          echo "EXACT_SOURCE_MACHINE=PASS"
+      - name: New KDP topic and cover digest invariants
+        working-directory: private-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,hashlib,struct
+          root=Path('.')
+          manifest=json.loads((root/'distribution/p01/catalog.json').read_text(encoding='utf8'))
+          assert len(manifest['topics'])==8
+          entry=next(t for t in manifest['topics'] if t['topic_id']=='kdp-paperback-print-preflight')
+          assert entry['topic_version']=='v1.0.0'
+          assert entry['summary'].startswith('出版前如何核对')
+          assert all(x.get('cover') for x in manifest['topics'])
+          for key in ('html','sources','cover'):
+              o=entry[key];d=(root/o['path']).read_bytes()
+              assert len(d)==o['bytes'],key
+              assert hashlib.sha256(d).hexdigest()==o['sha256'],key
+          assert entry['cover']['sha256']=='dd3da9f094265c39b954382fb84a58dea1e65b2f51ab65a38ff9e881961fa79b'
+          image=(root/entry['cover']['path']).read_bytes()
+          assert image[:8]==b'\x89PNG\r\n\x1a\n'
+          assert struct.unpack('>II',image[16:24])==(1200,900)
+          text=(root/entry['html']['path']).read_text(encoding='utf8')
+          assert '<script' not in text.lower()
+          assert 'KDP' in text and 'Design References' in text
+          assert (root/'topics/kdp-paperback-print-preflight/v1.0.0/quality-evidence.md').is_file()
+          assert len(json.loads((root/entry['sources']['path']).read_text(encoding='utf8'))['sources'])==10
+          print("KDP_PACKAGE_CATALOG_COVER=PASS")
+          PY
+      - name: Remove private files after validation
+        if: always()
+        shell: bash
+        run: |
+          rm -rf private-src
+          echo "PRIVATE_SOURCE_PERSISTED=NO"
