@@ -1,0 +1,77 @@
+name: P01 V2.47.432 Music Shell HTTP 500 Repro (one-shot)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247432-music-shell-repro.yml'
+permissions:
+  contents: read
+jobs:
+  repro:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout trusted ephemeral diagnostic
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install PHP and curl
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd curl unzip jq >/dev/null
+          php -v
+      - name: Reproduce exact signed FULL package authenticated music-shell request
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          mkdir -p /tmp/p01-music-shell-repro/site
+          gh release download v2.47.432 -R llhzx2018/vf-start -D /tmp/p01-music-shell-repro -p 'VF-Start-V2.47.432-FULL.zip'
+          printf '%s  %s\n' d8301f05e78f99806e7f77555fbb5491c523fd72db24e292a44ff663469f8938 /tmp/p01-music-shell-repro/VF-Start-V2.47.432-FULL.zip | sha256sum --check
+          unzip -q /tmp/p01-music-shell-repro/VF-Start-V2.47.432-FULL.zip -d /tmp/p01-music-shell-repro/site
+          cat /tmp/p01-music-shell-repro/site/VERSION.txt
+          test "$(cat /tmp/p01-music-shell-repro/site/VERSION.txt)" = "2.47.432"
+          php -S 127.0.0.1:19432 -t /tmp/p01-music-shell-repro/site >/tmp/p01-music-shell-repro/server.log 2>&1 &
+          echo $! >/tmp/p01-music-shell-repro/server.pid
+          for i in $(seq 1 50); do
+            if curl -fsS -c /tmp/p01-music-shell-repro/cookie -b /tmp/p01-music-shell-repro/cookie http://127.0.0.1:19432/setup.php -o /tmp/p01-music-shell-repro/setup.html; then break; fi
+            sleep 0.2
+          done
+          csrf="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-music-shell-repro/setup.html').read()
+          m=re.search(r'name="setup_csrf"\\s+value="([^"]+)"',s)
+          if not m: raise ValueError('setup csrf missing')
+          print(m.group(1))
+          PY
+          )"
+          curl -fsS -c /tmp/p01-music-shell-repro/cookie -b /tmp/p01-music-shell-repro/cookie -X POST http://127.0.0.1:19432/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=Music Synthetic 500 Gate' \
+            --data-urlencode 'admin_password=MusicOnlySynthetic!2026' \
+            --data-urlencode 'admin_password_confirm=MusicOnlySynthetic!2026' \
+            -o /tmp/p01-music-shell-repro/setup-post.html
+          curl -fsS -c /tmp/p01-music-shell-repro/cookie -b /tmp/p01-music-shell-repro/cookie -H 'Content-Type: application/json' \
+            --data '{"password":"MusicOnlySynthetic!2026"}' http://127.0.0.1:19432/api.php?action=login \
+            -o /tmp/p01-music-shell-repro/login.json
+          jq -e '.ok == true' /tmp/p01-music-shell-repro/login.json
+          for page in 'music-home.php' 'music-shell.php?view=home&route=music-home.php' 'music-shell.php?view=discover&route=music-discover.php' 'music-shell.php?view=radio&route=music-radio.php'; do
+            status=$(curl -sS -b /tmp/p01-music-shell-repro/cookie -o /tmp/p01-music-shell-repro/body.html -w '%{http_code}' "http://127.0.0.1:19432/$page")
+            echo "MUSIC_SHELL_HTTP_ENDPOINT=$page STATUS=$status"
+            if [ "$status" != 200 ]; then
+              echo 'MUSIC_SHELL_HTTP_FAIL_LOG_START'
+              tail -n 35 /tmp/p01-music-shell-repro/server.log
+              echo 'MUSIC_SHELL_HTTP_FAIL_LOG_END'
+              exit 80
+            fi
+          done
+          echo P01_MUSIC_SHELL_AUTHENTICATED_HTTP=PASS
+      - name: Cleanup temporary installation and logs
+        if: always()
+        run: |
+          test ! -f /tmp/p01-music-shell-repro/server.pid || kill "$(cat /tmp/p01-music-shell-repro/server.pid)" >/dev/null 2>&1 || true
+          rm -rf /tmp/p01-music-shell-repro
