@@ -1,0 +1,84 @@
+name: P01 V2.47.434 native channel verification (one-shot)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247434-native-channel-20261023.yml'
+permissions:
+  contents: read
+jobs:
+  native-channel:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Verify exact public runner request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prepare official PHP runtime
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-curl php-sqlite3 php-zip unzip jq >/dev/null
+          php -m | grep -Fx curl
+          php -m | grep -Fx pdo_sqlite
+      - name: Resolve exact candidate manifest and V2.47.433 native update client
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          git clone -q --depth 1 --branch release/p01-v247434-music-shell-hotfix-20261023 "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/core-updates.git" channel
+          test "$(git -C channel rev-parse HEAD)" = 4b45af7f269bbc0cd650a7bfea5ba7a1e5c6a4fa
+          git clone -q --depth 1 --branch v2.47.433 "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" v433
+          test "$(cat v433/VERSION)" = 2.47.433
+          jq -e '.project_id=="P01" and .component_id=="APP" and .target_version=="2.47.434" and .release_tag=="v2.47.434" and .from_versions==["2.47.433"] and .schema_from=="2026102201" and .schema_to=="2026102201" and .asset_bytes==2832961 and .asset_sha256=="aa25d6f1a90ed094008a2206ec0accefb77af1b68b3427db368ff8da9bb2dc57"' channel/projects/P01.json >/dev/null
+      - name: Re-run canonical core-updates contract and native PHP tests on exact channel candidate
+        run: |
+          set -Eeuo pipefail
+          (cd channel && python3 scripts/check_manifest_contract.py) > /tmp/p01-channel-contract.txt
+          find channel/update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/p01-channel-php-lint.txt
+          (cd channel && php update-core/php/tests/run.php) | tee /tmp/p01-channel-native-tests.txt
+          echo P01_CHANNEL_SCOPED_CONTRACT=PASS
+      - name: Native V2.47.433 update eligibility and release asset download with verified bytes
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/p01-native-gate.php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require getenv('GITHUB_WORKSPACE').'/v433/src/app/CoreUpdates/UpdateCore.php';
+          require getenv('GITHUB_WORKSPACE').'/v433/src/app/CoreUpdates/GitHubClient.php';
+          $m=json_decode(file_get_contents(getenv('GITHUB_WORKSPACE').'/channel/projects/P01.json'),true,512,JSON_THROW_ON_ERROR);
+          $core=new \CoreUpdates\UpdateCore('P01','APP');
+          $eligible=$core->check('2.47.433','2026102201',$m);
+          if (($eligible['status']??'') !== 'AVAILABLE') throw new RuntimeException('native 431 discovery not available: '.json_encode($eligible));
+          if (($core->check('2.47.428','2026102201',$m)['status']??'') !== 'BLOCKED_SOURCE_VERSION') throw new RuntimeException('old source version not blocked');
+          if (($core->check('2.47.433','2026090401',$m)['status']??'') !== 'BLOCKED_SCHEMA') throw new RuntimeException('schema mismatch not blocked');
+          echo "P01_NATIVE_433_DISCOVERY=PASS\n";
+          $client=new \CoreUpdates\GitHubClient((string)getenv('READ_TOKEN'));
+          $dest='/tmp/vf-start-v247434-native-downloaded-update.zip';
+          @unlink($dest);
+          $asset=$client->downloadReleaseAsset('llhzx2018/vf-start','v2.47.434','VF_Start_V2.47.434_UPDATE.zip',$dest);
+          if ((int)($asset['size']??0) !== 2832961) throw new RuntimeException('GitHub asset size not expected');
+          $check=$core->verifyPackage($dest,$m);
+          if (($check['status']??'') !== 'VERIFIED') throw new RuntimeException('native asset verification failed: '.json_encode($check));
+          if (!hash_equals('aa25d6f1a90ed094008a2206ec0accefb77af1b68b3427db368ff8da9bb2dc57',hash_file('sha256',$dest))) throw new RuntimeException('download hash mismatch');
+          echo "P01_NATIVE_REMOTE_DOWNLOAD_SHA256=PASS\n";
+          $live=$client->fetchProjectManifest('llhzx2018/core-updates','P01.json','main');
+          if (($live['target_version']??'')==='2.47.434') {
+            if (!hash_equals((string)$m['asset_sha256'],(string)$live['asset_sha256'])) throw new RuntimeException('live public channel differs from candidate');
+            echo "P01_LIVE_MAIN_NATIVE_DISCOVERY=PASS\n";
+          } else {
+            echo "P01_LIVE_MAIN_NATIVE_DISCOVERY=AWAIT_CHANNEL_MERGE\n";
+          }
+          PHP
+          php /tmp/p01-native-gate.php
+          rm -f /tmp/vf-start-v247434-native-downloaded-update.zip /tmp/p01-native-gate.php
+          echo P01_NATIVE_CHANNEL_CANDIDATE_AND_ASSET=PASS
+      - name: Cleanup transient private checkout and fixtures
+        if: always()
+        run: |
+          rm -rf v433 channel /tmp/p01-channel-contract.txt /tmp/p01-channel-php-lint.txt /tmp/p01-channel-native-tests.txt /tmp/vf-start-v247434-native-downloaded-update.zip /tmp/p01-native-gate.php
