@@ -1,0 +1,120 @@
+name: S01 Theme exact formal release
+on:
+  push:
+    branches: [{{BRANCH}}]
+    paths: ['.github/workflows/{{LANE_ID}}-formal.yml']
+permissions:
+  contents: read
+env:
+  TARGET_REPO: {{REPOSITORY}}
+  TARGET_VERSION: {{TARGET_VERSION}}
+  TARGET_SHA: {{TARGET_SHA}}
+  TARGET_TREE: {{TARGET_TREE}}
+  BASE_SHA: {{BASE_SHA}}
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: control
+      - uses: actions/checkout@v4
+        with:
+          repository: {{REPOSITORY}}
+          ref: {{TARGET_SHA}}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Exact candidate, merged tree and required evidence readback
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p proof provider candidate-proof
+          test "$(gh api repos/llhzx2018/core-free-runner-public/actions/runs/{{CANDIDATE_RUN}} --jq .conclusion)" = success
+          test "$(gh api repos/llhzx2018/core-free-runner-public/actions/runs/{{CANDIDATE_RUN}} --jq .head_sha)" = {{CANDIDATE_CONTROL_SHA}}
+          test "$(gh api repos/$TARGET_REPO/commits/main --jq .sha)" = "$TARGET_SHA"
+          test "$(gh api repos/$TARGET_REPO/git/commits/$TARGET_SHA --jq .tree.sha)" = "$TARGET_TREE"
+          gh run download {{CANDIDATE_RUN}} --repo llhzx2018/core-free-runner-public --name s01-home-{{CANDIDATE_RUN}} --dir candidate-proof
+          cmp candidate-proof/state-before.sha256 candidate-proof/state-after.sha256
+          cmp candidate-proof/contracts-before.json candidate-proof/contracts-after.json
+          python3 control/lanes/{{LANE_ID}}/package.py
+          python3 - <<'PYVERIFY'
+          import json,pathlib
+          r=pathlib.Path('candidate-proof')
+          old=json.loads((r/'package.json').read_text());new=json.loads(pathlib.Path('proof/package.json').read_text())
+          assert old['source']=='{{CANDIDATE_SHA}}'
+          phases={phase:json.loads((r/(phase+'-home.json')).read_text()) for phase in ['before','upgrade','rollback','after']}
+          for phase,result in phases.items():
+              assert result['status']=='PASS' and result['write_requests']==[] and result['errors']==[]
+              assert len(result['rows'])==8
+              assert {x['language'] for x in result['rows']}=={'en','zh'}
+              assert {x['width'] for x in result['rows']}=={1920,1440,1319,1024}
+              fixed=phase in ['upgrade','after']
+              for row in result['rows']:
+                  o=row['observed']
+                  assert row['result']=='PASS' and o['overflow'] is False and o['clipped']==[]
+                  assert len(o['cards'])==6 and all(x>=4.5 for x in o['quickContrast'])
+                  assert o['headerMark']==o['footerMark']
+                  assert row['center_error']<=2 if fixed else row['center_error']>=40
+                  if fixed:
+                      assert o['copy']['textAlign']=='center'
+                      assert all(h['head']['textAlign']=='center' and abs(h['head']['center']-h['copy']['center'])<=2 for h in o['heads'])
+                      assert all(float(x['padding'][:-2])>=24 for x in o['cards'])
+              if phase in ['before','after']:
+                  assert len(result['interactions'])==2
+                  for x in result['interactions']:
+                      assert len(x['quick_destinations'])==3 and x['return_home']==x['language_switch']==x['task_disclosure']=='PASS'
+          for before,after in zip(phases['before']['rows'],phases['after']['rows']):
+              for key in ['hrefs','h1','canonical']:assert before['observed'][key]==after['observed'][key]
+          assert json.loads((r/'clean-install.json').read_text())['status']=='PASS'
+          for k in ['status','version','tree','sha256','bytes','files']:assert old[k]==new[k],k
+          assert new['sha256']=='{{ASSET_SHA256}}' and new['bytes']=={{ASSET_BYTES}}
+          coverage=json.loads(pathlib.Path('control/lanes/{{LANE_ID}}/release-authority.json').read_text())
+          assert set(coverage['required'])=={'TESTING','GIT','UA_UI','SEO','SECURITY','INSTALL','UPGRADE','DATA_SCHEMA'}
+          assert coverage['source']=='{{CANDIDATE_SHA}}' and coverage['tree']=='{{TARGET_TREE}}'
+          assert coverage['owner_preview']=='N_A per unchanged Theme SSOT15'
+          for item in coverage['required'].values():
+              assert item['sha'] and item['acceptance']
+              item['evidence_status']='PASS_EXACT_CANDIDATE_MACHINE'
+          coverage['candidate_run']='{{CANDIDATE_RUN}}'
+          coverage['merged_source']='{{TARGET_SHA}}'
+          coverage['formal_release_gate']='PASS'
+          coverage['production_effect']='NOT_PROVEN_POST_MANUAL_UPGRADE_READBACK_REQUIRED'
+          pathlib.Path('proof/public-authority-coverage.json').write_text(json.dumps(coverage,ensure_ascii=False,indent=2))
+          print('MERGED_TREE_EQUALS_TESTED_TREE_AND_EXACT_PACKAGE_PASS')
+          PYVERIFY
+      - name: Publish only the exact verified package
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh release view {{TARGET_TAG}} --repo "$TARGET_REPO" >/dev/null 2>&1; then
+            gh release create {{TARGET_TAG}} provider/vf-tools-theme_V{{TARGET_VERSION}}.zip --repo "$TARGET_REPO" --target "$TARGET_SHA" --title 'VF Tools Theme V{{TARGET_VERSION}}' --notes '针对Owner实际截图反馈，重新处理首页桌面整体构图：参考iLovePDF与Smallpdf的居中层级，首屏标题/说明/操作居中，三条快捷入口横排，区块标题居中，统一模块和卡片内边距、流程节点及底部CTA。内容、链接、模块顺序、自定义菜单、SEO及领域逻辑保持；此前品牌和可读性修复保持。中英文四档桌面、实际链接跳转/返回、语言切换、键盘任务展开、干净安装/登录、原生升级/回退/重复安装与受保护数据验证通过。476运行文件；M3U8保持1.25.94，Ops未改。Production由Owner手工升级，手机按Owner要求暂缓；机器验证不等于首页整体运营体验已获认可，须在正式站整页复验。' --latest
+          fi
+          test "$(gh api repos/$TARGET_REPO/git/ref/tags/{{TARGET_TAG}} --jq .object.sha)" = "$TARGET_SHA"
+          test "$(gh release view {{TARGET_TAG}} --repo "$TARGET_REPO" --json isDraft,isPrerelease --jq '.isDraft or .isPrerelease')" = false
+      - name: Authenticated remote ZIP byte comparison
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p remote
+          gh release download {{TARGET_TAG}} --repo "$TARGET_REPO" --pattern vf-tools-theme_V{{TARGET_VERSION}}.zip --dir remote
+          cmp provider/vf-tools-theme_V{{TARGET_VERSION}}.zip remote/vf-tools-theme_V{{TARGET_VERSION}}.zip
+          echo '{{ASSET_SHA256}}  remote/vf-tools-theme_V{{TARGET_VERSION}}.zip' | sha256sum -c
+          test "$(stat -c %s remote/vf-tools-theme_V{{TARGET_VERSION}}.zip)" = {{ASSET_BYTES}}
+          gh release view {{TARGET_TAG}} --repo "$TARGET_REPO" --json url,publishedAt,tagName > proof/formal-release.json
+          echo FORMAL_RELEASE_EXACT_REMOTE_ASSET_PASS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s01-home-formal-${{ github.run_id }}
+          path: proof/
+          retention-days: 14
+      - name: Cleanup private sources and packages
+        if: always()
+        run: rm -rf target provider remote candidate-proof
