@@ -59,16 +59,18 @@ version_check(){ test "$(cli theme get vf-tools-theme --field=version)" = "$1"; 
 version_check "$TARGET_VERSION"
 cli theme install /tmp/theme-old.zip --force >/dev/null
 version_check "$SOURCE_VERSION"
-NODE_PATH="$PWD/node_modules" node "control/lanes/$LANE_ID/browser.cjs" --baseline
+NODE_PATH="$PWD/node_modules" node "control/lanes/$LANE_ID/release-regression.cjs" --phase=before
 cli theme install /tmp/theme-new.zip --force >/dev/null
 version_check "$TARGET_VERSION"
+NODE_PATH="$PWD/node_modules" node "control/lanes/$LANE_ID/release-regression.cjs" --phase=upgrade
 cli theme install /tmp/theme-old.zip --force >/dev/null
 version_check "$SOURCE_VERSION"
+NODE_PATH="$PWD/node_modules" node "control/lanes/$LANE_ID/release-regression.cjs" --phase=rollback
 cli theme install /tmp/theme-new.zip --force >/dev/null
 version_check "$TARGET_VERSION"
 cli theme install /tmp/theme-new.zip --force >/dev/null
 version_check "$TARGET_VERSION"
-NODE_PATH="$PWD/node_modules" node "control/lanes/$LANE_ID/browser.cjs"
+NODE_PATH="$PWD/node_modules" node "control/lanes/$LANE_ID/release-regression.cjs" --phase=after
 cli eval-file /tmp/snapshot.php > proof/state-after.sha256
 cmp proof/state-before.sha256 proof/state-after.sha256
 cli eval-file /tmp/contracts-snapshot.php > proof/contracts-after.json
