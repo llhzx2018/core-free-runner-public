@@ -1,0 +1,175 @@
+name: P01 R3 Navigation and Inbox daily operations exact-source regression
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-r3-frontstage-inbox-category-gate.yml'
+permissions:
+  contents: read
+jobs:
+  p01-inbox-gate:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      REPO: llhzx2018/vf-start
+      CANDIDATE_SHA: e19776ccbba074aa4d894257b7329a67ba2c617d
+      BASELINE_SHA: 367e2ea828c53e17b94fd26266be27ce3ad2d77b
+    steps:
+      - name: Prepare PHP, SQLite and Node
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, mbstring, zip, gd, openssl
+          coverage: none
+      - name: Fetch pinned private sources into ephemeral runner only
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'BLOCKED_SECRET_MISSING'; exit 11; }
+          git init -q candidate
+          git -C candidate remote add origin "https://x-access-token:${READ_TOKEN}@github.com/${REPO}.git"
+          git -C candidate -c advice.detachedHead=false fetch -q --depth 1 origin "$CANDIDATE_SHA"
+          git -C candidate checkout -q --detach FETCH_HEAD
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git init -q stable
+          git -C stable remote add origin "https://x-access-token:${READ_TOKEN}@github.com/${REPO}.git"
+          git -C stable -c advice.detachedHead=false fetch -q --depth 1 origin "$BASELINE_SHA"
+          git -C stable checkout -q --detach FETCH_HEAD
+          test "$(git -C stable rev-parse HEAD)" = "$BASELINE_SHA"
+          git -C candidate remote remove origin
+          git -C stable remote remove origin
+          echo P01_INBOX_EXACT_SOURCE_CHECKOUT=PASS
+      - name: R3 navigation category and Inbox native dialog contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          test "$(tr -d '\r\n ' < VERSION)" = "2.47.444"
+          test "$(tr -d '\r\n ' < src/VERSION.txt)" = "2.47.444"
+          for p in src/app/FunctionalWorkspace.php src/app/FunctionalHome.php src/app/SurfaceShell.php src/app/FunctionalWorkspaceShell.php src/surface-manager.php src/inbox.php tests/unit/p01_ia_v2_r3_frontstage_contract.php; do php -l "$p" >/dev/null; done
+          php tests/unit/p01_r2_frontstage_panel_lifecycle_contract.php
+          php tests/unit/p01_ia_v2_r3_frontstage_contract.php
+          node --check src/assets/workspace.js
+          node --check src/assets/frontend-start-actions.js
+          node --check src/assets/frontstage-panel-controller.js
+          node tests/unit/p01_r2_frontstage_panel_behavior.cjs
+          echo P01_R3_FOCUSED_GATE=PASS
+      - name: Synthetic HTTP auth and Inbox capture smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate/src
+          php -S 127.0.0.1:18483 -t . >/tmp/p01-inbox-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" >/dev/null 2>&1 || true' EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-inbox-cookies -b /tmp/p01-inbox-cookies http://127.0.0.1:18483/setup.php -o /tmp/p01-inbox-setup.html; then break; fi
+            sleep 1
+          done
+          csrf=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-inbox-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          assert m, 'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-inbox-cookies -b /tmp/p01-inbox-cookies -X POST http://127.0.0.1:18483/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=P01 Inbox Synthetic Smoke' \
+            --data-urlencode 'admin_password=Inbox!Synthetic18483' \
+            --data-urlencode 'admin_password_confirm=Inbox!Synthetic18483' \
+            -o /tmp/p01-inbox-post.html
+          php -r '
+          require "app/bootstrap.php";
+          $repo=new VfRepository(vf_db());
+          $repo->createCategory(["name"=>"Inbox Synthetic Category","description"=>"","icon"=>"","is_private"=>1,"sort_order"=>0]);
+          $first=$repo->savePendingCapture(["title"=>"P01 Inbox Synthetic Capture","url"=>"https://example.com/vf-inbox-synthetic-18483"],"browser-extension");
+          $second=$repo->savePendingCapture(["title"=>"P01 Inbox Synthetic Capture","url"=>"https://example.com/vf-inbox-synthetic-18483"],"browser-extension");
+          if((int)($first["id"]??0)<1||empty($second["duplicate"])||(int)$first["id"]!==(int)$second["id"])exit(3);
+          $id=(int)$first["id"];$q=vf_db()->prepare("SELECT is_pending,is_private FROM links WHERE id=?");
+          $q->execute([$id]);$a=$q->fetch(PDO::FETCH_ASSOC);
+          if((int)$a["is_pending"]!==1||(int)$a["is_private"]!==1)exit(4);
+          echo "P01_INBOX_CANONICAL_CAPTURE_DEDUP=PASS\\n";
+          '
+          guest_status=$(curl -sS -o /tmp/p01-inbox-guest.html -w '%{http_code}' http://127.0.0.1:18483/inbox.php)
+          test "$guest_status" = 302
+          ! grep -Fq 'P01 Inbox Synthetic Capture' /tmp/p01-inbox-guest.html
+          echo P01_INBOX_ANONYMOUS_DENIED=PASS
+          curl -fsS -c /tmp/p01-inbox-cookies -b /tmp/p01-inbox-cookies \
+            -H 'Content-Type: application/json' -d '{"password":"Inbox!Synthetic18483"}' \
+            'http://127.0.0.1:18483/api.php?action=login' -o /tmp/p01-inbox-login.json
+          grep -Fq '"ok":true' /tmp/p01-inbox-login.json
+          curl -fsS -b /tmp/p01-inbox-cookies 'http://127.0.0.1:18483/inbox.php' -o /tmp/p01-inbox-owner.html
+          grep -Fq 'P01 Inbox Synthetic Capture' /tmp/p01-inbox-owner.html
+          grep -Fq 'vf-inbox-organize' /tmp/p01-inbox-owner.html
+          grep -Fq 'aria-current="page"' /tmp/p01-inbox-owner.html
+          grep -Fq '收集箱' /tmp/p01-inbox-owner.html
+          grep -Fq 'placeholder="搜索收集箱"' /tmp/p01-inbox-owner.html
+          grep -Fq 'vf-inbox-quick-save' /tmp/p01-inbox-owner.html
+          grep -Fq 'href="quick-save.php"' /tmp/p01-inbox-owner.html
+          grep -Fq '仅私人待整理' /tmp/p01-inbox-owner.html
+          ! grep -Fq 'vf-start-scope-select' /tmp/p01-inbox-owner.html
+          curl -fsS -b /tmp/p01-inbox-cookies 'http://127.0.0.1:18483/inbox.php?scope=public' -o /tmp/p01-inbox-public-request.html
+          grep -Fq 'P01 Inbox Synthetic Capture' /tmp/p01-inbox-public-request.html
+          curl -fsS -b /tmp/p01-inbox-cookies 'http://127.0.0.1:18483/inbox.php?q=nonexistent-ux-r1-needle' -o /tmp/p01-inbox-no-result.html
+          ! grep -Fq 'vf-inbox-row" data-asset-row="' /tmp/p01-inbox-no-result.html
+          echo P01_INBOX_SCOPED_SEARCH_AND_CAPTURE_HTTP=PASS
+          redirect=$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' -b /tmp/p01-inbox-cookies \
+            'http://127.0.0.1:18483/start.php?view=pending')
+          test "$redirect" = '302 http://127.0.0.1:18483/inbox.php'
+          guest_admin=$(curl -sS -o /tmp/p01-subsite-guest.html -w '%{http_code}' 'http://127.0.0.1:18483/subsite-admin.php')
+          test "$guest_admin" = 403
+          echo P01_R1_GUEST_ADMIN_DENIED=PASS
+          curl -fsS -b /tmp/p01-inbox-cookies 'http://127.0.0.1:18483/subsite-admin.php' -o /tmp/p01-subsite-owner.html
+          grep -Fq '子站管理' /tmp/p01-subsite-owner.html
+          grep -Fq 'data-vf-nav-group="subsites"' /tmp/p01-subsite-owner.html
+          grep -Fq 'gov-book-manager.php' /tmp/p01-subsite-owner.html
+          grep -Fq 'toolbox-manager.php' /tmp/p01-subsite-owner.html
+          grep -Fq 'full-governance.php?from=pending' /tmp/p01-subsite-owner.html
+          grep -Fq '进入共享资源中心' /tmp/p01-subsite-owner.html
+          test "$(grep -Fc 'class="vf-subsite-directory-row"' /tmp/p01-subsite-owner.html)" = 11
+          echo P01_R1_OWNER_11_SUBSITES_HTTP=PASS
+          curl -fsS -b /tmp/p01-inbox-cookies 'http://127.0.0.1:18483/start.php' -o /tmp/p01-r2-owner-start.html
+          echo P01_R2_OWNER_BODY_BYTES=$(wc -c </tmp/p01-r2-owner-start.html)
+          echo P01_R2_OWNER_BODY_START
+          head -c 350 /tmp/p01-r2-owner-start.html
+          echo
+          echo P01_R2_OWNER_BODY_END
+          if ! grep -Fq 'file=frontstage-panel-controller.js' /tmp/p01-r2-owner-start.html; then
+            echo P01_R2_OWNER_CONTROLLER_MISSING
+            grep -Eo 'assets/[a-z-]+\\.js' /tmp/p01-r2-owner-start.html | tail -25 || true
+            exit 41
+          fi
+          if ! grep -Fq 'file=frontstage-panels.css' /tmp/p01-r2-owner-start.html; then
+            echo P01_R2_OWNER_CSS_MISSING
+            grep -Eo 'assets/[a-z-]+\\.css' /tmp/p01-r2-owner-start.html | tail -25 || true
+            exit 42
+          fi
+          curl -fsS 'http://127.0.0.1:18483/start.php?scope=public' -o /tmp/p01-r2-guest-start.html
+          ! grep -Fq 'file=frontstage-panel-controller.js' /tmp/p01-r2-guest-start.html
+          echo P01_R2_OWNER_ASSETS_ONLY=PASS
+          r3_redirect=$(curl -sS -b /tmp/p01-inbox-cookies -o /dev/null -w '%{http_code} %{redirect_url}' 'http://127.0.0.1:18483/surface-manager.php')
+          test "$r3_redirect" = '302 http://127.0.0.1:18483/inbox.php'
+          curl -fsS -b /tmp/p01-inbox-cookies 'http://127.0.0.1:18483/surface-manager.php?governance=1' -o /tmp/p01-r3-governance.html
+          grep -Fq 'AI 批量整理' /tmp/p01-r3-governance.html
+          ! grep -Fq 'class="vf-resource-search vf-pending-search"' /tmp/p01-r3-governance.html
+          r3_bad_csrf=$(curl -sS -b /tmp/p01-inbox-cookies -o /dev/null -w '%{http_code}' -X POST -d 'action=delete' 'http://127.0.0.1:18483/surface-manager.php?governance=1')
+          test "$r3_bad_csrf" = 419
+          echo P01_R3_LEGACY_OWNER_ROUTING_GOVERNANCE_CSRF=PASS
+          echo P01_INBOX_OWNER_HTTP_SMOKE=PASS
+      - name: Canonical full unit regression against current main baseline
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash candidate/tests/canonical_release_regression.sh candidate stable --require-zero-debt
+          echo P01_R3_CANONICAL_REGRESSION=PASS
+      - name: Verify private source never persists in public runner
+        if: always()
+        shell: bash
+        run: |
+          rm -rf candidate stable
+          echo P01_R3_PRIVATE_SOURCE_CLEANUP=PASS
