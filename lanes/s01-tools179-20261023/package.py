@@ -8,7 +8,7 @@ assert git('rev-parse', 'HEAD') == os.environ['TARGET_SHA']
 assert git('rev-parse', 'HEAD^{tree}') == os.environ['TARGET_TREE']
 version = os.environ['TARGET_VERSION']
 assert (root / 'VERSION').read_text().strip() == version
-expected={'src/inc/public-css-owner-registry.php', 'docs/evidence/2026-10-23-tools-directory-desktop.md', 'src/inc/services/frontend-page-progress-service.php', 'VERSION', 'tests/tools-directory-desktop-browser-check.cjs', 'src/inc/modules/module-faq.php', 'src/assets/css/public/vf-theme-public-runtime.css', 'src/assets/css/public/pages/families/public-family-02-tool-directory-detail-operations-closure.css', 'CHANGELOG.md', 'tests/tools-directory-copy-check.php', 'src/inc/modules/module-tool-grid.php', 'src/style.css', 'src/inc/runtime-constants.php'}
+expected={'src/inc/modules/module-content-matrix.php', 'src/inc/public-css-owner-registry.php', 'docs/evidence/2026-10-23-tools-directory-desktop.md', 'src/inc/services/frontend-page-progress-service.php', 'VERSION', 'tests/tools-directory-desktop-browser-check.cjs', 'src/inc/modules/module-faq.php', 'src/assets/css/public/vf-theme-public-runtime.css', 'src/assets/css/public/pages/families/public-family-02-tool-directory-detail-operations-closure.css', 'CHANGELOG.md', 'tests/tools-directory-copy-check.php', 'src/inc/modules/module-tool-grid.php', 'src/style.css', 'src/inc/runtime-constants.php'}
 assert set(git('diff','--name-only',os.environ['BASE_SHA'],'HEAD').splitlines())==expected
 print('BOUNDED_DIRECTORY_PRESENTATION_NO_CONTENT_OR_DATA_CHANGE_PASS')
 
