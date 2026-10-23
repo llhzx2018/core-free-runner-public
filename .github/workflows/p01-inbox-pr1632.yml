@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 25
     env:
       REPO: llhzx2018/vf-start
-      CANDIDATE_SHA: 4771a70dcbcb08cd0c18184f51e59facc8a02800
+      CANDIDATE_SHA: 27df50cd1c579395f05f55860dab1ddbc1eb3378
       BASELINE_SHA: 976b61f5e24951d5c62c32deaff3b5a83d703b1e
     steps:
       - name: Prepare PHP, SQLite and Node
@@ -66,6 +66,60 @@ jobs:
           set -Eeuo pipefail
           bash candidate/tests/canonical_release_regression.sh candidate stable --require-zero-debt
           echo P01_INBOX_CANONICAL_REGRESSION=PASS
+      - name: Synthetic HTTP auth and Inbox capture smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate/src
+          php -S 127.0.0.1:18483 -t . >/tmp/p01-inbox-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" >/dev/null 2>&1 || true' EXIT
+          for _ in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-inbox-cookies -b /tmp/p01-inbox-cookies http://127.0.0.1:18483/setup.php -o /tmp/p01-inbox-setup.html; then break; fi
+            sleep 1
+          done
+          csrf=$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-inbox-setup.html',encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\\s+value="([^"]+)"',s)
+          assert m, 'setup csrf missing'
+          print(m.group(1))
+          PY
+          )
+          curl -fsS -c /tmp/p01-inbox-cookies -b /tmp/p01-inbox-cookies -X POST http://127.0.0.1:18483/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=P01 Inbox Synthetic Smoke' \
+            --data-urlencode 'admin_password=Inbox!Synthetic18483' \
+            --data-urlencode 'admin_password_confirm=Inbox!Synthetic18483' \
+            -o /tmp/p01-inbox-post.html
+          php -r '
+          require "app/bootstrap.php";
+          $repo=new VfRepository(vf_db());
+          $first=$repo->savePendingCapture(["title"=>"P01 Inbox Synthetic Capture","url"=>"https://example.com/vf-inbox-synthetic-18483"],"browser-extension");
+          $second=$repo->savePendingCapture(["title"=>"P01 Inbox Synthetic Capture","url"=>"https://example.com/vf-inbox-synthetic-18483"],"browser-extension");
+          if((int)($first["id"]??0)<1||empty($second["duplicate"])||(int)$first["id"]!==(int)$second["id"])exit(3);
+          $id=(int)$first["id"];$q=vf_db()->prepare("SELECT is_pending,is_private FROM links WHERE id=?");
+          $q->execute([$id]);$a=$q->fetch(PDO::FETCH_ASSOC);
+          if((int)$a["is_pending"]!==1||(int)$a["is_private"]!==1)exit(4);
+          echo "P01_INBOX_CANONICAL_CAPTURE_DEDUP=PASS\\n";
+          '
+          guest_status=$(curl -sS -o /tmp/p01-inbox-guest.html -w '%{http_code}' http://127.0.0.1:18483/inbox.php)
+          test "$guest_status" = 302
+          ! grep -Fq 'P01 Inbox Synthetic Capture' /tmp/p01-inbox-guest.html
+          echo P01_INBOX_ANONYMOUS_DENIED=PASS
+          curl -fsS -c /tmp/p01-inbox-cookies -b /tmp/p01-inbox-cookies \
+            -H 'Content-Type: application/json' -d '{"password":"Inbox!Synthetic18483"}' \
+            'http://127.0.0.1:18483/api.php?action=login' -o /tmp/p01-inbox-login.json
+          grep -Fq '"ok":true' /tmp/p01-inbox-login.json
+          curl -fsS -b /tmp/p01-inbox-cookies 'http://127.0.0.1:18483/inbox.php' -o /tmp/p01-inbox-owner.html
+          grep -Fq 'P01 Inbox Synthetic Capture' /tmp/p01-inbox-owner.html
+          grep -Fq 'vf-inbox-organize' /tmp/p01-inbox-owner.html
+          grep -Fq 'aria-current="page"' /tmp/p01-inbox-owner.html
+          grep -Fq '收集箱' /tmp/p01-inbox-owner.html
+          redirect=$(curl -sS -o /dev/null -w '%{http_code} %{redirect_url}' -b /tmp/p01-inbox-cookies \
+            'http://127.0.0.1:18483/start.php?view=pending')
+          test "$redirect" = '302 http://127.0.0.1:18483/inbox.php'
+          echo P01_INBOX_OWNER_HTTP_SMOKE=PASS
       - name: Verify private source never persists in public runner
         if: always()
         shell: bash
