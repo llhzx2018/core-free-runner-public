@@ -1,0 +1,77 @@
+name: GOV-TOPIC KDP first 30 days v1.0.0 exact-source proof
+# One-off public-safe hosted runner: private source remains transient and is never uploaded.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/gov-topic-kdp30-v100-once.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      EXPECTED_GOV_TOPIC_SHA: 9a6f8ffc0ee61a6bf387a8a5aadaa59215147cc1
+    steps:
+      - name: Verify private read capability without exposing token
+        shell: bash
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$PRIVATE_READ_TOKEN" || { echo "REGISTERED_PRIVATE_CHECKOUT=BLOCKED_CAPABILITY"; exit 78; }
+          echo 'REGISTERED_PRIVATE_CHECKOUT=AVAILABLE'
+      - name: Checkout exact private GOV-TOPIC PR source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          repository: llhzx2018/gov-topic
+          ref: ${{ env.EXPECTED_GOV_TOPIC_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-src
+      - name: Bind exact source and execute repository machine gates
+        working-directory: private-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_GOV_TOPIC_SHA"
+          echo "GOV_TOPIC_EXACT_SHA=$EXPECTED_GOV_TOPIC_SHA"
+          python3 -m unittest discover -s tests -v
+          python3 tools/build_catalog.py --check
+          echo 'GOV_TOPIC_EXACT_REPO_TESTS=PASS'
+      - name: Verify exact manifest asset integrity and immutable cover
+        working-directory: private-src
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json, struct
+          root=Path('.')
+          catalog=json.loads((root/'distribution/p01/catalog.json').read_text(encoding='utf-8'))
+          entry=next(x for x in catalog['topics'] if x['topic_id']=='kdp-new-book-first-30-days')
+          assert entry['topic_version']=='v1.0.0'
+          assert len(catalog['topics'])==9
+          assert all(item.get('cover') for item in catalog['topics'])
+          for key in ('html','sources','cover'):
+              item=entry[key]; data=(root/item['path']).read_bytes()
+              assert len(data)==item['bytes'],key
+              assert hashlib.sha256(data).hexdigest()==item['sha256'],key
+          png=(root/entry['cover']['path']).read_bytes()
+          assert png[:8]==b'\x89PNG\r\n\x1a\n'
+          assert struct.unpack('>II',png[16:24])==(1200,900)
+          html=(root/entry['html']['path']).read_text(encoding='utf-8').lower()
+          assert '<script' not in html and 'onclick=' not in html and 'noindex' not in html
+          csv=(root/'topics/kdp-new-book-first-30-days/v1.0.0/30-day-review-template.csv').read_bytes()
+          assert len(csv)==349
+          print('GOV_TOPIC_CATALOG_BYTES_AND_COVER=PASS')
+          PY
+      - name: Remove transient private workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf private-src
+          echo 'PRIVATE_SOURCE_PERSISTED_IN_PUBLIC_ARTIFACT=NO'
