@@ -1,0 +1,71 @@
+name: P01 Audius discovery V2.47.431 exact source
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p01-music-audius-v247431-20261023.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 14
+    steps:
+      - uses: shivammathur/setup-php@2.35.5
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite,sqlite3,mbstring,curl,zip
+          coverage: none
+      - name: Fetch exact P01 private source
+        env:
+          PRIVATE_READ: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$PRIVATE_READ"
+          git clone -q --depth 1 --no-checkout "https://x-access-token:${PRIVATE_READ}@github.com/llhzx2018/vf-start.git" candidate
+          git -C candidate fetch -q --depth 1 origin 57d6290152c7bf844ae029e5419742c2e00c907f
+          git -C candidate checkout -q --detach FETCH_HEAD
+          git -C candidate remote set-url origin https://github.com/llhzx2018/vf-start.git
+          test "$(git -C candidate rev-parse HEAD)" = 57d6290152c7bf844ae029e5419742c2e00c907f
+          test "$(tr -d '\r\n ' <candidate/VERSION)" = 2.47.431
+          test "$(tr -d '\r\n ' <candidate/src/VERSION.txt)" = 2.47.431
+          echo P01_AUDIUS_EXACT_SOURCE=PASS
+      - name: PHP, Node and actual owner-only SQLite HTTP
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for f in src/music-discover.php src/music-home.php src/app/MusicSource.php src/app/MusicQuickImport.php src/app/bootstrap.php; do php -l "candidate/$f"; done
+          (cd candidate && php tests/unit/music_audius_source_contract.php)
+          node candidate/tests/unit/music_audius_directory_contract.js
+          (cd candidate && php tests/unit/music_security_contract.php)
+          (cd candidate && php tests/unit/music_quick_import_contract.php)
+          (cd candidate && php tests/unit/music_radio_source_contract.php)
+          node candidate/tests/unit/music_radio_directory_contract.js
+          node candidate/tests/unit/music_player_fallback_contract.js
+          bash -n candidate/tests/integration/music_fresh_http.sh
+          bash candidate/tests/integration/music_fresh_http.sh candidate
+          echo P01_AUDIUS_PRIVATE_HTTP_AND_QUEUE=PASS
+      - name: Audius live no-secret catalog and CORS
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for endpoint in 'tracks/trending?limit=3' 'tracks/search?query=jazz&limit=3' 'playlists/trending?limit=3'; do
+            if ! curl -fsSL --connect-timeout 10 --max-time 20 -A 'VF-Music/2.47.431' \
+              -H 'Origin: https://start.kewaro.com' \
+              -D /tmp/audius-headers -o /tmp/audius-data "https://api.audius.co/v1/$endpoint"; then
+              echo P01_AUDIUS_PUBLIC_API_NEEDS_REVIEW
+              exit 1
+            fi
+            python3 -c 'import json; d=json.load(open("/tmp/audius-data")); assert isinstance(d.get("data"),list)'
+            if ! grep -qi '^access-control-allow-origin:' /tmp/audius-headers; then
+              echo P01_AUDIUS_CORS_NOT_PROVEN
+              exit 1
+            fi
+            echo "P01_AUDIUS_NO_KEY_JSON_CORS=PASS $endpoint"
+          done
+      - name: Cleanup all temporary private code and API data
+        if: always()
+        run: |
+          rm -rf candidate /tmp/audius-headers /tmp/audius-data
+          echo P01_AUDIUS_EPHEMERAL_CLEANUP=PASS
