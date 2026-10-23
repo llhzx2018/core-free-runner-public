@@ -14,7 +14,7 @@ docker exec "$WP" sh -c 'echo "Listen 18880" >> /etc/apache2/ports.conf;sed -i "
 cli(){ docker exec --user www-data "$WP" php /usr/local/bin/wp "$@" --path=/var/www/html; }
 cli config set VF_WP_UPDATE_TEST_MODE true --raw >/dev/null
 cli config set DISABLE_WP_CRON true --raw >/dev/null
-cli core install --url=http://127.0.0.1:18880 --title='Synthetic Frontend Review' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
+cli core install --url=http://127.0.0.1:18880 --title='M3U8.ONE' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
 docker exec "$WP" mkdir -p /var/www/html/wp-content/themes/vf-tools-theme /var/www/html/wp-content/mu-plugins
 docker exec "$WP" rmdir /var/www/html/wp-content/themes/vf-tools-theme
 docker cp "provider/vf-tools-theme_V$TARGET_VERSION.zip" "$WP:/tmp/clean-theme.zip"
