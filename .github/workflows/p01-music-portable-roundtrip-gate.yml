@@ -1,0 +1,78 @@
+name: P01 VF Music Portable JSON Exact Source Gate
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-music-portable-roundtrip-gate.yml'
+permissions:
+  contents: read
+jobs:
+  music-portable-gate:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SOURCE_REPOSITORY: llhzx2018/vf-start
+      CANDIDATE_SHA: 451c9801a903333003b6a4fd781916cfc650e19a
+    steps:
+      - name: Prepare ephemeral PHP and SQLite interpreter
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, mbstring, zip, gd, openssl
+          coverage: none
+      - name: Verify private read permission and checkout exact source SHA
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo 'P01_MUSIC_GATE_BLOCKED_SECRET_MISSING'; exit 11; }
+          git init -q candidate
+          git -C candidate remote add origin "https://x-access-token:$READ_TOKEN@github.com/$SOURCE_REPOSITORY.git"
+          git -C candidate -c advice.detachedHead=false fetch -q --depth 1 origin "$CANDIDATE_SHA"
+          git -C candidate checkout -q --detach FETCH_HEAD
+          test "$(git -C candidate rev-parse HEAD)" = "$CANDIDATE_SHA"
+          git -C candidate remote remove origin
+          echo "P01_MUSIC_EXACT_SOURCE=$CANDIDATE_SHA"
+      - name: Lint exact-source portable export PHP and browser JS
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(tr -d '\r\n ' < VERSION)" = "2.47.444"
+          test "$(tr -d '\r\n ' < src/VERSION.txt)" = "2.47.444"
+          php -m | grep -Fxq pdo_sqlite
+          for file in src/app/MusicPlaylistImport.php src/app/MusicImportPlan.php src/app/MusicRepository.php src/music.php src/music-import.php tests/integration/music_portable_sqlite_roundtrip.php; do
+            php -l "$file" >/dev/null
+          done
+          node --check src/assets/music-preview-player.js
+          echo P01_MUSIC_PORTABLE_SYNTAX=PASS
+      - name: Validate import contracts and SQLite round trip
+        working-directory: candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for file in \
+            tests/unit/music_playlist_import_contract.php \
+            tests/unit/music_playlist_text_formats_contract.php \
+            tests/unit/music_import_plan_contract.php \
+            tests/unit/music_import_plan_conflict_contract.php \
+            tests/unit/music_import_private_route_contract.php \
+            tests/unit/music_security_contract.php \
+            tests/unit/music_native_source_contract.php; do
+            php "$file"
+          done
+          php tests/integration/music_portable_sqlite_roundtrip.php
+          echo P01_MUSIC_IMPORT_CONTRACTS_AND_SQLITE=PASS
+      - name: Verify source removal from runner
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ -d candidate ]; then
+            git -C candidate remote remove origin 2>/dev/null || true
+            rm -rf candidate
+          fi
+          test ! -e candidate
+          echo P01_MUSIC_PRIVATE_SOURCE_CLEANUP=PASS
