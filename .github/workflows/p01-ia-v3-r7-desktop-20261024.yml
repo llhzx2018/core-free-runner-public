@@ -1,0 +1,97 @@
+name: P01 IA V3 R7 desktop browser smoke
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p01-ia-v3-r7-desktop-20261024.yml']
+permissions:
+  contents: read
+jobs:
+  desktop:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      P01_SHA: 2ab32a18333a8e0cc98c23d8e0eeb008e576bce4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install isolated browser runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-xml php-zip php-gd >/dev/null
+          mkdir -p "$RUNNER_TEMP/p01-r7-desktop"
+          cd "$RUNNER_TEMP/p01-r7-desktop"
+          npm install --no-save --no-package-lock --silent playwright@1.56.1
+          PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/p01-r7-desktop/browsers" ./node_modules/.bin/playwright install --with-deps chromium
+      - name: Source-bound browser checks on fresh local Owner installation
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          ROOT="$RUNNER_TEMP/p01-r7-desktop"
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" "$ROOT/candidate"
+          git -C "$ROOT/candidate" fetch -q origin refs/heads/test/p01-ia-v3-r7-e2e-20261024
+          git -C "$ROOT/candidate" checkout -q --detach FETCH_HEAD
+          git -C "$ROOT/candidate" remote set-url origin https://github.com/llhzx2018/vf-start.git
+          test "$(git -C "$ROOT/candidate" rev-parse HEAD)" = "$P01_SHA"
+          cp -a "$ROOT/candidate/src" "$ROOT/site"
+          php -S 127.0.0.1:18641 -t "$ROOT/site" >"$ROOT/php.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" >/dev/null 2>&1 || true; rm -rf -- "$ROOT/site" "$ROOT/candidate"' EXIT
+          cat >"$ROOT/smoke.cjs" <<'JS'
+          'use strict';
+          const { chromium,request }=require('playwright');
+          const assert=require('node:assert/strict');
+          const origin='http://127.0.0.1:18641',password='R7Desktop!Synthetic2026';
+          (async()=>{
+            const api=await request.newContext({baseURL:origin});
+            let setup;
+            for(let n=0;n<45;n++){try{setup=await api.get('/setup.php');if(setup.ok())break}catch(e){}await new Promise(r=>setTimeout(r,300))}
+            assert(setup?.ok(),'local PHP setup unavailable');
+            const html=await setup.text(),csrf=html.match(/name="setup_csrf"\s+value="([^"]+)"/)?.[1];
+            assert(csrf,'setup form token missing');
+            const install=await api.post('/setup.php',{form:{setup_csrf:csrf,site_title:'P01 IA V3 R7 Desktop',admin_password:password,admin_password_confirm:password}});
+            assert(install.ok(),'fresh synthetic setup failed');
+            const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+            try{
+              const ctx=await browser.newContext({viewport:{width:1440,height:900}});
+              await ctx.route('**/*',r=>r.request().url().startsWith(origin)?r.continue():r.abort());
+              const login=await ctx.request.post(origin+'/api.php?action=login',{data:{password}});
+              assert.equal(login.status(),200,'Owner login status');
+              assert((await login.json()).ok,'Owner login payload');
+              const page=await ctx.newPage();
+              const fronts=['index.php','start.php','inbox.php','channels.php','watch.php','music-home.php','topics.php','courses.php','projects.php','tools.php','software.php'];
+              for(const route of fronts){
+                const r=await page.goto(origin+'/'+route,{waitUntil:'domcontentloaded',timeout:30000});
+                assert(r&&r.status()===200,'Owner frontstage '+route+' HTTP '+r?.status());
+                assert((await page.locator('body').count())===1,'missing DOM '+route);
+              }
+              console.log('P01_R7_DESKTOP_11_OWNER_FRONTSTAGE=PASS');
+              await page.goto(origin+'/manage.php',{waitUntil:'domcontentloaded'});
+              const group=page.locator('[data-vf-nav-group="sources"]');
+              assert.equal(await group.count(),1,'sources group missing');
+              const entries=group.locator('.vf-rail-subitem');
+              assert.equal(await entries.count(),5,'generic install should show only five usable specialists');
+              assert(await entries.first().isVisible(),'sources specialist menu must be visible without clicking a directory');
+              assert.equal(await page.locator('[data-vf-nav-group="subsites"]').count(),0,'legacy hub still in menu');
+              const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-innerWidth);
+              assert(overflow<=12,'desktop admin horizontal overflow: '+overflow);
+              await page.locator('[data-vf-nav-group="sources"] a[href="gov-book-manager.php"]').click();
+              await page.waitForURL(/\/gov-book-manager\.php(?:\?.*)?$/);
+              assert(await page.locator('body[data-vf-group="sources"]').count()===1,'specialist not owned by Sources group');
+              console.log('P01_R7_DESKTOP_DIRECT_SPECIALISTS_AND_GEOMETRY=PASS');
+              await page.goto(origin+'/subsite-admin.php',{waitUntil:'domcontentloaded'});
+              assert(page.url().endsWith('/manage.php'),'retired hub should redirect to Overview');
+              console.log('P01_R7_DESKTOP_LEGACY_HUB_REDIRECT=PASS');
+              await ctx.close();
+            } finally {await browser.close()}
+            await api.dispose();
+          })().catch(e=>{console.error(e);process.exitCode=1});
+          JS
+          PLAYWRIGHT_BROWSERS_PATH="$ROOT/browsers" node "$ROOT/smoke.cjs"
+          echo P01_R7_DESKTOP_OWNER_IA=PASS
