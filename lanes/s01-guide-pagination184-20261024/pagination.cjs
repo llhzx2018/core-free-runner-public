@@ -1,0 +1,31 @@
+const {chromium}=require('playwright'),assert=require('node:assert/strict'),fs=require('node:fs');
+const phase=process.argv.find(x=>x.startsWith('--phase='))?.split('=')[1]||'after',fixed=['upgrade','after'].includes(phase),full=['before','after'].includes(phase),origin='http://127.0.0.1:18880';
+(async()=>{
+ const b=await chromium.launch(),ctx=await b.newContext(),rows=[],errors=[],writes=[];
+ ctx.on('request',r=>{if(r.url().startsWith(origin)&&!['GET','HEAD','OPTIONS'].includes(r.method()))writes.push(r.method())});
+ for(const width of(full?[1440,1024]:[1440]))for(const lang of(full?['en','zh']:['en'])){
+  const p=await ctx.newPage();p.on('pageerror',e=>errors.push(e.message));await p.setViewportSize({width,height:1000});
+  const route=lang==='zh'?'/zh/guides/':'/guides/';assert.equal((await p.goto(origin+route,{waitUntil:'networkidle'})).status(),200);await p.evaluate(()=>document.fonts.ready);
+  const snapshot=()=>p.evaluate(()=>{
+   const box=e=>{const r=e.getBoundingClientRect(),s=getComputedStyle(e);return{x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width,height:r.height,border:parseFloat(s.borderTopWidth),borderColor:s.borderTopColor,gap:parseFloat(s.columnGap),padding:parseFloat(s.paddingLeft),background:s.backgroundColor,shadow:s.boxShadow,outline:s.outlineStyle}};
+   const root=document.querySelector('.vf-theme-post-list--guide_index'),ul=root.querySelector('.vf-theme-pagination>ul.page-numbers');
+   return{version:document.querySelector('meta[name="vf-theme-version"]').content,overflow:document.documentElement.scrollWidth>innerWidth+1,h1:[...document.querySelectorAll('h1')].map(e=>e.textContent.trim()),canonical:[...document.querySelectorAll('link[rel=canonical]')].map(e=>e.href),hreflang:[...document.querySelectorAll('link[hreflang]')].map(e=>[e.hreflang,e.href]),shell:[...document.querySelectorAll('header a[href],footer a[href]')].map(e=>[e.textContent.trim(),e.getAttribute('href')]),cards:[...root.querySelectorAll('[data-vf-directory-item]')].map(e=>({title:e.querySelector('h3').textContent.trim(),copy:e.querySelector('p').textContent.trim(),href:e.getAttribute('href'),meta:e.querySelector('.vf-directory-card-meta').textContent.trim(),box:box(e)})),list:box(ul),controls:[...ul.querySelectorAll('li>.page-numbers')].map(e=>({text:e.textContent.trim(),current:e.getAttribute('aria-current'),href:e.getAttribute('href'),box:box(e)}))};
+  });
+  const v=await snapshot();assert.equal(v.version,fixed?'1.35.184':'1.35.183');assert.equal(v.overflow,false);assert.equal(v.cards.length,9);assert.equal(v.h1.length,1);assert.equal(v.controls.length,3);
+  if(fixed){assert.equal(v.list.border,0,'no group border');assert.equal(v.list.padding,0);assert.equal(v.list.background,'rgba(0, 0, 0, 0)');assert.equal(v.list.shadow,'none');assert.equal(v.list.gap,8);for(let i=1;i<v.controls.length;i++)assert.ok(Math.abs(v.controls[i].box.x-v.controls[i-1].box.right-8)<1,'separate page buttons');assert.equal(v.controls.filter(c=>c.current==='page').length,1);assert.notEqual(v.controls.find(c=>c.current).box.background,v.controls.find(c=>c.href).box.background);}
+  else assert.ok(v.list.border>0,'reproduce stock list receiving a button border');
+  if(phase==='after'){const old=JSON.parse(fs.readFileSync('proof/before-pagination-'+lang+'-'+width+'.json'));for(const k of ['h1','canonical','hreflang','shell'])assert.deepEqual(v[k],old[k]);assert.deepEqual(v.cards,old.cards,'cards unchanged outside pagination');assert.deepEqual(v.controls.map(c=>[c.text,c.current,c.href]),old.controls.map(c=>[c.text,c.current,c.href]),'links and page identity unchanged');}
+  fs.writeFileSync('proof/'+phase+'-pagination-'+lang+'-'+width+'.json',JSON.stringify(v,null,2));
+  const ul=p.locator('.vf-theme-post-list--guide_index .vf-theme-pagination>ul');
+  async function picture(state){await ul.scrollIntoViewIfNeeded();const rect=await ul.evaluate(e=>{const r=e.getBoundingClientRect();return{x:r.x+scrollX-12,y:r.y+scrollY-12,width:r.width+24,height:r.height+24}});const png=await p.screenshot({path:'proof/'+phase+'-pagination-'+lang+'-'+width+'-'+state+'.png',clip:rect});if(phase==='after'&&(state==='normal'||width===1440))console.log('PAGINATION_IMAGE='+JSON.stringify({lang,width,state,png:png.toString('base64')}));}
+  if(full)await picture('normal');
+  if(phase==='after'){
+   const next=ul.locator('a.next');await next.hover();const hv=await snapshot();assert.equal(hv.list.border,0);assert.notEqual(hv.controls.at(-1).box.background,v.controls.at(-1).box.background,'hover feedback');if(width===1440)await picture('hover');
+   await p.mouse.move(1,1);await p.keyboard.press('Tab');await next.focus();const focus=await next.evaluate(e=>({visible:e.matches(':focus-visible'),outline:getComputedStyle(e).outlineStyle}));assert.equal(focus.visible,true);assert.notEqual(focus.outline,'none');if(width===1440)await picture('focus');
+   const href=await next.getAttribute('href');await next.press('Enter');await p.waitForURL(/paged=2/);await p.waitForLoadState('networkidle');assert.equal(new URL(p.url()).searchParams.get('paged'),'2');assert.equal(new URL(p.url()).pathname,new URL(href,origin).pathname);
+   const current=ul.locator('[aria-current="page"]');assert.equal((await current.textContent()).trim(),'2');assert.equal(await p.locator('.vf-theme-post-list--guide_index [data-vf-directory-item]').count(),3);const second=await snapshot();assert.equal(second.list.border,0);assert.ok(second.controls.some(c=>/Previous|上一页/.test(c.text)));await ul.locator('a.prev').click();await p.waitForLoadState('networkidle');assert.equal((await ul.locator('[aria-current="page"]').textContent()).trim(),'1');
+  }
+  rows.push({lang,width,status:'PASS'});await p.close();
+ }
+ assert.deepEqual(errors,[]);assert.deepEqual(writes,[]);fs.writeFileSync('proof/'+phase+'-pagination-summary.json',JSON.stringify({status:'PASS',phase,rows,errors,write_requests:writes}));await b.close();console.log('PAGINATION_'+phase.toUpperCase()+'_PASS views='+rows.length);
+})().catch(e=>{console.error(e);process.exit(1)});
