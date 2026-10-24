@@ -1,0 +1,153 @@
+name: P01 R5 owner music frontstage exact-source regression
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-r5-music-frontstage-exact-source.yml'
+permissions:
+  contents: read
+jobs:
+  p01-r5-music-gate:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      REPO: llhzx2018/vf-start
+      CANDIDATE_SHA: 42df885af4d4a16bd82e09efbe190a0e01706fa1
+      BASELINE_SHA: 49b6b7331fc81f47f26dfe7832a39d1b2dc591e7
+    steps:
+      - name: PHP 8.3 with SQLite and Node
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_sqlite, sqlite3, curl, mbstring, zip, openssl
+          coverage: none
+      - name: Pin private candidate and main in ephemeral workspace
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN" || { echo BLOCKED_SECRET_MISSING; exit 11; }
+          for pair in "candidate $CANDIDATE_SHA" "stable $BASELINE_SHA"; do
+            set -- $pair
+            git init -q "$1"
+            git -C "$1" remote add origin "https://x-access-token:${READ_TOKEN}@github.com/${REPO}.git"
+            git -C "$1" -c advice.detachedHead=false fetch -q --depth 1 origin "$2"
+            git -C "$1" checkout -q --detach FETCH_HEAD
+            test "$(git -C "$1" rev-parse HEAD)" = "$2"
+            git -C "$1" remote remove origin
+          done
+          echo P01_R5_EXACT_SOURCE_PIN=PASS
+      - name: Focused PHP JS static security and real SQLite mutation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          test "$(tr -d '\r\n ' < VERSION)" = "2.47.444"
+          test "$(tr -d '\r\n ' < src/VERSION.txt)" = "2.47.444"
+          for file in src/music-home.php src/music-shell.php src/app/MusicRepository.php tests/unit/p01_ia_v2_r5_music_frontstage_contract.php; do php -l "$file"; done
+          for file in src/assets/music-dock.js src/assets/music-library-actions.js; do node --check "$file"; done
+          php tests/unit/p01_ia_v2_r5_music_frontstage_contract.php
+          php tests/unit/music_quick_import_contract.php
+          php tests/unit/music_security_contract.php
+          php tests/unit/p01_r2_frontstage_panel_lifecycle_contract.php
+          node tests/unit/music_dock_contract.js
+          node tests/unit/music_shell_route_contract.js
+          node tests/unit/music_interaction_quality_contract.js
+          echo P01_R5_FOCUSED_CONTRACT_AND_SQLITE=PASS
+      - name: Synthetic Owner and anonymous HTTP R5 CRUD and import rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate/src
+          php -S 127.0.0.1:18585 -t . >/tmp/p01-r5-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" >/dev/null 2>&1 || true' EXIT
+          base=http://127.0.0.1:18585
+          for _ in $(seq 1 30); do
+            if curl -fsS -c /tmp/p01-r5-cookie -b /tmp/p01-r5-cookie "$base/setup.php" -o /tmp/p01-r5-setup.html; then break; fi
+            sleep 1
+          done
+          setup_csrf=$(python3 -c 'import re; s=open("/tmp/p01-r5-setup.html").read(); m=re.search(r"name=\"setup_csrf\"\s+value=\"([^\"]+)\"",s); assert m; print(m.group(1))')
+          curl -fsS -c /tmp/p01-r5-cookie -b /tmp/p01-r5-cookie -X POST "$base/setup.php" \
+            --data-urlencode "setup_csrf=$setup_csrf" --data-urlencode 'site_title=R5 Music Synthetic' \
+            --data-urlencode 'admin_password=R5!Synthetic18585' --data-urlencode 'admin_password_confirm=R5!Synthetic18585' \
+            -o /tmp/p01-r5-setup-result.html
+          for route in music-shell.php music-home.php music.php music-import.php; do
+            status=$(curl -sS -o /tmp/p01-r5-guest.html -w '%{http_code}' "$base/$route")
+            test "$status" = 403
+          done
+          curl -fsS -c /tmp/p01-r5-cookie -b /tmp/p01-r5-cookie \
+            -H 'Content-Type: application/json' -d '{"password":"R5!Synthetic18585"}' \
+            "$base/api.php?action=login" -o /tmp/p01-r5-login.json
+          grep -Fq '"ok":true' /tmp/p01-r5-login.json
+          curl -fsS -b /tmp/p01-r5-cookie "$base/music-home.php" -o /tmp/p01-r5-owner.html
+          curl -fsS -b /tmp/p01-r5-cookie "$base/music-shell.php" -o /tmp/p01-r5-shell.html
+          grep -Fq 'data-vf-music-editor-overlay' /tmp/p01-r5-owner.html
+          grep -Fq 'data-dock-import="1"' /tmp/p01-r5-shell.html
+          csrf=$(python3 -c 'import re,html; s=open("/tmp/p01-r5-owner.html").read(); m=re.search(r"name=\"csrf\"\s+value=\"([^\"]+)\"",s); assert m; print(html.unescape(m.group(1)))')
+          status=$(curl -sS -b /tmp/p01-r5-cookie -o /tmp/p01-r5-badcsrf.html -w '%{http_code}' \
+            -d 'action=create_playlist' -d 'csrf=wrong' -d 'name=Should Not Exist' "$base/music-home.php")
+          test "$status" = 419
+          create_status=$(curl -sS -b /tmp/p01-r5-cookie -o /tmp/p01-r5-create.html -w '%{http_code}' \
+            -d "csrf=$csrf" -d 'action=create_playlist' --data-urlencode 'name=R5 Synthetic Playlist' "$base/music-home.php")
+          test "$create_status" = 303
+          pid=$(php -r 'require "app/bootstrap.php"; echo vf_db()->query("SELECT id FROM music_playlists WHERE name=\x27R5 Synthetic Playlist\x27")->fetchColumn();')
+          test "$pid" -gt 0
+          rename_status=$(curl -sS -b /tmp/p01-r5-cookie -o /tmp/p01-r5-rename.html -w '%{http_code}' \
+            -d "csrf=$csrf" -d 'action=rename_playlist' -d "playlist_id=$pid" \
+            --data-urlencode 'name=R5 Renamed Playlist' "$base/music-home.php?playlist=$pid")
+          test "$rename_status" = 303
+          curl -fsS -b /tmp/p01-r5-cookie "$base/music-home.php?playlist=$pid" -o /tmp/p01-r5-playlist.html
+          grep -Fq 'R5 Renamed Playlist' /tmp/p01-r5-playlist.html
+          source=https://upload.wikimedia.org/wikipedia/commons/4/43/Smells_Like_Rain.ogg
+          curl -fsS -b /tmp/p01-r5-cookie -d "csrf=$csrf" -d 'action=quick_preview' \
+            -d "playlist_id=$pid" --data-urlencode "content=$source" \
+            "$base/music-home.php?playlist=$pid&quick=1" -o /tmp/p01-r5-preview.html
+          grep -Fq '检查完成' /tmp/p01-r5-preview.html
+          test "$(php -r 'require "app/bootstrap.php";echo vf_db()->query("SELECT COUNT(*) FROM music_tracks")->fetchColumn();')" = 0
+          bad_preview=$(curl -sS -b /tmp/p01-r5-cookie -o /tmp/p01-r5-invalid-preview.html -w '%{http_code}' \
+            -d "csrf=$csrf" -d 'action=quick_preview' -d "playlist_id=$pid" \
+            --data-urlencode "content=$source"$'\n''http://127.0.0.1/secret.mp3' "$base/music-home.php?playlist=$pid&quick=1")
+          test "$bad_preview" = 422
+          grep -Fq '127.0.0.1' /tmp/p01-r5-invalid-preview.html
+          test "$(php -r 'require "app/bootstrap.php";echo vf_db()->query("SELECT COUNT(*) FROM music_tracks")->fetchColumn();')" = 0
+          save_status=$(curl -sS -b /tmp/p01-r5-cookie -o /tmp/p01-r5-saved.html -w '%{http_code}' \
+            -d "csrf=$csrf" -d 'action=quick_save' -d "playlist_id=$pid" \
+            --data-urlencode "content=$source" "$base/music-home.php?playlist=$pid&quick=1")
+          test "$save_status" = 303
+          test "$(php -r 'require "app/bootstrap.php";echo vf_db()->query("SELECT COUNT(*) FROM music_tracks")->fetchColumn();')" = 1
+          tid=$(php -r 'require "app/bootstrap.php";echo vf_db()->query("SELECT id FROM music_tracks LIMIT 1")->fetchColumn();')
+          favorite_status=$(curl -sS -b /tmp/p01-r5-cookie -o /tmp/p01-r5-fav.html -w '%{http_code}' \
+            -d "csrf=$csrf" -d 'action=favorite_track' -d "playlist_id=$pid" \
+            -d "track_id=$tid" -d 'favorite=1' "$base/music-home.php?playlist=$pid")
+          test "$favorite_status" = 303
+          test "$(php -r 'require "app/bootstrap.php";echo vf_db()->query("SELECT COUNT(*) FROM music_tracks WHERE favorite=1")->fetchColumn();')" = 1
+          more=https://www.youtube.com/watch?v=dQw4w9WgXcQ
+          curl -sS -b /tmp/p01-r5-cookie -o /tmp/p01-r5-second.html -d "csrf=$csrf" \
+            -d 'action=quick_save' -d "playlist_id=$pid" --data-urlencode "content=$more" "$base/music-home.php?playlist=$pid"
+          second=$(php -r 'require "app/bootstrap.php";echo vf_db()->query("SELECT id FROM music_tracks ORDER BY id DESC LIMIT 1")->fetchColumn();')
+          move=$(curl -sS -b /tmp/p01-r5-cookie -o /tmp/p01-r5-move.html -w '%{http_code}' \
+            -d "csrf=$csrf" -d 'action=move_track' -d "playlist_id=$pid" \
+            -d "track_id=$second" -d 'direction=up' "$base/music-home.php?playlist=$pid")
+          test "$move" = 303
+          first=$(php -r 'require "app/bootstrap.php";echo vf_db()->query("SELECT track_id FROM music_playlist_tracks ORDER BY sort_order,track_id LIMIT 1")->fetchColumn();')
+          test "$first" = "$second"
+          invalid_move=$(curl -sS -b /tmp/p01-r5-cookie -o /tmp/p01-r5-invalid-move.html -w '%{http_code}' \
+            -d "csrf=$csrf" -d 'action=move_track' -d "playlist_id=$pid" \
+            -d 'track_id=999999' -d 'direction=down' "$base/music-home.php?playlist=$pid")
+          test "$invalid_move" = 422
+          echo P01_R5_GUEST_403_OWNER_CSRF_CRUD_PREVIEW_ROLLBACK_SORT=PASS
+      - name: Complete canonical baseline regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash candidate/tests/canonical_release_regression.sh candidate stable --require-zero-debt
+          echo P01_R5_CANONICAL_REGRESSION=PASS
+      - name: Erase private checkout
+        if: always()
+        shell: bash
+        run: |
+          rm -rf candidate stable
+          echo P01_R5_EPHEMERAL_PRIVATE_SOURCE_CLEANUP=PASS
