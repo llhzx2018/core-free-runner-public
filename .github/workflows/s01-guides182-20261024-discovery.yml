@@ -1,0 +1,101 @@
+name: S01 native Theme update discovery
+on:
+  push:
+    branches: [task/s01-guides182-20261024]
+    paths: ['.github/workflows/s01-guides182-20261024-discovery.yml']
+permissions:
+  contents: read
+env:
+  TARGET_REPO: llhzx2018/vf-tools-theme
+  TARGET_VERSION: 1.35.182
+  TARGET_SHA: f1535ec95e2f4d661a3650628bae0b35b0b1c517
+jobs:
+  discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          path: control
+      - uses: actions/checkout@v4
+        with:
+          ref: 02d4591eed025a3d3a67bc0a150b3ddc448c2ab8
+          persist-credentials: false
+          path: established
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: 1f4e8f1917226e255724e185876459ee46e829db
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: target
+      - name: Prepare exact previous Theme and current formal Provider
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p proof provider
+          cp -a established/lanes/s01-frontend-design-20261017 lane
+          test "$(cat target/VERSION)" = 1.35.181
+          gh release download v1.25.94 --repo llhzx2018/vf-tools-m3u8 --pattern vf-tools-m3u8_V1.25.94.zip --dir provider
+          echo '70b90d40da5d69fc7819bd7ada3f15fb0145e64822b788bd94956c7827b2df03  provider/vf-tools-m3u8_V1.25.94.zip' | sha256sum -c
+      - name: Actual native WordPress discovery without upgrading
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          cat > lane/discover.php <<'PHPDISCOVER'
+          <?php
+          if(!defined('ABSPATH'))exit(20);
+          require_once ABSPATH.'wp-admin/includes/update.php';
+          delete_site_transient('update_themes');
+          delete_site_transient('update_plugins');
+          if(class_exists('VF_M3U8_Update_Source_V1'))VF_M3U8_Update_Source_V1::clear_cache();
+          wp_update_themes();wp_update_plugins();
+          $themes=get_site_transient('update_themes');
+          $plugins=get_site_transient('update_plugins');
+          $t=is_object($themes)?($themes->response['vf-tools-theme']??null):null;
+          $p=is_object($plugins)?($plugins->response['vf-tool-m3u8/vf-tool-m3u8.php']??null):null;
+          $tv=is_array($t)?($t['new_version']??''):($t->new_version??'');
+          $pv=is_object($p)?($p->new_version??''):($p['new_version']??'');
+          $package=is_array($t)?($t['package']??''):($t->package??'');
+          $result=['theme_installed'=>wp_get_theme('vf-tools-theme')->get('Version'),'theme_offered'=>$tv,'plugin_installed'=>get_plugin_data(WP_PLUGIN_DIR.'/vf-tool-m3u8/vf-tool-m3u8.php',false,false)['Version'],'plugin_offered'=>$pv,'package_present'=>$package!=='','production'=>'UNTOUCHED'];
+          echo wp_json_encode($result)."\n";
+          if($result['theme_installed']!=='1.35.181'||$tv!=='1.35.182'||$result['plugin_installed']!=='1.25.94'||$pv!==''||$package==='')exit(43);
+          echo "NATIVE_THEME_DISCOVERY_WITHOUT_APPLY_PASS\n";
+          PHPDISCOVER
+          php -l lane/discover.php
+          python3 - <<'PYDISCOVER'
+          from pathlib import Path
+          s=Path('lane/native.sh').read_text().replace('provider/vf-tools-m3u8_V1.25.91.zip','provider/vf-tools-m3u8_V1.25.94.zip')
+          installer='cli plugin install polylang --version=3.8.10 --activate >/dev/null'
+          assert s.count(installer)==1
+          s=s.replace(installer,'for attempt in 1 2 3; do '+installer+' && break; test "$attempt" -lt 3 || exit 1; sleep 3; done')
+          s=s.replace('node lane/warm-admin.cjs','true')
+          prior_checks='docker cp lane/wp-check.php "$WP:/tmp/wp-check.php";cli eval-file /tmp/wp-check.php > proof/wordpress.json'
+          assert s.count(prior_checks)==1
+          s=s.replace(prior_checks,'cli user add-cap admin vf_manage_theme_profile >/dev/null')
+          marker='if [ "${VF_REVIEW_ONLY_STATE:-0}" = "1" ];then'
+          assert s.count(marker)==1
+          s=s.split(marker)[0]+"""
+          docker cp lane/discover.php "$WP:/tmp/discover.php"
+          docker exec -e VF_PRIVATE_READ_TOKEN="$VF_PRIVATE_READ_TOKEN" --user www-data "$WP" php /usr/local/bin/wp eval-file /tmp/discover.php --path=/var/www/html > proof/native-discovery.txt
+          cat proof/native-discovery.txt
+          grep -qx NATIVE_THEME_DISCOVERY_WITHOUT_APPLY_PASS proof/native-discovery.txt
+          cli eval-file /tmp/snapshot.php > proof/state-after.sha256
+          cmp proof/state-before.sha256 proof/state-after.sha256
+          echo NATIVE_DISCOVERY_PROTECTED_DATA_UNCHANGED_PASS
+          """
+          Path('lane/discover.sh').write_text(s)
+          PYDISCOVER
+          bash lane/discover.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s01-home-discovery-${{ github.run_id }}
+          path: proof/
+          retention-days: 14
+      - name: Cleanup private runtime
+        if: always()
+        run: rm -rf target provider
