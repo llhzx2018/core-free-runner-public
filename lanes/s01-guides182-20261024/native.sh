@@ -22,6 +22,7 @@ cli theme install /tmp/clean-theme.zip >/dev/null
 docker cp provider/vf-tools-m3u8_V1.25.94.zip "$WP:/tmp/provider.zip"
 cli plugin install /tmp/provider.zip --activate >/dev/null
 docker cp lane/fixture.php "$WP:/var/www/html/wp-content/mu-plugins/progress-fixture.php"
+docker cp "control/lanes/$LANE_ID/guide-cases.php" "$WP:/var/www/html/wp-content/mu-plugins/guide-cases.php"
 docker exec "$WP" chown -R www-data:www-data /var/www/html/wp-content/themes/vf-tools-theme
 cli theme activate vf-tools-theme >/dev/null
 for attempt in 1 2 3; do cli plugin install polylang --version=3.8.10 --activate >/dev/null && break; test "$attempt" -lt 3 || exit 1; sleep 3; done
