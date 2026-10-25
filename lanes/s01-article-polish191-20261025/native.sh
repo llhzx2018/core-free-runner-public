@@ -32,7 +32,6 @@ cli rewrite structure '/%postname%/' --hard >/dev/null
 docker cp lane/mount-seed.php "$WP:/tmp/mount-seed.php";cli eval-file /tmp/mount-seed.php > proof/mounts.json
 docker cp "control/lanes/$LANE_ID/seed.php" "$WP:/tmp/extra-protected.php";cli eval-file /tmp/extra-protected.php >/dev/null
 docker cp target/tests/article-reference-seed.php "$WP:/tmp/seed-blog.php";cli eval-file /tmp/seed-blog.php > proof/article-fixtures.json
-docker cp target/tests/article-ad-layout-fixture.php "$WP:/var/www/html/wp-content/mu-plugins/article-ad-review-fixture.php"
 docker cp target/tests/article-reference-fixture.php "$WP:/var/www/html/wp-content/mu-plugins/article-review-fixture.php"
 
 docker cp "control/lanes/$LANE_ID/adjacent-seed.php" "$WP:/tmp/adjacent-seed.php";cli eval-file /tmp/adjacent-seed.php >/dev/null
@@ -72,6 +71,8 @@ for attempt in 1 2 3; do cli plugin install seo-by-rank-math --version=1.0.280 -
 # Match the plugin's documented account-connection skip in this isolated fixture.
 cli option update rank_math_registration_skip 1 >/dev/null
 curl -fsS http://127.0.0.1:18880/m3u8-player/ >/dev/null
+# Install the public-only ad double after clean admin initialization.
+docker cp target/tests/article-ad-layout-fixture.php "$WP:/var/www/html/wp-content/mu-plugins/article-ad-review-fixture.php"
 cli eval-file /tmp/snapshot.php > proof/state-before.sha256
 docker cp "control/lanes/$LANE_ID/contracts-snapshot.php" "$WP:/tmp/contracts-snapshot.php"
 cli eval-file /tmp/contracts-snapshot.php > proof/contracts-before.json
