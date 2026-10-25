@@ -57,6 +57,10 @@ docker cp "provider/vf-tools-theme_V$SOURCE_VERSION.zip" "$WP:/tmp/theme-old.zip
 docker cp "provider/vf-tools-theme_V$TARGET_VERSION.zip" "$WP:/tmp/theme-new.zip"
 version_check(){ test "$(cli theme get vf-tools-theme --field=version)" = "$1"; test "$(cli plugin get vf-tool-m3u8 --field=version)" = "1.25.94"; echo INSTALLED_VERSION_PASS="$1"; }
 version_check "$TARGET_VERSION"
+docker cp proof/blog-fixtures.json "$WP:/tmp/blog-fixtures.json"
+docker cp target/tests/blog-result-count-native-check.php "$WP:/tmp/blog-native-check.php"
+docker exec -e S01_BLOG_NATIVE_QUERY=1 --user www-data "$WP" php /usr/local/bin/wp eval-file /tmp/blog-native-check.php --path=/var/www/html > proof/native-main-query.json
+cat proof/native-main-query.json
 cli theme install /tmp/theme-old.zip --force >/dev/null
 version_check "$SOURCE_VERSION"
 NODE_PATH="$PWD/node_modules" node target/tests/blog-result-count-browser-check.cjs --phase=before
@@ -71,10 +75,6 @@ version_check "$TARGET_VERSION"
 cli theme install /tmp/theme-new.zip --force >/dev/null
 version_check "$TARGET_VERSION"
 NODE_PATH="$PWD/node_modules" node target/tests/blog-result-count-browser-check.cjs --phase=after
-docker cp proof/blog-fixtures.json "$WP:/tmp/blog-fixtures.json"
-docker cp target/tests/blog-result-count-native-check.php "$WP:/tmp/blog-native-check.php"
-docker exec -e S01_BLOG_NATIVE_QUERY=1 --user www-data "$WP" php /usr/local/bin/wp eval-file /tmp/blog-native-check.php --path=/var/www/html > proof/native-main-query.json
-cat proof/native-main-query.json
 cli eval-file /tmp/snapshot.php > proof/state-after.sha256
 cmp proof/state-before.sha256 proof/state-after.sha256
 cli eval-file /tmp/contracts-snapshot.php > proof/contracts-after.json
