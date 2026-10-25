@@ -1,0 +1,178 @@
+name: p01-ia-v4-oneoff-exact-candidate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-ia-v4-oneoff-exact-candidate.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor == 'llhzx2018' &&
+      startsWith(github.event.pull_request.title, 'test(P01 IA V4):')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      TARGET_SHA: 77046c05ac148b375448fd792791143c291ebb6d
+      BASE_VERSION: 2.47.451
+      TARGET_VERSION: 2.47.452
+    steps:
+      - name: Checkout exact private candidate without credential persistence
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 77046c05ac148b375448fd792791143c291ebb6d
+          path: candidate
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - name: Checkout previous formal source for differential regression
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.47.451
+          path: stable
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - name: Prepare PHP and verify exact source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$TARGET_VERSION"
+          grep -F "define('VF_VERSION', '$TARGET_VERSION')" candidate/src/app/bootstrap.php
+          test "$(tr -d '\r\n ' < stable/VERSION)" = "$BASE_VERSION"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd unzip >/dev/null
+          php -l candidate/src/app/AdminShell.php >/dev/null
+          php -l candidate/src/app/FunctionalWorkspaceShell.php >/dev/null
+          php -l candidate/src/app/ToolWorkspaceHome.php >/dev/null
+          php candidate/tests/unit/p01_scalable_workspace_ia_v4_contract.php
+          node candidate/tests/unit/p01_direct_subsite_strip_contract.js
+          echo P01_IA_V4_FOCUSED_EXACT_SOURCE=PASS
+      - name: Run canonical PHP zero-debt differential regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash candidate/tests/canonical_release_regression.sh candidate stable --require-zero-debt
+          echo P01_IA_V4_CANONICAL_PHP=PASS
+      - name: Browser test on ephemeral PHP installation only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TESTROOT="$RUNNER_TEMP/p01-ia-v4-installed"
+          mkdir -p "$TESTROOT"
+          cp -a candidate/src/. "$TESTROOT/"
+          php -S 127.0.0.1:18567 -t "$TESTROOT" >"$RUNNER_TEMP/p01-ia-v4-php.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 60); do
+            if curl -fsS -c "$RUNNER_TEMP/p01-ia-v4.cookie" -b "$RUNNER_TEMP/p01-ia-v4.cookie" "http://127.0.0.1:18567/setup.php" -o "$RUNNER_TEMP/p01-ia-v4.setup"; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 -c 'import re,sys; s=open(sys.argv[1],encoding="utf-8").read(); m=re.search(r"name=\"setup_csrf\"\s+value=\"([^\"]+)\"",s); assert m; print(m.group(1))' "$RUNNER_TEMP/p01-ia-v4.setup")
+          curl -fsS -c "$RUNNER_TEMP/p01-ia-v4.cookie" -b "$RUNNER_TEMP/p01-ia-v4.cookie" -X POST "http://127.0.0.1:18567/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" --data-urlencode "site_title=IA V4 Ephemeral Gate" \
+            --data-urlencode "admin_password=IAV4Ephemeral!7865" \
+            --data-urlencode "admin_password_confirm=IAV4Ephemeral!7865" > /dev/null
+          (cd "$TESTROOT" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          mkdir -p "$RUNNER_TEMP/p01-ia-v4-browser"
+          npm install --prefix "$RUNNER_TEMP/p01-ia-v4-browser" --no-audit --no-fund --silent playwright@1.56.1
+          "$RUNNER_TEMP/p01-ia-v4-browser/node_modules/.bin/playwright" install chromium >/dev/null
+          export P01_BROWSER_MODULE="$RUNNER_TEMP/p01-ia-v4-browser/node_modules/playwright"
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const {chromium} = require(process.env.P01_BROWSER_MODULE);
+          const base = 'http://127.0.0.1:18567';
+          (async () => {
+            const browser = await chromium.launch({headless:true,args:['--no-sandbox']});
+            try {
+              const context = await browser.newContext({viewport:{width:1280,height:800}});
+              const page = await context.newPage();
+              await page.goto(base + '/index.php');
+              let inventory = await page.locator('.vf-global-domain-links>a').allTextContents();
+              assert.equal(inventory.length, 9, 'nine guest direct entries');
+              assert(!inventory.includes('收集箱') && !inventory.includes('音乐'), 'private entries absent from guest DOM');
+              const login = await context.request.post(base + '/api.php?action=login',{
+                data:{password:'IAV4Ephemeral!7865'},
+                headers:{'Content-Type':'application/json'}
+              });
+              assert.equal(login.status(), 200, 'owner login');
+              assert.equal((await login.json()).ok, true, 'owner login response');
+              await page.goto(base + '/home.php');
+              inventory = await page.locator('.vf-global-domain-links>a').allTextContents();
+              assert.equal(inventory.length, 11, 'eleven owner direct entries');
+              assert(inventory.includes('收集箱') && inventory.includes('音乐'), 'owner entries kept');
+              await page.route('**/home.php?ia4_count=*', async route => {
+                const response = await route.fetch();
+                const body = await response.text();
+                const url = new URL(route.request().url());
+                const n = Number(url.searchParams.get('ia4_count'));
+                const selected = Number(url.searchParams.get('ia4_selected'));
+                assert([20,50].includes(n) && selected>=12 && selected<=n);
+                const marker = /(<div class="vf-global-domain-links"[^>]*>)([\s\S]*?)(<\/div>)/;
+                assert(marker.test(body),'exact shipped global strip in real PHP HTML');
+                const changed = body.replace(marker, (_,open,links,close)=>{
+                  const normalized = links.replace(/aria-current="page"/g,'aria-current="false"')
+                    .replace(/class="active"/g,'class=""');
+                  let extra='';
+                  for(let i=12;i<=n;i++) {
+                    extra+='<a class="'+(i===selected?'active':'')+'" href="home.php?ia4_count='+n+'&ia4_selected='+i+'" aria-current="'+(i===selected?'page':'false')+'">未来子站 '+i+'</a>';
+                  }
+                  return open+normalized+extra+close;
+                });
+                await route.fulfill({response,body:changed});
+              });
+              for (const [count,selected] of [[20,20],[50,50],[50,35]]) {
+                await page.goto(base+'/home.php?ia4_count='+count+'&ia4_selected='+selected);
+                const m=await page.evaluate(()=>{
+                  const strip=document.querySelector('.vf-global-domain-links');
+                  const active=strip.querySelector('a[aria-current="page"]');
+                  const account=document.querySelector('.vf-global-account-actions');
+                  const s=strip.getBoundingClientRect(),a=active.getBoundingClientRect(),r=account.getBoundingClientRect();
+                  return {count:strip.querySelectorAll('a').length,overflow:strip.scrollWidth-strip.clientWidth,scroll:strip.scrollLeft,
+                    reveal:a.left>=s.left-9&&a.right<=s.right+9,accountNotCovered:s.right<=r.left+1};
+                });
+                assert.equal(m.count,count,'all synthetic direct links represented');
+                assert(m.overflow>0 && m.scroll>0 && m.reveal && m.accountNotCovered,'active reveal/overflow/account separation');
+                const first=page.locator('.vf-global-domain-links>a').first();
+                await first.focus();
+                assert.equal(await first.evaluate(el=>document.activeElement===el),true,'first link keyboard focus');
+                const last=page.locator('.vf-global-domain-links>a').last();
+                await last.focus();
+                assert.equal(await last.evaluate(el=>document.activeElement===el),true,'last link keyboard focus');
+                const focusVisible=await last.evaluate(el=>{
+                  const a=el.getBoundingClientRect(),s=el.parentElement.getBoundingClientRect();
+                  return a.left>=s.left-9&&a.right<=s.right+9;
+                });
+                assert(focusVisible,'keyboard focus reaches last item in scrollport');
+                await page.evaluate(()=>document.querySelector('.vf-global-domain-links').scrollLeft=0);
+                const stripBox=await page.locator('.vf-global-domain-links').boundingBox();
+                await page.mouse.move(stripBox.x+Math.min(100,stripBox.width/2),stripBox.y+stripBox.height/2);
+                await page.mouse.wheel(0,120);
+                const wheel=await page.locator('.vf-global-domain-links').evaluate(el=>el.scrollLeft);
+                assert(wheel>0,'mouse wheel translates to horizontal scroll');
+                console.log('P01_IA_V4_BROWSER_'+count+'_ACTIVE_'+selected+'=PASS');
+              }
+              await page.goto(base+'/home.php?ia4_count=50&ia4_selected=12');
+              await page.locator('.vf-global-domain-links>a').last().click();
+              assert(page.url().includes('ia4_selected=50'),'direct link navigates without launcher');
+              const active=await page.locator('.vf-global-domain-links>a[aria-current="page"]').innerText();
+              assert.equal(active,'未来子站 50','active marker after navigation');
+              console.log('P01_IA_V4_BROWSER_GUEST_OWNER_DIRECT_LINKS=PASS');
+              console.log('P01_IA_V4_BROWSER_20_50_FOCUS_WHEEL_NAV=PASS');
+              await context.close();
+            } finally { await browser.close(); }
+          })().catch(e=>{console.error('P01_IA_V4_BROWSER=FAIL:',e.message);process.exitCode=1;});
+          NODE
+          echo P01_IA_V4_DESKTOP_BROWSER=PASS
+      - name: Confirm private source and test cookies are not uploaded
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo P01_IA_V4_PUBLIC_SAFE_EVIDENCE_ONLY=PASS
