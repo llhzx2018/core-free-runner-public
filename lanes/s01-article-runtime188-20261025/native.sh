@@ -49,6 +49,8 @@ assert all(not a['option_presence'][k]and b['option_presence'][k]for k in change
 PYBOOT
 # Activate the SEO integration after clean admin intake, before all Head/lifecycle baselines.
 for attempt in 1 2 3; do cli plugin install seo-by-rank-math --version=1.0.280 --activate >/dev/null && break; test "$attempt" -lt 3 || exit 1; sleep 3; done
+# Match the plugin's documented account-connection skip in this isolated fixture.
+cli option update rank_math_registration_skip 1 >/dev/null
 curl -fsS http://127.0.0.1:18880/m3u8-player/ >/dev/null
 cli eval-file /tmp/snapshot.php > proof/state-before.sha256
 docker cp "control/lanes/$LANE_ID/contracts-snapshot.php" "$WP:/tmp/contracts-snapshot.php"
