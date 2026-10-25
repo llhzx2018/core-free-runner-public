@@ -39,14 +39,31 @@ docker cp lane/snapshot.php "$WP:/tmp/snapshot.php"
 curl -fsS http://127.0.0.1:18880/ >/dev/null
 curl -fsS http://127.0.0.1:18880/m3u8-playlist-checker/ >/dev/null
 cli eval-file /tmp/snapshot.php > proof/bootstrap-before.json
+cli option get vf_theme_layout --format=json > proof/bootstrap-layout-before.json
 node lane/warm-admin.cjs
 cli eval-file /tmp/snapshot.php > proof/bootstrap-after.json
+cli option get vf_theme_layout --format=json > proof/bootstrap-layout-after.json
 python3 - <<'PYBOOT'
 import json,pathlib
 r=pathlib.Path('proof');a=json.loads((r/'bootstrap-before.json').read_text());b=json.loads((r/'bootstrap-after.json').read_text());changed=[k for k in a['sections']if a['sections'][k]!=b['sections'][k]]
-assert set(changed)<= {'vf_theme_brand','vf_theme_tokens','vf_theme_navigation'}
-assert all(not a['option_presence'][k]and b['option_presence'][k]for k in changed)
-(r/'bootstrap.json').write_text(json.dumps({'status':'PASS','created_missing_options':changed,'existing_protected_records':'BYTE_IDENTICAL','scope':'fresh isolated installation initialization before review baseline'}))
+assert set(changed)<= {'vf_theme_brand','vf_theme_tokens','vf_theme_navigation','vf_theme_layout'}
+created=[k for k in changed if k!='vf_theme_layout']
+assert all(not a['option_presence'][k]and b['option_presence'][k]for k in created)
+# This fixture deliberately seeds a partial layout on a new installation.
+# Existing install-migration fills missing fields on first privileged admin visit.
+# Verify every authored leaf survives; never waive mutation of an existing value.
+x=json.loads((r/'bootstrap-layout-before.json').read_text());y=json.loads((r/'bootstrap-layout-after.json').read_text())
+def preserved(before,after,path='layout'):
+    if isinstance(before,dict):
+        assert isinstance(after,dict),path
+        for k,v in before.items():
+            assert k in after,path+'.'+k
+            preserved(v,after[k],path+'.'+k)
+    else: assert before==after,(path,before,after)
+preserved(x,y)
+assert len(y['modules'])==20 and len(y['templates'])==20
+
+(r/'bootstrap.json').write_text(json.dumps({'status':'PASS','created_missing_options':created,'partial_layout_initialization':'ALL_AUTHORED_LEAVES_PRESERVED_20_CONTEXTS','other_existing_protected_records':'BYTE_IDENTICAL','scope':'fresh isolated installation initialization before review baseline'}))
 PYBOOT
 # Activate the SEO integration after clean admin intake, before all Head/lifecycle baselines.
 for attempt in 1 2 3; do cli plugin install seo-by-rank-math --version=1.0.280 --activate >/dev/null && break; test "$attempt" -lt 3 || exit 1; sleep 3; done
