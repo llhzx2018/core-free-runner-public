@@ -1,0 +1,131 @@
+name: p01-music-prepaint-exact-main
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-music-prepaint-exact-main.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor == 'llhzx2018' &&
+      startsWith(github.event.pull_request.title, 'test(P01 Music):')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      TARGET_SHA: bacdf79dccd1a7285c10f8d7105da25e4da2fd4d
+      TARGET_VERSION: 2.47.452
+    steps:
+      - name: Checkout exact merged private Music source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: bacdf79dccd1a7285c10f8d7105da25e4da2fd4d
+          path: candidate
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - name: Exact SHA, PHP lint and focused Node/PHP contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$TARGET_VERSION"
+          grep -F "define('VF_VERSION', '$TARGET_VERSION')" candidate/src/app/bootstrap.php
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd unzip >/dev/null
+          for file in src/app/AdminShell.php src/app/FunctionalWorkspaceCore.php src/app/WorkspaceViewCatalog.php src/music-home.php src/music-discover.php src/music-radio.php src/music-shell.php tests/unit/p01_scalable_workspace_ia_v4_contract.php; do
+            php -l "candidate/$file" >/dev/null
+          done
+          node candidate/tests/unit/p01_music_early_shell_redirect_contract.js
+          php candidate/tests/unit/p01_scalable_workspace_ia_v4_contract.php
+          echo P01_MUSIC_EXACT_MERGED_SOURCE_CONTRACT=PASS
+      - name: Real desktop Chromium first-paint redirect and shell check
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          TESTROOT="$RUNNER_TEMP/p01-music-prepaint-installed"
+          mkdir -p "$TESTROOT"
+          cp -a candidate/src/. "$TESTROOT/"
+          php -S 127.0.0.1:18651 -t "$TESTROOT" >"$RUNNER_TEMP/p01-music-prepaint-php.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 60); do
+            if curl -fsS -c "$RUNNER_TEMP/p01-music.cookie" -b "$RUNNER_TEMP/p01-music.cookie" "http://127.0.0.1:18651/setup.php" -o "$RUNNER_TEMP/p01-music.setup"; then break; fi
+            sleep 1
+          done
+          CSRF=$(python3 -c 'import re,sys; s=open(sys.argv[1],encoding="utf-8").read(); m=re.search(r"name=\"setup_csrf\"\s+value=\"([^\"]+)\"",s); assert m; print(m.group(1))' "$RUNNER_TEMP/p01-music.setup")
+          curl -fsS -c "$RUNNER_TEMP/p01-music.cookie" -b "$RUNNER_TEMP/p01-music.cookie" -X POST "http://127.0.0.1:18651/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" --data-urlencode "site_title=Music Ephemeral Gate" \
+            --data-urlencode "admin_password=P01MusicEphemeral!7824" \
+            --data-urlencode "admin_password_confirm=P01MusicEphemeral!7824" > /dev/null
+          (cd "$TESTROOT" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          mkdir -p "$RUNNER_TEMP/p01-music-browser"
+          npm install --prefix "$RUNNER_TEMP/p01-music-browser" --no-audit --no-fund --silent playwright@1.56.1
+          "$RUNNER_TEMP/p01-music-browser/node_modules/.bin/playwright" install chromium >/dev/null
+          export P01_BROWSER_MODULE="$RUNNER_TEMP/p01-music-browser/node_modules/playwright"
+          node <<'NODE'
+          const assert = require('node:assert/strict');
+          const {chromium} = require(process.env.P01_BROWSER_MODULE);
+          const base='http://127.0.0.1:18651';
+          (async()=>{
+            const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+            try {
+              const context=await browser.newContext({viewport:{width:1366,height:900}});
+              const page=await context.newPage();
+              const denied=await context.request.get(base+'/music-shell.php');
+              assert.equal(denied.status(),403,'Music remains Owner-only');
+              const login=await context.request.post(base+'/api.php?action=login',{
+                data:{password:'P01MusicEphemeral!7824'},
+                headers:{'Content-Type':'application/json'}
+              });
+              assert.equal(login.status(),200,'Owner login');
+              assert.equal((await login.json()).ok,true,'Owner session');
+              await page.goto(base+'/home.php');
+              const music=page.locator('.vf-global-domain-links a').filter({hasText:'音乐'});
+              assert.equal(await music.count(),1,'one global Music entry');
+              assert((await music.getAttribute('href')).includes('music-shell.php?view=home'),'direct canonical shell route');
+              for (const [legacy,view] of [
+                ['music-home.php','home'],['music-discover.php','discover'],['music-radio.php','radio']
+              ]) {
+                let legacyDcl=0;
+                const observer=()=>{if(page.url().includes('/'+legacy))legacyDcl++;};
+                page.on('domcontentloaded',observer);
+                try{
+                  await page.goto(base+'/'+legacy+'?playlist=27&view=samples',{waitUntil:'domcontentloaded'});
+                }catch(e){
+                  if(!/ERR_ABORTED|interrupted|Navigation failed/i.test(e.message))throw e;
+                }
+                await page.waitForURL(url=>url.pathname==='/music-shell.php'&&url.searchParams.get('view')===view,{timeout:15000});
+                await page.locator('body.vf-music-dock-app').waitFor({timeout:15000});
+                assert.equal(legacyDcl,0,legacy+': no old standalone page DOMContentLoaded');
+                assert.equal(await page.locator('audio[data-dock-audio]').count(),1,legacy+': persistent audio mounted');
+                assert.equal(await page.locator('iframe[data-dock-panel="'+view+'"]').count(),1,legacy+': panel present');
+                const query=new URL(page.url()).searchParams;
+                assert.equal(query.get('route'),legacy+'?playlist=27&view=samples',legacy+': deep link preserved');
+                page.off('domcontentloaded',observer);
+                console.log('P01_MUSIC_CHROMIUM_PREPAINT_'+view.toUpperCase()+'=PASS');
+              }
+              await page.goto(base+'/music-shell.php?view=home');
+              await page.evaluate(()=>{window.__p01MusicAudio=document.querySelector('audio[data-dock-audio]');});
+              await page.locator('a[data-dock-view="discover"]').first().click();
+              await page.waitForURL(url=>url.searchParams.get('view')==='discover',{timeout:15000}).catch(()=>{});
+              assert.equal(await page.evaluate(()=>window.__p01MusicAudio===document.querySelector('audio[data-dock-audio]')),true,'persistent audio survives panel switch');
+              console.log('P01_MUSIC_CHROMIUM_OWNER_ENTRY_AND_PLAYER=PASS');
+              await context.close();
+            }finally{await browser.close();}
+          })().catch(e=>{console.error('P01_MUSIC_CHROMIUM=FAIL:',e.message);process.exitCode=1;});
+          NODE
+          echo P01_MUSIC_EXACT_DESKTOP_CHROMIUM=PASS
+      - name: Public-safe no-artifact cleanup
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -d candidate && rm -rf candidate || true
+          echo P01_MUSIC_PRIVATE_SOURCE_NOT_PERSISTED=PASS
