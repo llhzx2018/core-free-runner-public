@@ -8,7 +8,7 @@ assert git('rev-parse', 'HEAD') == os.environ['TARGET_SHA']
 assert git('rev-parse', 'HEAD^{tree}') == os.environ['TARGET_TREE']
 version = os.environ['TARGET_VERSION']
 assert (root / 'VERSION').read_text().strip() == version
-expected={'src/inc/seo-parts/seo-jsonld.php', 'src/assets/js/main.js', 'src/inc/modules/module-faq.php', 'src/inc/modules/module-related-tools.php', 'tests/article-reference-browser-check.cjs', 'src/assets/css/public/public-reading-final-owner.css', 'src/style.css', 'tests/article-reference-fixture.php', 'src/inc/runtime-constants.php', 'tests/article-reference-seed.php', 'src/inc/modules/module-hero.php', 'CHANGELOG.md', 'src/inc/services/frontend-page-progress-service.php', 'VERSION', 'src/inc/modules/module-cta.php', 'src/inc/content-reading-system.php'}
+expected={'src/inc/modules/module-faq.php', 'src/inc/seo-parts/seo-jsonld.php', 'src/inc/modules/module-hero.php', 'src/inc/modules/module-related-tools.php', 'src/style.css', 'src/assets/js/main.js', 'src/inc/runtime-constants.php', 'src/assets/css/public/public-reading-final-owner.css', 'src/inc/services/frontend-page-progress-service.php', 'tests/article-reference-browser-check.cjs', 'tests/article-reference-fixture.php', 'tests/article-reference-seed.php', 'CHANGELOG.md', 'src/inc/modules/module-cta.php', 'VERSION', 'src/inc/content-reading-system.php'}
 assert set(git('diff','--name-only',os.environ['BASE_SHA'],'HEAD').splitlines())==expected
 print('APPROVED_ARTICLE_REFERENCE_SCOPE_PASS')
 
@@ -17,6 +17,11 @@ for p in ['src/assets/css/public/vf-theme-public-runtime.css','src/inc/public-cs
     old=subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':'+p])
     assert (root/p).read_bytes()==old
 print('EXISTING_OWNER_AND_PERSISTENCE_BYTE_IDENTICAL_PASS')
+
+for p,limit in [('src/assets/css/public/public-reading-final-owner.css',18000),('src/assets/js/main.js',6000)]:
+    old=subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':'+p])
+    assert len((root/p).read_bytes())-len(old)<=limit
+print('BOUNDED_READING_ASSET_BUDGET_PASS')
 
 files = sorted(p for p in (root / 'src').rglob('*') if p.is_file())
 assert len(files) == 476
