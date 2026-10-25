@@ -8,9 +8,9 @@ assert git('rev-parse', 'HEAD') == os.environ['TARGET_SHA']
 assert git('rev-parse', 'HEAD^{tree}') == os.environ['TARGET_TREE']
 version = os.environ['TARGET_VERSION']
 assert (root / 'VERSION').read_text().strip() == version
-expected={'tests/layout-legacy-toc-browser-check.cjs', 'src/style.css', 'src/inc/services/layout-service.php', 'src/inc/services/frontend-page-progress-service.php', 'CHANGELOG.md', 'src/inc/runtime-constants.php', 'VERSION', 'tests/layout-legacy-toc-fixture.php'}
+expected={'src/inc/services/frontend-page-progress-service.php', 'src/inc/runtime-constants.php', 'CHANGELOG.md', 'src/style.css', 'src/inc/services/layout-service.php', 'tests/layout-legacy-toc-fixture.php', 'tests/layout-legacy-toc-browser-check.cjs', 'src/inc/module-system/module-system-render.php', 'VERSION'}
 assert set(git('diff','--name-only',os.environ['BASE_SHA'],'HEAD').splitlines())==expected
-print('APPROVED_KNOWN_LEGACY_FIELD_ONLY_SCOPE_PASS')
+print('APPROVED_KNOWN_LEGACY_FIELD_AND_PARITY_SCOPE_PASS')
 
 # Keep the shared CSS bundle, URL/SEO owners, layout persistence and Provider contracts intact.
 for p in ['src/assets/css/public/vf-theme-public-runtime.css','src/inc/public-css-owner-registry.php','src/assets/js/admin/admin-layout.js','src/inc/services/seo-owner-service.php','src/inc/services/seo-head-service.php','src/inc/services/technical-seo-service.php','src/inc/services/url/public-url-post-permalinks.php']:
