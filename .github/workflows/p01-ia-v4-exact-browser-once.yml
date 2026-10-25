@@ -1,0 +1,167 @@
+name: P01 IA V4 exact source desktop gate (temporary)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-ia-v4-exact-browser-once.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-candidate:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'test/p01-ia-v4-exact-browser-20261025'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout public controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Checkout exact private P01 candidate (ephemeral)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 77046c05ac148b375448fd792791143c291ebb6d
+          path: candidate
+          token: \${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Checkout prior formal baseline (ephemeral)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: v2.47.451
+          path: stable
+          token: \${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+
+      - name: Exact source and version guard
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "77046c05ac148b375448fd792791143c291ebb6d"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "2.47.452"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "2.47.452"
+          test "$(tr -d '\r\n ' < stable/VERSION)" = "2.47.451"
+          echo P01_IA_V4_EXACT_SOURCE=PASS
+
+      - name: Prepare PHP runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd >/dev/null
+          php -m | grep -Fi pdo_sqlite
+          echo P01_IA_V4_PHP_RUNTIME=PASS
+
+      - name: Exact candidate syntax, IA and canonical regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find candidate/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find candidate/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          php candidate/tests/unit/p01_scalable_workspace_ia_v4_contract.php
+          node candidate/tests/unit/p01_direct_subsite_strip_contract.js
+          bash candidate/tests/canonical_release_regression.sh candidate stable --require-zero-debt
+          echo P01_IA_V4_STATIC_PHP_JS_AND_CANONICAL=PASS
+
+      - name: Install isolated browser automation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm install --silent --no-audit --no-fund --prefix /tmp/p01-ia-v4-node playwright@1.56.1
+          node /tmp/p01-ia-v4-node/node_modules/playwright/cli.js install --with-deps chromium
+          echo P01_IA_V4_BROWSER_READY=PASS
+
+      - name: Real Chromium 20 and 50 direct-subsite desktop interaction
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          node <<'JS'
+          'use strict';
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const { chromium } = require('/tmp/p01-ia-v4-node/node_modules/playwright');
+          (async () => {
+            const browser = await chromium.launch({headless:true});
+            const css = fs.readFileSync('candidate/src/assets/subsite-shell.css', 'utf8');
+            const js = fs.readFileSync('candidate/src/assets/auth-controls.js', 'utf8');
+            for (const count of [20, 50]) {
+              for (const selected of [0, Math.floor(count / 2), count - 1]) {
+                const page = await browser.newPage({viewport:{width:1280,height:800}});
+                const links = Array.from({length:count}, (_, i) =>
+                  '<a href="future-' + (i + 1) + '.php" aria-current="' +
+                  (i === selected ? 'page' : 'false') + '" class="' +
+                  (i === selected ? 'active' : '') + '">' +
+                  '子站 ' + String(i + 1).padStart(2,'0') + ' 工作区</a>').join('');
+                await page.setContent(
+                  '<!doctype html><html lang="zh"><head><meta charset="utf-8"></head>' +
+                  '<body class="vf-surface-app" style="margin:0;--ws-soft:#eef9f3;--ws-panel:#fff;--ws-line:#ddd;--ws-line-strong:#98ada4;--ws-muted:#5a6f67;--ws-strong:#203a30;--ws-teal:#07884f">' +
+                  '<nav class="vf-global-domain-nav"><div class="vf-global-domain-nav-inner">' +
+                  '<div class="vf-global-domain-links">' + links + '</div>' +
+                  '<div class="vf-global-account-actions"><a class="vf-global-account-action" href="manage.php">后台</a><span>管理员</span></div>' +
+                  '</div></nav><main style="height:2000px"></main></body></html>');
+                await page.addStyleTag({content:css});
+                await page.addScriptTag({content:js});
+                await page.waitForTimeout(100);
+                const metrics = await page.evaluate(() => {
+                  const strip = document.querySelector('.vf-global-domain-links');
+                  const items = [...strip.querySelectorAll('a')];
+                  const current = strip.querySelector('[aria-current="page"]');
+                  const r = strip.getBoundingClientRect();
+                  const a = current.getBoundingClientRect();
+                  const acct = document.querySelector('.vf-global-account-actions').getBoundingClientRect();
+                  return {
+                    count:items.length, unique:new Set(items.map(a=>a.getAttribute('href'))).size,
+                    overflow:strip.scrollWidth>strip.clientWidth,
+                    visible:a.left>=r.left-2 && a.right<=r.right+2,
+                    noAccountOverlap:r.right<=acct.left+2,
+                    scrollLeft:strip.scrollLeft,
+                    scrollbar:getComputedStyle(strip).scrollbarWidth,
+                    first:items[0].getAttribute('href'),
+                    last:items[items.length-1].getAttribute('href')
+                  };
+                });
+                assert.equal(metrics.count,count,'all direct links rendered');
+                assert.equal(metrics.unique,count,'all links have unique direct hrefs');
+                assert.equal(metrics.overflow,true,'desktop strip has horizontal overflow');
+                assert.equal(metrics.visible,true,'selected current subsite automatically revealed');
+                assert.equal(metrics.noAccountOverlap,true,'account controls remain unobstructed');
+                assert.equal(metrics.scrollbar,'thin','horizontal overflow discoverable');
+                assert.equal(metrics.first,'future-1.php');
+                assert.equal(metrics.last,'future-' + count + '.php');
+                const strip = page.locator('.vf-global-domain-links');
+                await strip.evaluate(el=>el.scrollLeft=0);
+                const box = await strip.boundingBox();
+                await page.mouse.move(box.x + Math.min(70,box.width/2),box.y+box.height/2);
+                await page.mouse.wheel(0,140);
+                await page.waitForTimeout(100);
+                assert((await strip.evaluate(el=>el.scrollLeft))>0,'mouse wheel scrolls the strip');
+                await page.mouse.wheel(100,0);
+                await page.waitForTimeout(100);
+                assert((await strip.evaluate(el=>el.scrollLeft))>140,'horizontal trackpad scrolls the strip');
+                // Keyboard Tab must visit each first/last direct anchor, without an intermediary.
+                await page.keyboard.press('Tab');
+                for (let i = 1; i < count; i++) await page.keyboard.press('Tab');
+                const focused = await page.evaluate(()=>document.activeElement?.getAttribute('href'));
+                assert.equal(focused,'future-'+count+'.php','last subsite keyboard reachable');
+                const lastVisible = await page.evaluate(()=>{
+                  const strip=document.querySelector('.vf-global-domain-links');
+                  const r=strip.getBoundingClientRect();
+                  const a=strip.querySelector('a:last-child').getBoundingClientRect();
+                  return a.left>=r.left-2&&a.right<=r.right+2;
+                });
+                assert.equal(lastVisible,true,'native keyboard focus reveals last subsite');
+                console.log('P01_IA_V4_CHROMIUM_DESKTOP_'+count+'_SELECTED_'+selected+'=PASS');
+                await page.close();
+              }
+            }
+            await browser.close();
+            console.log('P01_IA_V4_20_50_REAL_BROWSER=PASS');
+          })().catch(err => { console.error(err); process.exit(1); });
+          JS
