@@ -35,3 +35,13 @@ add_action('template_redirect',static function(){
  if($case==='inline-unsafe')$copy->post_content.='<dl><dt><img src="x" onerror="window.GLOSSARY_XSS=1">Shadow</dt><dd><script>window.GLOSSARY_XSS=1</script><p>Safe definition</p><a href="javascript:window.GLOSSARY_XSS=1">Unsafe target</a></dd><dt>中文名</dt><dd>非拉丁首字母定义。</dd></dl>';
  wp_cache_set($id,$copy,'posts');
 },1);
+
+// Bounded read-only diagnostics emitted only in isolated inline cases.
+add_action('wp_footer',static function(){
+ if(!str_starts_with((string)($_GET['glossary_case']??''),'inline-'))return;
+ $lang=str_starts_with((string)($_SERVER['REQUEST_URI']??''),'/zh/')?'zh':'en';
+ $route=function_exists('vf_toolsite_static_request_path')?vf_toolsite_static_request_path():'missing';
+ $id=(int)vf_theme_public_route_contract_find_exact_published_post_id_for_route_language('glossary',$lang);
+ $info=['route'=>$route,'language'=>vf_theme_public_language(),'queried'=>get_queried_object_id(),'exact'=>$id,'post_language'=>$id?pll_get_post_language($id):'','bytes'=>strlen((string)get_post_field('post_content',$id)),'pool'=>$GLOBALS['vf_theme_glossary_has_entries']??null,'inline_total'=>$GLOBALS['vf_theme_glossary_inline_total']??null,'parsed'=>function_exists('vf_theme_glossary_page_terms')?count(vf_theme_glossary_page_terms()):null,'plan'=>vf_theme_post_list_query_plan('glossary_index')];
+ echo '<pre id="glossary-test-diagnostics" hidden>'.esc_html(wp_json_encode($info)).'</pre>';
+},9999);
