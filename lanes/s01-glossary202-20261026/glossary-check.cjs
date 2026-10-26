@@ -10,7 +10,7 @@ const {chromium}=require('playwright'),fs=require('fs'),assert=require('assert/s
   await go(urls[lang]);assert.equal(await items().count(),12);assert.equal(await inline().count(),0,'independent entries remain first');baseline('proof/primary-'+lang+'.json',{head:await head(),items:await items().allTextContents(),links:await p.locator('[data-vf-directory-item]').evaluateAll(es=>es.map(e=>e.getAttribute('href')))});checks+=3;rows++;
   await go(urls[lang]+'?vf_q=UTF-8');assert.equal(await items().count(),0,'a nonmatching independent dataset must not switch to Page definitions');checks++;
   const legacy=urls[lang]+'?glossary_case=inline-legacy';await go(legacy);baseline('proof/legacy-head-'+lang+'.json',await head());
-  if(phase==='before'){assert.equal(await items().count(),0,'201 reproduces existing Page definitions omitted');checks++;}
+  if(phase!=='after'){assert.equal(await items().count(),0,'201 reproduces existing Page definitions omitted');checks++;}
   else if(lang==='en'){assert.equal(await inline().count(),11);assert.ok((await inline().allTextContents()).some(x=>x.includes('a UTF-8 playlist format')));assert.equal(await p.locator('.vf-glossary-inline-term > a').count(),0,'no invented detail navigation');checks+=3;}
   else{assert.equal(await inline().count(),0,'generic Chinese operating copy is not a definition or English fallback');assert.ok(await p.locator('[data-vf-directory-empty]').isVisible());checks+=2;}
   const prepared=urls[lang]+'?glossary_case=inline-prepared';await go(prepared);baseline('proof/prepared-head-'+lang+'.json',await head());

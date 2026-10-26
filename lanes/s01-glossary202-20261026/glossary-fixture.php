@@ -29,8 +29,8 @@ add_filter('posts_pre_query',static function($posts,$query){
 // Nonpersistent object-cache fixture only; no database or content write.
 add_action('template_redirect',static function(){
  $case=(string)($_GET['glossary_case']??'');if(!in_array($case,['inline-prepared','inline-unsafe'],true))return;
- $id=(int)get_queried_object_id();$post=get_post($id);if(!$post)return;
- $lang=function_exists('pll_get_post_language')?(string)pll_get_post_language($id,'slug'):'en';
+ $lang=str_starts_with((string)($_SERVER['REQUEST_URI']??''),'/zh/')?'zh':'en';
+ $id=(int)vf_theme_public_route_contract_find_exact_published_post_id_for_route_language('glossary',$lang);$post=get_post($id);if(!$post)return;
  $copy=clone $post;$copy->post_content=(string)file_get_contents('/tmp/glossary-prepared-'.$lang.'.html');
  if($case==='inline-unsafe')$copy->post_content.='<dl><dt><img src="x" onerror="window.GLOSSARY_XSS=1">Shadow</dt><dd><script>window.GLOSSARY_XSS=1</script><p>Safe definition</p><a href="javascript:window.GLOSSARY_XSS=1">Unsafe target</a></dd><dt>中文名</dt><dd>非拉丁首字母定义。</dd></dl>';
  wp_cache_set($id,$copy,'posts');
