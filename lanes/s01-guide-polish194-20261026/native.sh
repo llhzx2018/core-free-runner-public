@@ -36,6 +36,7 @@ docker cp target/tests/article-reference-fixture.php "$WP:/var/www/html/wp-conte
 
 docker cp target/tests/guide-detail-desktop-seed.php "$WP:/tmp/guide-seed.php";cli eval-file /tmp/guide-seed.php > proof/guide-fixtures.json
 docker cp "control/lanes/$LANE_ID/adjacent-seed.php" "$WP:/tmp/adjacent-seed.php";cli eval-file /tmp/adjacent-seed.php >/dev/null
+docker cp "control/lanes/$LANE_ID/polish-seed.php" "$WP:/tmp/polish-seed.php";cli eval-file /tmp/polish-seed.php >/dev/null
 docker cp lane/snapshot.php "$WP:/tmp/snapshot.php"
 # Warm only public read-only boot paths before protected-state comparison.
 curl -fsS http://127.0.0.1:18880/ >/dev/null
