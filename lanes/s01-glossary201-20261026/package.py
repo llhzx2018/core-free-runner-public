@@ -8,14 +8,16 @@ assert git('rev-parse', 'HEAD') == os.environ['TARGET_SHA']
 assert git('rev-parse', 'HEAD^{tree}') == os.environ['TARGET_TREE']
 version = os.environ['TARGET_VERSION']
 assert (root / 'VERSION').read_text().strip() == version
-expected={'src/inc/services/frontend-page-progress-service.php', 'src/inc/modules/module-directory-ui.php', 'src/inc/modules/module-hero.php', 'src/style.css', 'src/inc/module-system/module-system-render.php', 'src/inc/modules/module-post-list.php', 'CHANGELOG.md', 'VERSION', 'src/inc/runtime-constants.php', 'src/assets/css/public/pages/families/public-layer-04-page-families-directory.css', 'src/inc/modules/module-cta.php', 'src/assets/css/public/vf-theme-public-runtime.css', 'src/inc/public-css-owner-registry.php'}
+expected={'src/assets/js/main.js', 'src/inc/services/frontend-page-progress-service.php', 'src/inc/modules/module-directory-ui.php', 'src/inc/modules/module-hero.php', 'src/style.css', 'src/inc/module-system/module-system-render.php', 'src/inc/modules/module-post-list.php', 'CHANGELOG.md', 'VERSION', 'src/inc/runtime-constants.php', 'src/assets/css/public/pages/families/public-layer-04-page-families-directory.css', 'src/inc/modules/module-cta.php', 'src/assets/css/public/vf-theme-public-runtime.css', 'src/inc/public-css-owner-registry.php'}
 assert set(git('diff','--name-only',os.environ['BASE_SHA'],'HEAD').splitlines())==expected
 print('APPROVED_GLOSSARY_DIRECTORY_SCOPE_PASS')
 
 # Keep the shared CSS bundle, URL/SEO owners, layout persistence and Provider contracts intact.
-for p in ['src/assets/js/admin/admin-layout.js','src/inc/admin/admin-ads-actions.php','src/inc/services/ads-service.php','src/assets/js/main.js','tests/faq-desktop-browser-check.cjs','src/inc/modules/module-faq.php','src/inc/modules/module-support-pages.php','src/inc/services/layout-service.php','src/inc/theme-ad-contract.php','src/inc/theme-ad-runtime.php','src/inc/theme-native-toc.php','src/inc/services/seo-owner-service.php','src/inc/services/seo-head-service.php','src/inc/services/technical-seo-service.php','src/inc/services/url/public-url-post-permalinks.php']:
+for p in ['src/assets/js/admin/admin-layout.js','src/inc/admin/admin-ads-actions.php','src/inc/services/ads-service.php','tests/faq-desktop-browser-check.cjs','src/inc/modules/module-faq.php','src/inc/modules/module-support-pages.php','src/inc/services/layout-service.php','src/inc/theme-ad-contract.php','src/inc/theme-ad-runtime.php','src/inc/theme-native-toc.php','src/inc/services/seo-owner-service.php','src/inc/services/seo-head-service.php','src/inc/services/technical-seo-service.php','src/inc/services/url/public-url-post-permalinks.php']:
     old=subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':'+p])
     assert (root/p).read_bytes()==old
+old_js=subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':src/assets/js/main.js']).decode()
+assert (root/'src/assets/js/main.js').read_text()==old_js.replace("// WordPress owns full-article Blog search; never re-filter its page by excerpts.\n    var serverSearch = root.getAttribute('data-vf-directory-context') === 'blog_index';","// WordPress owns full-dataset Blog and Glossary search across pagination.\n    var serverSearch = ['blog_index','glossary_index'].indexOf(root.getAttribute('data-vf-directory-context')) !== -1;",1)
 print('EXISTING_OWNER_AND_PERSISTENCE_BYTE_IDENTICAL_PASS')
 
 old_bundle=subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':src/assets/css/public/vf-theme-public-runtime.css'])
@@ -31,7 +33,7 @@ assert new_registry==re.sub(r"('sha256' => ')[a-f0-9]{64}(')",lambda m:m[1]+hash
 print('BUNDLE_IS_EXACTLY_ONE_OWNER_SEGMENT_REPLACEMENT_PASS')
 
 
-for p,limit in [('src/assets/css/public/pages/families/public-layer-04-page-families-directory.css',11000),('src/assets/js/main.js',0)]:
+for p,limit in [('src/assets/css/public/pages/families/public-layer-04-page-families-directory.css',11000),('src/assets/js/main.js',150)]:
     old=subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':'+p])
     assert len((root/p).read_bytes())-len(old)<=limit
 print('BOUNDED_READING_ASSET_BUDGET_PASS')
