@@ -76,6 +76,8 @@ curl -fsS http://127.0.0.1:18880/m3u8-player/ >/dev/null
 docker cp target/tests/ads-entry-fixture.php "$WP:/var/www/html/wp-content/mu-plugins/ads-entry-fixture.php"
 for lang in en zh;do docker cp "control/lanes/$LANE_ID/content/original-$lang.json" "$WP:/tmp/glossary-original-$lang.json";docker cp "control/lanes/$LANE_ID/content/glossary-$lang.html" "$WP:/tmp/glossary-prepared-$lang.html";done
 docker cp "control/lanes/$LANE_ID/glossary-seed.php" "$WP:/tmp/glossary-seed.php";cli eval-file /tmp/glossary-seed.php > proof/glossary-fixtures.json
+docker cp "$WP:/tmp/glossary-seed-readback.json" proof/glossary-seed-readback.json
+cat proof/glossary-seed-readback.json
 docker cp "control/lanes/$LANE_ID/glossary-fixture.php" "$WP:/var/www/html/wp-content/mu-plugins/glossary-review-fixture.php"
 cli eval-file /tmp/snapshot.php > proof/state-before.sha256
 docker cp "control/lanes/$LANE_ID/contracts-snapshot.php" "$WP:/tmp/contracts-snapshot.php"
