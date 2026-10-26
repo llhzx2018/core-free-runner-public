@@ -9,7 +9,7 @@ const { chromium } = require('playwright');
   let checks = 0, rows = 0;
   const go = async url => { const r = await p.goto(url); assert.equal(r.status(), 200); await p.waitForLoadState('networkidle'); };
   const terms = () => p.locator('.vf-glossary-inline-term');
-  const head = () => p.evaluate(() => ({ title: document.title, h1: [...document.querySelectorAll('h1')].map(x => x.textContent), meta: [...document.head.querySelectorAll('meta,link[rel="canonical"],link[rel="alternate"],script[type="application/ld+json"]')].filter(x => !['vf-theme-version','vf-theme-round','vf-theme-cache-token','vf-toolsite-theme','vf-theme-home-tools-force','vf-theme-page-family-visuals'].includes(x.getAttribute('name'))).map(x => x.outerHTML) }));
+  const head = () => p.evaluate(() => ({ title: document.title, h1: [...document.querySelectorAll('h1')].map(x => x.textContent), meta: [...document.head.querySelectorAll('meta,link[rel="canonical"],link[rel="alternate"],script[type="application/ld+json"]')].map(x => (x.getAttribute('name')||'').startsWith('vf-') ? x.outerHTML.replace(/1\.35\.20[23]/g,'THEME_VERSION').replace(/vf-theme-13520[23]/g,'THEME_CACHE_VERSION') : x.outerHTML) }));
   const baseline = (file, value) => { if (phase === 'before') fs.writeFileSync(file, JSON.stringify(value)); else assert.deepEqual(value, JSON.parse(fs.readFileSync(file)), file); };
   const metrics = () => p.evaluate(() => {
     const read = selector => { const el = document.querySelector(selector); if (!el) return null; const s = getComputedStyle(el), r = el.getBoundingClientRect(); return { border: ['Top','Right','Bottom','Left'].map(x => parseFloat(s['border'+x+'Width'])), color: s.borderColor, background: s.backgroundColor, outline: parseFloat(s.outlineWidth), shadow: s.boxShadow, width: r.width, height: r.height, x: r.x }; };
@@ -17,7 +17,7 @@ const { chromium } = require('playwright');
   });
   const zero = object => assert.ok(object.border.every(v => v === 0), JSON.stringify(object));
   for (const lang of ['en','zh']) {
-    await go(urls[lang]);
+    await go(urls[lang]);assert.equal(await p.locator('meta[name=\"vf-theme-version\"]').getAttribute('content'),phase==='after'?'1.35.203':'1.35.202');checks++;
     baseline('proof/independent-'+lang+'.json', { head: await head(), text: await p.locator('[data-vf-directory-item]').allTextContents(), links: await p.locator('[data-vf-directory-item]').evaluateAll(es => es.map(x => x.getAttribute('href'))) }); checks += 3;
     const url = urls[lang] + '?glossary_case=inline-legacy';
     await go(url); assert.equal(await terms().count(), 12); rows++; checks++;
