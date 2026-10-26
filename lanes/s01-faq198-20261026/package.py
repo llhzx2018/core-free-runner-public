@@ -8,15 +8,28 @@ assert git('rev-parse', 'HEAD') == os.environ['TARGET_SHA']
 assert git('rev-parse', 'HEAD^{tree}') == os.environ['TARGET_TREE']
 version = os.environ['TARGET_VERSION']
 assert (root / 'VERSION').read_text().strip() == version
-expected={'VERSION', 'src/style.css', 'src/inc/runtime-constants.php', 'tests/faq-desktop-fixture.php', 'src/assets/css/public/pages/families/public-layer-04-page-families-support-faq.css', 'CHANGELOG.md', 'tests/faq-desktop-browser-check.cjs', 'src/inc/module-system/module-system-render.php', 'src/inc/modules/module-faq.php', 'src/inc/modules/module-support-pages.php'}
+expected={'src/assets/css/public/vf-theme-public-runtime.css','src/inc/public-css-owner-registry.php','VERSION', 'src/style.css', 'src/inc/runtime-constants.php', 'tests/faq-desktop-fixture.php', 'src/assets/css/public/pages/families/public-layer-04-page-families-support-faq.css', 'CHANGELOG.md', 'tests/faq-desktop-browser-check.cjs', 'src/inc/module-system/module-system-render.php', 'src/inc/modules/module-faq.php', 'src/inc/modules/module-support-pages.php'}
 assert set(git('diff','--name-only',os.environ['BASE_SHA'],'HEAD').splitlines())==expected
 print('APPROVED_PROBLEM_DETAIL_ONLY_SCOPE_PASS')
 
 # Keep the shared CSS bundle, URL/SEO owners, layout persistence and Provider contracts intact.
-for p in ['src/assets/css/public/vf-theme-public-runtime.css','src/inc/public-css-owner-registry.php','src/assets/js/admin/admin-layout.js','src/inc/admin/admin-ads-actions.php','src/inc/services/ads-service.php','src/assets/js/main.js','src/inc/services/layout-service.php','src/inc/theme-ad-contract.php','src/inc/theme-ad-runtime.php','src/inc/theme-native-toc.php','src/inc/services/seo-owner-service.php','src/inc/services/seo-head-service.php','src/inc/services/technical-seo-service.php','src/inc/services/url/public-url-post-permalinks.php']:
+for p in ['src/assets/js/admin/admin-layout.js','src/inc/admin/admin-ads-actions.php','src/inc/services/ads-service.php','src/assets/js/main.js','src/inc/services/layout-service.php','src/inc/theme-ad-contract.php','src/inc/theme-ad-runtime.php','src/inc/theme-native-toc.php','src/inc/services/seo-owner-service.php','src/inc/services/seo-head-service.php','src/inc/services/technical-seo-service.php','src/inc/services/url/public-url-post-permalinks.php']:
     old=subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':'+p])
     assert (root/p).read_bytes()==old
 print('EXISTING_OWNER_AND_PERSISTENCE_BYTE_IDENTICAL_PASS')
+
+old_bundle=subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':src/assets/css/public/vf-theme-public-runtime.css'])
+old_owner=subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':src/assets/css/public/pages/families/public-layer-04-page-families-support-faq.css'])
+new_owner=(root/'src/assets/css/public/pages/families/public-layer-04-page-families-support-faq.css').read_bytes()
+assert old_bundle.count(old_owner)==1
+new_bundle=(root/'src/assets/css/public/vf-theme-public-runtime.css').read_bytes()
+assert new_bundle==old_bundle.replace(old_owner,new_owner)
+old_registry=subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':src/inc/public-css-owner-registry.php']).decode()
+import re
+new_registry=(root/'src/inc/public-css-owner-registry.php').read_text()
+assert new_registry==re.sub(r"('sha256' => ')[a-f0-9]{64}(')",lambda m:m[1]+hashlib.sha256(new_bundle).hexdigest()+m[2],old_registry,count=1)
+print('BUNDLE_IS_EXACTLY_ONE_OWNER_SEGMENT_REPLACEMENT_PASS')
+
 
 for p,limit in [('src/assets/css/public/pages/families/public-layer-04-page-families-support-faq.css',6500),('src/assets/js/main.js',0)]:
     old=subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':'+p])
