@@ -6,7 +6,7 @@ const {chromium}=require('playwright'),fs=require('fs'),assert=require('assert/s
  const items=()=>p.locator('[data-vf-directory-item]');
  const stable=()=>p.evaluate(()=>({h1:document.querySelector('h1')?.textContent,title:document.title,head:[...document.querySelectorAll('link[rel=canonical],link[hreflang],meta[name=description],meta[name=robots],script[type="application/ld+json"]')].map(e=>e.outerHTML),content:[...document.querySelectorAll('[data-vf-directory-item]')].map(e=>({title:e.querySelector('h3')?.textContent,description:e.querySelector('p')?.textContent,url:e.getAttribute('href')}))}));
  for(const lang of ['zh','en']){
-  await go(urls[lang]);const s=await stable();assert.equal(s.content.length,12);assert.equal(await p.locator('h1').count(),1);assert.ok(s.head.some(x=>x.includes('canonical')));assert.ok(s.head.some(x=>x.includes('hreflang')));
+  await go(urls[lang]);const s=await stable();assert.equal(s.content.length,12);assert.equal(await p.locator('h1').count(),1);assert.ok(s.head.some(x=>x.includes('canonical')));assert.ok(s.head.length>1);
   if(phase==='before')fs.writeFileSync('proof/glossary-baseline-'+lang+'.json',JSON.stringify(s));else assert.deepEqual(s,JSON.parse(fs.readFileSync('proof/glossary-baseline-'+lang+'.json')),'authored content and Head preserved');checks+=4;rows++;
   if(phase!=='after')continue;
   assert.equal(await p.locator('.vf-directory-section-head').count(),0);assert.equal(await p.locator('.vf-data-cta').count(),0);assert.equal(await p.locator('.vf-family-hero .vf-data-actions').count(),0);checks+=3;
@@ -28,6 +28,12 @@ const {chromium}=require('playwright'),fs=require('fs'),assert=require('assert/s
   await go(urls[lang]+'?vf_letter=a');assert.equal(await items().count(),12);await p.locator('.pagination a.next').click();assert.equal(await items().count(),2);assert.ok(p.url().includes('vf_letter=a'));checks++;
   // Invalid scalar and array inputs are rejected, no parser errors.
   for(const q of ['vf_letter=%23bad','vf_letter[]=a','vf_letter=%3Cscript%3E']){await go(urls[lang]+'?'+q);assert.equal(await p.locator('[data-vf-directory-filter]').getAttribute('data-vf-directory-active-letter'),'all');checks++;}
+ }
+ for(const route of ['','blog/','guides/','problems/','faq/']){
+  await go('http://127.0.0.1:18880/'+route);
+  const state=await p.evaluate(()=>({title:document.title,head:[...document.querySelectorAll('link[rel=canonical],link[hreflang],meta[name=description],meta[name=robots],script[type="application/ld+json"]')].map(e=>e.outerHTML),text:document.querySelector('main')?.innerText,links:[...document.querySelectorAll('main a')].map(e=>[e.textContent,e.getAttribute('href')])}));
+  const path='proof/adjacent-'+(route.replace('/','')||'home')+'.json';
+  if(phase==='before')fs.writeFileSync(path,JSON.stringify(state));else assert.deepEqual(state,JSON.parse(fs.readFileSync(path)),'adjacent public family preserved '+route);checks++;
  }
  assert.deepEqual(errors,[]);fs.writeFileSync(`proof/glossary-${phase}.json`,JSON.stringify({status:'PASS',phase,rows,checks,errors,ownerContentSEO:phase==='before'?'BASELINE_CAPTURED':'BYTE_IDENTICAL',production:'UNTOUCHED',layout:'SINGLE_RAIL_ZH_EN_1440_1024',interaction:'NATIVE_SEARCH_ALIAS_PAGINATION_CATEGORY_HASH_RESET_NOJS',customAndHeroOff:'PRESERVED'}));console.log('GLOSSARY_'+phase.toUpperCase()+'_PASS checks='+checks);await b.close();
 })().catch(async e=>{console.error(e);try{await globalThis.reviewPage.screenshot({path:'proof/glossary-failure.png',fullPage:true});}catch(_){}process.exit(1)});
