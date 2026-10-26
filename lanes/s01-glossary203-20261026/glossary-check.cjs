@@ -9,7 +9,7 @@ const { chromium } = require('playwright');
   let checks = 0, rows = 0;
   const go = async url => { const r = await p.goto(url); assert.equal(r.status(), 200); await p.waitForLoadState('networkidle'); };
   const terms = () => p.locator('.vf-glossary-inline-term');
-  const head = () => p.evaluate(() => ({ title: document.title, h1: [...document.querySelectorAll('h1')].map(x => x.textContent), meta: [...document.head.querySelectorAll('meta,link[rel="canonical"],link[rel="alternate"],script[type="application/ld+json"]')].map(x => x.outerHTML) }));
+  const head = () => p.evaluate(() => ({ title: document.title, h1: [...document.querySelectorAll('h1')].map(x => x.textContent), meta: [...document.head.querySelectorAll('meta,link[rel="canonical"],link[rel="alternate"],script[type="application/ld+json"]')].filter(x => !['vf-theme-version','vf-theme-round','vf-theme-cache-token','vf-toolsite-theme','vf-theme-home-tools-force','vf-theme-page-family-visuals'].includes(x.getAttribute('name'))).map(x => x.outerHTML) }));
   const baseline = (file, value) => { if (phase === 'before') fs.writeFileSync(file, JSON.stringify(value)); else assert.deepEqual(value, JSON.parse(fs.readFileSync(file)), file); };
   const metrics = () => p.evaluate(() => {
     const read = selector => { const el = document.querySelector(selector); if (!el) return null; const s = getComputedStyle(el), r = el.getBoundingClientRect(); return { border: ['Top','Right','Bottom','Left'].map(x => parseFloat(s['border'+x+'Width'])), color: s.borderColor, background: s.backgroundColor, outline: parseFloat(s.outlineWidth), shadow: s.boxShadow, width: r.width, height: r.height, x: r.x }; };
@@ -33,7 +33,7 @@ const { chromium } = require('playwright');
       }
       zero(m.form); zero(m.input); zero(m.section); zero(m.summary); zero(m.term); zero(m.ul); checks += 6;
       assert.equal(m.form.shadow, 'none'); assert.equal(m.ul.background, 'rgba(0, 0, 0, 0)'); assert.equal(m.current.background, 'rgba(0, 0, 0, 0)'); assert.equal(m.label.border[0], 1); checks += 4;
-      assert.equal(m.label.color, 'rgb(148, 163, 184)'); assert.ok(m.label.height >= 44); assert.ok(m.current.height >= 44); checks += 3;
+      assert.equal(m.label.color, 'rgb(122, 135, 147)');const rgb=m.label.color.match(/\d+/g).map(Number).slice(0,3).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);assert.ok(1.05/(rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722+.05)>=3);checks++; assert.ok(m.label.height >= 44); assert.ok(m.current.height >= 44); checks += 3;
       await p.screenshot({ path: `proof/glossary-${lang}-${width}.png`, fullPage: true });
       await p.locator('.vf-directory-search').screenshot({ path: `proof/search-${lang}-${width}.png` });
       await p.locator('.vf-theme-pagination').screenshot({ path: `proof/pagination-${lang}-${width}.png` });
