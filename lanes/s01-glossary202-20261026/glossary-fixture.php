@@ -18,11 +18,14 @@ add_filter('option_vf_theme_layout',static function($raw){
 },20000);
 
 // Force the real zero-independent-entry case without changing stored content.
-add_action('pre_get_posts',static function($query){
+add_filter('posts_pre_query',static function($posts,$query){
  $case=(string)($_GET['glossary_case']??'');
- if(!str_starts_with($case,'inline-')||$query->is_main_query())return;
- if((array)$query->get('post_type')===['post','page']&&(int)$query->get('posts_per_page')===-1&&$query->get('fields')==='ids')$query->set('post__in',[0]);
-});
+ if(!str_starts_with($case,'inline-')||$query->is_main_query())return $posts;
+ // Limit the synthetic empty pool to this renderer's query; do not alter URL/locale probes.
+ $frames=debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS);
+ if(!in_array('vf_theme_render_context_query_posts',array_column($frames,'function'),true))return $posts;
+ $query->found_posts=0;$query->max_num_pages=1;return [];
+},20000,2);
 // Nonpersistent object-cache fixture only; no database or content write.
 add_action('template_redirect',static function(){
  $case=(string)($_GET['glossary_case']??'');if(!in_array($case,['inline-prepared','inline-unsafe'],true))return;
