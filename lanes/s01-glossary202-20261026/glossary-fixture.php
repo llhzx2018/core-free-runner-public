@@ -26,15 +26,17 @@ add_filter('posts_pre_query',static function($posts,$query){
  if(!in_array('vf_theme_render_context_query_posts',array_column($frames,'function'),true))return $posts;
  $query->found_posts=0;$query->max_num_pages=1;return [];
 },20000,2);
-// Nonpersistent object-cache fixture only; no database or content write.
-add_action('template_redirect',static function(){
- $case=(string)($_GET['glossary_case']??'');if(!in_array($case,['inline-prepared','inline-unsafe'],true))return;
+// Request-local canonical-field read fixture; no database or object-cache writes.
+add_filter('post_content',static function($value,$id){
+ $case=(string)($_GET['glossary_case']??'');if(!in_array($case,['inline-prepared','inline-unsafe'],true))return $value;
+ // The route renderer may run before template_redirect; use the native field-read hook.
+ if(!in_array('vf_theme_glossary_page_terms',array_column(debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS),'function'),true))return $value;
  $lang=str_starts_with((string)($_SERVER['REQUEST_URI']??''),'/zh/')?'zh':'en';
- $id=(int)vf_theme_public_route_contract_find_exact_published_post_id_for_route_language('glossary',$lang);$post=get_post($id);if(!$post)return;
- $copy=clone $post;$copy->post_content=(string)file_get_contents('/tmp/glossary-prepared-'.$lang.'.html');
- if($case==='inline-unsafe')$copy->post_content.='<dl><dt><img src="x" onerror="window.GLOSSARY_XSS=1">Shadow</dt><dd><script>window.GLOSSARY_XSS=1</script><p>Safe definition</p><a href="javascript:window.GLOSSARY_XSS=1">Unsafe target</a></dd><dt>中文名</dt><dd>非拉丁首字母定义。</dd></dl>';
- wp_cache_set($id,$copy,'posts');
-},1);
+ if((int)$id!==(int)vf_theme_public_route_contract_find_exact_published_post_id_for_route_language('glossary',$lang))return $value;
+ $content=(string)file_get_contents('/tmp/glossary-prepared-'.$lang.'.html');
+ if($case==='inline-unsafe')$content.='<dl><dt><img src="x" onerror="window.GLOSSARY_XSS=1">Shadow</dt><dd><script>window.GLOSSARY_XSS=1</script><p>Safe definition</p><a href="javascript:window.GLOSSARY_XSS=1">Unsafe target</a></dd><dt>中文名</dt><dd>非拉丁首字母定义。</dd></dl>';
+ return $content;
+},20000,2);
 
 // Bounded read-only diagnostics emitted only in isolated inline cases.
 add_action('wp_footer',static function(){
