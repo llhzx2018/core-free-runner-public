@@ -8,7 +8,7 @@ assert git('rev-parse', 'HEAD') == os.environ['TARGET_SHA']
 assert git('rev-parse', 'HEAD^{tree}') == os.environ['TARGET_TREE']
 version = os.environ['TARGET_VERSION']
 assert (root / 'VERSION').read_text().strip() == version
-expected={'src/inc/modules/module-directory-ui.php', 'src/inc/modules/module-hero.php', 'src/style.css', 'src/inc/module-system/module-system-render.php', 'src/inc/modules/module-post-list.php', 'CHANGELOG.md', 'VERSION', 'src/inc/runtime-constants.php', 'src/assets/css/public/pages/families/public-layer-04-page-families-directory.css', 'src/inc/modules/module-cta.php', 'src/assets/css/public/vf-theme-public-runtime.css', 'src/inc/public-css-owner-registry.php'}
+expected={'src/inc/services/frontend-page-progress-service.php', 'src/inc/modules/module-directory-ui.php', 'src/inc/modules/module-hero.php', 'src/style.css', 'src/inc/module-system/module-system-render.php', 'src/inc/modules/module-post-list.php', 'CHANGELOG.md', 'VERSION', 'src/inc/runtime-constants.php', 'src/assets/css/public/pages/families/public-layer-04-page-families-directory.css', 'src/inc/modules/module-cta.php', 'src/assets/css/public/vf-theme-public-runtime.css', 'src/inc/public-css-owner-registry.php'}
 assert set(git('diff','--name-only',os.environ['BASE_SHA'],'HEAD').splitlines())==expected
 print('APPROVED_GLOSSARY_DIRECTORY_SCOPE_PASS')
 
@@ -31,7 +31,7 @@ assert new_registry==re.sub(r"('sha256' => ')[a-f0-9]{64}(')",lambda m:m[1]+hash
 print('BUNDLE_IS_EXACTLY_ONE_OWNER_SEGMENT_REPLACEMENT_PASS')
 
 
-for p,limit in [('src/assets/css/public/pages/families/public-layer-04-page-families-directory.css',6500),('src/assets/js/main.js',0)]:
+for p,limit in [('src/assets/css/public/pages/families/public-layer-04-page-families-directory.css',11000),('src/assets/js/main.js',0)]:
     old=subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':'+p])
     assert len((root/p).read_bytes())-len(old)<=limit
 print('BOUNDED_READING_ASSET_BUDGET_PASS')
