@@ -8,8 +8,8 @@ update_option('vf_theme_layout',$layout);
 $cat=wp_insert_term('Glossary','category',['slug'=>'glossary']);$catid=is_wp_error($cat)?$cat->get_error_data()['term_id']:$cat['term_id'];
 $out=[];$pairs=[];
 foreach(['en','zh']as$lang){
- $pages=get_posts(['post_type'=>'page','name'=>'glossary','lang'=>$lang,'suppress_filters'=>false,'numberposts'=>1]);
- $id=$pages?(int)$pages[0]->ID:wp_insert_post(['post_type'=>'page','post_status'=>'publish','post_name'=>'glossary','post_title'=>$lang==='zh'?'M3U8 / HLS 术语表':'M3U8 / HLS Glossary','post_content'=>'<p>Owner glossary index content.</p>']);
+ $id=wp_insert_post(['post_type'=>'page','post_status'=>'draft','post_name'=>'glossary','post_title'=>$lang==='zh'?'M3U8 / HLS 术语表':'M3U8 / HLS Glossary','post_content'=>'<p>Owner glossary index content.</p>'],true);
+ if(is_wp_error($id))throw new RuntimeException('GLOSSARY_SEED_INSERT_FAILED');
  pll_set_post_language($id,$lang);$pairs[$lang]=$id;update_post_meta($id,'rank_math_description','Owner glossary SEO '.$lang);
  $out[$lang]=home_url($lang==='zh'?'/zh/glossary/':'/glossary/');
  for($i=0;$i<30;$i++){
@@ -22,7 +22,7 @@ foreach(['en','zh']as$lang){
 }
 if(count(array_unique($pairs))!==2)throw new RuntimeException('GLOSSARY_SEED_LANGUAGE_COLLISION');
 pll_save_post_translations($pairs);
-foreach (['en','zh'] as $lang) { $raw=json_decode(file_get_contents('/tmp/glossary-original-'.$lang.'.json'),true);wp_update_post(['ID'=>$pairs[$lang],'post_content'=>$raw['post_content'],'post_excerpt'=>$raw['post_excerpt']]); }
+foreach (['en','zh'] as $lang) { $raw=json_decode(file_get_contents('/tmp/glossary-original-'.$lang.'.json'),true);wp_update_post(['ID'=>$pairs[$lang],'post_status'=>'publish','post_name'=>'glossary','post_content'=>$raw['post_content'],'post_excerpt'=>$raw['post_excerpt']]); }
 // Match Production's established Polylang Pro shared slug in this disposable Free fixture.
 foreach($pairs as $lang=>$id){global $wpdb;if(get_post_field('post_name',$id)!=='glossary'){$wpdb->update($wpdb->posts,['post_name'=>'glossary'],['ID'=>$id],['%s'],['%d']);clean_post_cache($id);}}
 foreach($pairs as $lang=>$id){if(pll_get_post_language($id)!==$lang)throw new RuntimeException('GLOSSARY_SEED_LANGUAGE_MISMATCH');}
