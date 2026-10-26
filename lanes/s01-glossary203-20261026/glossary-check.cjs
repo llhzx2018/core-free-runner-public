@@ -13,9 +13,10 @@ const { chromium } = require('playwright');
   const baseline = (file, value) => { if (phase === 'before') fs.writeFileSync(file, JSON.stringify(value)); else assert.deepEqual(value, JSON.parse(fs.readFileSync(file)), file); };
   const metrics = () => p.evaluate(() => {
     const read = selector => { const el = document.querySelector(selector); if (!el) return null; const s = getComputedStyle(el), r = el.getBoundingClientRect(); return { border: ['Top','Right','Bottom','Left'].map(x => parseFloat(s['border'+x+'Width'])), color: s.borderColor, background: s.backgroundColor, outline: parseFloat(s.outlineWidth), shadow: s.boxShadow, width: r.width, height: r.height, x: r.x }; };
-    return { form: read('.vf-directory-search'), label: read('.vf-directory-search label'), input: read('[data-vf-directory-query]'), section: read('.vf-directory-section'), summary: read('.vf-content-list-summary'), term: read('.vf-glossary-inline-term'), ul: read('.vf-theme-pagination>ul'), current: read('.vf-theme-pagination .current'), overflow: document.documentElement.scrollWidth > innerWidth, hero: read('.vf-family-hero .container-wide'), rail: read('.vf-directory-section .container-wide') };
+    return { form: read('.vf-directory-search'), label: read('.vf-directory-search label'), input: read('[data-vf-directory-query]'), section: read('.vf-directory-section'), frame: read('.vf-theme-module-frame--post_list'), heroBox: read('.vf-family-hero'), summary: read('.vf-content-list-summary'), term: read('.vf-glossary-inline-term'), ul: read('.vf-theme-pagination>ul'), current: read('.vf-theme-pagination .current'), overflow: document.documentElement.scrollWidth > innerWidth, hero: read('.vf-family-hero .container-wide'), rail: read('.vf-directory-section .container-wide') };
   });
   const zero = object => assert.ok(object.border.every(v => v === 0), JSON.stringify(object));
+  const detail = async (selector,path) => { const el=p.locator(selector);await el.scrollIntoViewIfNeeded();const clip=await el.evaluate(e=>{const r=e.getBoundingClientRect();return {x:Math.max(0,r.x+scrollX-7),y:Math.max(0,r.y+scrollY-7),width:r.width+14,height:r.height+14};});await p.screenshot({path,clip}); };
   for (const lang of ['en','zh']) {
     await go(urls[lang]);assert.equal(await p.locator('meta[name=\"vf-theme-version\"]').getAttribute('content'),phase==='after'?'1.35.203':'1.35.202');checks++;
     baseline('proof/independent-'+lang+'.json', { head: await head(), text: await p.locator('[data-vf-directory-item]').allTextContents(), links: await p.locator('[data-vf-directory-item]').evaluateAll(es => es.map(x => x.getAttribute('href'))) }); checks += 3;
@@ -31,21 +32,21 @@ const { chromium } = require('playwright');
         assert.ok(m.ul.border.some(v => v > 0), 'reproduce pagination parent mistaken for page link');
         assert.ok(m.term.border[2] > 0 && m.summary.border[2] > 0, 'reproduce repeated rules'); checks += 3; continue;
       }
-      zero(m.form); zero(m.input); zero(m.section); zero(m.summary); zero(m.term); zero(m.ul); checks += 6;
+      zero(m.frame); zero(m.heroBox); checks += 2;zero(m.form); zero(m.input); zero(m.section); zero(m.summary); zero(m.term); zero(m.ul); checks += 6;
       assert.equal(m.form.shadow, 'none'); assert.equal(m.ul.background, 'rgba(0, 0, 0, 0)'); assert.equal(m.current.background, 'rgba(0, 0, 0, 0)'); assert.equal(m.label.border[0], 1); checks += 4;
       assert.equal(m.label.color, 'rgb(122, 135, 147)');const rgb=m.label.color.match(/\d+/g).map(Number).slice(0,3).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4);assert.ok(1.05/(rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722+.05)>=3);checks++; assert.ok(m.label.height >= 44); assert.ok(m.current.height >= 44); checks += 3;
       await p.screenshot({ path: `proof/glossary-${lang}-${width}.png`, fullPage: true });
-      await p.locator('.vf-directory-search').screenshot({ path: `proof/search-${lang}-${width}.png` });
-      await p.locator('.vf-theme-pagination').screenshot({ path: `proof/pagination-${lang}-${width}.png` });
+      await detail('.vf-directory-search',`proof/search-${lang}-${width}.png`);
+      await detail('.vf-theme-pagination',`proof/pagination-${lang}-${width}.png`);
       await p.locator('.vf-theme-pagination a.next').hover(); zero((await metrics()).ul); checks++;
-      await p.locator('.vf-theme-pagination').screenshot({ path: `proof/pagination-hover-${lang}-${width}.png` });
+      await detail('.vf-theme-pagination',`proof/pagination-hover-${lang}-${width}.png`);
       await p.locator('.vf-theme-pagination a.next').focus(); await p.keyboard.press('Tab'); await p.keyboard.press('Shift+Tab');
       assert.ok(await p.locator('.vf-theme-pagination a.next').evaluate(e => e.matches(':focus-visible') && parseFloat(getComputedStyle(e).outlineWidth) >= 2));
       zero((await metrics()).ul); checks += 2;
-      await p.locator('.vf-theme-pagination').screenshot({ path: `proof/pagination-focus-${lang}-${width}.png` });
+      await detail('.vf-theme-pagination',`proof/pagination-focus-${lang}-${width}.png`);
       await p.locator('[data-vf-directory-query]').focus();
       const focus = await metrics(); assert.ok(focus.label.outline >= 2); zero(focus.input); zero(focus.form); checks += 3;
-      await p.locator('.vf-directory-search').screenshot({ path: `proof/search-focus-${lang}-${width}.png` });
+      await detail('.vf-directory-search',`proof/search-focus-${lang}-${width}.png`);
     }
     if (phase !== 'after') continue;
     await p.setViewportSize({ width: 1440, height: 1100 }); await go(url);
