@@ -1,0 +1,130 @@
+name: S01 Theme PR346 exact-source PHP and isolated WordPress proof
+on:
+  push:
+    branches: [task/s01-theme346-wp-proof-20261028]
+    paths: ['.github/workflows/s01-theme346-wp-proof-20261028.yml']
+permissions:
+  contents: read
+env:
+  TARGET_REPO: llhzx2018/vf-tools-theme
+  TARGET_VERSION: 1.35.212
+  TARGET_SHA: 7e802fef740d2f622cfe6fa4188c5eb12e2183ee
+  TARGET_TREE: a285090f95ba761ad9bcab77eb11371a934a1506
+  BASE_SHA: 7b5e6b50a7836cb5360f8c8d9b7171b4d1de0b18
+jobs:
+  php-wordpress:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: control
+      - name: Audit one-shot exact-source lane
+        run: python3 control/scripts/ephemeral_lane_spec.py audit-rendered --spec control/lanes/s01-theme346-wp-proof-20261028/spec.json --input control/.github/workflows/s01-theme346-wp-proof-20261028.yml
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 02d4591eed025a3d3a67bc0a150b3ddc448c2ab8
+          persist-credentials: false
+          path: established
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: 7e802fef740d2f622cfe6fa4188c5eb12e2183ee
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Exact identity and ten-file scoped PHP and CSS checks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof provider
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse 'HEAD^{tree}')" = "$TARGET_TREE"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          git -C target diff --name-only "$BASE_SHA" HEAD | sort > proof/changed-files.txt
+          test "$(wc -l < proof/changed-files.txt)" -eq 10
+          grep -Fxq 'src/inc/modules/module-hero.php' proof/changed-files.txt
+          grep -Fxq 'src/assets/css/public/vf-theme-public-runtime.css' proof/changed-files.txt
+          grep -Fxq 'tests/tool-task-hero-compact-contract.php' proof/changed-files.txt
+          for file in src/inc/modules/module-hero.php src/inc/services/frontend-page-progress-service.php src/inc/public-css-owner-registry.php src/inc/runtime-constants.php tests/tool-task-hero-compact-contract.php; do
+            php -l "target/$file" | tee -a proof/php-lint.txt
+          done
+          php target/tests/tool-task-hero-compact-contract.php > proof/hero-contract.json
+          php target/tests/public-detail-heading-contract.php > proof/detail-heading.json
+          php target/tests/three-tool-next-route-rendering.php en > proof/tool-adjacent-en.json
+          php target/tests/three-tool-next-route-rendering.php zh > proof/tool-adjacent-zh.json
+          python3 - <<'PYVERIFY'
+          import hashlib,json,pathlib
+          src=pathlib.Path('target/src')
+          bundle=(src/'assets/css/public/vf-theme-public-runtime.css').read_bytes()
+          family=(src/'assets/css/public/pages/families/public-family-02-tool-directory-detail-operations-closure.css').read_bytes()
+          registry=(src/'inc/public-css-owner-registry.php').read_text()
+          digest=hashlib.sha256(bundle).hexdigest()
+          assert family in bundle,'canonical CSS not in runtime bundle'
+          assert digest=='302555de59d3219f3a55e3b761826975d2638089618300f2b8a4a3840aec7117',digest
+          assert digest in registry,'registry SHA mismatch'
+          p=pathlib.Path('proof')
+          for filename in ['hero-contract.json','detail-heading.json','tool-adjacent-en.json','tool-adjacent-zh.json']:
+              j=json.loads((p/filename).read_text())
+              assert j['status']=='PASS',(filename,j)
+          hero=json.loads((p/'hero-contract.json').read_text())
+          assert hero['checks']>=60,hero
+          (p/'php-css-gate.json').write_text(json.dumps({'status':'PASS','target_sha':'7e802fef740d2f622cfe6fa4188c5eb12e2183ee','files':10,'hero_checks':hero['checks'],'runtime_sha256':digest,'production':'UNTOUCHED'}))
+          print('S01_THEME346_PHP_CSS_PASS checks='+str(hero['checks']))
+          PYVERIFY
+          git -C target archive --format=zip --prefix=vf-tools-theme/ "$TARGET_SHA:src" > provider/theme346.zip
+          unzip -t provider/theme346.zip >/dev/null
+          unzip -p provider/theme346.zip vf-tools-theme/style.css | grep -q 'Version: 1.35.212'
+      - name: Run disposable WordPress MariaDB Polylang integration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          NET="s01-pr346-$GITHUB_RUN_ID"; DB="$NET-db"; WP="$NET-wp"
+          cleanup(){ docker rm -fv "$WP" "$DB" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker network create "$NET" >/dev/null
+          docker run -d --name "$DB" --network "$NET" -e MARIADB_ROOT_PASSWORD=syntheticroot -e MARIADB_DATABASE=wordpress -e MARIADB_USER=wordpress -e MARIADB_PASSWORD=syntheticdb mariadb:11.8.8 >/dev/null
+          for i in $(seq 1 60); do docker exec "$DB" mariadb-admin ping -h127.0.0.1 -uroot -psyntheticroot --silent >/dev/null 2>&1 && break; sleep 2; done
+          docker run -d --name "$WP" --network "$NET" -p 18880:80 -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_NAME=wordpress -e WORDPRESS_DB_USER=wordpress -e WORDPRESS_DB_PASSWORD=syntheticdb wordpress:7.1.2-php8.3-apache >/dev/null
+          for i in $(seq 1 90); do docker exec "$WP" test -f /var/www/html/wp-settings.php && curl -fsS http://127.0.0.1:18880/wp-admin/install.php >/dev/null && break; sleep 2; done
+          curl -fsSLo /tmp/s01-pr346-wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          docker cp /tmp/s01-pr346-wp-cli.phar "$WP:/usr/local/bin/wp"
+          cli(){ docker exec --user www-data "$WP" php /usr/local/bin/wp "$@" --path=/var/www/html; }
+          cli config set DISABLE_WP_CRON true --raw >/dev/null
+          cli core install --url=http://127.0.0.1:18880 --title='Synthetic S01 PR346' --admin_user=admin --admin_password='Synthetic-Only-Pr346!' --admin_email=runner@example.invalid --skip-email >/dev/null
+          docker cp provider/theme346.zip "$WP:/tmp/theme346.zip"
+          cli theme install /tmp/theme346.zip --activate >/dev/null
+          for attempt in 1 2 3; do cli plugin install polylang --version=3.8.10 --activate >/dev/null && break; test "$attempt" -lt 3 || exit 1; sleep 3; done
+          docker cp established/lanes/s01-frontend-design-20261017/languages.php "$WP:/tmp/languages.php"
+          cli eval-file /tmp/languages.php >/dev/null
+          cli rewrite structure '/%postname%/' --hard >/dev/null
+          docker cp control/lanes/s01-theme346-wp-proof-20261028/wordpress-check.php "$WP:/tmp/theme346-wordpress-check.php"
+          cli eval-file /tmp/theme346-wordpress-check.php > proof/wordpress-check.json
+          curl -fsS http://127.0.0.1:18880/ > proof/home-http.html
+          python3 - <<'PYVERIFY'
+          import json,pathlib
+          p=pathlib.Path('proof')
+          check=json.loads((p/'wordpress-check.json').read_text())
+          assert check['status']=='PASS',check
+          assert check['source_sha']=='7e802fef740d2f622cfe6fa4188c5eb12e2183ee',check
+          assert check['count']>=20,check
+          assert all(x['pass'] for x in check['checks']),check
+          assert check['production']=='NOT_EXECUTED',check
+          assert '<html' in (p/'home-http.html').read_text().lower(),'front-end HTTP smoke missing HTML'
+          (p/'integration-gate.json').write_text(json.dumps({'status':'PASS','source_sha':check['source_sha'],'wordpress_checks':check['count'],'synthetic_languages':['en','zh'],'http_smoke':'PASS','production':'UNTOUCHED'}))
+          print('S01_THEME346_ISOLATED_WORDPRESS_PASS checks='+str(check['count']))
+          PYVERIFY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s01-theme346-wordpress-${{ github.run_id }}
+          path: |
+            proof/*.json
+            proof/php-lint.txt
+            proof/changed-files.txt
+          retention-days: 14
+      - name: Remove ephemeral private checkout
+        if: always()
+        run: rm -rf target provider established
