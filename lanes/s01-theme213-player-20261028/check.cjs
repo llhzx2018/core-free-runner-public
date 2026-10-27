@@ -43,8 +43,9 @@ const norm=s=>s.replaceAll('1.35.213','1.35.211').replaceAll('135213','135211');
     assert.ok(screen.height<=481,'video must not dominate the entire viewport');
     assert.equal(await root.locator('.vf-recent-item:visible').count(),5,'real populated five-row library');
     assert.equal(await root.locator('.vf-row-actions:visible button').count(),20,'all existing row actions remain discoverable');
-    if(width===1440){assert.ok(library.x>stage.x+stage.width,'library is secondary right rail');assert.ok(Math.abs(library.y-stage.y)<2,'media and library share start');}
-    else assert.ok(library.y>=stage.y+stage.height,'tablet library follows the media');
+    if(width===1440){assert.ok(library.x>stage.x+stage.width,'library is secondary right rail');assert.ok(Math.abs(library.y-stage.y)<2,'media and library share start');assert.ok(library.height<690,'five rows must not produce an excessive library rail');}
+    else {assert.ok(library.y>=stage.y+stage.height,'tablet library follows the media');assert.ok(library.height<530,'tablet history uses compact two-column rows');}
+    assert.ok(stage.y<600,'video starts within the first desktop viewport');
     assert.equal(await p.locator('.vf-m3u8-launchbar__steps').isVisible(),false,'avoid repeated steps before input');
     assert.ok(await p.locator('.vf-m3u8-launchbar__back').isVisible(),'all tools navigation retained');
     rows.push({kind:'desktop-layout',lang,width,inputY:i.y,rail:f.width,stage,library,screen,status:'PASS'});
