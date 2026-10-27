@@ -3,6 +3,7 @@ define('ABSPATH',__DIR__.'/');
 $source=$argv[1];$phase=$argv[2];$GLOBALS['language']=$argv[3]??'en';$GLOBALS['scenario']=$argv[4]??'normal';
 class WP_Post{public $ID;public $post_status;public $post_title;function __construct($id,$title,$status='publish'){$this->ID=$id;$this->post_title=$title;$this->post_status=$status;}}
 function add_action(...$args){}function add_filter(...$args){}
+function is_admin(){return true;}
 function post_type_exists($s){return true;}
 function get_option($k){return 0;}
 function get_post($id){return new WP_Post($id,$id===1001?'Authored English sitemap':'作者的中文站点地图',$GLOBALS['scenario']==='draft'?'draft':'publish');}
