@@ -50,6 +50,6 @@ foreach (['en', 'zh'] as $language) {
 }
 echo wp_json_encode([
     'status' => 'PASS', 'checks' => $checks, 'count' => count($checks),
-    'version' => '1.35.212', 'source_sha' => '7e802fef740d2f622cfe6fa4188c5eb12e2183ee',
+    'version' => '1.35.212', 'source_sha' => '353241c626b2ff549c848e61fd48fed5c7ef15d9',
     'production' => 'NOT_EXECUTED',
 ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
