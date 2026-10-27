@@ -69,6 +69,8 @@ for attempt in 1 2 3; do cli plugin install seo-by-rank-math --version=1.0.280 -
 # Match the plugin's documented account-connection skip in this isolated fixture.
 cli option update rank_math_registration_skip 1 >/dev/null
 curl -fsS http://127.0.0.1:18880/m3u8-player/ >/dev/null
+docker cp "control/lanes/$LANE_ID/stable-dates.php" "$WP:/tmp/stable-dates.php"
+cli eval-file /tmp/stable-dates.php >/dev/null
 docker cp "control/lanes/$LANE_ID/contracts-snapshot.php" "$WP:/tmp/contracts-snapshot.php"
 cli eval-file /tmp/snapshot.php > proof/state-before.sha256
 cli eval-file /tmp/contracts-snapshot.php > proof/contracts-before.json
@@ -79,6 +81,9 @@ version_check "$TARGET_VERSION"
 cli theme install /tmp/theme-old.zip --force >/dev/null
 version_check "$SOURCE_VERSION"
 export WP
+docker cp provider/theme-current-main.zip "$WP:/tmp/theme-current-main.zip"
+cli theme install /tmp/theme-current-main.zip --force >/dev/null
+version_check "$SOURCE_VERSION"
 NODE_PATH="$PWD/node_modules" node "control/lanes/$LANE_ID/check.cjs" before
 cli theme install /tmp/theme-new.zip --force >/dev/null
 version_check "$TARGET_VERSION"
