@@ -1,5 +1,6 @@
 <?php
 define('ABSPATH',__DIR__.'/');
+define('OBJECT','OBJECT');
 $source=$argv[1];$phase=$argv[2];$GLOBALS['language']=$argv[3]??'en';$GLOBALS['scenario']=$argv[4]??'normal';
 class WP_Post{public $ID;public $post_status;public $post_title;function __construct($id,$title,$status='publish'){$this->ID=$id;$this->post_title=$title;$this->post_status=$status;}}
 function add_action(...$args){}function add_filter(...$args){}
