@@ -26,7 +26,7 @@ const norm=s=>s.replaceAll('1.35.211','1.35.210').replaceAll('135211','135210');
     const h=await p.locator('h1').boundingBox(),f=await p.locator('.vf-tool-runtime-stage-frame').boundingBox(),i=await input.boundingBox();
     await p.screenshot({path:`proof/player-${lang}-${width}.png`,fullPage:true});
     fs.writeFileSync(`proof/layout-${lang}-${width}.json`,JSON.stringify({h,f,i,ancestors:await input.evaluate(e=>{const rows=[];for(let p=e;p&&p.tagName!=='BODY';p=p.parentElement){const s=getComputedStyle(p),r=p.getBoundingClientRect();rows.push({tag:p.tagName,cls:p.className,y:r.y,h:r.height,padding:s.padding,margin:s.margin,gap:s.gap,display:s.display});}return rows;})},null,2));
-    assert.ok(Math.abs(h.x-f.x)<2,'title/workspace common baseline');assert.ok(i.y<500,`input visible in first desktop viewport: ${i.y}`);
+    assert.ok(Math.abs(h.x-f.x)<2,'title/workspace common baseline');const cta=await p.locator('.vf-data-cta>.container-wide').boundingBox();assert.ok(Math.abs(cta.x-f.x)<2,'CTA follows the same gutter and content rail');assert.ok(i.y<500,`input visible in first desktop viewport: ${i.y}`);
     const styles=await p.locator('.vf-tool-runtime-stage-frame').evaluate(e=>{const s=getComputedStyle(e);return{border:s.borderTopWidth,shadow:s.boxShadow,overflow:s.overflow,padding:s.padding}});
     assert.equal(styles.border,'0px');assert.equal(styles.shadow,'none');assert.equal(styles.padding,'0px');assert.equal(styles.overflow,'visible');
     assert.ok(await root.locator('[data-vf-player-view="simple"]').isVisible());assert.ok(await root.locator('[data-vf-player-view="pro"]').isVisible());
