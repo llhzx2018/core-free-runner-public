@@ -43,6 +43,8 @@ cli eval-file /tmp/snapshot.php > proof/state-before.json
 cli eval-file /tmp/contracts-snapshot.php > proof/contracts-before.json
 docker cp target/src/. "$WP:/var/www/html/wp-content/themes/vf-tools-theme/"
 docker exec "$WP" chown -R www-data:www-data /var/www/html/wp-content/themes/vf-tools-theme
+docker cp "control/lanes/$LANE_ID/hero-check.php" "$WP:/tmp/404-hero-check.php"
+cli eval-file /tmp/404-hero-check.php > proof/hero-check.txt
 NODE_PATH="$PWD/node_modules" node "control/lanes/$LANE_ID/check.cjs" after
 cli eval-file /tmp/404-settings.php restore >/dev/null
 cli eval-file /tmp/snapshot.php > proof/state-after.json
