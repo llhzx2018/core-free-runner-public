@@ -1,0 +1,148 @@
+name: "TEMP P01 music real external media probe"
+on:
+  push:
+    branches:
+      - "verify/p01-music-live-providers-20261027"
+permissions:
+  contents: read
+jobs:
+  p01-music-native-decoder:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout P01 exact private source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: "b42441e0691f0e82d25732b90fc2cbaee9bf7271"
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - name: Verify exact source identity (no release)
+        run: |
+          test "$(git rev-parse HEAD)" = "b42441e0691f0e82d25732b90fc2cbaee9bf7271"
+          test "$(cat VERSION)" = "2.47.465"
+          test "$(cat src/VERSION.txt)" = "2.47.465"
+          echo "P01_MUSIC_DECODER_EXACT_SOURCE=PASS"
+      - name: Prepare isolated PHP site and browser runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -v | head -n 1
+          command -v google-chrome
+          npm install --silent --no-audit --no-fund --prefix "$RUNNER_TEMP/p01-playwright" playwright-core@1.56.1
+          mkdir -p "$RUNNER_TEMP/music-native-e2e"
+          cp -a src "$RUNNER_TEMP/music-native-e2e/site"
+          echo "P01_MUSIC_ISOLATED_RUNTIME=PASS"
+      - name: Isolated owner login and real HTML5 browser decoding
+        shell: bash
+        env:
+          SYNTHETIC_BASE: http://127.0.0.1:18465
+        run: |
+          set -Eeuo pipefail
+          work="$RUNNER_TEMP/music-native-e2e"
+          export SYNTHETIC_COOKIE="$work/cookie.txt"
+          export NODE_PATH="$RUNNER_TEMP/p01-playwright/node_modules"
+          export CHROME_BIN="$(command -v google-chrome)"
+          php -S 127.0.0.1:18465 -t "$work/site" > "$work/php.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 50); do
+            if curl -fsS -c "$SYNTHETIC_COOKIE" -b "$SYNTHETIC_COOKIE" "$SYNTHETIC_BASE/setup.php" -o "$work/setup.html" 2>/dev/null; then break; fi
+            sleep 0.2
+          done
+          test -f "$work/setup.html"
+          csrf="$(sed -n 's/.*name="setup_csrf"[[:space:]]*value="\([^"]*\)".*/\1/p' "$work/setup.html" | head -n 1)"
+          test -n "$csrf"
+          curl -fsS -c "$SYNTHETIC_COOKIE" -b "$SYNTHETIC_COOKIE" -X POST "$SYNTHETIC_BASE/setup.php" --data-urlencode "setup_csrf=$csrf" --data-urlencode "site_title=Isolated Music Decoder Gate" --data-urlencode "admin_password=IsolatedOnly2026!" --data-urlencode "admin_password_confirm=IsolatedOnly2026!" -o "$work/setup-result.html"
+          test -f "$work/site/app/.runtime.php"
+          curl -fsS -c "$SYNTHETIC_COOKIE" -b "$SYNTHETIC_COOKIE" -H "Content-Type: application/json" --data '{"password":"IsolatedOnly2026!"}' "$SYNTHETIC_BASE/api.php?action=login" -o "$work/login.json"
+          python3 -c 'import json,sys; assert json.load(open(sys.argv[1])).get("ok") is True' "$work/login.json"
+          node - <<'JS'
+          'use strict';
+          const assert=require('node:assert/strict');
+          const fs=require('node:fs');
+          const {chromium}=require('playwright-core');
+          (async()=>{
+            const base=process.env.SYNTHETIC_BASE;
+            const cookies=fs.readFileSync(process.env.SYNTHETIC_COOKIE,'utf8').split(/\r?\n/)
+              .filter(x=>x&&!x.startsWith('# ')).map(x=>x.replace(/^#HttpOnly_/,'').split('\t'))
+              .filter(x=>x.length>=7&&x[0]==='127.0.0.1')
+              .map(x=>({name:x[5],value:x[6],url:base+'/'}));
+            assert(cookies.some(x=>x.name==='vfnav_session'),'isolated owner cookie missing');
+            const browser=await chromium.launch({executablePath:process.env.CHROME_BIN,headless:true,args:['--no-sandbox']});
+            try{
+              const ctx=await browser.newContext({viewport:{width:1280,height:800},locale:'zh-CN'});
+              await ctx.addCookies(cookies);
+              const page=await ctx.newPage();
+              let allowedMedia=0,blockedExternal=0;
+              await page.route('**/*',route=>{
+                const url=new URL(route.request().url());
+                if(url.origin===base)return route.continue();
+                if(url.protocol==='https:' && route.request().resourceType()==='media'){
+                  allowedMedia++;return route.continue();
+                }
+                blockedExternal++;return route.abort('blockedbyclient');
+              });
+              const res=await page.goto(base+'/music-shell.php?view=home',{waitUntil:'domcontentloaded'});
+              assert.equal(res?.status(),200,'authenticated isolated Music shell');
+              const home=page.frameLocator('iframe[data-dock-panel="home"]');
+              const tracks=home.locator('[data-music-audio]');
+              assert.equal(await tracks.count(),4,'four live Commons sample tracks expected');
+              const audio=page.locator('[data-dock-audio]');
+              const collect=async label=>{
+                let result='NOT_PROVEN_TIMEOUT';
+                try{
+                  await page.waitForFunction(()=>{
+                    const a=document.querySelector('[data-dock-audio]');
+                    const st=document.querySelector('[data-music-playback-state]')?.textContent||'';
+                    return (a&&!a.paused&&a.currentTime>0.40&&a.readyState>=2)||
+                      st==='播放失败 · 可重试';
+                  },null,{timeout:14000});
+                  const v=await audio.evaluate(a=>({current:a.currentTime,ready:a.readyState,paused:a.paused,error:a.error?.code||0}));
+                  result=v.current>0.40&&v.ready>=2&&!v.paused?'PASS_DECODED_AUDIO':'NOT_PROVEN_MEDIA_ERROR_'+v.error;
+                }catch(e){
+                  const v=await audio.evaluate(a=>({ready:a.readyState,time:a.currentTime,error:a.error?.code||0}));
+                  result='NOT_PROVEN_WAIT_'+v.ready+'_'+v.error;
+                }
+                console.log('PROVIDER_RESULT '+label+'='+result);
+                await page.evaluate(()=>window.VfMusicDock.stop());
+                return result;
+              };
+              const results={};
+              for(let i=0;i<4;i++){
+                await tracks.nth(i).click();
+                results['commons_'+(i+1)]=await collect('COMMONS_'+(i+1));
+              }
+              await page.evaluate(()=>{
+                const btn=document.createElement('button');
+                btn.id='probe-external';btn.textContent='Play provider';
+                btn.style.cssText='position:fixed;left:12px;top:12px;z-index:2147483647;display:block;width:170px;height:50px;background:white;color:black';
+                btn.addEventListener('click',()=>{
+                  const s=btn.dataset.source;
+                  if(s==='audius')window.VfMusicDock.playTracks([{
+                    title:'Public eligible Audius track',url:'https://api.audius.co/v1/tracks/mzXmz1/stream'
+                  }],0);
+                  else window.VfMusicDock.playRadio({
+                    id:'7a3a3989-8f26-44f7-9ae5-fa91e5cf4f9d',
+                    name:'Radio Browser RMC FR',country:'France',stream:'https://audio.bfmtv.com/rmcradio_128.mp3'
+                  });
+                });
+                document.body.append(btn);
+              });
+              await page.locator('#probe-external').evaluate(e=>e.dataset.source='audius');
+              await page.locator('#probe-external').click();
+              results.audius=await collect('AUDIUS_PUBLIC_ELIGIBLE');
+              await page.locator('#probe-external').evaluate(e=>e.dataset.source='radio');
+              await page.locator('#probe-external').click();
+              results.radio=await collect('RADIO_BROWSER_HTTPS_MP3');
+              assert(allowedMedia>0,'browser must issue actual HTTPS media requests');
+              const decoded=Object.values(results).filter(v=>v==='PASS_DECODED_AUDIO').length;
+              console.log('P01_MUSIC_EXTERNAL_BROWSER_PROBE=COMPLETE');
+              console.log('P01_MUSIC_EXTERNAL_DECODED_COUNT='+decoded+'/6');
+              console.log('P01_MUSIC_EXTERNAL_MEDIA_REQUEST_COUNT='+allowedMedia);
+              console.log('P01_MUSIC_EXTERNAL_NONSOURCE_REQUESTS_BLOCKED='+blockedExternal);
+              console.log('PROVIDER_AVAILABILITY_IS_ENVIRONMENT_SPECIFIC=TRUE');
+            }finally{await browser.close();}
+          })().catch(e=>{console.error('P01_MUSIC_EXTERNAL_BROWSER_HARNESS_FAIL',e);process.exitCode=1;});
+          JS
+          echo "P01_MUSIC_EXTERNAL_READONLY_PROBE=COMPLETE"
