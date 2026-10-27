@@ -1,0 +1,214 @@
+name: S01-C02 Ops trusted formal release
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c02-ops-publish-1113.yml'
+      - 'release-requests/S01-C02-1113.json'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-c02-ops-publish-1113.yml'
+      - 'release-requests/S01-C02-1113.json'
+permissions:
+  contents: read
+concurrency:
+  group: s01-c02-ops-formal-release
+  cancel-in-progress: false
+jobs:
+  validate:
+    name: Static release-request gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Validate exactly one bounded S01-C02 release request
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -f release-requests/S01-C02-1113.json
+          jq -e '
+            .project_id == "S01-C02" and
+            .product_repository == "llhzx2018/vf-tools-ops" and
+            .distribution_repository == "llhzx2018/core-updates" and
+            .mode == "exact-source-formal" and
+            (.version | type == "string" and test("^[0-9]+[.][0-9]+[.][0-9]+$")) and
+            (.source_version | type == "string" and test("^[0-9]+[.][0-9]+[.][0-9]+$")) and
+            (.candidate_sha | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.candidate_tree | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.proof_runner_id | type == "number" and . > 0) and
+            (.proof_runner_head_sha | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.ui_runner_id | type == "number" and . > 0) and
+            (.ui_runner_head_sha | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.summary | type == "string" and length > 16) and
+            .version != .source_version
+          ' release-requests/S01-C02-1113.json >/dev/null
+          test "$(jq -r .version release-requests/S01-C02-1113.json)" = "1.21.1113"
+          test "$(jq -r .source_version release-requests/S01-C02-1113.json)" = "1.21.1112"
+          test "$(jq -r .candidate_sha release-requests/S01-C02-1113.json)" = "a2cd3f2cde411c5b25fca0d364591638a491c274"
+          test "$(jq -r .candidate_tree release-requests/S01-C02-1113.json)" = "6228e624b5c9df7227320e3449fd6c9f66aac0e5"
+          echo S01_C02_RELEASE_REQUEST_STATIC_PASS
+  publish:
+    name: Verified main to private Ops immutable GitHub asset
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'llhzx2018/core-free-runner-public'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_REPO: llhzx2018/vf-tools-ops
+      REQUEST: release-requests/S01-C02-1113.json
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout trusted merged publication control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Fail closed on secret or identity absence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN" || { echo BLOCKED_RELEASE_WRITE_CAPABILITY; exit 78; }
+          test -n "$READ_TOKEN" || { echo BLOCKED_PRIVATE_READ_CAPABILITY; exit 78; }
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          VERSION="$(jq -r .version "$REQUEST")"
+          SOURCE="$(jq -r .source_version "$REQUEST")"
+          CANDIDATE="$(jq -r .candidate_sha "$REQUEST")"
+          TREE="$(jq -r .candidate_tree "$REQUEST")"
+          {
+            echo "VERSION=$VERSION"
+            echo "SOURCE_VERSION=$SOURCE"
+            echo "CANDIDATE=$CANDIDATE"
+            echo "EXPECTED_TREE=$TREE"
+            echo "TAG=v$VERSION"
+            echo "ARTIFACT=vf-tools-ops_V$VERSION.zip"
+          } >> "$GITHUB_ENV"
+      - name: Read back independent exact candidate and Chromium machine proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for kind in proof ui; do
+            rid="$(jq -r ".${kind}_runner_id" "$REQUEST")"
+            expected="$(jq -r ".${kind}_runner_head_sha" "$REQUEST")"
+            actual="$(gh api "repos/llhzx2018/core-free-runner-public/actions/runs/$rid" --jq .head_sha)"
+            conclusion="$(gh api "repos/llhzx2018/core-free-runner-public/actions/runs/$rid" --jq .conclusion)"
+            test "$actual" = "$expected" || { echo "RUNNER_IDENTITY_MISMATCH:$kind"; exit 80; }
+            test "$conclusion" = success || { echo "RUNNER_GATE_NOT_PASS:$kind"; exit 80; }
+          done
+          echo S01_C02_INDEPENDENT_MACHINE_EVIDENCE_PASS
+      - name: Require product PR merge lineage and exact candidate tree
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" product
+          git -C product checkout -q main
+          MAIN_SHA="$(git -C product rev-parse HEAD)"
+          MAIN_TREE="$(git -C product rev-parse 'HEAD^{tree}')"
+          test "$MAIN_TREE" = "$EXPECTED_TREE" || { echo PRODUCT_MAIN_TREE_NOT_EXACT_CANDIDATE; exit 81; }
+          git -C product merge-base --is-ancestor "$CANDIDATE" HEAD || { echo CANDIDATE_NOT_MERGED_IN_MAIN; exit 81; }
+          test "$(tr -d '\r\n ' < product/VERSION)" = "$VERSION"
+          grep -Fq " * Version: $VERSION" product/vf-ops.php
+          grep -Fq "define('VF_OPS_VERSION', '$VERSION')" product/vf-ops.php
+          test "$(gh api "repos/$PRODUCT_REPO/git/ref/heads/main" --jq .object.sha)" = "$MAIN_SHA"
+          echo "MAIN_SHA=$MAIN_SHA" >> "$GITHUB_ENV"
+          echo S01_C02_EXACT_MERGED_TREE_PASS
+      - name: Build safe deterministic runtime-only ZIP
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path, PurePosixPath
+          import hashlib, os, zipfile
+          root=Path('product')
+          files=[]
+          for base in ('assets','includes'):
+              files.extend(p for p in (root/base).rglob('*') if p.is_file())
+          for name in ('vf-ops.php','uninstall.php'):
+              if (root/name).is_file(): files.append(root/name)
+          files=sorted(files)
+          assert len(files)==990, f'expected 990 strict WordPress runtime files, got {len(files)}'
+                    assert not any(p.name=='plugin-manifest.json' for p in files), 'non-runtime metadata included'
+                    assert all(str(p.relative_to(root)) in ('vf-ops.php','uninstall.php') or str(p.relative_to(root)).startswith(('assets/','includes/','languages/','config/')) for p in files), 'non-runtime path selected'
+          out=Path('/tmp')/os.environ['ARTIFACT']
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for p in files:
+                  assert not p.is_symlink(), 'symlink in plugin runtime'
+                  arc=str(PurePosixPath('vf-ops')/p.relative_to(root))
+                  assert '..' not in PurePosixPath(arc).parts
+                  info=zipfile.ZipInfo(arc,(1980,1,1,0,0,0))
+                  info.compress_type=zipfile.ZIP_DEFLATED
+                  info.external_attr=0o100644 << 16
+                  z.writestr(info,p.read_bytes(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+          with zipfile.ZipFile(out) as z:
+              assert z.testzip() is None
+              assert 'vf-ops/vf-ops.php' in z.namelist()
+              assert len(z.namelist())==len(set(z.namelist()))
+              assert 'vf-ops/plugin-manifest.json' not in z.namelist(), 'forbidden root metadata'
+          sha=hashlib.sha256(out.read_bytes()).hexdigest()
+          with open(os.environ['GITHUB_ENV'],'a') as f:
+              f.write(f"ASSET_SHA={sha}\nASSET_BYTES={out.stat().st_size}\nASSET_FILES={len(files)}\n")
+          print(f'S01_C02_RUNTIME_ZIP_PASS count={len(files)} bytes={out.stat().st_size} sha256={sha}')
+          PY
+      - name: Create immutable exact tag and formal GitHub Release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          now="$(gh api "repos/$PRODUCT_REPO/git/ref/heads/main" --jq .object.sha)"
+          test "$now" = "$MAIN_SHA" || { echo PRODUCT_MAIN_MOVED; exit 82; }
+          if gh api "repos/$PRODUCT_REPO/git/ref/tags/$TAG" >/tmp/s01-ops-tag.json 2>/dev/null; then
+            test "$(jq -r .object.sha /tmp/s01-ops-tag.json)" = "$MAIN_SHA" || { echo RELEASE_TAG_COLLISION; exit 82; }
+          else
+            gh api --method POST "repos/$PRODUCT_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$MAIN_SHA" >/tmp/s01-ops-tag.json
+          fi
+          test "$(gh api "repos/$PRODUCT_REPO/git/ref/tags/$TAG" --jq .object.sha)" = "$MAIN_SHA"
+          notes="/tmp/s01-ops-release-notes.md"
+          {
+            echo "# VF Tools Ops V$VERSION"
+            jq -r .summary "$REQUEST"
+            echo ""
+            echo "Exact candidate source: $CANDIDATE"
+            echo "Final merged main source: $MAIN_SHA"
+            echo "Runtime tree: $EXPECTED_TREE"
+            echo "Previous release: v$SOURCE_VERSION"
+            echo "Independent candidate Runner: $(jq -r .proof_runner_id "$REQUEST")"
+            echo "Independent Chromium UI Runner: $(jq -r .ui_runner_id "$REQUEST")"
+            echo "Runtime asset SHA-256: $ASSET_SHA"
+            echo "Runtime asset bytes: $ASSET_BYTES"
+            echo "Runtime files: $ASSET_FILES"
+            echo "Production unchanged; OWNER must upgrade manually."
+          } >"$notes"
+          if gh release view "$TAG" -R "$PRODUCT_REPO" >/dev/null 2>&1; then
+            echo EXISTING_RELEASE_VERIFY_ONLY
+          else
+            gh release create "$TAG" "/tmp/$ARTIFACT" -R "$PRODUCT_REPO" --title "VF Tools Ops $VERSION" --notes-file "$notes" --verify-tag
+          fi
+      - name: Remote asset bytes SHA256 and tag target readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$PRODUCT_REPO/releases/tags/$TAG" >/tmp/s01-ops-release.json
+          test "$(jq -r .tag_name /tmp/s01-ops-release.json)" = "$TAG"
+          test "$(jq -r .draft /tmp/s01-ops-release.json)" = false
+          test "$(jq -r .prerelease /tmp/s01-ops-release.json)" = false
+          test "$(gh api "repos/$PRODUCT_REPO/git/ref/tags/$TAG" --jq .object.sha)" = "$MAIN_SHA"
+          test "$(jq -r --arg asset "$ARTIFACT" '.assets[]|select(.name==$asset)|.size' /tmp/s01-ops-release.json)" = "$ASSET_BYTES"
+          mkdir -p /tmp/s01-ops-remote
+          gh release download "$TAG" -R "$PRODUCT_REPO" -D /tmp/s01-ops-remote -p "$ARTIFACT"
+          test "$(sha256sum "/tmp/s01-ops-remote/$ARTIFACT" | cut -d ' ' -f1)" = "$ASSET_SHA"
+          {
+            echo 'S01_C02_FORMAL_RELEASE_AND_REMOTE_ASSET_READBACK=PASS'
+            echo "TAG=$TAG"
+            echo "MAIN_SHA=$MAIN_SHA"
+            echo "ASSET=$ARTIFACT"
+            echo "ASSET_BYTES=$ASSET_BYTES"
+            echo "ASSET_SHA256=$ASSET_SHA"
+            echo "RUNTIME_FILES=$ASSET_FILES"
+            echo 'Distribution and Production are separate gates; neither was changed.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove transient private code and synthetic packaging
+        if: always()
+        shell: bash
+        run: |
+          rm -rf product /tmp/s01-ops-remote
