@@ -5,7 +5,7 @@
  */
 if (!defined('ABSPATH')) { throw new RuntimeException('WORDPRESS_BOOTSTRAP_REQUIRED'); }
 
-$checks = [];
+$GLOBALS['checks'] = [];
 function s01_theme346_gate(bool $ok, string $name): void {
     if (!$ok) { throw new RuntimeException('THEME346_GATE_FAILED: '.$name); }
     $GLOBALS['checks'][] = ['name' => $name, 'pass' => true];
@@ -52,7 +52,7 @@ foreach (['en', 'zh'] as $language) {
     s01_theme346_gate(pll_get_post_language((int)$id) === $language, 'synthetic_page_language_'.$language);
 }
 echo wp_json_encode([
-    'status' => 'PASS', 'checks' => $checks, 'count' => count($checks),
+    'status' => 'PASS', 'checks' => $GLOBALS['checks'], 'count' => count($GLOBALS['checks']),
     'version' => '1.35.212', 'source_sha' => '353241c626b2ff549c848e61fd48fed5c7ef15d9',
     'production' => 'NOT_EXECUTED',
 ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
