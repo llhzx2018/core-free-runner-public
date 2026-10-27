@@ -84,6 +84,8 @@ const norm=s=>s.replaceAll('1.35.213','1.35.211').replaceAll('135213','135211');
    await root.locator('[data-vf-player-sample]').first().click();
    await p.waitForFunction(()=>{const v=document.querySelector('[data-vf-player-video]');return v&&v.readyState>=2&&v.currentTime>0;},null,{timeout:30000});
    const playback=await video.evaluate(v=>({readyState:v.readyState,time:v.currentTime,width:v.videoWidth,height:v.videoHeight,error:v.error?.code||0}));assert.ok(playback.width>0&&playback.height>0);assert.equal(playback.error,0);
+   const mediaBox=await video.boundingBox(),screenBox=await root.locator('.vf-screen').boundingBox();
+   assert.ok(mediaBox.height<=screenBox.height+1,'native media controls must not be cropped by the screen');
    await p.screenshot({path:`proof/player-${lang}-playing.png`,fullPage:true});
    await root.locator('[data-vf-player-reset]').click();assert.equal(await input.inputValue(),'');assert.equal(await video.getAttribute('src'),null);
    const faq=p.locator('.vf-tool-faq-list details').nth(1);await faq.locator('summary').press('Enter');assert.equal(await faq.getAttribute('open'),'');
