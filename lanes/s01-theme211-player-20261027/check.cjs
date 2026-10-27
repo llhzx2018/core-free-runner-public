@@ -7,7 +7,7 @@ const norm=s=>s.replaceAll('1.35.211','1.35.210').replaceAll('135211','135210');
   const p=await c.newPage();await p.goto(base+path,{waitUntil:'networkidle'});out.pages[path]=norm(await p.locator('#content').innerHTML());await p.close();
  }
  for(const lang of ['en','zh']){
-  const path=(lang==='zh'?'/zh':'')+'/m3u8-player/',p=await c.newPage();p.on('pageerror',e=>errors.push(e.message));const media=[];
+  const path=(lang==='zh'?'/zh':'')+'/m3u8-player/',p=await b.newPage({viewport:{width:1440,height:1000}});p.on('pageerror',e=>errors.push(e.message));const media=[];
   p.on('request',r=>{if(/\.(m3u8|m4s|ts|mp4)(?:\?|$)/.test(r.url()))media.push(r.url());});
   await p.goto(base+path,{waitUntil:'networkidle'});
   const root=p.locator('[data-vf-module="player"]'),input=root.locator('[data-vf-player-url]'),video=root.locator('video');
