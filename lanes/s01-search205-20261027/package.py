@@ -17,6 +17,14 @@ for p in ['src/assets/js/main.js','src/inc/modules/module-directory-ui.php','src
     old=subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':'+p]);assert(root/p).read_bytes()==old,p
 owner='src/assets/css/public/pages/families/public-family-05-system-search-recovery-closure.css'
 old=subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':'+owner]);new=(root/owner).read_bytes()
+import runpy
+helper=runpy.run_path('control/lanes/'+os.environ['LANE_ID']+'/css-scope-check.py')
+marker=b'/* Search presentation: GOV.UK search reference'
+assert new.count(marker)==1
+prefix,canonical=new.split(marker)
+assert prefix.decode()==helper['strip_search'](old.decode())+'\n'
+assert b'.vf-theme-pagination' not in canonical and b'.page-numbers' not in canonical
+print('NON_SEARCH_SELECTORS_AND_SHARED_PAGINATION_UNCHANGED_PASS')
 bundle='src/assets/css/public/vf-theme-public-runtime.css';before=subprocess.check_output(['git','-C',str(root),'show',os.environ['BASE_SHA']+':'+bundle]);assert before.count(old)==1
 after=(root/bundle).read_bytes();assert after==before.replace(old,new);assert len(after)<len(before)
 assert before.count(b'/* Shared native pagination:')==after.count(b'/* Shared native pagination:')==1
