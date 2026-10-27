@@ -1,0 +1,96 @@
+name: S01-C02 Ops V1.21.1112 live native update discovery
+on:
+  push:
+    branches: [test/s01-c02-v1211112-channel-20261027]
+    paths:
+      - '.github/workflows/s01-c02-v1211112-wp-discovery.yml'
+permissions:
+  contents: read
+jobs:
+  discovery:
+    name: Disposable WordPress native plugin update discovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: wordpress-root
+          MARIADB_DATABASE: wordpress
+          MARIADB_USER: wordpress
+          MARIADB_PASSWORD: wordpress
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout ephemeral independent read-only proof lane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify live channel and immutable release identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_PRIVATE_READ_TOKEN"
+          gh api repos/llhzx2018/core-updates/contents/projects/S01-C02.json?ref=main -H 'Accept: application/vnd.github.raw+json' >/tmp/s01-channel.json
+          jq -e '.target_version=="1.21.1112" and .asset_name=="vf-tools-ops_V1.21.1112.zip" and .asset_bytes==3625201 and .asset_sha256=="cf4d4d2b4f6b017e5315df05a59674aa7bcb1268b35de5a155c5a909be80f222" and (.from_versions | index("1.21.1111") != null)' /tmp/s01-channel.json >/dev/null
+          gh api repos/llhzx2018/vf-tools-ops/releases/tags/v1.21.1112 >/tmp/s01-release.json
+          jq -e '.tag_name=="v1.21.1112" and .draft==false and .prerelease==false and (.assets | any(.name=="vf-tools-ops_V1.21.1112.zip" and .size==3625201))' /tmp/s01-release.json >/dev/null
+          echo S01_C02_LIVE_CHANNEL_RELEASE_READBACK=PASS
+      - name: Prepare isolated WordPress with previous installed formal release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/s01-native
+          gh release download v1.21.1111 -R llhzx2018/vf-tools-ops -D /tmp/s01-native -p vf-tools-ops_V1.21.1111.zip
+          curl -fsSLo /tmp/s01-native/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          root=/tmp/s01-native/site
+          mkdir -p "$root"
+          php /tmp/s01-native/wp-cli.phar core download --path="$root" --skip-content
+          php /tmp/s01-native/wp-cli.phar core config --path="$root" --dbname=wordpress --dbuser=wordpress --dbpass=wordpress --dbhost=127.0.0.1:3306 --dbprefix=s01disc_ --skip-check
+          php /tmp/s01-native/wp-cli.phar core install --path="$root" --url=http://127.0.0.1:18889 --title=S01-Native-Discovery --admin_user=admin --admin_password=isolated-synthetic-only --admin_email=admin@example.invalid --skip-email
+          php /tmp/s01-native/wp-cli.phar option update home http://127.0.0.1:18889 --path="$root"
+          php /tmp/s01-native/wp-cli.phar option update siteurl http://127.0.0.1:18889 --path="$root"
+          php /tmp/s01-native/wp-cli.phar plugin install /tmp/s01-native/vf-tools-ops_V1.21.1111.zip --activate --force --path="$root"
+          test "$(php /tmp/s01-native/wp-cli.phar plugin get vf-ops --field=version --path="$root")" = 1.21.1111
+          echo S01_C02_DISPOSABLE_PREVIOUS_VERSION_INSTALLED=PASS
+      - name: Prove actual WordPress plugin transient offers 1.21.1112
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/s01-native
+          cat > /tmp/s01-native/readback.php <<'PHP'
+          <?php
+          if (!function_exists('vf_ops_wp_update_manual_check_v1')) { fwrite(STDERR, "OPS_NATIVE_CLIENT_MISSING\n"); exit(11); }
+          $res=vf_ops_wp_update_manual_check_v1();
+          if (empty($res['ok']) || ($res['status']??'')!=='UPDATE_AVAILABLE') {
+              fwrite(STDERR, 'OPS_NATIVE_MANUAL_DISCOVERY_FAIL:'.json_encode(['ok'=>$res['ok']??null,'status'=>$res['status']??null,'error'=>$res['error_code']??null])."\n");
+              exit(12);
+          }
+          if (($res['manifest']['target_version']??null)!=='1.21.1112') { fwrite(STDERR,"MANIFEST_TARGET_MISMATCH\n");exit(13); }
+          require_once ABSPATH.'wp-admin/includes/update.php';
+          delete_site_transient('update_plugins');
+          wp_update_plugins();
+          $updates=get_site_transient('update_plugins');
+          $offer=is_object($updates) && isset($updates->response['vf-ops/vf-ops.php']) ? $updates->response['vf-ops/vf-ops.php'] : null;
+          if (!is_object($offer) || ($offer->new_version??null)!=='1.21.1112' || ($offer->plugin??null)!=='vf-ops/vf-ops.php') {
+              fwrite(STDERR,"WP_NATIVE_UPDATE_OFFER_MISSING\n");exit(14);
+          }
+          $asset=$res['release']['asset_api_url']??null;
+          if (!is_string($asset) || ($offer->package??null)!==$asset) { fwrite(STDERR,"NATIVE_PACKAGE_MISMATCH\n");exit(15); }
+          echo "S01_C02_WP_NATIVE_REAL_DISCOVERY=PASS installed=1.21.1111 available=".$offer->new_version."\n";
+          PHP
+          php /tmp/s01-native/wp-cli.phar eval-file /tmp/s01-native/readback.php --path=/tmp/s01-native/site
+          echo S01_C02_NATIVE_UPDATE_DISCOVERY=PASS >> "$GITHUB_STEP_SUMMARY"
+      - name: Remove all isolated WordPress data and private package
+        if: always()
+        shell: bash
+        run: |
+          rm -rf /tmp/s01-native
