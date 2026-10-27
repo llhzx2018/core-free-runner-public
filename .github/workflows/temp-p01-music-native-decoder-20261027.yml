@@ -1,0 +1,146 @@
+name: "TEMP P01 music native HTML5 decoder E2E"
+on:
+  push:
+    branches:
+      - "verify/p01-music-native-decoder-20261027"
+permissions:
+  contents: read
+jobs:
+  p01-music-native-decoder:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout P01 exact private source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: "b42441e0691f0e82d25732b90fc2cbaee9bf7271"
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - name: Verify exact source identity (no release)
+        run: |
+          test "$(git rev-parse HEAD)" = "b42441e0691f0e82d25732b90fc2cbaee9bf7271"
+          test "$(cat VERSION)" = "2.47.465"
+          test "$(cat src/VERSION.txt)" = "2.47.465"
+          echo "P01_MUSIC_DECODER_EXACT_SOURCE=PASS"
+      - name: Prepare isolated PHP site and browser runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -v | head -n 1
+          command -v google-chrome
+          npm install --silent --no-audit --no-fund --prefix "$RUNNER_TEMP/p01-playwright" playwright-core@1.56.1
+          mkdir -p "$RUNNER_TEMP/music-native-e2e"
+          cp -a src "$RUNNER_TEMP/music-native-e2e/site"
+          echo "P01_MUSIC_ISOLATED_RUNTIME=PASS"
+      - name: Isolated owner login and real HTML5 browser decoding
+        shell: bash
+        env:
+          SYNTHETIC_BASE: http://127.0.0.1:18465
+        run: |
+          set -Eeuo pipefail
+          work="$RUNNER_TEMP/music-native-e2e"
+          export SYNTHETIC_COOKIE="$work/cookie.txt"
+          export NODE_PATH="$RUNNER_TEMP/p01-playwright/node_modules"
+          export CHROME_BIN="$(command -v google-chrome)"
+          php -S 127.0.0.1:18465 -t "$work/site" > "$work/php.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 50); do
+            if curl -fsS -c "$SYNTHETIC_COOKIE" -b "$SYNTHETIC_COOKIE" "$SYNTHETIC_BASE/setup.php" -o "$work/setup.html" 2>/dev/null; then break; fi
+            sleep 0.2
+          done
+          test -f "$work/setup.html"
+          csrf="$(sed -n 's/.*name="setup_csrf"[[:space:]]*value="\([^"]*\)".*/\1/p' "$work/setup.html" | head -n 1)"
+          test -n "$csrf"
+          curl -fsS -c "$SYNTHETIC_COOKIE" -b "$SYNTHETIC_COOKIE" -X POST "$SYNTHETIC_BASE/setup.php" --data-urlencode "setup_csrf=$csrf" --data-urlencode "site_title=Isolated Music Decoder Gate" --data-urlencode "admin_password=IsolatedOnly2026!" --data-urlencode "admin_password_confirm=IsolatedOnly2026!" -o "$work/setup-result.html"
+          test -f "$work/site/app/.runtime.php"
+          curl -fsS -c "$SYNTHETIC_COOKIE" -b "$SYNTHETIC_COOKIE" -H "Content-Type: application/json" --data '{"password":"IsolatedOnly2026!"}' "$SYNTHETIC_BASE/api.php?action=login" -o "$work/login.json"
+          python3 -c 'import json,sys; assert json.load(open(sys.argv[1])).get("ok") is True' "$work/login.json"
+          node - <<'JS'
+          'use strict';
+          const assert = require('node:assert/strict');
+          const fs = require('node:fs');
+          const { chromium } = require('playwright-core');
+          (async () => {
+            const base = process.env.SYNTHETIC_BASE;
+            const cookieLines = fs.readFileSync(process.env.SYNTHETIC_COOKIE,'utf8').split(/\r?\n/);
+            const cookies = cookieLines.filter(x => x && !x.startsWith('# '))
+              .map(x => x.replace(/^#HttpOnly_/,'').split('\t'))
+              .filter(x => x.length >= 7 && x[0] === '127.0.0.1')
+              .map(x => ({name:x[5],value:x[6],url:base+'/'}));
+            assert(cookies.some(c => c.name === 'vfnav_session'), 'isolated owner cookie required');
+            const rate=22050, seconds=12, samples=rate*seconds;
+            const wave=Buffer.alloc(44+samples*2);
+            wave.write('RIFF',0);wave.writeUInt32LE(wave.length-8,4);wave.write('WAVE',8);
+            wave.write('fmt ',12);wave.writeUInt32LE(16,16);wave.writeUInt16LE(1,20);
+            wave.writeUInt16LE(1,22);wave.writeUInt32LE(rate,24);wave.writeUInt32LE(rate*2,28);
+            wave.writeUInt16LE(2,32);wave.writeUInt16LE(16,34);wave.write('data',36);
+            wave.writeUInt32LE(samples*2,40);
+            for(let i=0;i<samples;i++)wave.writeInt16LE(Math.round(Math.sin(2*Math.PI*440*i/rate)*9500),44+i*2);
+            const browser=await chromium.launch({executablePath:process.env.CHROME_BIN,headless:true,args:['--no-sandbox']});
+            try {
+              const ctx=await browser.newContext({viewport:{width:1280,height:800},locale:'zh-CN'});
+              await ctx.addCookies(cookies);
+              const page=await ctx.newPage();
+              let fixtureRequests=0;
+              await page.route('**/*',route=>{
+                const url=new URL(route.request().url());
+                if(url.origin===base)return route.continue();
+                if((url.hostname==='upload.wikimedia.org' && url.pathname.endsWith('.ogg')) ||
+                  (url.hostname==='radio.example.org' && url.pathname==='/live.mp3')){
+                  fixtureRequests++;
+                  return route.fulfill({status:200,contentType:'audio/wav',headers:{'access-control-allow-origin':'*'},body:wave});
+                }
+                return route.abort('blockedbyclient');
+              });
+              const response=await page.goto(base+'/music-shell.php?view=home',{waitUntil:'domcontentloaded'});
+              assert.equal(response?.status(),200,'isolated owner shell');
+              const track=page.frameLocator('iframe[data-dock-panel="home"]').locator('[data-music-audio]').first();
+              await track.waitFor({state:'visible',timeout:10000});
+              await track.click();
+              await page.waitForFunction(()=>{
+                const a=document.querySelector('[data-dock-audio]');
+                return a && !a.paused && a.readyState>=3 && a.currentTime>0.35;
+              },null,{timeout:18000});
+              const a=page.locator('[data-dock-audio]');
+              assert.equal(await page.locator('[data-music-playback-state]').textContent(),'正在播放歌曲');
+              const t1=await a.evaluate(node=>node.currentTime);
+              await page.locator('[data-dock-view="discover"]').click();
+              await page.waitForFunction(t=>document.querySelector('[data-dock-audio]').currentTime>t+0.4,t1,{timeout:12000});
+              assert.equal(await a.evaluate(node=>node.paused),false,'navigating within Music must preserve playback');
+              await page.locator('[data-dock-toggle]').click();
+              assert.equal((await page.locator('[data-music-playback-state]').textContent()).trim(),'歌曲已暂停');
+              const t2=await a.evaluate(node=>node.currentTime);
+              await page.waitForTimeout(250);
+              assert(Math.abs((await a.evaluate(node=>node.currentTime))-t2)<0.13,'pause must freeze media clock');
+              await page.locator('[data-dock-toggle]').click();
+              await page.waitForFunction(t=>document.querySelector('[data-dock-audio]').currentTime>t+0.35,t2,{timeout:12000});
+              await page.evaluate(()=>{
+                const b=document.createElement('button');b.id='fixture-radio';b.textContent='Fixture Radio';
+                b.addEventListener('click',()=>window.VfMusicDock.playRadio({
+                  id:'01234567-89ab-cdef-0123-456789abcdef',
+                  name:'Isolated radio',country:'QA',stream:'https://radio.example.org/live.mp3'
+                }));
+                document.body.append(b);
+              });
+              await page.locator('#fixture-radio').click();
+              await page.waitForFunction(()=>{
+                const a=document.querySelector('[data-dock-audio]');
+                return a && a.currentTime>0.35 && !a.paused &&
+                  document.querySelector('[data-music-playback-state]').textContent==='正在收听直播';
+              },null,{timeout:18000});
+              assert.equal(await page.locator('.vf-dock-timeline').isHidden(),true);
+              await page.locator('[data-dock-view="home"]').click();
+              assert.equal(await a.evaluate(node=>node.paused),false,'radio must survive home navigation');
+              await page.locator('[data-dock-stop]').click();
+              assert.equal(await a.evaluate(node=>node.getAttribute('src')),null,'stop must unload media');
+              assert.equal(await page.locator('[data-vf-music-dock]').isHidden(),true);
+              assert(fixtureRequests>=2,'both source types must be fetched and decoded');
+              console.log('P01_MUSIC_REAL_HTML5_DECODER_E2E=PASS');
+              console.log('P01_MUSIC_TAB_PAUSE_RESUME_RADIO_STOP=PASS');
+              console.log('EXTERNAL_PROVIDER_LIVE_COMPATIBILITY=NOT_PROVEN');
+            } finally { await browser.close(); }
+          })().catch(e=>{console.error('P01_MUSIC_REAL_DECODER_E2E_FAIL',e);process.exitCode=1;});
+          JS
+          echo "PUBLIC_SAFE_SYNTHETIC_AUDIO_ONLY=PASS"
