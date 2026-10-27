@@ -57,6 +57,7 @@ const norm=s=>s.replaceAll('1.35.213','1.35.211').replaceAll('135213','135211');
    const history=root.locator('[data-vf-player-recent-list]');
    p.once('dialog',d=>d.accept('Renamed synthetic stream'));
    await history.locator('[data-vf-player-rename-url]').first().click();
+   await history.getByText('Renamed synthetic stream',{exact:true}).waitFor({state:'visible',timeout:15000});
    assert.ok((await history.innerText()).includes('Renamed synthetic stream'));
    await history.locator('[data-vf-player-toggle-favorite-url]').first().click();
    await root.locator('[data-vf-player-list-tab="favorites"]').click();
