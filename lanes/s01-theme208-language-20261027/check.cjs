@@ -3,14 +3,14 @@ const phase=process.argv[2],fixed=phase==='after',base='http://127.0.0.1:18880';
 const norm=s=>s.replaceAll('1.35.208','1.35.207');
 (async()=>{
  const browser=await chromium.launch(),context=await browser.newContext(),rows=[],parity={},errors=[];
- for(const lang of ['en','zh'])for(const width of [1440,1024])for(const kind of ['404','missing-current','home','paired-tool']){
-  const route=(lang==='zh'?'/zh':'')+(kind==='home'?'/':kind==='paired-tool'?'/m3u8-player/':'/vf-page-check-404/')+(kind==='missing-current'?'?vf_missing_current=1':'');
+ for(const lang of ['en','zh'])for(const width of [1440,1024])for(const kind of ['404','unavailable-translation','home','paired-tool']){
+  const route=(lang==='zh'?'/zh':'')+(kind==='home'?'/':kind==='paired-tool'?'/m3u8-player/':'/vf-page-check-404/')+(kind==='unavailable-translation'?'?vf_unavailable_translation=1':'');
   const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.setViewportSize({width,height:1000});
-  const response=await page.goto(base+route,{waitUntil:'networkidle'});assert.equal(response.status(),kind==='404'||kind==='missing-current'?404:200);await page.evaluate(()=>document.fonts.ready);
+  const response=await page.goto(base+route,{waitUntil:'networkidle'});assert.equal(response.status(),kind==='404'||kind==='unavailable-translation'?404:200);await page.evaluate(()=>document.fonts.ready);
   const key=[lang,width,kind].join('-');
   parity[key]=await page.evaluate(()=>({body:document.querySelector('#content').innerHTML,head:[...document.querySelectorAll('link[rel=canonical],link[rel=alternate][hreflang],meta[name=robots]')].map(e=>e.outerHTML),menu:[...document.querySelectorAll('#vf-primary-nav>a:not(.vf-lang-nav-link),#vf-primary-nav>.vf-nav-item>a')].map(e=>[e.textContent.trim(),e.href,e.getAttribute('aria-current')])}));parity[key]=JSON.parse(norm(JSON.stringify(parity[key])));
   const switcher=page.locator('#vf-site-header [data-vf-lang-switcher-context=header]'),guard=page.locator('#vf-site-header [data-vf-lang-guard]');
-  const edge=kind==='missing-current';
+  const edge=kind==='unavailable-translation';
   if(edge&&!fixed){assert.equal(await switcher.count(),0);assert.equal(await guard.count(),1);assert.match(await guard.innerText(),/Language|语言/);}
   else{
    assert.equal(await switcher.count(),1);assert.equal(await guard.count(),0);
@@ -32,7 +32,7 @@ const norm=s=>s.replaceAll('1.35.208','1.35.207');
  }
  assert.deepEqual(errors,[]);
  if(fixed){assert.deepEqual(parity,JSON.parse(fs.readFileSync('proof/before-parity.json','utf8')),'unchanged404/home/tool bodies,SEO and authored menus');
-  const nojs=await browser.newContext({javaScriptEnabled:false});for(const lang of ['en','zh']){const page=await nojs.newPage({viewport:{width:1440,height:1000}});assert.equal((await page.goto(base+(lang==='zh'?'/zh':'')+'/vf-page-check-404/?vf_missing_current=1')).status(),404);const control=page.locator('#vf-site-header [data-vf-lang-switcher-context=header]');await control.locator('summary').click();assert.equal(await control.getAttribute('open'),'');assert.ok(await control.locator('a[data-vf-lang-target]').isVisible());await page.close();}await nojs.close();
+  const nojs=await browser.newContext({javaScriptEnabled:false});for(const lang of ['en','zh']){const page=await nojs.newPage({viewport:{width:1440,height:1000}});assert.equal((await page.goto(base+(lang==='zh'?'/zh':'')+'/vf-page-check-404/?vf_unavailable_translation=1')).status(),404);const control=page.locator('#vf-site-header [data-vf-lang-switcher-context=header]');await control.locator('summary').click();assert.equal(await control.getAttribute('open'),'');assert.ok(await control.locator('a[data-vf-lang-target]').isVisible());await page.close();}await nojs.close();
  }
  fs.writeFileSync(`proof/${phase}-parity.json`,JSON.stringify(parity));fs.writeFileSync(`proof/${phase}-results.json`,JSON.stringify({status:'PASS',phase,cases:rows.length,rows,noJavaScript:fixed?'PASS':'NOT_RUN',bodyHeadMenuParity:fixed?'PASS':'BASELINE',production:'UNTOUCHED'},null,2));console.log(`${phase.toUpperCase()}_BILINGUAL_HEADER_16_CASES_PASS`);await browser.close();
 })().catch(e=>{console.error(e);process.exit(1)});
