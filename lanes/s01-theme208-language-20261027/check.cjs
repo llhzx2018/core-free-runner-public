@@ -22,7 +22,7 @@ const norm=s=>s.replaceAll('1.35.208','1.35.207');
    fs.writeFileSync(`proof/${phase}-geometry-${key}.json`,JSON.stringify(geo,null,2));
    if(fixed&&edge){
     await page.screenshot({path:`proof/404-${lang}-${width}.png`,fullPage:true});
-    await current.press('Enter');assert.equal(await switcher.getAttribute('open'),'');assert.equal(await current.getAttribute('aria-expanded'),'true');await target.waitFor({state:'visible'});
+    await current.press('Enter');await page.waitForFunction(()=>{const d=document.querySelector('#vf-site-header [data-vf-lang-switcher-context=header]');return d.open&&d.querySelector('summary').getAttribute('aria-expanded')==='true';});await target.waitFor({state:'visible'});
     const panel=await switcher.locator('.vf-lang-panel').boundingBox();assert.ok(panel.x>=0&&panel.x+panel.width<=width);await target.press('Escape');assert.equal(await switcher.getAttribute('open'),null);assert.equal(await current.getAttribute('aria-expanded'),'false');assert.ok(await current.evaluate(e=>document.activeElement===e));
     await current.click();await page.locator('h1').click();assert.equal(await switcher.getAttribute('open'),null);
     await current.click();await page.locator('#vf-site-header').screenshot({path:`proof/language-open-${lang}-${width}.png`});await target.click();assert.equal(page.url(),href);assert.ok((await page.locator('html').getAttribute('lang')).toLowerCase().startsWith(other));
