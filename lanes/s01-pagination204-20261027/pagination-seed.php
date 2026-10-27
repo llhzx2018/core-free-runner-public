@@ -1,5 +1,8 @@
 <?php
 // Disposable native content and settings before protected-state baseline only.
+// Rank Math defaults date archives to a homepage redirect; enable this native
+// archive in the isolated fixture before snapshots so its real pager is exercised.
+$titles=get_option('rank-math-options-titles',[]);$titles['disable_date_archives']='off';update_option('rank-math-options-titles',$titles);
 $layout=get_option('vf_theme_layout',[]);
 foreach(['blog_index','guide_index','problem_index','archive_list','search'] as $key){
  $old=$layout['moduleSettings'][$key]['post_list']??[];
