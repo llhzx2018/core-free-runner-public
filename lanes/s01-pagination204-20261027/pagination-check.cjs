@@ -33,7 +33,7 @@ const fs=require('fs'),assert=require('assert/strict'),{chromium}=require('playw
    await p.setViewportSize({width:1440,height:1100});await go(url);
    const itemSelector=family==='glossary'?'.vf-glossary-inline-term h3':'[data-vf-directory-item] h3';const first=await p.locator(itemSelector).allTextContents();assert.ok(first.length>0);const next=nav().locator('a.next');assert.equal(await next.count(),1);const href=await next.getAttribute('href');await next.click();await p.waitForLoadState('networkidle');assert.ok(await nav().locator('[aria-current="page"]').count());assert.notDeepEqual(await p.locator(itemSelector).allTextContents(),first,'real page2 '+family);checks+=4;
    if(family==='search'){assert.equal(new URL(p.url()).searchParams.get('s'),'Pagination204');checks++;}
-   const last=nav().locator('a.page-numbers').filter({hasText:/^\d+$/}).last();if(await last.count()){await last.click();await p.waitForLoadState('networkidle');assert.equal(await nav().locator('a.next').count(),0,'last page '+family);checks++;}
+   const last=nav().locator('.page-numbers').filter({hasText:/^\d+$/}).last();if(await last.count()){if(await last.evaluate(e=>e.tagName==='A')){await last.click();await p.waitForLoadState('networkidle');}assert.equal(await nav().locator('a.next').count(),0,'last page '+family);checks++;}
    if(['blog','guides','glossary','search'].includes(family)){
     const nc=await b.newContext({javaScriptEnabled:false,viewport:{width:1024,height:1100}}),np=await nc.newPage();assert.equal((await np.goto(new URL(href,url).href)).status(),200);assert.ok(await np.locator(itemSelector).count()>0);await nc.close();checks++;
    }
