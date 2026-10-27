@@ -1,0 +1,107 @@
+name: S01 Theme PR343 isolated WordPress integration
+on:
+  push:
+    branches: [task/s01-theme343-wp-integration-20261027]
+    paths: ['.github/workflows/s01-theme343-wp-integration-20261027.yml']
+permissions:
+  contents: read
+env:
+  TARGET_REPO: llhzx2018/vf-tools-theme
+  TARGET_VERSION: 1.35.210
+  TARGET_SHA: bb310802ea23039260b2a85ebd9650ba8e261d84
+  TARGET_TREE: d5a1c8d93046e91c8ba71cbab4a84b9c5bc84c06
+  BASE_SHA: adfe34a08c2ec2a541da3cf5f77248b6a40d1bdf
+jobs:
+  wordpress-php:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: control
+      - name: Exact target identity preflight
+        run: python3 control/scripts/ephemeral_lane_spec.py audit-rendered --spec control/lanes/s01-theme343-wp-integration-20261027/spec.json --input control/.github/workflows/s01-theme343-wp-integration-20261027.yml
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 02d4591eed025a3d3a67bc0a150b3ddc448c2ab8
+          persist-credentials: false
+          path: established
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: bb310802ea23039260b2a85ebd9650ba8e261d84
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Confirm two-file delta and prepare transient Theme
+        run: |
+          set -Eeuo pipefail
+          mkdir -p proof provider
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse 'HEAD^{tree}')" = "$TARGET_TREE"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          git -C target diff --name-only "$BASE_SHA" HEAD | sort > proof/changed-files.txt
+          test "$(wc -l < proof/changed-files.txt)" -eq 2
+          grep -Fxq 'tests/frontend-pages-wordpress-check.php' proof/changed-files.txt
+          grep -Fxq 'tests/frontend-progress-history-projection.php' proof/changed-files.txt
+          php -l target/tests/frontend-pages-wordpress-check.php | tee proof/php-lint.txt
+          php -l target/tests/frontend-progress-history-projection.php | tee -a proof/php-lint.txt
+          php -l control/lanes/s01-theme343-wp-integration-20261027/seed.php | tee -a proof/php-lint.txt
+          php target/tests/frontend-progress-history-projection.php > proof/standalone-projection.json
+          git -C target archive --format=zip --prefix=vf-tools-theme/ "$TARGET_SHA:src" > provider/theme343.zip
+          unzip -t provider/theme343.zip >/dev/null
+          test "$(unzip -p provider/theme343.zip vf-tools-theme/style.css | grep -c 'Version: 1.35.210')" -ge 1
+      - name: Run seeded WordPress and Polylang test in disposable containers
+        run: |
+          set -Eeuo pipefail
+          NET="s01-pr343-$GITHUB_RUN_ID"; DB="$NET-db"; WP="$NET-wp"
+          cleanup(){ docker rm -fv "$WP" "$DB" >/dev/null 2>&1 || true; docker network rm "$NET" >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+          docker network create "$NET" >/dev/null
+          docker run -d --name "$DB" --network "$NET" -e MARIADB_ROOT_PASSWORD=syntheticroot -e MARIADB_DATABASE=wordpress -e MARIADB_USER=wordpress -e MARIADB_PASSWORD=syntheticdb mariadb:11.8.8 >/dev/null
+          for i in $(seq 1 60); do docker exec "$DB" mariadb-admin ping -h127.0.0.1 -uroot -psyntheticroot --silent >/dev/null 2>&1 && break; sleep 2; done
+          docker run -d --name "$WP" --network "$NET" -p 18880:80 -e WORDPRESS_DB_HOST="$DB:3306" -e WORDPRESS_DB_NAME=wordpress -e WORDPRESS_DB_USER=wordpress -e WORDPRESS_DB_PASSWORD=syntheticdb wordpress:7.1.2-php8.3-apache >/dev/null
+          for i in $(seq 1 90); do docker exec "$WP" test -f /var/www/html/wp-settings.php && curl -fsS http://127.0.0.1:18880/wp-admin/install.php >/dev/null && break; sleep 2; done
+          curl -fsSLo /tmp/s01-pr343-wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          docker cp /tmp/s01-pr343-wp-cli.phar "$WP:/usr/local/bin/wp"
+          cli(){ docker exec --user www-data "$WP" php /usr/local/bin/wp "$@" --path=/var/www/html; }
+          cli config set VF_WP_UPDATE_TEST_MODE true --raw >/dev/null
+          cli config set DISABLE_WP_CRON true --raw >/dev/null
+          cli core install --url=http://127.0.0.1:18880 --title='Synthetic S01 PR343' --admin_user=admin --admin_password='Synthetic-Only-Pr343!' --admin_email=runner@example.invalid --skip-email >/dev/null
+          docker exec "$WP" mkdir -p /var/www/html/wp-content/mu-plugins
+          docker cp established/lanes/s01-frontend-design-20261017/fixture.php "$WP:/var/www/html/wp-content/mu-plugins/s01-cpt.php"
+          docker cp provider/theme343.zip "$WP:/tmp/theme343.zip"
+          cli theme install /tmp/theme343.zip --activate >/dev/null
+          for attempt in 1 2 3; do cli plugin install polylang --version=3.8.10 --activate >/dev/null && break; test "$attempt" -lt 3 || exit 1; sleep 3; done
+          docker cp established/lanes/s01-frontend-design-20261017/languages.php "$WP:/tmp/languages.php"
+          cli eval-file /tmp/languages.php >/dev/null
+          cli user add-cap admin vf_manage_theme_profile >/dev/null
+          cli rewrite structure '/%postname%/' --hard >/dev/null
+          docker cp control/lanes/s01-theme343-wp-integration-20261027/seed.php "$WP:/tmp/s01-seed.php"
+          cli eval-file /tmp/s01-seed.php > proof/seed.json
+          docker cp target/tests/frontend-pages-wordpress-check.php "$WP:/tmp/s01-pr343-wordpress-check.php"
+          cli eval-file /tmp/s01-pr343-wordpress-check.php > proof/wordpress-check.json
+          python3 - <<'PYVERIFY'
+          import json,pathlib
+          base=pathlib.Path('proof')
+          seed=json.loads((base/'seed.json').read_text())
+          check=json.loads((base/'wordpress-check.json').read_text())
+          assert seed['status']=='PASS' and seed['synthetic_guides']=={'en':26,'zh':3},seed
+          assert check['status']=='PASS',check
+          assert len(check['checks'])>=20,check
+          assert all(x['pass'] for x in check['checks']),check
+          assert check['production']=='NOT_EXECUTED',check
+          (base/'integration-gate.json').write_text(json.dumps({'status':'PASS','source_sha':'bb310802ea23039260b2a85ebd9650ba8e261d84','standalone':'PASS','wordpress_checks':len(check['checks']),'synthetic_guides':seed['synthetic_guides'],'production':'UNTOUCHED'}))
+          print('PR343_ISOLATED_WORDPRESS_INTEGRATION_PASS checks='+str(len(check['checks'])))
+          PYVERIFY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s01-theme343-wordpress-${{ github.run_id }}
+          path: proof/
+          retention-days: 14
+      - name: Clear transient private checkout and package
+        if: always()
+        run: rm -rf target provider established
