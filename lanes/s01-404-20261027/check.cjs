@@ -1,0 +1,35 @@
+const {chromium}=require('playwright');
+const fs=require('fs'),cp=require('child_process'),assert=require('assert');
+const phase=process.argv[2],root='http://127.0.0.1:18880',wp=process.env.WP;
+let checks=0;const ok=(v,m)=>{assert(v,m);checks++};
+const settings=mode=>cp.execFileSync('docker',['exec','--user','www-data',wp,'php','/usr/local/bin/wp','eval-file','/tmp/404-settings.php',mode,'--path=/var/www/html'],{stdio:'pipe'});
+(async()=>{const browser=await chromium.launch({headless:true});const ctx=await browser.newContext();const page=await ctx.newPage();
+for(const lang of ['en','zh']){
+ const prefix=lang==='zh'?'/zh':'',url=root+prefix+'/vf-page-check-404/';
+ await page.setViewportSize({width:1440,height:1000});const response=await page.goto(url);await page.evaluate(()=>document.fonts.ready);
+ const head=await page.locator('head').evaluate(el=>({title:document.title,robots:el.querySelector('meta[name=robots]')?.content,canonical:el.querySelector('link[rel=canonical]')?.href||'',alternate:[...el.querySelectorAll('link[rel=alternate]')].map(x=>x.outerHTML)}));
+ const links=await page.locator('.vf-theme-system-recovery--404 a').evaluateAll(a=>a.map(x=>x.getAttribute('href')));
+ const non404={};for(const route of [prefix+'/?s=Search206',prefix+'/?s=404NoMatchNonexistent']){await page.goto(root+route);non404[route]=await page.locator('#content').innerHTML()}
+ if(phase==='before'){fs.writeFileSync('proof/baseline-'+lang+'.json',JSON.stringify({head,links,non404}));continue;}
+ const baseline=JSON.parse(fs.readFileSync('proof/baseline-'+lang+'.json'));ok(JSON.stringify(head)===JSON.stringify(baseline.head),'404 head title/robots/canonical unchanged '+lang);ok(JSON.stringify(links)===JSON.stringify(baseline.links),'recovery destination URLs unchanged '+lang);ok(JSON.stringify(non404)===JSON.stringify(baseline.non404),'both nonempty and zero-result Search HTML byte-identical '+lang);
+ for(const width of [1440,1024]){
+  await page.setViewportSize({width,height:1000});const res=await page.goto(url);await page.evaluate(()=>document.fonts.ready);
+  ok(res.status()===404,'native404 status '+lang+width);ok(await page.locator('#content h1').count()===1,'single H1');
+  const scope=page.locator('.vf-theme-system-recovery--404');ok(await scope.locator('.vf-theme-recovery-workspace-head').count()===0,'stock workspace repetition omitted');ok(await scope.locator('h2').count()===3,'three alternative sections use headings');ok(!/Step one|Core routes|01|02 ·|03 ·|第一步|核心入口/.test(await scope.innerText()),'no fake sequential or technical recovery labels');
+  const hero=await page.locator('#content .vf-family-hero>.container-wide').boundingBox(),rail=await scope.locator('>.container-wide').boundingBox();ok(Math.abs(hero.x-rail.x)<2&&Math.abs(hero.width-rail.width)<2,'hero and recovery rail aligned');
+  ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'no horizontal overflow');
+  const box=await scope.locator('.vf-theme-recovery-search-step').evaluate(el=>{const s=getComputedStyle(el);return {border:parseFloat(s.borderTopWidth),padding:parseFloat(s.paddingTop),background:s.backgroundColor}});ok(box.border===0&&box.padding===0,'no outer search box');
+  const form=scope.locator('form');ok(await form.getAttribute('method')==='get','native GET search');ok(await form.getAttribute('action')===root+prefix+'/','current language search action');ok(await form.locator('input[name=s]').count()===1,'native query key');
+  ok(await scope.locator('.vf-theme-system-route-list--404>a').count()===5,'all available configured routes retained');ok(await scope.locator('.vf-theme-system-route-list--404>a>span').count()===0,'no duplicate route kicker');ok(await scope.locator('.vf-theme-system-route-list--recommended>a').count()===3,'real recent-content count retained');
+  await form.locator('input').focus();ok(await form.locator('input').evaluate(el=>parseFloat(getComputedStyle(el).outlineWidth)>=2),'visible keyboard focus');
+  await page.screenshot({path:`proof/404-${lang}-${width}.png`,fullPage:true});
+ }
+ settings('custom');await page.goto(url);ok(await page.locator('.vf-theme-recovery-workspace-head h2').innerText()==='Custom <title> preserved','authored title preserved and escaped');ok(await page.locator('.vf-theme-recovery-workspace-head p').innerText()==='Custom <description> preserved','authored description preserved and escaped');ok(await page.locator('.vf-theme-recovery-workspace-head title,.vf-theme-recovery-workspace-head description').count()===0,'custom markup not executed');
+ settings('title-only');await page.goto(url);ok(await page.locator('.vf-theme-recovery-workspace-head h2').count()===1&&await page.locator('.vf-theme-recovery-workspace-head p').count()===0,'custom title with stock description');
+ settings('description-only');await page.goto(url);ok(await page.locator('.vf-theme-recovery-workspace-head h2').count()===0&&await page.locator('.vf-theme-recovery-workspace-head p').count()===1,'custom description with stock title');
+ settings('off');await page.goto(url);ok(await page.locator('.vf-theme-system-recovery--404 form,.vf-theme-system-recovery--404 .vf-theme-system-route,.vf-theme-system-recovery--404 .vf-theme-recovery-workspace-head').count()===0,'all configured hidden sections remain absent');
+ settings('columns');await page.goto(url);ok(await page.locator('.vf-theme-system-route-list--404').evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length)===1,'configured route column count');ok(await page.locator('.vf-theme-system-route small').count()===0,'description toggle');ok(await page.locator('.vf-theme-system-query-chips,.vf-theme-system-recovery-recommended').count()===0,'popular and recent toggles');
+ settings('restore');await page.goto(url);await page.locator('.vf-theme-system-search-box input').fill('Search206');await Promise.all([page.waitForURL(/s=Search206/),page.locator('.vf-theme-system-search-box button').click()]);ok(page.url().startsWith(root+prefix+'/?s='),'real submit keeps language');ok(await page.locator('.vf-directory-card--search').count()>0,'real native results after submit');
+ const nojs=await browser.newContext({javaScriptEnabled:false});const p=await nojs.newPage();ok((await p.goto(url)).status()===404,'noJS404');await p.locator('.vf-theme-system-search-box input').fill('Search206');await Promise.all([p.waitForURL(/s=Search206/),p.locator('.vf-theme-system-search-box button').click()]);ok(await p.locator('.vf-directory-card--search').count()>0,'noJS native search works');await nojs.close();
+}
+await browser.close();if(phase!=='before')fs.writeFileSync('proof/results.json',JSON.stringify({status:'PASS',checks,scope:'404 recovery only; English/Chinese at1440/1024; mobile deferred; no Release or Production claim'},null,2));console.log(phase,checks,'checks PASS');})().catch(e=>{console.error(e);process.exit(1)});
