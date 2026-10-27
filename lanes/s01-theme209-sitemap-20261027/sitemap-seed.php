@@ -12,6 +12,9 @@ foreach(['en','zh'] as $lang){
  for($i=1;$i<=3;$i++){
   $title=$lang==='en'?($i===1?'A long practical HLS playlist diagnosis title with a continuous-stream-reference-that-must-wrap-without-clipping':'Authored playlist reference '.$i):($i===1?'用于验证目录长标题换行、分组间距与真实语言隔离的媒体播放列表排查记录':'播放列表参考记录'.$i);
   $id=wp_insert_post(['post_type'=>'post','post_status'=>'publish','post_name'=>'sitemap-reference-'.$lang.'-'.$i,'post_title'=>$title,'post_content'=>'<p>Authored sitemap reference.</p>','post_excerpt'=>'Authored summary preserved.']);pll_set_post_language($id,$lang);
+  // Stable distinct timestamps keep unchanged modified-desc recommendations deterministic.
+  $stamp='2026-10-20 10:00:0'.$i;
+  $wpdb->update($wpdb->posts,['post_date'=>$stamp,'post_date_gmt'=>$stamp,'post_modified'=>$stamp,'post_modified_gmt'=>$stamp],['ID'=>$id]);clean_post_cache($id);
  }
 }
 $layout=get_option('vf_theme_layout',[]);$row=$layout['moduleSettings']['html_sitemap']['post_list']??[];
