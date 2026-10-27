@@ -7,6 +7,7 @@ function settings(mode){execFileSync('docker',['exec','--user','www-data',proces
  for(const lang of ['en','zh'])for(const width of [1440,1024]){
   const page=await ctx.newPage({viewport:{width,height:1000}});page.on('pageerror',e=>errors.push(e.message));const prefix=lang==='zh'?'/zh':'',key=lang+'-'+width;
   const response=await page.goto(base+prefix+'/sitemap/',{waitUntil:'networkidle'});assert.equal(response.status(),200);await page.evaluate(()=>document.fonts.ready);await page.locator('[data-vf-sitemap-enhanced=true]').waitFor();
+  fs.writeFileSync(`proof/${phase}-diagnostic-${key}.json`,await page.locator('#sitemap-fixture-diagnostic').textContent());
   const h1=await page.locator('h1').allTextContents();assert.equal(h1.length,1);if(fixed)assert.equal(h1[0],fixture.titles[lang]);else if(lang==='en')assert.notEqual(h1[0],fixture.titles.en,'208 mixed-language title not reproduced');
   const group=page.locator('[data-vf-sitemap-group]'),items=page.locator('[data-vf-sitemap-item]');assert.ok(await group.count()>=4);assert.ok(await items.count()>=20);
   const links=await items.evaluateAll(a=>a.map(e=>e.getAttribute('href')).sort()),graph=await page.locator('.vf-sitemap-path-disclosure a[href]').evaluateAll(a=>a.map(e=>e.getAttribute('href')).sort());

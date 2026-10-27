@@ -71,6 +71,7 @@ cli option update rank_math_registration_skip 1 >/dev/null
 curl -fsS http://127.0.0.1:18880/m3u8-player/ >/dev/null
 docker cp "control/lanes/$LANE_ID/sitemap-seed.php" "$WP:/tmp/sitemap-seed.php"
 cli eval-file /tmp/sitemap-seed.php > proof/sitemap-fixtures.json
+docker cp "control/lanes/$LANE_ID/diagnostic.php" "$WP:/var/www/html/wp-content/mu-plugins/sitemap-fixture-diagnostic.php"
 docker cp "control/lanes/$LANE_ID/settings.php" "$WP:/tmp/sitemap-settings.php"
 cli eval-file /tmp/sitemap-settings.php restore >/dev/null
 docker cp "control/lanes/$LANE_ID/contracts-snapshot.php" "$WP:/tmp/contracts-snapshot.php"
