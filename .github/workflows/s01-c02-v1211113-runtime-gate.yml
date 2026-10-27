@@ -1,0 +1,139 @@
+name: S01-C02 V1.21.1113 exact package runtime gate
+on:
+  push:
+    branches: [test/s01-c02-v1211113-runtime-allowlist-20261027]
+    paths: ['.github/workflows/s01-c02-v1211113-runtime-gate.yml']
+permissions:
+  contents: read
+jobs:
+  runtime-package:
+    name: Exact package validator and isolated 1111 upgrade rollback
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: wordpress-root
+          MARIADB_DATABASE: wordpress
+          MARIADB_USER: wordpress
+          MARIADB_PASSWORD: wordpress
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      CANDIDATE: a2cd3f2cde411c5b25fca0d364591638a491c274
+    steps:
+      - name: Checkout exact approved-source candidate transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: a2cd3f2cde411c5b25fca0d364591638a491c274
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-ops
+      - name: Configure PHP runtime ZipArchive
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, mbstring, intl, zip
+          coverage: none
+      - name: Exact candidate source and version readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C private-ops rev-parse HEAD)" = "$CANDIDATE"
+          test "$(tr -d '\r\n ' < private-ops/VERSION)" = "1.21.1113"
+          grep -Fq ' * Version: 1.21.1113' private-ops/vf-ops.php
+          grep -Fq "define('VF_OPS_VERSION', '1.21.1113')" private-ops/vf-ops.php
+          php -l private-ops/vf-ops.php
+          echo S01_C02_EXACT_1113_SOURCE_PASS
+      - name: Build candidate ZIP by the exact WordPress runtime allowlist
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path, PurePosixPath
+          import zipfile
+          root=Path('private-ops')
+          files=[]
+          for base in ('assets','includes','languages','config'):
+              if (root/base).is_dir(): files.extend(p for p in (root/base).rglob('*') if p.is_file())
+          for name in ('vf-ops.php','uninstall.php'):
+              if (root/name).is_file(): files.append(root/name)
+          files=sorted(files)
+          assert len(files)==990, f'unexpected runtime count {len(files)}'
+          out=Path('/tmp/s01-ops-1113-allowlist.zip')
+          with zipfile.ZipFile(out,'w',zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+              for p in files:
+                  assert not p.is_symlink()
+                  rel=str(PurePosixPath(p.relative_to(root)))
+                  assert rel in ('vf-ops.php','uninstall.php') or rel.startswith(('assets/','includes/','languages/','config/'))
+                  assert '..' not in PurePosixPath(rel).parts
+                  z.write(p,str(PurePosixPath('vf-ops')/rel))
+          with zipfile.ZipFile(out) as z:
+              assert len(z.namelist())==990
+              assert 'vf-ops/plugin-manifest.json' not in z.namelist()
+              assert z.testzip() is None
+          print('S01_C02_STRICT_PACKAGER_RUNTIME_ONLY_PASS count=990')
+          PY
+          gh release download v1.21.1111 -R llhzx2018/vf-tools-ops -D /tmp -p vf-tools-ops_V1.21.1111.zip
+          gh release download v1.21.1112 -R llhzx2018/vf-tools-ops -D /tmp -p vf-tools-ops_V1.21.1112.zip
+      - name: Prepare isolated installed 1111 WordPress
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsSLo /tmp/s01wp.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          root=/tmp/s01-ops-package-test
+          mkdir -p "$root"
+          php /tmp/s01wp.phar core download --path="$root" --skip-content
+          php /tmp/s01wp.phar core config --path="$root" --dbname=wordpress --dbuser=wordpress --dbpass=wordpress --dbhost=127.0.0.1:3306 --dbprefix=s01pkg_ --skip-check
+          php /tmp/s01wp.phar core install --path="$root" --url=http://127.0.0.1:18891 --title=S01-Test --admin_user=admin --admin_password=synthetic-only --admin_email=test@example.invalid --skip-email
+          php /tmp/s01wp.phar plugin install /tmp/vf-tools-ops_V1.21.1111.zip --force --activate --path="$root"
+          test "$(php /tmp/s01wp.phar plugin get vf-ops --field=version --path="$root")" = 1.21.1111
+      - name: Assert bad official ZIP rejected and new ZIP accepted by actual updater guard
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/s01-package-check.php <<'PHP'
+          <?php
+          $m=['target_version'=>'1.21.1113','runtime_file_count'=>990];
+          $bad=VF_Ops_Update_Package_V1::validate_zip('/tmp/vf-tools-ops_V1.21.1112.zip',$m);
+          if (!is_wp_error($bad)||$bad->get_error_code()!=='vf_update_zip_non_runtime') {fwrite(STDERR,"OLD_BAD_PACKAGE_WAS_NOT_REJECTED\n");exit(21);}
+          $good=VF_Ops_Update_Package_V1::validate_zip('/tmp/s01-ops-1113-allowlist.zip',$m);
+          if (is_wp_error($good)) {fwrite(STDERR,"CORRECT_PACKAGE_REJECTED:".$good->get_error_code()."\n");exit(22);}
+          if (($good['file_count']??0)!==990) {fwrite(STDERR,"RUNTIME_COUNT_MISMATCH\n");exit(23);}
+          $m['runtime_file_count']=991;
+          $wrong=VF_Ops_Update_Package_V1::validate_zip('/tmp/s01-ops-1113-allowlist.zip',$m);
+          if (!is_wp_error($wrong)||$wrong->get_error_code()!=='vf_update_runtime_count_mismatch') {fwrite(STDERR,"RUNTIME_COUNT_FAIL_CLOSED_LOST\n");exit(24);}
+          echo "S01_C02_REAL_WP_PACKAGE_GATE=PASS old_1112_rejected=true target_1113_accepted=true count=990\n";
+          PHP
+          php /tmp/s01wp.phar eval-file /tmp/s01-package-check.php --path=/tmp/s01-ops-package-test
+          echo S01_C02_REAL_UPGRADE_ZIP_VALIDATOR=PASS >> "$GITHUB_STEP_SUMMARY"
+      - name: Verify upgrade rollback reupgrade preserves isolated owner data
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root=/tmp/s01-ops-package-test
+          wp() { php /tmp/s01wp.phar "$@" --path="$root"; }
+          wp option add s01_canary do-not-lose
+          wp plugin install /tmp/s01-ops-1113-allowlist.zip --force --activate
+          test "$(wp plugin get vf-ops --field=version)" = 1.21.1113
+          test "$(wp option get s01_canary)" = do-not-lose
+          wp plugin install /tmp/vf-tools-ops_V1.21.1111.zip --force --activate
+          test "$(wp plugin get vf-ops --field=version)" = 1.21.1111
+          test "$(wp option get s01_canary)" = do-not-lose
+          wp plugin install /tmp/s01-ops-1113-allowlist.zip --force --activate
+          test "$(wp plugin get vf-ops --field=version)" = 1.21.1113
+          test "$(wp option get s01_canary)" = do-not-lose
+          echo S01_C02_1113_INSTALL_UPGRADE_ROLLBACK_DATA_PASS >> "$GITHUB_STEP_SUMMARY"
+      - name: Cleanup private checkout and synthetic fixture
+        if: always()
+        shell: bash
+        run: |
+          rm -rf private-ops /tmp/s01-ops-package-test
+          rm -f /tmp/s01-ops-1113-allowlist.zip /tmp/vf-tools-ops_V1.21.1111.zip /tmp/vf-tools-ops_V1.21.1112.zip
