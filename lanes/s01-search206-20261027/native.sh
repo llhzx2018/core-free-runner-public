@@ -94,5 +94,5 @@ cli eval-file /tmp/snapshot.php > proof/state-after.sha256
 cmp proof/state-before.sha256 proof/state-after.sha256
 cli eval-file /tmp/contracts-snapshot.php > proof/contracts-after.json
 cmp proof/contracts-before.json proof/contracts-after.json
-test "$(cli option get vf_summary_probe_executed --format=json)" = false
+cli eval 'if(get_option("vf_summary_probe_executed","missing")!==false){throw new RuntimeException("SUMMARY_CALLBACK_EXECUTED_OR_MISSING");}echo "PASSIVE_SUMMARY_NO_CALLBACK_PASS\n";'
 echo SEARCH_UPGRADE_ROLLBACK_REPEAT_PROTECTED_DATA_PASS
