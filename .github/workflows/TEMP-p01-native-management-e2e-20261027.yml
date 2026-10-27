@@ -1,0 +1,172 @@
+name: TEMP P01 native frontstage management E2E
+on:
+  push:
+    branches:
+      - verify/p01-native-management-e2e-20261027
+permissions:
+  contents: read
+jobs:
+  p01-three-subsites-browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout private P01 exact source into transient runner
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          repository: llhzx2018/vf-start
+          ref: b42441e0691f0e82d25732b90fc2cbaee9bf7271
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - name: Prepare isolated copy, no artifacts retained
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = b42441e0691f0e82d25732b90fc2cbaee9bf7271
+          test "$(cat VERSION)" = 2.47.465
+          test "$(cat src/VERSION.txt)" = 2.47.465
+          php -m | grep -qi pdo_sqlite
+          command -v google-chrome
+          npm install --silent --no-audit --no-fund --prefix "$RUNNER_TEMP/p01-browser" playwright-core@1.56.1
+          mkdir -p "$RUNNER_TEMP/p01-native"
+          cp -a src "$RUNNER_TEMP/p01-native/site"
+          echo P01_NATIVE_EXACT_SOURCE_AND_ENV_PASS
+      - name: Isolated FULL install, three fixture types, real Chromium modal operations
+        shell: bash
+        env:
+          P01_TEST_BASE: http://127.0.0.1:18465
+        run: |
+          set -Eeuo pipefail
+          work="$RUNNER_TEMP/p01-native"
+          export P01_TEST_COOKIE="$work/cookies.txt"
+          export NODE_PATH="$RUNNER_TEMP/p01-browser/node_modules"
+          export CHROME_BIN="$(command -v google-chrome)"
+          php -S 127.0.0.1:18465 -t "$work/site" > "$work/php.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 50); do
+            if curl -fsS -c "$P01_TEST_COOKIE" -b "$P01_TEST_COOKIE" "$P01_TEST_BASE/setup.php" -o "$work/setup.html" 2>/dev/null; then break; fi
+            sleep 0.2
+          done
+          test -s "$work/setup.html"
+          csrf="$(sed -nE 's/.*name="setup_csrf" value="([^"]+)".*/\1/p' "$work/setup.html" | head -n 1)"
+          test -n "$csrf"
+          onepass="Isolated-$(openssl rand -hex 12)"
+          curl -fsS -L -c "$P01_TEST_COOKIE" -b "$P01_TEST_COOKIE" \
+            --data-urlencode "setup_csrf=$csrf" --data-urlencode 'site_title=P01 Isolated Native Modal' \
+            --data-urlencode "admin_password=$onepass" \
+            --data-urlencode "admin_password_confirm=$onepass" \
+            "$P01_TEST_BASE/setup.php" -o "$work/installed.html"
+          test -f "$work/site/app/.runtime.php"
+          jq -nc --arg password "$onepass" '{password:$password}' | curl -fsS \
+            -c "$P01_TEST_COOKIE" -b "$P01_TEST_COOKIE" \
+            -H 'Content-Type: application/json' -d @- "$P01_TEST_BASE/api.php?action=login" -o "$work/login.json"
+          export P01_TEST_CSRF="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["ok"] is True; print(d["csrf"])' "$work/login.json")"
+          jq -nc '{name:"Isolated Browser Verification",is_private:true}' | curl -fsS \
+            -c "$P01_TEST_COOKIE" -b "$P01_TEST_COOKIE" -H 'Content-Type: application/json' \
+            -H "X-CSRF-Token: $P01_TEST_CSRF" -d @- \
+            "$P01_TEST_BASE/api.php?action=category_save" -o "$work/category.json"
+          catid="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["ok"] is True; print(d["id"])' "$work/category.json")"
+          jq -nc --argjson catid "$catid" \
+            '{surface:"start",title:"Isolated Tool Fixture",url:"https://example.com/p01-tool-e2e",category_id:$catid,tags:["tool:网站与开发"],is_private:true,is_pending:false}' \
+            | curl -fsS -c "$P01_TEST_COOKIE" -b "$P01_TEST_COOKIE" \
+            -H 'Content-Type: application/json' -H "X-CSRF-Token: $P01_TEST_CSRF" \
+            -d @- "$P01_TEST_BASE/api.php?action=link_save" -o "$work/tool.json"
+          jq -nc --argjson catid "$catid" \
+            '{surface:"start",title:"Isolated Pending Fixture",url:"https://example.com/p01-pending-e2e",category_id:$catid,tags:[],is_private:true,is_pending:true}' \
+            | curl -fsS -c "$P01_TEST_COOKIE" -b "$P01_TEST_COOKIE" \
+            -H 'Content-Type: application/json' -H "X-CSRF-Token: $P01_TEST_CSRF" \
+            -d @- "$P01_TEST_BASE/api.php?action=link_save" -o "$work/pending.json"
+          curl -fsS -c "$P01_TEST_COOKIE" -b "$P01_TEST_COOKIE" \
+            --data-urlencode "csrf=$P01_TEST_CSRF" --data-urlencode 'surface=watch' \
+            --data-urlencode 'title=Isolated Watch Fixture' \
+            --data-urlencode 'url=https://example.com/p01-watch-e2e' \
+            --data-urlencode 'resource_kind=电影' --data-urlencode 'media_status=want' \
+            --data-urlencode 'is_private=1' "$P01_TEST_BASE/workspace-create.php" -o "$work/watch.json"
+          python3 -c 'import json,sys; files=sys.argv[1:]; [(lambda d: (_ for _ in ()).throw(AssertionError(str(d))) if not d.get("ok") else None)(json.load(open(p))) for p in files]' "$work/tool.json" "$work/pending.json" "$work/watch.json"
+          echo P01_NATIVE_ISOLATED_FIXTURE_CREATION_PASS
+          node <<'JS'
+          const fs=require('fs');
+          const assert=require('assert/strict');
+          const {chromium}=require('playwright-core');
+          const base=process.env.P01_TEST_BASE;
+          const timeout=16000;
+          (async()=>{
+            const browser=await chromium.launch({executablePath:process.env.CHROME_BIN,headless:true,args:['--no-sandbox','--disable-dev-shm-usage']});
+            try{
+              const context=await browser.newContext({viewport:{width:1440,height:900},locale:'zh-CN'});
+              let cookies=[];
+              for(let row of fs.readFileSync(process.env.P01_TEST_COOKIE,'utf8').split(/\r?\n/)){
+                row=row.trim();
+                if(row.startsWith('#HttpOnly_'))row=row.replace('#HttpOnly_','');
+                else if(!row || row.startsWith('#'))continue;
+                const bits=row.split('\t');
+                if(bits.length>=7)cookies.push({name:bits[5],value:bits[6],url:base});
+              }
+              assert(cookies.length>0,'No authenticated session cookie');
+              await context.addCookies(cookies);
+              await context.route('**/*',route=>{
+                const u=new URL(route.request().url());
+                if(u.origin!==base)return route.abort('blockedbyclient');
+                return route.continue();
+              });
+              const page=await context.newPage();
+              let redirected=false;
+              page.on('framenavigated',frame=>{if(frame===page.mainFrame()&&/admin|manager\.php|manage\.php/.test(frame.url()))redirected=true;});
+              async function enter(route){
+                const response=await page.goto(base+'/'+route,{waitUntil:'domcontentloaded',timeout});
+                assert.equal(response.status(),200,route+' HTTP status');
+                assert.equal(new URL(page.url()).pathname,'/'+route,route+' owner path');
+                const opener=page.locator('[data-vf-local-manage-open]');
+                await opener.waitFor({state:'visible',timeout});
+                await opener.click();
+                const dlg=page.locator('dialog[data-vf-local-management]');
+                await dlg.waitFor({state:'visible',timeout});
+                assert.equal(await dlg.evaluate(el=>el.open),true,route+' native dialog');
+                assert.equal(await dlg.locator('iframe').count(),0,'No iframe');
+                assert.equal(new URL(page.url()).pathname,'/'+route,route+' modal navigation');
+                return dlg;
+              }
+              const watch=await enter('watch.php');
+              const wr=watch.locator('[data-vf-local-manage-list] li').filter({hasText:'Isolated Watch Fixture'});
+              assert.equal(await wr.count(),1,'Watch fixture in management list');
+              await wr.locator('button[aria-label^="编辑"]').click();
+              await page.waitForFunction(()=>!document.querySelector('dialog[data-vf-local-management]')?.open,{timeout});
+              const drawer=page.locator('[data-panel="detail"]');
+              await drawer.waitFor({state:'visible',timeout});
+              assert.equal((await drawer.locator('[data-detail-form] [name="title"]').inputValue()).trim(),'Isolated Watch Fixture');
+              assert.equal(new URL(page.url()).pathname,'/watch.php');
+              console.log('P01_NATIVE_WATCH_EDIT_SAME_PAGE_PASS');
+              await page.goto(base+'/tools.php',{waitUntil:'domcontentloaded',timeout});
+              const tools=await enter('tools.php');
+              await tools.locator('[data-vf-local-task="toolbox"]').click();
+              await page.waitForFunction(()=>document.querySelector('[data-vf-local-toolbox-scene]')?.options.length>0,null,{timeout});
+              assert.equal(await tools.locator('[data-vf-local-toolbox-area]').isVisible(),true,'Tools workflow form visible');
+              await tools.locator('[data-vf-local-toolbox-new]').click();
+              await tools.locator('[data-vf-local-toolbox-form] [name="name"]').fill('Isolated Workflow E2E');
+              await tools.locator('[data-vf-local-toolbox-form] [name="copy"]').fill('Native frontstage functional save');
+              await tools.locator('[data-vf-local-toolbox-form] [name="keywords"]').fill('isolated,e2e');
+              await tools.locator('[data-vf-local-toolbox-save]').click();
+              await tools.locator('[data-vf-local-toolbox-status]').getByText('已保存').waitFor({state:'visible',timeout});
+              assert.equal(new URL(page.url()).pathname,'/tools.php');
+              console.log('P01_NATIVE_TOOLS_WORKFLOW_SAVE_SAME_PAGE_PASS');
+              await tools.locator('[data-vf-local-manage-close]').click();
+              assert.equal(await tools.evaluate(el=>el.open),false,'tools dialog closes');
+              const inbox=await enter('inbox.php');
+              await inbox.locator('[data-vf-local-task="resources"]').click();
+              const ir=inbox.locator('[data-vf-local-manage-list] li').filter({hasText:'Isolated Pending Fixture'});
+              assert.equal(await ir.count(),1,'Inbox fixture in management list');
+              await ir.locator('button[aria-label^="整理"]').click();
+              const organize=page.locator('dialog.vf-inbox-organize-dialog[open]');
+              await organize.waitFor({state:'visible',timeout});
+              assert.equal(new URL(page.url()).pathname,'/inbox.php','Inbox native organize stays on route');
+              assert.equal(await organize.locator('iframe').count(),0);
+              await page.keyboard.press('Escape');
+              await page.waitForFunction(()=>!document.querySelector('dialog.vf-inbox-organize-dialog')?.open,null,{timeout});
+              assert.equal(new URL(page.url()).pathname,'/inbox.php');
+              assert.equal(redirected,false,'No hidden backend page navigations');
+              console.log('P01_NATIVE_INBOX_ORGANIZE_SAME_PAGE_PASS');
+              console.log('P01_NATIVE_MODAL_NO_BACKEND_REDIRECT_PASS');
+              console.log('P01_NATIVE_THREE_SUBSITE_BROWSER_GROUP_PASS');
+            }finally{await browser.close();}
+          })().catch(err=>{console.error('P01_NATIVE_THREE_SUBSITE_BROWSER_GROUP_FAIL',String(err?.stack||err));process.exitCode=1;});
+          JS
