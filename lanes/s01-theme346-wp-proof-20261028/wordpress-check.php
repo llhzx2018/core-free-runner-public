@@ -10,6 +10,9 @@ function s01_theme346_gate(bool $ok, string $name): void {
     if (!$ok) { throw new RuntimeException('THEME346_GATE_FAILED: '.$name); }
     $GLOBALS['checks'][] = ['name' => $name, 'pass' => true];
 }
+if (!function_exists('vf_theme_module_render_tool_hero')) {
+    require_once get_stylesheet_directory().'/inc/modules/module-hero.php';
+}
 $theme = wp_get_theme();
 s01_theme346_gate($theme->get_stylesheet() === 'vf-tools-theme', 'activated_exact_theme_slug');
 s01_theme346_gate($theme->get('Version') === '1.35.212', 'actual_wordpress_theme_version');
