@@ -16,4 +16,7 @@ foreach(['en','zh'] as $lang){
  $out[$lang]=['search'=>home_url($prefix.'/?s=Search206&type=article'),'entry'=>home_url($prefix.'/search/?q=Search206&type=article'),'home'=>home_url($prefix.'/'),'tools'=>home_url($prefix.'/tools/'),'blog'=>home_url($prefix.'/blog/?q=Search206'),'authored'=>$plain];
 }
 foreach($pairs as $pair)pll_save_post_translations($pair);
+global $wpdb;
+$ids=$wpdb->get_col("SELECT ID FROM {$wpdb->posts} WHERE post_type IN ('post','vf_guide','vf_problem','vf_glossary') AND post_status='publish' ORDER BY ID");
+foreach($ids as $i=>$id){$stamp=gmdate('Y-m-d H:i:s',1577836800+$i*3600);$wpdb->update($wpdb->posts,['post_modified'=>$stamp,'post_modified_gmt'=>$stamp],['ID'=>(int)$id]);clean_post_cache((int)$id);}
 echo wp_json_encode($out);

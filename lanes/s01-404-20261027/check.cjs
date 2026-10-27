@@ -10,6 +10,7 @@ for(const lang of ['en','zh']){
  const head=await page.locator('head').evaluate(el=>({title:document.title,robots:el.querySelector('meta[name=robots]')?.content,canonical:el.querySelector('link[rel=canonical]')?.href||'',alternate:[...el.querySelectorAll('link[rel=alternate]')].map(x=>x.outerHTML)}));
  const links=await page.locator('.vf-theme-system-recovery--404 a').evaluateAll(a=>a.map(x=>x.getAttribute('href')));
  const non404={};for(const route of [prefix+'/?s=Search206',prefix+'/?s=404NoMatchNonexistent']){await page.goto(root+route);non404[route]=await page.locator('#content').innerHTML()}
+ fs.writeFileSync('proof/observed-'+phase+'-'+lang+'.json',JSON.stringify({head,links,non404}));
  if(phase==='before'){fs.writeFileSync('proof/baseline-'+lang+'.json',JSON.stringify({head,links,non404}));continue;}
  const baseline=JSON.parse(fs.readFileSync('proof/baseline-'+lang+'.json'));ok(JSON.stringify(head)===JSON.stringify(baseline.head),'404 head title/robots/canonical unchanged '+lang);ok(JSON.stringify(links)===JSON.stringify(baseline.links),'recovery destination URLs unchanged '+lang);ok(JSON.stringify(non404)===JSON.stringify(baseline.non404),'both nonempty and zero-result Search HTML byte-identical '+lang);
  for(const width of [1440,1024]){
