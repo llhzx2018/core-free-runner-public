@@ -1,0 +1,140 @@
+name: S01 C01 V1.35.207 exact candidate proof
+on:
+  push:
+    branches:
+      - test/s01-135207-1211112-exact-candidate-20261027
+    paths:
+      - '.github/workflows/s01-c01-v135207-candidate-proof.yml'
+permissions:
+  contents: read
+env:
+  TARGET_REPO: llhzx2018/vf-tools-theme
+  TARGET_VERSION: '1.35.207'
+  TARGET_SHA: fcb7ea5a9af9ddc8b51f02a8cf0316eb19bd1d32
+  SOURCE_VERSION: '1.35.206'
+jobs:
+  theme:
+    name: Theme clean-install, upgrade, rollback, data protection
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: wordpress-root
+          MARIADB_DATABASE: wordpress
+          MARIADB_USER: wordpress
+          MARIADB_PASSWORD: wordpress
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Checkout public preflight authority
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Audit exact target identity before private checkout
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_spec.py validate --spec .github/ephemeral-lanes/s01-c01-v135207-spec.json
+          python3 scripts/ephemeral_lane_spec.py audit-rendered --spec .github/ephemeral-lanes/s01-c01-v135207-spec.json --input .github/workflows/s01-c01-v135207-candidate-proof.yml
+      - name: Require registered private checkout token
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$PRIVATE_READ_TOKEN" || { echo BLOCKED_INFRA_PRIVATE_READ_TOKEN_MISSING; exit 78; }
+      - name: Checkout candidate exact source transiently
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-theme
+      - name: Checkout official previous version transiently
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: v1.35.206
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-theme-old
+      - name: PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, mbstring, intl, zip
+          coverage: none
+      - name: Verify exact version identity and PHP syntax
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C private-theme rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(cat private-theme/VERSION)" = "$TARGET_VERSION"
+          grep -q "^Version: $TARGET_VERSION$" private-theme/src/style.css
+          grep -q "define('VF_THEME_VERSION', '$TARGET_VERSION')" private-theme/src/inc/runtime-constants.php
+          test "$(cat private-theme-old/VERSION)" = "$SOURCE_VERSION"
+          find private-theme/src -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/s01-c01-php-lint.log
+          echo "THEME_PHP_LINT_PASS=$(wc -l </tmp/s01-c01-php-lint.log)" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build local throwaway test ZIPs and validate archive safety
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path, PurePosixPath
+          import zipfile, hashlib
+          for label,root in [('old',Path('private-theme-old/src')),('candidate',Path('private-theme/src'))]:
+              out=Path('/tmp')/f's01-theme-{label}.zip'
+              paths=sorted(x for x in root.rglob('*') if x.is_file())
+              assert len(paths)>100
+              with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED) as z:
+                  for p in paths:
+                      z.write(p,str(PurePosixPath('vf-tools-theme')/p.relative_to(root)))
+              with zipfile.ZipFile(out) as z:
+                  assert z.testzip() is None
+                  names=z.namelist()
+                  assert 'vf-tools-theme/style.css' in names
+                  assert all(not n.startswith('/') and '..' not in PurePosixPath(n).parts for n in names)
+              print(f'S01_THEME_{label}_ZIP_FILES={len(paths)} sha256={hashlib.sha256(out.read_bytes()).hexdigest()}')
+          PY
+      - name: Prepare two isolated WordPress instances
+        run: |
+          set -Eeuo pipefail
+          curl -fsSLo /tmp/s01-wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          for site in upgrade fresh; do
+            root="/tmp/s01-c01-wp-$site"
+            mkdir -p "$root"
+            php /tmp/s01-wp-cli.phar core download --path="$root" --skip-content
+            php /tmp/s01-wp-cli.phar core config --path="$root" --dbname=wordpress --dbuser=wordpress --dbpass=wordpress --dbhost=127.0.0.1:3306 --dbprefix="s01c01_${site}_" --skip-check
+            php /tmp/s01-wp-cli.phar core install --path="$root" --url="http://127.0.0.1/$site" --title=S01-C01-Synthetic --admin_user=admin --admin_password=local-only-fixture --admin_email=test@example.invalid --skip-email
+          done
+      - name: Clean install candidate package
+        run: |
+          set -Eeuo pipefail
+          root=/tmp/s01-c01-wp-fresh
+          php /tmp/s01-wp-cli.phar theme install /tmp/s01-theme-candidate.zip --force --activate --path="$root"
+          test "$(php /tmp/s01-wp-cli.phar theme get vf-tools-theme --field=version --path="$root")" = "$TARGET_VERSION"
+          echo "THEME_CLEAN_INSTALL_PASS" >> "$GITHUB_STEP_SUMMARY"
+      - name: Existing-site upgrade, function smoke, rollback and re-upgrade
+        run: |
+          set -Eeuo pipefail
+          root=/tmp/s01-c01-wp-upgrade
+          wp() { php /tmp/s01-wp-cli.phar "$@" --path="$root"; }
+          wp theme install /tmp/s01-theme-old.zip --force --activate
+          test "$(wp theme get vf-tools-theme --field=version)" = "$SOURCE_VERSION"
+          wp option add s01_preserve_canary s01-owner-data-fixture
+          wp theme install /tmp/s01-theme-candidate.zip --force --activate
+          test "$(wp theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
+          test "$(wp option get s01_preserve_canary)" = s01-owner-data-fixture
+          wp eval-file "$GITHUB_WORKSPACE/private-theme/tests/s01-pr-frontend-navigation-wordpress-smoke.php" --skip-plugins
+          wp theme install /tmp/s01-theme-old.zip --force --activate
+          test "$(wp theme get vf-tools-theme --field=version)" = "$SOURCE_VERSION"
+          test "$(wp option get s01_preserve_canary)" = s01-owner-data-fixture
+          wp theme install /tmp/s01-theme-candidate.zip --force --activate
+          test "$(wp theme get vf-tools-theme --field=version)" = "$TARGET_VERSION"
+          test "$(wp option get s01_preserve_canary)" = s01-owner-data-fixture
+          echo "THEME_UPGRADE_ROLLBACK_REUPGRADE_AND_DATA_PRESERVATION_PASS" >> "$GITHUB_STEP_SUMMARY"
