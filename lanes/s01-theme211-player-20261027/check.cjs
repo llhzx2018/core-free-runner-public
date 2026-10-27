@@ -30,6 +30,7 @@ const norm=s=>s.replaceAll('1.35.211','1.35.210').replaceAll('135211','135210');
     const styles=await p.locator('.vf-tool-runtime-stage-frame').evaluate(e=>{const s=getComputedStyle(e);return{border:s.borderTopWidth,shadow:s.boxShadow,overflow:s.overflow,padding:s.padding}});
     assert.equal(styles.border,'0px');assert.equal(styles.shadow,'none');assert.equal(styles.padding,'0px');assert.equal(styles.overflow,'visible');
     assert.ok(await root.locator('[data-vf-player-view="simple"]').isVisible());assert.ok(await root.locator('[data-vf-player-view="pro"]').isVisible());
+    for(const selector of ['.vf-tool-steps-list li>div','.vf-tool-related-card>div'])for(const el of await p.locator(selector).all()){assert.ok((await el.boundingBox()).width>200,'support copy must not occupy the old index column');}
     await p.screenshot({path:`proof/player-${lang}-${width}.png`,fullPage:true});
     rows.push({kind:'desktop-layout',lang,width,inputY:i.y,rail:f.width,status:'PASS'});
    }else await p.screenshot({path:`proof/before-player-${lang}-${width}.png`,fullPage:true});
