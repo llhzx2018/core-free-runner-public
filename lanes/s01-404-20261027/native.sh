@@ -33,6 +33,8 @@ cli rewrite structure '/%postname%/' --hard >/dev/null
 docker cp lane/mount-seed.php "$WP:/tmp/mount-seed.php";cli eval-file /tmp/mount-seed.php > proof/mounts.json
 docker cp "control/lanes/$LANE_ID/seed.php" "$WP:/tmp/extra-protected.php";cli eval-file /tmp/extra-protected.php >/dev/null
 docker cp lane/snapshot.php "$WP:/tmp/snapshot.php"
+docker cp "control/lanes/$LANE_ID/summary-probe.php" "$WP:/var/www/html/wp-content/mu-plugins/summary-probe.php"
+cli option update vf_summary_probe_called not-executed >/dev/null
 curl -sS http://127.0.0.1:18880/vf-page-check-404/ >/dev/null
 docker cp "control/lanes/$LANE_ID/search-seed.php" "$WP:/tmp/search-seed.php";cli eval-file /tmp/search-seed.php > proof/search-fixtures.json
 docker cp "control/lanes/$LANE_ID/settings.php" "$WP:/tmp/404-settings.php"
@@ -51,4 +53,6 @@ cli eval-file /tmp/snapshot.php > proof/state-after.json
 cli eval-file /tmp/contracts-snapshot.php > proof/contracts-after.json
 cmp proof/state-before.json proof/state-after.json
 cmp proof/contracts-before.json proof/contracts-after.json
+test "$(cli option get vf_summary_probe_called)" = not-executed
+echo PASSIVE_SUMMARIES_NEVER_EXECUTE_SHORTCODE
 echo PROTECTED_STATE_AND_NATIVE_REVIEW_NOTES_BYTE_IDENTICAL
