@@ -14,7 +14,7 @@ const norm=s=>s.replaceAll('1.35.211','1.35.210').replaceAll('135211','135210');
   out.players[lang]={
    h1:await p.locator('h1').allTextContents(),
    head:await p.locator('title,link[rel=canonical],link[rel=alternate][hreflang],meta[name=robots],meta[name=description]').evaluateAll(es=>es.map(e=>e.outerHTML)),
-   header:norm(await p.locator('header.site-header').innerHTML()),footer:norm(await p.locator('footer.site-footer').innerHTML()),
+   header:norm(await p.locator('[data-vf-theme-shell=header]').innerHTML()),footer:norm(await p.locator('[data-vf-theme-shell=footer]').innerHTML()),
    controls:await root.locator('input,button,select,video').evaluateAll(es=>es.map(e=>({tag:e.tagName,attrs:[...e.attributes].filter(a=>a.name.startsWith('data-vf-')||['type','controls','preload'].includes(a.name)).map(a=>[a.name,a.value])})))
   };
   assert.equal(media.length,0,'no media requested on page load');assert.equal(await video.getAttribute('preload'),'none');
