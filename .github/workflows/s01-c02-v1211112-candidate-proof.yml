@@ -1,0 +1,148 @@
+name: S01 C02 V1.21.1112 exact candidate proof
+on:
+  push:
+    branches:
+      - test/s01-135207-1211112-exact-candidate-20261027
+    paths:
+      - '.github/workflows/s01-c02-v1211112-candidate-proof.yml'
+permissions:
+  contents: read
+env:
+  TARGET_REPO: llhzx2018/vf-tools-ops
+  TARGET_VERSION: '1.21.1112'
+  TARGET_SHA: 1e8e4b76770fa0868e3c311f0b19e223d1e922a5
+  SOURCE_VERSION: '1.21.1111'
+jobs:
+  ops:
+    name: Ops clean-install, upgrade, rollback, safe admin links
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: wordpress-root
+          MARIADB_DATABASE: wordpress
+          MARIADB_USER: wordpress
+          MARIADB_PASSWORD: wordpress
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Checkout public preflight authority
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Audit exact target identity before private checkout
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_spec.py validate --spec .github/ephemeral-lanes/s01-c02-v1211112-spec.json
+          python3 scripts/ephemeral_lane_spec.py audit-rendered --spec .github/ephemeral-lanes/s01-c02-v1211112-spec.json --input .github/workflows/s01-c02-v1211112-candidate-proof.yml
+      - name: Require registered private checkout token
+        env:
+          PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$PRIVATE_READ_TOKEN" || { echo BLOCKED_INFRA_PRIVATE_READ_TOKEN_MISSING; exit 78; }
+      - name: Checkout candidate exact source transiently
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-ops
+      - name: Checkout official previous version transiently
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: v1.21.1111
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-ops-old
+      - name: PHP 8.3
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli, mbstring, intl, zip
+          coverage: none
+      - name: Verify exact version identity, security and targeted PHP checks
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C private-ops rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(cat private-ops/VERSION)" = "$TARGET_VERSION"
+          grep -q "^ \* Version: $TARGET_VERSION$" private-ops/vf-ops.php
+          grep -q "define('VF_OPS_VERSION', '$TARGET_VERSION')" private-ops/vf-ops.php
+          test "$(cat private-ops-old/VERSION)" = "$SOURCE_VERSION"
+          php -l private-ops/vf-ops.php
+          php -l private-ops/includes/admin-v13/views/system_plugins.php
+          php -l private-ops/tests/s01-c02-1211095-system-update-blocker-visibility.php
+          php private-ops/tests/s01-c02-1211095-system-update-blocker-visibility.php
+          echo "OPS_TARGETED_PHP_AND_SAFE_LINK_CONTRACT_PASS" >> "$GITHUB_STEP_SUMMARY"
+      - name: Build transient plugin ZIPs with safe package roots
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path, PurePosixPath
+          import zipfile, hashlib
+          for label,root in [('old',Path('private-ops-old')),('candidate',Path('private-ops'))]:
+              out=Path('/tmp')/f's01-ops-{label}.zip'
+              paths=[]
+              for top in ('assets','includes'):
+                  paths.extend(x for x in (root/top).rglob('*') if x.is_file())
+              for name in ('vf-ops.php','uninstall.php','plugin-manifest.json'):
+                  if (root/name).is_file(): paths.append(root/name)
+              paths=sorted(paths)
+              assert len(paths)>100 and (root/'vf-ops.php').is_file()
+              with zipfile.ZipFile(out,'w',compression=zipfile.ZIP_DEFLATED) as z:
+                  for p in paths:
+                      z.write(p,str(PurePosixPath('vf-ops')/p.relative_to(root)))
+              with zipfile.ZipFile(out) as z:
+                  assert z.testzip() is None
+                  names=z.namelist()
+                  assert 'vf-ops/vf-ops.php' in names
+                  assert all(not n.startswith('/') and '..' not in PurePosixPath(n).parts for n in names)
+              print(f'S01_OPS_{label}_ZIP_FILES={len(paths)} sha256={hashlib.sha256(out.read_bytes()).hexdigest()}')
+          PY
+      - name: Prepare two isolated WordPress fixtures
+        run: |
+          set -Eeuo pipefail
+          curl -fsSLo /tmp/s01-wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          for site in upgrade fresh; do
+            root="/tmp/s01-c02-wp-$site"
+            mkdir -p "$root"
+            php /tmp/s01-wp-cli.phar core download --path="$root" --skip-content
+            php /tmp/s01-wp-cli.phar core config --path="$root" --dbname=wordpress --dbuser=wordpress --dbpass=wordpress --dbhost=127.0.0.1:3306 --dbprefix="s01c02_${site}_" --skip-check
+            php /tmp/s01-wp-cli.phar core install --path="$root" --url="http://127.0.0.1/$site" --title=S01-C02-Synthetic --admin_user=admin --admin_password=local-only-fixture --admin_email=test@example.invalid --skip-email
+          done
+      - name: Clean install candidate and verify safe redirect behavior
+        run: |
+          set -Eeuo pipefail
+          root=/tmp/s01-c02-wp-fresh
+          php /tmp/s01-wp-cli.phar plugin install /tmp/s01-ops-candidate.zip --force --activate --path="$root"
+          test "$(php /tmp/s01-wp-cli.phar plugin get vf-ops --field=version --path="$root")" = "$TARGET_VERSION"
+          php /tmp/s01-wp-cli.phar eval 'if (wp_validate_redirect("https://unsafe.example.test/", "") !== "") { throw new RuntimeException("unsafe external component route permitted"); }' --path="$root" --skip-themes
+          echo "OPS_CLEAN_INSTALL_AND_EXTERNAL_LINK_REJECTION_PASS" >> "$GITHUB_STEP_SUMMARY"
+      - name: Existing-site upgrade rollback and data conservation
+        run: |
+          set -Eeuo pipefail
+          root=/tmp/s01-c02-wp-upgrade
+          wp() { php /tmp/s01-wp-cli.phar "$@" --path="$root"; }
+          wp plugin install /tmp/s01-ops-old.zip --force --activate
+          test "$(wp plugin get vf-ops --field=version)" = "$SOURCE_VERSION"
+          wp option add s01_preserve_canary s01-owner-data-fixture
+          wp plugin install /tmp/s01-ops-candidate.zip --force --activate
+          test "$(wp plugin get vf-ops --field=version)" = "$TARGET_VERSION"
+          test "$(wp option get s01_preserve_canary)" = s01-owner-data-fixture
+          wp plugin install /tmp/s01-ops-old.zip --force --activate
+          test "$(wp plugin get vf-ops --field=version)" = "$SOURCE_VERSION"
+          test "$(wp option get s01_preserve_canary)" = s01-owner-data-fixture
+          wp plugin install /tmp/s01-ops-candidate.zip --force --activate
+          test "$(wp plugin get vf-ops --field=version)" = "$TARGET_VERSION"
+          test "$(wp option get s01_preserve_canary)" = s01-owner-data-fixture
+          echo "OPS_UPGRADE_ROLLBACK_REUPGRADE_AND_DATA_PRESERVATION_PASS" >> "$GITHUB_STEP_SUMMARY"
