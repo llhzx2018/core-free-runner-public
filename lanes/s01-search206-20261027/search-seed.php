@@ -2,7 +2,7 @@
 // Isolated synthetic fixtures, before all protected-state baselines.
 $layout=get_option('vf_theme_layout',[]);
 foreach(['search'=>3,'blog_index'=>9] as $key=>$count){$layout['moduleSettings'][$key]['post_list']=array_merge($layout['moduleSettings'][$key]['post_list']??[],['override'=>true,'count'=>$count,'show_pagination'=>true,'sort'=>'title_asc','excerpt_words'=>28]);}
-update_option('vf_theme_layout',$layout);update_option('posts_per_page',3);update_option('vf_summary_probe_executed',false);
+update_option('vf_theme_layout',$layout);update_option('posts_per_page',3);update_option('vf_summary_probe_executed','not-executed');
 $out=[];$pairs=[];
 foreach(['en','zh'] as $lang){
  $zh=$lang==='zh';$prefix=$zh?'/zh':'';
