@@ -1,0 +1,138 @@
+name: S01-C02 V1.21.1112 independent Chromium UI gate
+on:
+  push:
+    branches:
+      - test/s01-c02-v1211112-ui-gate-20261027
+    paths:
+      - '.github/workflows/s01-c02-v1211112-ui-gate.yml'
+permissions:
+  contents: read
+jobs:
+  ui:
+    name: Exact source WordPress admin UI 1440 768 390
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: wordpress-root
+          MARIADB_DATABASE: wordpress
+          MARIADB_USER: wordpress
+          MARIADB_PASSWORD: wordpress
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    env:
+      TARGET_SHA: 1e8e4b76770fa0868e3c311f0b19e223d1e922a5
+      TARGET_VERSION: '1.21.1112'
+      TARGET_REPO: llhzx2018/vf-tools-ops
+      NODE_PATH: /tmp/s01-ops-ui/node_modules
+    steps:
+      - name: Checkout trusted public workflow source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact private candidate transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 1e8e4b76770fa0868e3c311f0b19e223d1e922a5
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-ops
+      - name: Verify unmodified exact source and bounded PHP contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C private-ops rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n ' < private-ops/VERSION)" = "$TARGET_VERSION"
+          php -l private-ops/includes/admin-v13/views/system_plugins.php
+          php private-ops/tests/s01-c02-1211095-system-update-blocker-visibility.php
+      - name: Install disposable WordPress fixture
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsSLo /tmp/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          root=/tmp/s01-ops-ui-wp
+          mkdir -p "$root"
+          php /tmp/wp-cli.phar core download --path="$root" --skip-content
+          php /tmp/wp-cli.phar core config --path="$root" --dbname=wordpress --dbuser=wordpress --dbpass=wordpress --dbhost=127.0.0.1:3306 --dbprefix=s01ui_ --skip-check
+          php /tmp/wp-cli.phar core install --path="$root" --url=http://127.0.0.1:18888 --title=S01-UI-Fixture --admin_user=admin --admin_password=s01-only-synthetic-admin --admin_email=test@example.invalid --skip-email
+          python3 - <<'PY'
+          from pathlib import Path, PurePosixPath
+          import zipfile
+          root=Path('private-ops')
+          paths=[]
+          for p in ('assets','includes'):
+              paths.extend(f for f in (root/p).rglob('*') if f.is_file())
+          for p in ('vf-ops.php','uninstall.php','plugin-manifest.json'):
+              if (root/p).is_file(): paths.append(root/p)
+          assert len(paths)>100
+          with zipfile.ZipFile('/tmp/s01-ops-ui.zip','w',zipfile.ZIP_DEFLATED) as z:
+              for f in sorted(paths):
+                  z.write(f,str(PurePosixPath('vf-ops')/f.relative_to(root)))
+          PY
+          php /tmp/wp-cli.phar plugin install /tmp/s01-ops-ui.zip --force --activate --path="$root"
+          test "$(php /tmp/wp-cli.phar plugin get vf-ops --field=version --path="$root")" = "$TARGET_VERSION"
+          php -S 127.0.0.1:18888 -t "$root" >/tmp/s01-ops-ui-http.log 2>&1 &
+          echo $! >/tmp/s01-ops-ui-http.pid
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18888/wp-login.php >/dev/null; then break; fi
+            sleep 1
+          done
+      - name: Install pinned Playwright Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm --prefix /tmp/s01-ops-ui install --silent --no-audit --no-fund playwright@1.56.1
+          /tmp/s01-ops-ui/node_modules/.bin/playwright install --with-deps chromium >/tmp/s01-ops-ui-browser-install.log 2>&1
+      - name: Assert owner admin page visibility and three breakpoints
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          node - <<'JS'
+          const {chromium}=require('playwright');
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            const page=await browser.newPage();
+            const base='http://127.0.0.1:18888';
+            await page.goto(base+'/wp-login.php',{waitUntil:'domcontentloaded'});
+            await page.locator('#user_login').fill('admin');
+            await page.locator('#user_pass').fill('s01-only-synthetic-admin');
+            await page.locator('#wp-submit').click();
+            await page.waitForURL(/wp-admin/);
+            const target=base+'/wp-admin/admin.php?page=vf-toolsite-system-settings&tab=plugins';
+            for(const width of [1440,768,390]){
+              await page.setViewportSize({width,height:900});
+              await page.goto(target,{waitUntil:'domcontentloaded'});
+              const root=page.locator('[data-vf-plugin-root]');
+              await root.waitFor({state:'visible',timeout:15000});
+              const title=page.locator('.vf-plugin-page h1').first();
+              if(!(await title.innerText()).includes('组件与系统'))throw new Error('Wrong page at '+width);
+              const metrics=await page.evaluate(()=>{
+                const el=document.documentElement;
+                return {bodyScroll:document.body.scrollWidth,docScroll:el.scrollWidth,viewport:window.innerWidth,rootCount:document.querySelectorAll('[data-vf-plugin-root]').length};
+              });
+              if(metrics.rootCount!==1||metrics.docScroll>metrics.viewport+2||metrics.bodyScroll>metrics.viewport+2)throw new Error('Overflow or duplicate page '+width+': '+JSON.stringify(metrics));
+              await page.screenshot({path:'/tmp/s01-ops-'+width+'.png',fullPage:true});
+              console.log('S01_OPS_CHROMIUM_WIDTH_'+width+'=PASS');
+            }
+            await page.keyboard.press('Tab');
+            const focused=await page.evaluate(()=>document.activeElement&&document.activeElement.tagName);
+            if(!focused||focused==='BODY')throw new Error('Keyboard focus cannot enter controls');
+            await browser.close();
+            console.log('S01_OPS_EXACT_UI_CHROMIUM=PASS');
+          })().catch(e=>{console.error(e);process.exit(1)});
+          JS
+          echo 'S01_OPS_EXACT_UI_CHROMIUM=PASS' >> "$GITHUB_STEP_SUMMARY"
+      - name: Cleanup synthetic fixture and private checkout
+        if: always()
+        shell: bash
+        run: |
+          if test -f /tmp/s01-ops-ui-http.pid; then kill "$(cat /tmp/s01-ops-ui-http.pid)" >/dev/null 2>&1 || true; fi
+          rm -rf private-ops /tmp/s01-ops-ui-wp
