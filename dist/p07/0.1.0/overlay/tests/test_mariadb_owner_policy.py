@@ -1,6 +1,9 @@
 """P07 OS-matched MariaDB bootstrap and live endpoint guards; no VPS calls."""
 import pathlib
 import sys
+import os
+import socket
+import tempfile
 import unittest
 import subprocess
 from unittest import mock
@@ -153,6 +156,99 @@ class MariaDBDefaultPolicy(unittest.TestCase):
             return_value=subprocess.CompletedProcess([], 0, "mariadbd  Ver 11.8.3-MariaDB for debian-linux-gnu on x86_64", ""),
         ):
             self.assertEqual(pull.local_target_db_engine_version(), "MARIADB_11.8")
+
+    def test_cloudpanel_password_protected_root_1045_uses_process_owned_socket(self):
+        import server_migration_pull as pull
+        error = (
+            "ERROR 1045 (28000): Access denied for user "
+            "'root'@'localhost' (using password: NO)"
+        )
+        result = subprocess.CompletedProcess([], 1, "", error)
+        with mock.patch.object(pull.shutil, "which", return_value="/usr/bin/mariadb"), mock.patch.object(
+            pull.subprocess, "run", return_value=result,
+        ), mock.patch.object(
+            pull, "local_target_live_mariadb_process_version", return_value="MARIADB_11.8",
+        ) as live:
+            self.assertEqual(pull.local_target_active_db_engine_version(), "MARIADB_11.8")
+            live.assert_called_once_with()
+        with mock.patch.object(pull.shutil, "which", return_value="/usr/bin/mariadb"), mock.patch.object(
+            pull.subprocess, "run", return_value=result,
+        ), mock.patch.object(
+            pull, "local_target_live_mariadb_process_version", return_value="UNKNOWN",
+        ):
+            self.assertEqual(pull.local_target_active_db_engine_version(), "UNKNOWN")
+        for bad_error in (
+            "ERROR 2002 (HY000): Can't connect to local server",
+            "ERROR 1045 (28000): Access denied for user 'other'@'localhost' (using password: NO)",
+            "ERROR 1045 (28000): Access denied for user 'root'@'localhost' (using password: YES)",
+        ):
+            with self.subTest(error=bad_error), mock.patch.object(
+                pull.shutil, "which", return_value="/usr/bin/mariadb"
+            ), mock.patch.object(
+                pull.subprocess, "run",
+                return_value=subprocess.CompletedProcess([], 1, "", bad_error),
+            ), mock.patch.object(
+                pull, "local_target_live_mariadb_process_version",
+                side_effect=AssertionError("unexpected fallback"),
+            ):
+                self.assertEqual(pull.local_target_active_db_engine_version(), "UNKNOWN")
+
+    def test_live_service_pid_must_own_socket_instead_of_trusting_path_binary(self):
+        import server_migration_pull as pull
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            proc = root / "proc"
+            (proc / "net").mkdir(parents=True)
+            (proc / "112233" / "fd").mkdir(parents=True)
+            (proc / "112233" / "exe").symlink_to("/usr/sbin/mariadbd")
+            fd = proc / "112233" / "fd" / "8"
+            fd.symlink_to("socket:[445566]")
+            socket_file = root / "mysqld.sock"
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            try:
+                listener.bind(str(socket_file))
+                (proc / "net" / "unix").write_text(
+                    "Num RefCount Protocol Flags Type St Inode Path\n"
+                    f"0000: 00000002 00000000 00010000 0001 01 445566 {socket_file}\n"
+                )
+                def process(argv, **kwargs):
+                    if argv[0] == "/usr/bin/systemctl":
+                        return subprocess.CompletedProcess(argv, 0, "MainPID=112233\nActiveState=active\n", "")
+                    return subprocess.CompletedProcess(
+                        argv, 0,
+                        "mariadbd  Ver 11.8.9-MariaDB-deb13 for debian-linux-gnu on x86_64", "",
+                    )
+                with mock.patch.object(
+                    pull.shutil, "which", return_value="/usr/bin/systemctl"
+                ), mock.patch.object(pull.subprocess, "run", side_effect=process):
+                    self.assertEqual(
+                        pull.local_target_live_mariadb_process_version(
+                            proc_root=proc, socket_path=socket_file
+                        ), "MARIADB_11.8"
+                    )
+                    fd.unlink()
+                    fd.symlink_to("socket:[999999]")
+                    self.assertEqual(
+                        pull.local_target_live_mariadb_process_version(
+                            proc_root=proc, socket_path=socket_file
+                        ), "UNKNOWN"
+                    )
+                    fd.unlink()
+                    fd.symlink_to("socket:[445566]")
+                def mysql_process(argv, **kwargs):
+                    if argv[0] == "/usr/bin/systemctl":
+                        return subprocess.CompletedProcess(argv, 0, "MainPID=112233\nActiveState=active\n", "")
+                    return subprocess.CompletedProcess(argv, 0, "mysqld  Ver 8.4.4 MySQL Community Server", "")
+                with mock.patch.object(
+                    pull.shutil, "which", return_value="/usr/bin/systemctl"
+                ), mock.patch.object(pull.subprocess, "run", side_effect=mysql_process):
+                    self.assertEqual(
+                        pull.local_target_live_mariadb_process_version(
+                            proc_root=proc, socket_path=socket_file
+                        ), "UNKNOWN"
+                    )
+            finally:
+                listener.close()
 
     def test_mariadb_tuning_skip_does_not_claim_apply_pass(self):
         ui=(ROOT/"bin/vfops-init-ui").read_text(encoding="utf8")
