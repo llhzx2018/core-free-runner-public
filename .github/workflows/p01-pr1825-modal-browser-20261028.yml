@@ -1,0 +1,126 @@
+name: P01 PR1825 one-time isolated native Playwright acceptance
+on:
+  push:
+    branches: [task/p01-pr1825-modal-browser-20261028]
+    paths:
+      - '.github/workflows/p01-pr1825-modal-browser-20261028.yml'
+permissions:
+  contents: read
+env:
+  TARGET_REPO: llhzx2018/vf-start
+  TARGET_VERSION: 2.47.468
+  TARGET_SHA: efc08736798b3d5fd82b0dae0420df42a73b9ef6
+  BASE_SHA: 065c125c087b57c3e3e444e9024caf61ebe91463
+  LANE_ID: p01-pr1825-modal-browser-20261028
+jobs:
+  browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout existing public Runner control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: control
+      - name: Audit target exact source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 control/scripts/ephemeral_lane_spec.py validate --spec "control/lanes/$LANE_ID/spec.json" >/dev/null
+          python3 control/scripts/ephemeral_lane_spec.py audit-rendered --spec "control/lanes/$LANE_ID/spec.json" --input "control/.github/workflows/p01-pr1825-modal-browser-20261028.yml" >/dev/null
+      - name: Transient checkout P01 PR1825 exact commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: efc08736798b3d5fd82b0dae0420df42a73b9ef6
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Verify P01 exact source and test syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n' < target/VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n' < target/src/VERSION.txt)" = "$TARGET_VERSION"
+          git -C target merge-base --is-ancestor "$BASE_SHA" "$TARGET_SHA"
+          node --check "control/lanes/$LANE_ID/browser.mjs"
+          for source in src/app/FunctionalWorkspaceShell.php src/app/ChannelLibraryPage.php; do php -l "target/$source"; done
+          (cd target && node tests/browser/local_management_p02_modal_hub_contract.cjs)
+          for contract in p01_frontstage_local_management_r6_contract.php category_picker_sort_dialog_r13_contract.php; do php "target/tests/unit/$contract"; done
+          echo "P01_EXACT_SOURCE_PHP_JS_MODAL_CONTRACTS=PASS"
+      - name: Install one-time Playwright browser prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! php -m | grep -qi '^pdo_sqlite$'; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq php8.3-sqlite3
+          fi
+          php -m | grep -qi '^pdo_sqlite$'
+          npm install --prefix "control/lanes/$LANE_ID" --no-save --package-lock=false --ignore-scripts --no-audit --no-fund playwright@1.55.1
+          "control/lanes/$LANE_ID/node_modules/.bin/playwright" install --with-deps chromium
+          echo "P01_ISOLATED_PLAYWRIGHT_TOOLING=READY"
+      - name: Synthetic clean install and authenticated browser cases
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          work="$(mktemp -d "$RUNNER_TEMP/p01-browser-XXXXXXXX")"
+          site="$work/site"
+          cookie="$work/session.cookie"
+          server_pid=""
+          cleanup() {
+            if [ -n "$server_pid" ]; then kill "$server_pid" >/dev/null 2>&1 || true; fi
+            if [ -n "$work" ] && [ -d "$work" ]; then rm -rf -- "$work"; fi
+          }
+          trap cleanup EXIT
+          cp -a target/src "$site"
+          origin="http://127.0.0.1:18621"
+          php -S 127.0.0.1:18621 -t "$site" >"$work/php-server.log" 2>&1 &
+          server_pid="$!"
+          ready=0
+          for i in $(seq 1 80); do
+            if curl -fsS -c "$cookie" -b "$cookie" "$origin/setup.php" -o "$work/setup.html" 2>/dev/null; then ready=1; break; fi
+            sleep 0.25
+          done
+          test "$ready" -eq 1
+          csrf="$(python3 -c 'import re,sys; h=open(sys.argv[1],encoding="utf-8").read(); m=re.search(r"name=\"setup_csrf\"\s+value=\"([^\"]+)\"",h); print(m.group(1) if m else "")' "$work/setup.html")"
+          test -n "$csrf"
+          password="P01Browser!$(openssl rand -hex 12)"
+          echo "::add-mask::$password"
+          curl -fsS -c "$cookie" -b "$cookie" -X POST "$origin/setup.php" \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode "site_title=P01 Isolated Browser PR1825" \
+            --data-urlencode "admin_password=$password" \
+            --data-urlencode "admin_password_confirm=$password" -o "$work/setup-post.html"
+          test -f "$site/app/.runtime.php"
+          (cd "$site" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo "P01_SYNTHETIC_CLEAN_INSTALL=PASS"
+          # A clean install has zero categories. Quick capture requires one
+          # existing canonical category, so seed one ONLY in this disposable site.
+          php -r 'require $argv[1]."/app/bootstrap.php"; $repo=new VfRepository(vf_db()); $id=$repo->createCategory(["name"=>"P01 Synthetic Private Inbox","description"=>"","icon"=>"","is_private"=>1,"sort_order"=>0]); if ((int)$id<=0) throw new RuntimeException("Synthetic fixture category missing"); echo "P01_SYNTHETIC_CAPTURE_CATEGORY=READY\n";' "$site"
+          P01_TEST_ORIGIN="$origin" P01_TEST_PASSWORD="$password" node "control/lanes/$LANE_ID/browser.mjs"
+          echo "P01_ISOLATED_BROWSER_CASES=PASS_FOCUSED"
+      - name: Public-safe metadata proof only
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p proof
+          printf '{"schema":"vf-p01-pr1825-isolated-browser/v1","scope":"start-paged-bulk-and-sort-1440-768;channel-progress-retry-stop;topic-course-project-native-dialog;guest-privacy","result":"PASS_BROWSER_FOCUSED","test_cases":9,"target_repo":"%s","target_sha":"%s","base_sha":"%s","target_version":"%s","run_id":"%s"}\n' "$TARGET_REPO" "$TARGET_SHA" "$BASE_SHA" "$TARGET_VERSION" "$GITHUB_RUN_ID" > proof/metadata.json
+      - name: Upload metadata without private source or screenshots
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-pr1825-browser-${{ github.run_id }}
+          path: proof/metadata.json
+          retention-days: 14
+      - name: Remove transient private checkout
+        if: always()
+        shell: bash
+        run: |
+          if [ -d "$GITHUB_WORKSPACE/target" ]; then
+            test "$(realpath "$GITHUB_WORKSPACE/target")" = "$GITHUB_WORKSPACE/target"
+            rm -rf -- "$GITHUB_WORKSPACE/target"
+          fi
