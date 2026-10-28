@@ -53,7 +53,9 @@ try{
    const more=modal.locator('[data-vf-local-manage-more]');
    expect(await more.isVisible(),'Progressive-disclosure button missing');
    await more.click();
-   expect(await rows.count()===24,'Show more must expand to 24');
+   const afterMore=await rows.count();
+   console.log('P01_PAGING_AFTER_MORE='+JSON.stringify({width,afterMore,buttonVisible:await more.isVisible(),buttonText:await more.innerText(),titles:await rows.allInnerTexts()}));
+   expect(afterMore===24,'Show more must expand to 24, got '+afterMore);
    const search=modal.locator('[data-vf-local-manage-search]');
    await search.fill('Modal Fixture 27');
    expect(await rows.count()===1,'Search should reduce to 1 result');
