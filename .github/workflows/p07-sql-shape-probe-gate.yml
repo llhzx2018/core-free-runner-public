@@ -1,0 +1,65 @@
+name: TEMP P07 private-safe SQL shape probe offline gate
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'experiments/p07-sql-shape-probe-v1.py'
+      - '.github/workflows/p07-sql-shape-probe-gate.yml'
+permissions:
+  contents: read
+jobs:
+  offline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact P07 release97 parser without production data
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 8b037df9e993d4d5dc9b48feadf7653079825bdb
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: transient-p07
+      - name: Pure synthetic schema parsing and private redaction proof
+        shell: bash
+        env:
+          PYTHONPATH: transient-p07/lib:transient-p07
+        run: |
+          set -Eeuo pipefail
+          python3 -m py_compile experiments/p07-sql-shape-probe-v1.py
+          python3 - <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+          import gzip,importlib.util,io,contextlib
+          from tests.test_cross_engine_sql_format import SOURCE,TARGET
+          spec=importlib.util.spec_from_file_location("probe",Path("experiments/p07-sql-shape-probe-v1.py"))
+          module=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(module)
+          with TemporaryDirectory() as temp:
+              src,dst=Path(temp)/"source.sql.gz",Path(temp)/"target.sql.gz"
+              for path,content in ((src,SOURCE),(dst,TARGET)):
+                  with gzip.open(path,"wt",encoding="utf-8") as f:f.write(content)
+              out=io.StringIO()
+              with contextlib.redirect_stdout(out):module.summary(src,dst)
+              summary=out.getvalue()
+              assert "CREATE_TABLE_MISMATCHES=0:1" in summary,summary
+              assert "PROBE_REDACTED=YES" in summary
+              assert "single quote" not in summary and "demo" not in summary
+              assert "value" not in summary and "t0" not in summary
+              changed=TARGET.replace("idx_value","SECRET_INDEX")
+              with gzip.open(dst,"wt",encoding="utf-8") as f:f.write(changed)
+              out=io.StringIO()
+              with contextlib.redirect_stdout(out):module.summary(src,dst)
+              summary=out.getvalue()
+              assert "CREATE_TABLE_MISMATCHES=1:1" in summary,summary
+              assert "SECRET_INDEX" not in summary and "single quote" not in summary
+              print("P07_ANONYMIZED_SCHEMA_DIFF_PASS")
+          PY
+      - name: Ensure never stores production SQL or fixture remnants
+        if: always()
+        run: |
+          test ! -e /opt/vf-server-ops
+          echo P07_PROBE_OFFLINE_SCOPE_PASS
