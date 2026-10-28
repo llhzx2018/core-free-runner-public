@@ -98,6 +98,61 @@ class TargetPullContractTests(unittest.TestCase):
             ):
                 pull.compare_database_dumps(source, target)
 
+    def test_conditional_ddl_diagnostic_does_not_leak_sql(self) -> None:
+        import gzip
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "source.sql.gz"
+            target = Path(td) / "target.sql.gz"
+            secret = "PRIVATE_TEST_LITERAL_NEVER_PRINT"
+            sql = (
+                "CREATE TABLE t (id int);\n"
+                "/*!50003 CREATE TRIGGER secret_trigger BEFORE INSERT ON t FOR EACH ROW SET @x=1 */;\n"
+                "INSERT INTO t VALUES ('" + secret + "');\n"
+            )
+            with gzip.open(source, "wt", encoding="utf-8") as f:
+                f.write(sql)
+            with gzip.open(target, "wt", encoding="utf-8") as f:
+                f.write(
+                    "CREATE TABLE t (id int);\n"
+                    "INSERT INTO t VALUES ('" + secret + "');\n"
+                )
+            with self.assertRaises(pull.PullMigrationError) as caught:
+                pull.compare_database_dumps(source, target)
+            output = str(caught.exception)
+            self.assertIn("[CONDITIONAL_DDL]", output)
+            self.assertIn("SQL_DIFF_V1", output)
+            self.assertIn("conditional_ddl=DIFFER(1:0)", output)
+            self.assertIn("row_head=EQUAL(1:1)", output)
+            self.assertNotIn(secret, output)
+            self.assertNotIn("secret_trigger", output)
+            self.assertNotIn(str(source), output)
+
+    def test_conditional_ddl_diagnostic_keeps_guarded_versions_non_blocking_only_for_report(self) -> None:
+        import gzip
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "source.sql.gz"
+            target = Path(td) / "target.sql.gz"
+            with gzip.open(source, "wt", encoding="utf-8") as f:
+                f.write(
+                    "/*!40101 SET NAMES utf8mb4 */;\n"
+                    "CREATE TABLE t (id int);\n"
+                    "/*!50003 CREATE TRIGGER audit BEFORE INSERT ON t FOR EACH ROW SET @x=1 */;\n"
+                    "INSERT INTO t VALUES (1);\n"
+                )
+            with gzip.open(target, "wt", encoding="utf-8") as f:
+                f.write(
+                    "/*!50503 SET NAMES utf8mb4 */;\n"
+                    "CREATE TABLE t (id int);\n"
+                    "/*!50003 CREATE TRIGGER audit BEFORE INSERT ON t FOR EACH ROW SET @x=2 */;\n"
+                    "INSERT INTO t VALUES (1);\n"
+                )
+            with self.assertRaises(pull.PullMigrationError) as caught:
+                pull.compare_database_dumps(source, target)
+            output = str(caught.exception)
+            self.assertIn("guarded_set=EQUAL(1:1)", output)
+            self.assertIn("conditional_ddl=DIFFER(1:1)", output)
+            self.assertIn("row_head=EQUAL(1:1)", output)
+
     def test_unreadable_sql_dump_reports_fixed_nonsecret_reason(self) -> None:
         import gzip
         with tempfile.TemporaryDirectory() as td:
