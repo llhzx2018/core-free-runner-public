@@ -1,0 +1,81 @@
+name: TEMP P07 MySQL to MariaDB export-shape proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-cross-engine-export-repro.yml'
+permissions:
+  contents: read
+jobs:
+  export-parity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Start disposable MySQL 8.4 and MariaDB 11.8
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run -d --name p07-mysql-fixture -e MYSQL_ROOT_PASSWORD=synthetic --health-cmd="mysqladmin ping -uroot -psynthetic" mysql:8.4
+          docker run -d --name p07-maria-fixture -e MARIADB_ROOT_PASSWORD=synthetic --health-cmd="healthcheck.sh --connect --innodb_initialized" mariadb:11.8
+          for i in $(seq 1 90); do
+            if docker exec p07-mysql-fixture mysqladmin ping -uroot -psynthetic --silent >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          for i in $(seq 1 90); do
+            if docker exec p07-maria-fixture mariadb-admin ping -uroot -psynthetic --silent >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          docker exec p07-mysql-fixture mysqladmin ping -uroot -psynthetic --silent
+          docker exec p07-maria-fixture mariadb-admin ping -uroot -psynthetic --silent
+      - name: Create synthetic 84-table legacy site and cross-engine dumps
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY' > "$RUNNER_TEMP/fixture.sql"
+          print("CREATE DATABASE demo CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; USE demo;")
+          for i in range(84):
+              print(f"CREATE TABLE t{i} (id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT, value LONGTEXT COLLATE utf8mb4_unicode_ci, KEY idx_value(id), PRIMARY KEY (id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;")
+              if i < 9:
+                  print(f"INSERT INTO t{i} (value) VALUES ('single quote: \\'quote\\'', 'ignored');".replace(", 'ignored'", ""))
+          PY
+          docker exec -i p07-mysql-fixture mysql -uroot -psynthetic < "$RUNNER_TEMP/fixture.sql"
+          docker exec p07-mysql-fixture mysqldump -uroot -psynthetic --set-gtid-purged=OFF --skip-comments --databases demo > "$RUNNER_TEMP/source.sql"
+          docker exec -i p07-maria-fixture mariadb -uroot -psynthetic < "$RUNNER_TEMP/source.sql"
+          docker exec p07-maria-fixture mariadb-dump -uroot -psynthetic --skip-comments --databases demo > "$RUNNER_TEMP/target.sql"
+          test -s "$RUNNER_TEMP/source.sql"
+          test -s "$RUNNER_TEMP/target.sql"
+          echo P07_SYNTHETIC_CROSS_ENGINE_IMPORT_PASS
+      - name: Checkout exact P07 verifier for diagnostic-only analysis
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: a14a80d2693fa9326e4b6262ffbbb0f03fdc1348
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p07
+      - name: Compare synthetic dump representations without accepting mismatches
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PYTHONPATH=p07/lib python3 - "$RUNNER_TEMP" <<'PY'
+          import pathlib,sys
+          import verify
+          from server_migration_pull import compare_database_dumps, PullMigrationError
+          root=pathlib.Path(sys.argv[1])
+          src,dst=root/"source.sql",root/"target.sql"
+          print(verify.sql_comparison_diagnostic(src,dst))
+          source_data=verify.sql_data_fingerprint(src)
+          target_data=verify.sql_data_fingerprint(dst)
+          print("SYNTHETIC_ROW_SUMMARY_MATCH",source_data == target_data)
+          print("SYNTHETIC_ROW_COUNTS",source_data["data_statements"],target_data["data_statements"])
+          try:
+              print("SYNTHETIC_SQL_COMPARE",compare_database_dumps(src,dst))
+          except PullMigrationError as exc:
+              print("SYNTHETIC_SQL_COMPARE_BLOCKED",str(exc).split("[SQL_DIFF_V1")[0])
+          PY
+          echo P07_CROSS_ENGINE_DIAGNOSTIC_ONLY_DONE
+      - name: Purge disposable SQL dumps and containers
+        if: always()
+        run: |
+          docker rm -f p07-mysql-fixture p07-maria-fixture || true
+          rm -f -- "$RUNNER_TEMP/source.sql" "$RUNNER_TEMP/target.sql" "$RUNNER_TEMP/fixture.sql"
