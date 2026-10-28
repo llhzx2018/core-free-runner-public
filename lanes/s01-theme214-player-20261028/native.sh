@@ -80,6 +80,9 @@ version_check(){ test "$(cli theme get vf-tools-theme --field=version)" = "$1"; 
 version_check "$TARGET_VERSION"
 cli theme install /tmp/theme-old.zip --force >/dev/null
 version_check "$SOURCE_VERSION"
+docker cp provider/theme-main214-baseline.zip "$WP:/tmp/theme-main-baseline.zip"
+cli theme install /tmp/theme-main-baseline.zip --force >/dev/null
+version_check 1.35.214
 export WP
 NODE_PATH="$PWD/node_modules" node "control/lanes/$LANE_ID/check.cjs" before
 cli theme install /tmp/theme-new.zip --force >/dev/null
@@ -97,4 +100,4 @@ cli eval-file /tmp/contracts-snapshot.php > proof/contracts-after.json
 cmp proof/state-before.sha256 proof/state-after.sha256
 cmp proof/contracts-before.json proof/contracts-after.json
 echo INSTALL_UPGRADE_ROLLBACK_REPEAT_AND_DATA_PRESERVATION_PASS
-printf '%s' '{"status":"PASS","clean":"1.35.215","sequence":["1.35.213","1.35.215","1.35.213","1.35.215","1.35.215"],"protected":"BYTE_IDENTICAL","production":"UNTOUCHED"}' > proof/native-lifecycle.json
+printf '%s' '{"status":"PASS","clean":"1.35.215","sequence":["1.35.213","1.35.214","1.35.215","1.35.213","1.35.215","1.35.215"],"protected":"BYTE_IDENTICAL","production":"UNTOUCHED"}' > proof/native-lifecycle.json

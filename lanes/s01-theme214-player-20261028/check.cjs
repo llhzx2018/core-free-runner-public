@@ -1,6 +1,6 @@
 const {chromium}=require('playwright'),fs=require('fs'),assert=require('node:assert/strict');
 const phase=process.argv[2],fixed=phase==='after',base='http://127.0.0.1:18880',out={pages:{},players:{}},rows=[];
-const norm=s=>s.replaceAll('1.35.215','1.35.213').replaceAll('135215','135213');
+const norm=s=>s.replaceAll('1.35.215','1.35.213').replaceAll('135215','135213').replaceAll('1.35.214','1.35.213').replaceAll('135214','135213');
 (async()=>{
  const b=await chromium.launch(),c=await b.newContext({viewport:{width:1440,height:1000}}),errors=[];
  for(const path of ['/','/zh/','/sitemap/','/zh/sitemap/','/m3u8-playlist-checker/','/zh/m3u8-backup-restore/','/m3u8-downloader/','/zh/m3u8-to-mp4/']){
