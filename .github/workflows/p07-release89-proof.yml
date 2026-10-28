@@ -1,0 +1,80 @@
+name: TEMP P07 release89 exact-source build gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release89-proof.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  p07-release89:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      EXPECTED_P07_SHA: 45e3278a1cde884991096adfe9d57d1df7e57855
+      PUBLIC_BASE_SHA: 8c30e0e7d152e6e1f7efc3c41eabebc47e276a5e
+    steps:
+      - name: Verify transient private-source access
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo P07_PRIVATE_READ_CAPABILITY_UNAVAILABLE; exit 78; }
+
+      - name: Checkout exact private P07 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 45e3278a1cde884991096adfe9d57d1df7e57855
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: transient-p07-private
+
+      - name: Checkout immutable public release88 baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: 8c30e0e7d152e6e1f7efc3c41eabebc47e276a5e
+          persist-credentials: false
+          path: transient-p07-public-base
+
+      - name: Exact-source migration and identity regression
+        working-directory: transient-p07-private
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_P07_SHA"
+          test "$(cat VERSION)" = '0.1.0'
+          test "$(cat BUILD_ID)" = '0.1.0-release89'
+          bash -n bin/vfops-init-ui
+          PYTHONPATH=lib python3 -m unittest -v tests.test_mariadb_owner_policy tests.test_server_migration tests.test_server_migration_pull tests.test_p07_bundle_identity
+          echo P07_RELEASE89_EXACT_SOURCE_TEST_PASS
+
+      - name: Assemble candidate and validate immutable trust pins
+        working-directory: transient-p07-private
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/p07_candidate_bundle.py --product-root . --public-root ../transient-p07-public-base --output "$RUNNER_TEMP/p07-release89-candidate" --product-sha "$EXPECTED_P07_SHA" --build 0.1.0-release89 --care 0.1.0-rc58
+          bash -n "$RUNNER_TEMP/p07-release89-candidate/installers/p07-final.sh"
+          bash -n "$RUNNER_TEMP/p07-release89-candidate/installers/p07.sh"
+          bash -n "$RUNNER_TEMP/p07-release89-candidate/installers/p07-toolbox.sh"
+          bash -n "$RUNNER_TEMP/p07-release89-candidate/installers/p07-system-care.sh"
+          python3 - "$RUNNER_TEMP/p07-release89-candidate" "$EXPECTED_P07_SHA" <<'PY'
+          import json, pathlib, sys
+          root, sha = pathlib.Path(sys.argv[1]), sys.argv[2]
+          a = json.loads((root / "candidate_attestation.json").read_text())
+          assert a["product_source_sha"] == sha
+          assert a["product_build"] == "0.1.0-release89"
+          assert a["system_care_build"] == "0.1.0-rc58"
+          assert a["runtime_file_count"] > 50
+          assert a["status"] == "FORMAL_STAGING_NOT_PUBLISHED"
+          assert not any(a["negative"].values())
+          print("P07_RELEASE89_BUNDLE_IDENTITY_PASS", a["runtime_manifest_blob"], a["final_installer_blob"])
+          PY
+
+      - name: Purge private checkout and staging
+        if: always()
+        run: |
+          rm -rf -- transient-p07-private transient-p07-public-base "$RUNNER_TEMP/p07-release89-candidate"
+          echo P07_PRIVATE_RUNTIME_CLEANUP_DONE
