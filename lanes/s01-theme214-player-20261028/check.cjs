@@ -28,6 +28,7 @@ const norm=s=>s.replaceAll('1.35.214','1.35.213').replaceAll('135214','135213');
     assert.ok(i.y<400,'primary input in first viewport');assert.ok(stage.y<500,'media begins before half viewport');
     assert.equal(await p.locator('.vf-m3u8-launchbar').isVisible(),false);assert.equal(await p.locator('.vf-data-cta').count(),0,'default duplicate CTA omitted when related routes exist');
     for(const sel of ['.vf-player-support-disclosure','.vf-player-workflow-disclosure']){assert.equal(await p.locator(sel).getAttribute('open'),null);assert.ok(await p.locator(sel+'>summary').isVisible());}
+    for(const summary of await p.locator('.vf-tool-faq-list summary').all()){const box=await summary.boundingBox();assert.ok(box.height<130,'FAQ text must use the complete row after decorative index removal');}
     assert.ok(await root.locator('[data-vf-player-view="simple"]').isVisible());assert.ok(await root.locator('[data-vf-player-view="pro"]').isVisible());
     rows.push({kind:'full-width-layout',lang,width,inputY:i.y,stage,status:'PASS'});
    }
