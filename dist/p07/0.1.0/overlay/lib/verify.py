@@ -352,6 +352,23 @@ def _cross_engine_schema(sql: str) -> str:
         return match.group("prefix") + match.group("type") + attrs
 
     sql = column_with_width.sub(drop_only_default_display_width, sql)
+    # MySQL SHOW CREATE quotes integer DEFAULT values while MariaDB 11.8
+    # displays those same values as unquoted integers. Only a canonical
+    # base-10 integer DEFAULT on an integer-typed column is presentation
+    # syntax. Never touch string/decimal defaults, expressions, signed
+    # spellings with leading zeroes, or SQL embedded in a comment.
+    integer_default = re.compile(
+        r"(?P<prefix>\x60[A-Za-z0-9_]+\x60\s+"
+        r"(?:TINYINT|SMALLINT|MEDIUMINT|INT|INTEGER|BIGINT)"
+        r"(?:\([0-9]{1,3}\))?"
+        r"(?:\s+(?:UNSIGNED|SIGNED|ZEROFILL|NOT NULL|NULL|AUTO_INCREMENT))*"
+        r"\s+DEFAULT\s+)"
+        r"'(?P<literal>-?(?:0|[1-9][0-9]*))'(?=\s|[,)]|$)",
+        re.I,
+    )
+    sql = integer_default.sub(
+        lambda match: match.group("prefix") + match.group("literal"), sql,
+    )
     return sql
 
 
@@ -384,6 +401,57 @@ def _sql_canon_class(statement: str) -> str:
     if statement.startswith(("/*!", "/*M!")):
         return "versioned"
     return "other"
+
+
+_SQL_SHAPE_CLASSES = (
+    "int_default_quoted", "int_default_plain",
+    "guard_compound", "guard_compound_trigger",
+    "guard_unknown_set", "guard_other_single",
+)
+_SQL_SHAPE_INTEGER_PREFIX_RE = re.compile(
+    r"^\x60[A-Za-z0-9_]+\x60\s+"
+    r"(?:TINYINT|SMALLINT|MEDIUMINT|INT|INTEGER|BIGINT)"
+    r"(?:\([0-9]{1,3}\))?\b", re.I,
+)
+
+
+def _sql_shape_feature_counts(path: Path) -> dict[str, int]:
+    """Private SQL -> fixed numeric diagnostics only. Never emit any SQL."""
+    counts = {key: 0 for key in _SQL_SHAPE_CLASSES}
+    opener = gzip.open if path.name.endswith(".gz") else open
+    try:
+        with opener(path, "rt", encoding="utf-8", errors="strict") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if line.startswith(("\x60",)) and _SQL_SHAPE_INTEGER_PREFIX_RE.match(line):
+                    if re.search(r"\bDEFAULT\s+'-?(?:0|[1-9][0-9]*)'(?:\s|[,)]|$)", line, re.I):
+                        counts["int_default_quoted"] += 1
+                    if re.search(r"\bDEFAULT\s+-?(?:0|[1-9][0-9]*)(?:\s|[,)]|$)", line, re.I):
+                        counts["int_default_plain"] += 1
+                if not line.startswith(("/*!", "/*M!")):
+                    continue
+                if _GUARDED_SESSION_SET_RE.fullmatch(line):
+                    if not _cross_engine_known_session(line):
+                        counts["guard_unknown_set"] += 1
+                    continue
+                if line.count("/*!") + line.count("/*M!") >= 2:
+                    counts["guard_compound"] += 1
+                    if re.search(r"\bTRIGGER\b", line, re.I):
+                        counts["guard_compound_trigger"] += 1
+                elif _sql_canon_guard_class(line) == "guard_other":
+                    counts["guard_other_single"] += 1
+    except (OSError, EOFError, UnicodeError) as exc:
+        raise RestoreVerifyError("SQL shape diagnostic is unavailable") from exc
+    return counts
+
+
+def sql_cross_engine_shape_diagnostic(source: Path, target: Path) -> str:
+    """Reason-code counts only; this is not a SQL parity approval gate."""
+    before = _sql_shape_feature_counts(source)
+    after = _sql_shape_feature_counts(target)
+    return "SQL_SHAPE_V1 " + " ".join(
+        f"{name}={before[name]}:{after[name]}" for name in _SQL_SHAPE_CLASSES
+    )
 
 
 def sql_cross_engine_known_format_diagnostic(source: Path, target: Path) -> str:
