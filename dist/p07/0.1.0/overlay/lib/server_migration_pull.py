@@ -1247,8 +1247,34 @@ def compare_database_dumps(source_dump: Path, target_dump: Path) -> str:
         ):
             return "CROSS_ENGINE_LOGICAL_CONTENT"
     except verify_engine.RestoreVerifyError as exc:
-        raise PullMigrationError("MySQL verification failed") from exc
-    raise PullMigrationError("MySQL logical-content verification failed")
+        # Expose only a fixed, non-sensitive verifier reason code. SQL dumps can
+        # contain production data and must never be printed in operator output.
+        detail = str(exc)
+        reason = "UNCLASSIFIED_SQL_VERIFICATION"
+        if detail.startswith("SQL dump cannot be fingerprinted"):
+            reason = "SQL_DUMP_UNREADABLE"
+        elif detail.startswith("SQL dump has no comparable statements"):
+            reason = "NO_COMPARABLE_STATEMENTS"
+        elif detail.startswith("SQL schema cannot be fingerprinted"):
+            reason = "SQL_SCHEMA_UNREADABLE"
+        elif detail.startswith("no comparable SQL schema statements"):
+            reason = "NO_COMPARABLE_SCHEMA"
+        elif detail.startswith("unterminated SQL schema statement"):
+            reason = "UNTERMINATED_SCHEMA"
+        elif detail.startswith("custom SQL delimiters"):
+            reason = "CUSTOM_DELIMITER"
+        elif detail.startswith("conditional SQL DDL"):
+            reason = "CONDITIONAL_DDL"
+        elif detail.startswith("multiline SQL data"):
+            reason = "MULTILINE_DATA"
+        elif detail.startswith("unrecognized SQL data command"):
+            reason = "UNRECOGNIZED_DATA_COMMAND"
+        elif detail.startswith("SQL dump cannot be content-fingerprinted"):
+            reason = "SQL_CONTENT_UNREADABLE"
+        elif detail.startswith("SQL dump has no comparable logical content"):
+            reason = "NO_COMPARABLE_LOGICAL_CONTENT"
+        raise PullMigrationError(f"MySQL verification failed [{reason}]") from exc
+    raise PullMigrationError("MySQL logical-content verification failed [SCHEMA_OR_DATA_MISMATCH]")
 
 
 def sync_site_databases(state: dict[str, Any], site: dict[str, Any], *, phase: str) -> int:
