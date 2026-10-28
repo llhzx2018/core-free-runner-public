@@ -1,0 +1,129 @@
+name: P01 PR1827 exact music compatibility verification
+on:
+  push:
+    branches: [task/p01-pr1827-music-rank-proof-20261028]
+    paths: ['.github/workflows/p01-pr1827-music-rank-proof-20261028.yml']
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p01-pr1827-music-rank-proof-20261028.yml']
+permissions:
+  contents: read
+env:
+  TARGET_SHA: 253b2d139768ac9fd46992015230d5f16874b795
+  BASE_SHA: 15f77ad0ad383475eecb2ac661ca3ae4764b10d0
+  TARGET_VERSION: 2.47.468
+jobs:
+  focused:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Read-only transient exact-source checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 253b2d139768ac9fd46992015230d5f16874b795
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Runtime prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-mbstring php-curl php-zip php-gd unzip >/dev/null
+          php -m | grep -qi '^pdo_sqlite$'
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n ' < target/VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n ' < target/src/VERSION.txt)" = "$TARGET_VERSION"
+          git -C target merge-base --is-ancestor "$BASE_SHA" "$TARGET_SHA"
+          echo P01_MUSIC_EXACT_SOURCE=PASS
+      - name: PHP and JS exact-source syntax tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C target diff --name-only "$BASE_SHA" "$TARGET_SHA" > /tmp/p01-changed
+          while IFS= read -r file; do
+            case "$file" in
+              *.php) php -l "target/$file" >/dev/null ;;
+              *.js|*.cjs) node --check "target/$file" >/dev/null ;;
+            esac
+          done < /tmp/p01-changed
+          echo P01_MUSIC_SYNTAX=PASS
+      - name: Music source and regression contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd target
+          for f in \
+            tests/unit/music_native_source_contract.php \
+            tests/unit/music_radio_source_contract.php \
+            tests/unit/music_audius_source_contract.php \
+            tests/unit/music_security_contract.php; do
+            php "$f"
+          done
+          for f in \
+            tests/unit/music_radio_directory_contract.js \
+            tests/unit/music_dock_contract.js \
+            tests/unit/music_player_fallback_contract.js \
+            tests/unit/music_interaction_quality_contract.js \
+            tests/unit/music_open_catalog_contract.js; do
+            node "$f"
+          done
+          bash tests/music_candidate_smoke.sh
+          echo P01_MUSIC_FOCUSED_CONTRACTS=PASS
+      - name: Disposable real-Chrome browser smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm install --prefix target/tests/browser --no-save --package-lock=false --ignore-scripts --no-audit --no-fund playwright-core@1.55.1 >/dev/null
+          work="$(mktemp -d "$RUNNER_TEMP/p01-music-XXXXXXXX")"
+          site="$work/site"
+          cookie="$work/cookie.txt"
+          pid=""
+          cleanup(){ if [ -n "$pid" ]; then kill "$pid" >/dev/null 2>&1 || true; fi; rm -rf -- "$work"; }
+          trap cleanup EXIT
+          cp -a target/src "$site"
+          php -S 127.0.0.1:18671 -t "$site" >"$work/server.log" 2>&1 &
+          pid="$!"
+          origin="http://127.0.0.1:18671"
+          ready=0
+          for i in $(seq 1 80); do
+            if curl -fsS -c "$cookie" -b "$cookie" "$origin/setup.php" -o "$work/setup.html" 2>/dev/null; then ready=1; break; fi
+            sleep 0.25
+          done
+          test "$ready" = 1
+          csrf="$(python3 -c 'import re,sys; s=open(sys.argv[1]).read(); m=re.search(r"name=\"setup_csrf\"\s+value=\"([^\"]+)\"",s); print(m.group(1) if m else "")' "$work/setup.html")"
+          test -n "$csrf"
+          password="P01Music!$(openssl rand -hex 12)"
+          echo "::add-mask::$password"
+          curl -fsS -c "$cookie" -b "$cookie" -X POST "$origin/setup.php" \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode "site_title=P01 isolated music" \
+            --data-urlencode "admin_password=$password" \
+            --data-urlencode "admin_password_confirm=$password" -o "$work/setup-post.html"
+          test -f "$site/app/.runtime.php"
+          (cd "$site" && php cli/verify.php) | grep -Fx VERIFY_PASS=YES
+          response="$(curl -sS -c "$cookie" -b "$cookie" -o "$work/login.json" -w '%{http_code}' -H 'Content-Type: application/json' --data "$(php -r 'echo json_encode(["password"=>$argv[1]]);' "$password")" "$origin/api.php?action=login")"
+          test "$response" = 200
+          grep -Fq '"ok":true' "$work/login.json"
+          node target/tests/browser/music_synthetic_browser.cjs "$origin" "$cookie"
+          echo P01_MUSIC_AUTHENTICATED_CHROME_SYNTHETIC=PASS
+      - name: Metadata-only proof
+        if: success()
+        shell: bash
+        run: |
+          mkdir -p proof
+          printf '{"type":"p01-music-focused/v1","target_sha":"%s","version":"%s","run":"%s","result":"PASS_FOCUSED","scope":"php-js-syntax/contract/synthetic-chrome"}\n' "$TARGET_SHA" "$TARGET_VERSION" "$GITHUB_RUN_ID" > proof/metadata.json
+      - name: Upload public-safe metadata only
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-pr1827-music-${{ github.run_id }}
+          path: proof/metadata.json
+          retention-days: 14
+      - name: Remove private P01 source
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- target
