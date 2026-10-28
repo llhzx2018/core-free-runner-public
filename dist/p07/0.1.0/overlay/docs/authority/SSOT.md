@@ -254,7 +254,7 @@ Target bootstrap contract：
 - supported OS/arch is an explicit release-pinned allowlist；current feature line covers Ubuntu 22.04/24.04/26.04 and Debian 12/13 on x86_64/ARM64；bootstrap additionally requires ≥1 Core, a genuine 2 GB-class VM, and ≥10 GB disk；
 - bootstrap refuses a TARGET with CloudPanel state, MySQL/MariaDB data, existing htdocs, or a listener on 80/443；
 - installer URL and SHA256 are release-pinned from official CloudPanel documentation；checksum failure = no execution；
-- current bootstrap DB engine = MySQL 8.4；
+- current fresh-target bootstrap DB engine = OS-matched MariaDB: Debian 13 requires 11.8 (`MARIADB_11.8`), Debian 12 / Ubuntu 22.04 / 24.04 require 10.11 (`MARIADB_10.11`); a migration TARGET must prove both installed daemon identity and active SQL endpoint version match the selected OS-specific engine, with unsupported OS/unknown/other engines refused; existing CloudPanel / MySQL / Percona / MariaDB databases are never automatically replaced；
 - bootstrap also ensures rsync/cron prerequisites；
 - source prepare may auto-install only missing rsync after the migration confirmation; other missing critical dependencies fail closed；
 - plan performs low-disk SOURCE transient-reserve and TARGET capacity checks before migration writes。

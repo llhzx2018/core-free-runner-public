@@ -318,7 +318,7 @@ class ServerMigrationAutomationTests(unittest.TestCase):
         )
 
     def test_bootstrap_script_is_checksum_pinned_and_never_curl_pipe_bash(self) -> None:
-        script = engine.cloudpanel_bootstrap_script("do")
+        script = engine.cloudpanel_bootstrap_script("do", "MARIADB_10.11")
         self.assertIn(engine.CLOUDPANEL_INSTALLER_URL, script)
         self.assertIn(engine.CLOUDPANEL_INSTALLER_SHA256, script)
         self.assertIn("sha256sum -c", script)
@@ -356,6 +356,19 @@ class ServerMigrationAutomationTests(unittest.TestCase):
         self.assertEqual(result["cores"], 1)
         self.assertEqual(result["cloud_hint"], "do")
         self.assertEqual(result["db_engine"], "MARIADB_10.11")
+
+    def test_debian13_bootstrap_selects_mariadb_118_before_remote_write(self) -> None:
+        responses = [
+            subprocess.CompletedProcess([], 0, 'ID=debian\nVERSION_ID="13"\n', ''),
+            subprocess.CompletedProcess([], 0, 'x86_64|1|2100000|12884901888', ''),
+            subprocess.CompletedProcess([], 0, '', ''),
+            subprocess.CompletedProcess([], 0, 'Vultr Cloud Compute\n', ''),
+        ]
+        with mock.patch.object(engine.transport, "run_ssh", side_effect=responses):
+            result = engine.target_bootstrap_preflight(self.target())
+        self.assertEqual(result["db_engine"], "MARIADB_11.8")
+        self.assertEqual(result["cloud_hint"], "vultr")
+        self.assertFalse(result["writes_performed"])
 
     def test_bootstrap_preflight_rejects_low_memory_before_empty_server_guard(self) -> None:
         responses = [
