@@ -111,6 +111,79 @@ class TargetPullContractTests(unittest.TestCase):
             ):
                 pull.compare_database_dumps(source, target)
 
+    def test_cross_engine_known_session_guards_keep_conditional_ddl_strict(self) -> None:
+        import gzip
+        base_sql = (
+            "CREATE TABLE t (id int, KEY idx (id));\n"
+            "/*!50003 CREATE TRIGGER audit BEFORE INSERT ON t FOR EACH ROW SET @x=1 */;\n"
+            "INSERT INTO t VALUES (1);\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "source.sql.gz"
+            target = Path(td) / "target.sql.gz"
+            with gzip.open(source, "wt", encoding="utf-8") as f:
+                f.write("/*!40101 SET NAMES utf8mb4 */;\n" + base_sql)
+            with gzip.open(target, "wt", encoding="utf-8") as f:
+                f.write("/*!50503 SET NAMES utf8mb4 */;\n" + base_sql)
+            self.assertNotEqual(
+                pull.verify_engine.sql_fingerprint(source),
+                pull.verify_engine.sql_fingerprint(target),
+            )
+            self.assertEqual(
+                pull.compare_database_dumps(source, target),
+                "CROSS_ENGINE_GUARDED_SESSION_SQL_EXACT",
+            )
+
+            rejected = (
+                "CREATE TABLE t (id int, KEY idx (id));\n"
+                "INSERT INTO t VALUES (1);\n",
+                base_sql.replace("SET @x=1", "SET @x=2"),
+                base_sql.replace("INSERT INTO t VALUES (1)", "INSERT INTO t VALUES (2)"),
+                base_sql.replace("KEY idx (id)", "KEY changed_idx (id)"),
+            )
+            for changed in rejected:
+                with self.subTest(changed=changed[:35]):
+                    with gzip.open(target, "wt", encoding="utf-8") as f:
+                        f.write("/*!50503 SET NAMES utf8mb4 */;\n" + changed)
+                    with self.assertRaises(pull.PullMigrationError):
+                        pull.compare_database_dumps(source, target)
+
+            with gzip.open(target, "wt", encoding="utf-8") as f:
+                f.write("/*!50503 SET NAMES latin1 */;\n" + base_sql)
+            with self.assertRaises(pull.PullMigrationError):
+                pull.compare_database_dumps(source, target)
+            with gzip.open(target, "wt", encoding="utf-8") as f:
+                f.write("/*!99999 SET NAMES utf8mb4 */;\n" + base_sql)
+            with self.assertRaises(pull.PullMigrationError):
+                pull.compare_database_dumps(source, target)
+
+    def test_guarded_session_parity_preserves_multiline_trigger_body(self) -> None:
+        import gzip
+        sql = (
+            "CREATE TABLE t (id int);\n"
+            "DELIMITER ;;\n"
+            "/*!50003 CREATE TRIGGER audit BEFORE INSERT ON t\n"
+            "FOR EACH ROW BEGIN\n"
+            "  SET @x=1;\n"
+            "END */;;\n"
+            "DELIMITER ;\n"
+            "INSERT INTO t VALUES (1);\n"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            before, after = Path(td) / "before.sql.gz", Path(td) / "after.sql.gz"
+            with gzip.open(before, "wt", encoding="utf-8") as f:
+                f.write("/*!40101 SET NAMES utf8mb4 */;\n" + sql)
+            with gzip.open(after, "wt", encoding="utf-8") as f:
+                f.write("/*!50503 SET NAMES utf8mb4 */;\n" + sql)
+            self.assertEqual(
+                pull.compare_database_dumps(before, after),
+                "CROSS_ENGINE_GUARDED_SESSION_SQL_EXACT",
+            )
+            with gzip.open(after, "wt", encoding="utf-8") as f:
+                f.write("/*!50503 SET NAMES utf8mb4 */;\n" + sql.replace("SET @x=1", "SET @x=2"))
+            with self.assertRaises(pull.PullMigrationError):
+                pull.compare_database_dumps(before, after)
+
     def test_progress_note_is_opt_in_and_secret_free_channel(self) -> None:
         import io
         from contextlib import redirect_stderr

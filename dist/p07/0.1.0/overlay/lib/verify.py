@@ -96,6 +96,51 @@ def sql_fingerprint(path: Path) -> tuple[str, int]:
         raise RestoreVerifyError(f"SQL dump has no comparable statements: {path.name}")
     return digest.hexdigest(), statements
 
+_GUARDED_SESSION_SET_RE = re.compile(
+    r"^/\*(?P<flavor>!|M!)(?P<version>[0-9]{5,6})[ \t]+"
+    r"(?P<statement>SET[ \t]+.+?)[ \t]*\*/;?$",
+    re.IGNORECASE,
+)
+
+
+def sql_guarded_session_fingerprint(path: Path) -> tuple[str, int]:
+    """Strict raw SQL parity except equivalent, *known* session guard versions.
+
+    SQL DDL (including conditional triggers, views, routines, and custom
+    delimiters) and all row literals remain byte-for-byte represented.
+    Unrecognized guards, high-version guards, and differing SET values keep
+    their literal representation and therefore cannot falsely pass.
+    """
+    digest = hashlib.sha256()
+    statements = 0
+    opener = gzip.open if path.name.endswith(".gz") else open
+    try:
+        with opener(path, "rt", encoding="utf-8", errors="strict") as handle:
+            for raw in handle:
+                line = raw.rstrip("\r\n")
+                if not line.strip() or line.lstrip().startswith(("--", "#")):
+                    continue
+                match = _GUARDED_SESSION_SET_RE.fullmatch(line.strip())
+                if match:
+                    version = int(match.group("version"))
+                    flavor = match.group("flavor").upper()
+                    known_mysql = flavor == "!" and 40000 <= version <= 50699
+                    known_maria = flavor == "M!" and 100000 <= version <= 110899
+                    if known_mysql or known_maria:
+                        # Only the execution-version wrapper is canonicalized.
+                        # The entire SET statement, including quoted values,
+                        # remains unchanged and participates in the hash.
+                        line = "GUARDED_SESSION_SET " + match.group("statement")
+                digest.update(line.encode("utf-8"))
+                digest.update(b"\n")
+                statements += 1
+    except (OSError, EOFError, UnicodeError) as exc:
+        raise RestoreVerifyError("SQL guarded-session dump cannot be fingerprinted") from exc
+    if statements == 0:
+        raise RestoreVerifyError("SQL guarded-session dump has no statements")
+    return digest.hexdigest(), statements
+
+
 _CREATE_OBJECT_RE = re.compile(
     r"^CREATE\s+(?:TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?`?([A-Za-z0-9_.$-]+)`?",
     re.IGNORECASE,
