@@ -216,6 +216,185 @@ def sql_comparison_diagnostic(source: Path, target: Path) -> str:
     return "SQL_DIFF_V1 " + " ".join(parts)
 
 
+
+
+# The narrow export-format equivalence checker below is a second, independent
+# strict gate. It never uses row counts or object names in place of full SQL.
+# Only documented, harmless MySQL 8.4 / MariaDB 11.8 dump presentation
+# differences are canonicalized; every retained DDL, index and literal is hashed.
+_CROSS_ENGINE_SESSION_RE = (
+    re.compile(r"^SET @OLD_(?:CHARACTER_SET_CLIENT|CHARACTER_SET_RESULTS|COLLATION_CONNECTION|TIME_ZONE|SQL_NOTES)=@@(?:CHARACTER_SET_CLIENT|CHARACTER_SET_RESULTS|COLLATION_CONNECTION|TIME_ZONE|SQL_NOTES)$", re.I),
+    re.compile(r"^SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0$", re.I),
+    re.compile(r"^SET NAMES utf8mb4$", re.I),
+    re.compile(r"^SET TIME_ZONE='\+00:00'$", re.I),
+    re.compile(r"^SET @OLD_(?:UNIQUE_CHECKS|FOREIGN_KEY_CHECKS)=@@(?:UNIQUE_CHECKS|FOREIGN_KEY_CHECKS), (?:UNIQUE_CHECKS|FOREIGN_KEY_CHECKS)=0$", re.I),
+    re.compile(r"^SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO'$", re.I),
+    re.compile(r"^SET @OLD_NOTE_VERBOSITY=@@NOTE_VERBOSITY, NOTE_VERBOSITY=0$", re.I),
+    re.compile(r"^SET (?:CHARACTER_SET_CLIENT|CHARACTER_SET_RESULTS|COLLATION_CONNECTION|TIME_ZONE|SQL_NOTES|NOTE_VERBOSITY)=@OLD_(?:CHARACTER_SET_CLIENT|CHARACTER_SET_RESULTS|COLLATION_CONNECTION|TIME_ZONE|SQL_NOTES|NOTE_VERBOSITY)$", re.I),
+    re.compile(r"^SET (?:UNIQUE_CHECKS|FOREIGN_KEY_CHECKS)=@OLD_(?:UNIQUE_CHECKS|FOREIGN_KEY_CHECKS)$", re.I),
+    re.compile(r"^SET SQL_MODE=@OLD_SQL_MODE$", re.I),
+    re.compile(r"^SET @saved_cs_client = @@character_set_client$", re.I),
+    re.compile(r"^SET character_set_client = (?:@saved_cs_client|utf8mb4)$", re.I),
+)
+
+
+def _cross_engine_space(sql: str) -> str:
+    """Collapse only whitespace outside quoted SQL literals or identifiers."""
+    out: list[str] = []
+    quote = ""
+    space = False
+    index = 0
+    while index < len(sql):
+        char = sql[index]
+        if quote:
+            out.append(char)
+            if char == "\\" and index + 1 < len(sql):
+                index += 1
+                out.append(sql[index])
+            elif char == quote:
+                if index + 1 < len(sql) and sql[index + 1] == quote:
+                    index += 1
+                    out.append(sql[index])
+                else:
+                    quote = ""
+        elif char in ("'", '"', "\x60"):
+            if space and out and out[-1] not in ",()" and char not in ",()":
+                out.append(" ")
+            space = False
+            quote = char
+            out.append(char)
+        elif char.isspace():
+            space = True
+        else:
+            # Dump clients may insert newlines after row separators; only
+            # whitespace adjacent to SQL punctuation is presentation syntax.
+            if space and out and out[-1] not in ",()" and char not in ",()":
+                out.append(" ")
+            space = False
+            out.append(char)
+        index += 1
+    if quote:
+        raise RestoreVerifyError("cross-engine SQL literal is unterminated")
+    return "".join(out).strip()
+
+
+def _cross_engine_known_session(sql: str) -> bool:
+    guard = _GUARDED_SESSION_SET_RE.fullmatch(sql)
+    if not guard:
+        return False
+    version = int(guard.group("version"))
+    flavor = guard.group("flavor").upper()
+    if not ((flavor == "!" and 40000 <= version <= 50699)
+            or (flavor == "M!" and 100000 <= version <= 110899)):
+        return False
+    statement = re.sub(r"\s+", " ", guard.group("statement").strip())
+    return any(pattern.fullmatch(statement) for pattern in _CROSS_ENGINE_SESSION_RE)
+
+
+def _cross_engine_schema(sql: str) -> str:
+    if sql.upper().startswith("CREATE DATABASE "):
+        # Only the MySQL default *off* encryption option is export metadata.
+        sql = sql.replace(" /*!80016 DEFAULT ENCRYPTION='N' */", "")
+    if not sql.upper().startswith("CREATE TABLE "):
+        return sql
+    charset = re.search(r"\bDEFAULT CHARSET=([A-Za-z0-9_]+)\b", sql, re.I)
+    collation = re.search(r"\bCOLLATE=([A-Za-z0-9_]+)\b", sql, re.I)
+    if charset and collation:
+        actual_charset = charset.group(1).lower()
+        actual_collation = collation.group(1).lower()
+        text_column = re.compile(
+            r"(?P<column>\x60[A-Za-z0-9_]+\x60\s+(?:TINYTEXT|TEXT|MEDIUMTEXT|LONGTEXT))"
+            r"\s+CHARACTER SET (?P<charset>[A-Za-z0-9_]+)"
+            r"\s+COLLATE (?P<collation>[A-Za-z0-9_]+)(?=\s*,|\s+DEFAULT NULL\s*[,)])",
+            re.I,
+        )
+
+        def inherited(match: re.Match[str]) -> str:
+            if (match.group("charset").lower() == actual_charset
+                    and match.group("collation").lower() == actual_collation):
+                return match.group("column")
+            return match.group(0)
+
+        sql = text_column.sub(inherited, sql)
+    # Nullable TEXT DEFAULT NULL and no DEFAULT have identical stored defaults.
+    sql = re.sub(
+        r"(\x60[A-Za-z0-9_]+\x60\s+(?:TINYTEXT|TEXT|MEDIUMTEXT|LONGTEXT))"
+        r"\s+DEFAULT NULL(?=\s*[,)])", r"\1", sql, flags=re.I,
+    )
+    # MariaDB reports this legacy display width; neither side uses ZEROFILL.
+    def strip_display_width(match: re.Match[str]) -> str:
+        column = match.group(0)
+        if re.search(r"\bZEROFILL\b", column, re.I):
+            return column
+        return re.sub(r"\bBIGINT\(20\)(?=\s|[,)]|$)", "bigint", column, flags=re.I)
+
+    sql = re.sub(
+        r"\x60[A-Za-z0-9_]+\x60\s+BIGINT\(20\)[^,)]*(?=,|\))",
+        strip_display_width, sql, flags=re.I,
+    )
+    return sql
+
+
+def sql_cross_engine_known_format_fingerprint(path: Path) -> tuple[str, int]:
+    """Hash whole SQL statements; refuse unknown syntax, data or DDL changes.
+
+    This check is intentionally narrower than a semantic SQL comparison.
+    Each statement remains represented, including versioned ALTER TABLE
+    directives, constraints, triggers and all literal content.
+    """
+    digest = hashlib.sha256()
+    statements = 0
+    create_count = 0
+    pending: list[str] = []
+    pending_size = 0
+    opener = gzip.open if path.name.endswith(".gz") else open
+    try:
+        with opener(path, "rt", encoding="utf-8", errors="strict") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not line:
+                    continue
+                if line.upper().startswith("DELIMITER "):
+                    raise RestoreVerifyError("custom SQL delimiters require manual schema verification")
+                if not pending and line.startswith(("--", "#")):
+                    continue
+                if not pending and line == r"/*M!999999\- enable the sandbox mode */":
+                    continue
+                if not pending and _cross_engine_known_session(line):
+                    continue
+                if not pending and (
+                    re.fullmatch(r"LOCK TABLES \x60[A-Za-z0-9_$.-]+\x60 WRITE;", line, re.I)
+                    or re.fullmatch(r"UNLOCK TABLES;", line, re.I)
+                    or re.fullmatch(r"SET @OLD_AUTOCOMMIT=@@AUTOCOMMIT, @@AUTOCOMMIT=0;", line, re.I)
+                    or re.fullmatch(r"SET AUTOCOMMIT=@OLD_AUTOCOMMIT;", line, re.I)
+                    or re.fullmatch(r"COMMIT;", line, re.I)
+                ):
+                    continue
+                pending.append(line)
+                pending_size += len(line)
+                if pending_size > 128 * 1024 * 1024:
+                    raise RestoreVerifyError("cross-engine SQL statement exceeds safe limit")
+                if not line.endswith(";"):
+                    continue
+                # Normalize narrow schema display metadata before collapsing
+                # punctuation, so integer-type token boundaries remain visible.
+                statement = _cross_engine_space(_cross_engine_schema(" ".join(pending)))
+                pending.clear()
+                pending_size = 0
+                if statement.upper().startswith("CREATE TABLE "):
+                    create_count += 1
+                digest.update(statement.encode("utf-8"))
+                digest.update(b"\n")
+                statements += 1
+    except (OSError, EOFError, UnicodeError) as exc:
+        raise RestoreVerifyError("cross-engine SQL dump cannot be read") from exc
+    if pending:
+        raise RestoreVerifyError("cross-engine SQL statement is unterminated")
+    if not statements or not create_count:
+        raise RestoreVerifyError("cross-engine SQL dump has no comparable tables")
+    return digest.hexdigest(), statements
+
+
 _CREATE_OBJECT_RE = re.compile(
     r"^CREATE\s+(?:TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?`?([A-Za-z0-9_.$-]+)`?",
     re.IGNORECASE,
