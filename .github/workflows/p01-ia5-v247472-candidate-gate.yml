@@ -290,6 +290,112 @@ jobs:
           echo P01_MAINTENANCE_ARTIFACT_GATE=PASS
 
 
+      - name: Isolated desktop browser and frontstage save gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-ia5-browser-deps
+          npm install --prefix /tmp/p01-ia5-browser-deps --no-audit --no-fund playwright@1.56.1 >/tmp/p01-npm-install.log
+          PLAYWRIGHT_BROWSERS_PATH=/tmp/p01-ia5-browsers /tmp/p01-ia5-browser-deps/node_modules/.bin/playwright install --with-deps chromium >/tmp/p01-browser-install.log
+          (cd /tmp/p01-maintenance-gate/target-full && php -S 127.0.0.1:18521 -t . >/tmp/p01-ia5-browser-server.log 2>&1) &
+          server_pid=$!
+          trap 'kill "$server_pid" >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:18521/channels.php -o /dev/null; then break; fi
+            sleep 1
+          done
+          export NODE_PATH=/tmp/p01-ia5-browser-deps/node_modules
+          export PLAYWRIGHT_BROWSERS_PATH=/tmp/p01-ia5-browsers
+          node <<'JS'
+          'use strict';
+          const assert=require('node:assert/strict');
+          const {chromium}=require('playwright');
+          const origin='http://127.0.0.1:18521';
+          (async()=>{
+            const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+            try{
+              const context=await browser.newContext({viewport:{width:1440,height:900}});
+              await context.route(/https?:\/\/(?!127\.0\.0\.1)/,route=>route.abort());
+              const login=await context.request.post(origin+'/api.php?action=login',{data:{password:'ReleaseGate!18511'}});
+              assert.equal(login.status(),200,'synthetic Owner login');
+              assert.match(await login.text(),/"ok":true/);
+              const page=await context.newPage();
+              const failures=[];
+              page.on('pageerror',e=>failures.push(String(e).slice(0,180)));
+              for(const width of [1440,768]){
+                await page.setViewportSize({width,height:900});
+                for(const route of ['index.php','start.php','channels.php','watch.php','music-home.php']){
+                  const resp=await page.goto(origin+'/'+route,{waitUntil:'domcontentloaded'});
+                  assert.ok(resp&&resp.status()<400,route+' HTTP');
+                  const count=await page.locator('.vf-global-domain-links>a').count();
+                  assert.equal(count,11,route+' complete Owner subsite navigation');
+                  const opener=page.locator('[data-vf-local-manage-open]');
+                  assert.equal(await opener.count(),1,route+' local management entry');
+                  await opener.click();
+                  const dialog=page.locator('dialog[data-vf-local-management]');
+                  assert.equal(await dialog.evaluate(e=>e.open),true,route+' native dialog open');
+                  assert.equal(await dialog.locator('iframe').count(),0,route+' no embedded backstage');
+                  assert.ok(await dialog.locator('[data-vf-local-manage-list]').count()>0,route+' local task list');
+                  const boxes=await page.locator('dialog[open]').count();
+                  assert.equal(boxes,1,route+' single native modal');
+                  await page.keyboard.press('Escape');
+                  assert.equal(await dialog.evaluate(e=>e.open),false,route+' closes');
+                  const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-innerWidth);
+                  assert.ok(overflow<=8,route+'/'+width+' overflow '+overflow);
+                }
+                console.log('P01_IA5_BROWSER_SHELL_'+width+'=PASS');
+              }
+              await page.setViewportSize({width:1440,height:900});
+              await page.goto(origin+'/channels.php?view=directory',{waitUntil:'domcontentloaded'});
+              await page.locator('[data-vf-local-manage-open]').click();
+              const hub=page.locator('dialog[data-vf-local-management]');
+              await hub.locator('[data-vf-local-channel-add]').click();
+              const form=page.locator('[data-add-form]');
+              const url=form.locator('[name=url]');
+              await url.waitFor({state:'visible'});
+              const draft='https://example.com/p01-ia5-candidate-channel';
+              await url.fill(draft);
+              await form.locator('[name=title]').fill('IA5 Release Synthetic Channel');
+              const submits=form.locator('button[type=submit]');
+              assert.ok(await submits.count()>=2,'Save and add-and-continue both available');
+              let unexpected=[];
+              page.on('dialog',d=>{unexpected.push(d.message());d.dismiss().catch(()=>{});});
+              await form.locator('button[type=submit]:not([data-add-continue])').click();
+              await page.getByText('IA5 Release Synthetic Channel',{exact:false}).first().waitFor({state:'visible',timeout:20000});
+              assert.equal(unexpected.length,0,'successful save cannot trigger discard confirm');
+              assert.equal(await hub.evaluate(e=>e.open),false,'save closes native hub');
+              assert.ok(page.url().includes('/channels.php'),'save stays in Channels');
+              console.log('P01_IA5_BROWSER_CHANNEL_SAVE_CLOSE_REFRESH=PASS');
+              await page.locator('[data-vf-local-manage-open]').click();
+              await hub.locator('[data-vf-local-channel-add]').click();
+              await url.waitFor({state:'visible'});
+              await url.fill('https://example.com/p01-ia5-second-channel');
+              await form.locator('[name=title]').fill('IA5 Release Synthetic Continue');
+              await form.locator('[data-add-continue]').click();
+              await page.getByText(/可继续添加下一项/).first().waitFor({state:'visible',timeout:15000});
+              assert.equal(await url.inputValue(),'','continue resets URL');
+              assert.equal(await form.locator('[name=title]').inputValue(),'','continue resets title');
+              assert.equal(await hub.evaluate(e=>e.open),true,'continue keeps one native hub');
+              assert.equal(unexpected.length,0,'continue does not warn of discard');
+              await page.keyboard.press('Escape');
+              assert.equal(unexpected.length,0,'clean continue closes without discard');
+              console.log('P01_IA5_BROWSER_CHANNEL_ADD_CONTINUE=PASS');
+              const guest=await browser.newContext({viewport:{width:1440,height:900}});
+              await guest.route(/https?:\/\/(?!127\.0\.0\.1)/,route=>route.abort());
+              const gp=await guest.newPage();
+              await gp.goto(origin+'/channels.php?view=directory',{waitUntil:'domcontentloaded'});
+              assert.equal(await gp.locator('[data-vf-local-manage-open]').count(),0,'guest no native Owner management');
+              assert.equal(await gp.getByText('IA5 Release Synthetic Channel').count(),0,'private channel hidden from guest');
+              assert.equal(await gp.locator('.vf-global-domain-links>a').count(),9,'guest 9 public entries');
+              await guest.close();
+              assert.deepEqual(failures,[],'no JavaScript runtime errors');
+              console.log('P01_IA5_BROWSER_PRIVATE_PROJECTION=PASS');
+              await context.close();
+            }finally{await browser.close();}
+          })().catch(e=>{console.error('P01_IA5_BROWSER_FAILURE',e.stack||e);process.exitCode=1;});
+          JS
+          echo P01_IA5_EXACT_BROWSER_GATE=PASS
+
       - name: Finish without publishing
         shell: bash
         run: |
