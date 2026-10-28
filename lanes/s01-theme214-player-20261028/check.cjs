@@ -1,6 +1,6 @@
 const {chromium}=require('playwright'),fs=require('fs'),assert=require('node:assert/strict');
 const phase=process.argv[2],fixed=phase==='after',base='http://127.0.0.1:18880',out={pages:{},players:{}},rows=[];
-const norm=s=>s.replaceAll('1.35.214','1.35.213').replaceAll('135214','135213');
+const norm=s=>s.replaceAll('1.35.215','1.35.213').replaceAll('135215','135213');
 (async()=>{
  const b=await chromium.launch(),c=await b.newContext({viewport:{width:1440,height:1000}}),errors=[];
  for(const path of ['/','/zh/','/sitemap/','/zh/sitemap/','/m3u8-playlist-checker/','/zh/m3u8-backup-restore/','/m3u8-downloader/','/zh/m3u8-to-mp4/']){
@@ -38,7 +38,10 @@ const norm=s=>s.replaceAll('1.35.214','1.35.213').replaceAll('135214','135213');
    await toggle.press('Enter');assert.equal(await toggle.getAttribute('aria-expanded'),'true');assert.ok(await root.locator('.vf-user-card').isVisible());assert.equal(await root.locator('.vf-recent-item:visible').count(),5);assert.equal(await root.locator('.vf-row-actions:visible button').count(),20);
    const stage=await root.locator('.vf-stage').boundingBox(),lib=await root.locator('.vf-user-card').boundingBox();assert.ok(lib.y>=stage.y+stage.height);assert.ok(lib.width>=stage.width-2,'history is below full-width media');
    await p.screenshot({path:`proof/player-${lang}-library.png`,fullPage:true});
-   const history=root.locator('[data-vf-player-recent-list]');p.once('dialog',d=>d.accept('Renamed synthetic stream'));await history.locator('[data-vf-player-rename-url]').first().click();await history.getByText('Renamed synthetic stream',{exact:true}).waitFor({state:'visible',timeout:15000});
+   const history=root.locator('[data-vf-player-recent-list]'),rename=history.locator('[data-vf-player-rename-url]').first(),renameURL=await rename.getAttribute('data-vf-player-rename-url');
+   const dialogPromise=p.waitForEvent('dialog'),renameClick=rename.click(),dialog=await dialogPromise;assert.equal(dialog.type(),'prompt');await dialog.accept('QA-53172');await renameClick;
+   await history.getByText('QA-53172',{exact:true}).waitFor({state:'visible',timeout:15000});
+   const renamed=await p.evaluate(url=>window.VFM3U8PlayerHistory.find(url,document.querySelector('[data-vf-module="player"]')),renameURL);assert.equal(renamed.name,'QA-53172','the actual persisted row has the authored name');
    await history.locator('[data-vf-player-toggle-favorite-url]').first().click();await root.locator('[data-vf-player-list-tab="favorites"]').click();assert.equal(await root.locator('[data-vf-player-favorite-list] .vf-recent-item').count(),2);
    await root.locator('[data-vf-player-favorite-list] [data-vf-player-toggle-favorite-url]').first().click();await root.locator('[data-vf-player-list-tab="recent"]').click();const count=await history.locator('.vf-recent-item').count();await history.locator('[data-vf-player-remove-url]').first().click();assert.equal(await history.locator('.vf-recent-item').count(),count-1);
    const download=p.waitForEvent('download');await root.locator('[data-vf-player-export]').click();assert.equal(JSON.parse(fs.readFileSync(await(await download).path(),'utf8')).streams.length,5);
@@ -55,7 +58,7 @@ const norm=s=>s.replaceAll('1.35.214','1.35.213').replaceAll('135214','135213');
    await root.locator('[data-vf-player-reset]').click();assert.equal(await input.inputValue(),'');assert.equal(await video.getAttribute('src'),null);
    for(const sel of ['.vf-player-support-disclosure','.vf-player-workflow-disclosure']){await p.locator(sel+'>summary').press('Enter');assert.equal(await p.locator(sel).getAttribute('open'),'');assert.ok((await p.locator(sel).innerText()).length>100);await p.locator(sel+'>summary').press('Enter');assert.equal(await p.locator(sel).getAttribute('open'),null);}
    const faq=p.locator('.vf-tool-faq-list details').nth(1);await faq.locator('summary').press('Enter');assert.equal(await faq.getAttribute('open'),'');
-   await p.evaluate(()=>{document.querySelector('[data-vf-tool-description]').textContent='Authored professional player description';});await p.waitForFunction(()=>document.querySelector('[data-vf-player-presentation]').getAttribute('data-vf-player-stock-identity')==='0');assert.ok(await root.getByText('Authored professional player description',{exact:true}).isVisible());
+   await p.evaluate(()=>{document.querySelector('[data-vf-tool-description]').textContent='QA-Description-53172';});await p.waitForFunction(()=>document.querySelector('[data-vf-player-presentation]').getAttribute('data-vf-player-stock-identity')==='0');assert.ok(await root.getByText('QA-Description-53172',{exact:true}).isVisible());
    await p.evaluate(()=>{const h=window.VFM3U8PlayerHistory;localStorage.removeItem(h.store);localStorage.removeItem(h.lastInputStore);});await p.reload({waitUntil:'networkidle'});await toggle.waitFor({state:'hidden'});assert.equal(await root.locator('.vf-user-card').isVisible(),false);assert.ok((await root.locator('.vf-stage').boundingBox()).width>1000);await p.screenshot({path:`proof/player-${lang}-empty.png`,fullPage:true});
    rows.push({kind:'disclosure-keyboard-library-actions-persistence-export-real-feedback-pro-playback-custom-copy',lang,playback,status:'PASS'});
   }
