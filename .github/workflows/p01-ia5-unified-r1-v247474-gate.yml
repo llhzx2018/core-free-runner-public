@@ -85,6 +85,8 @@ jobs:
           echo P01_EXACT_SOURCE_AND_BASELINE=PASS
 
       - name: Canonical regression in isolated worktree
+        id: canonical
+        continue-on-error: true
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -111,6 +113,47 @@ jobs:
           test -z "$(git -C candidate status --porcelain)"
           echo P01_CANONICAL_RELEASE_PROOF=PASS
 
+      - name: Attribute only known Projects regressions to pinned current main
+        id: projects_main_attribution
+        if: steps.canonical.outcome == 'failure'
+        shell: bash
+        env:
+          PINNED_MAIN_SHA: a1e7f8f175eb2429fc42353886d0340bb33687ed
+        run: |
+          set -Eeuo pipefail
+          grep -Fx 'P01_CANONICAL_CHANGED_FAILURE_COUNT=0' /tmp/p01-canonical.txt
+          grep -Fx 'P01_CANONICAL_NEW_REGRESSION_COUNT=3' /tmp/p01-canonical.txt
+          mapfile -t actual < <(grep -oE 'NEW_UNIT_REGRESSION=tests/unit/[A-Za-z0-9_]+\.php' /tmp/p01-canonical.txt | cut -d= -f2 | sort -u)
+          test "${#actual[@]}" -eq 3
+          expected=(
+            tests/unit/frontend_projects_tools_software_r5_contract.php
+            tests/unit/project_action_index_v247177_contract.php
+            tests/unit/projects_guest_zero_public_scope_v247390_contract.php
+          )
+          for file in "${expected[@]}"; do
+            printf '%s\n' "${actual[@]}" | grep -Fx "$file"
+          done
+
+          git -C candidate fetch -q --depth 1 origin "$PINNED_MAIN_SHA"
+          test "$(git -C candidate rev-parse FETCH_HEAD)" = "$PINNED_MAIN_SHA"
+          git -C candidate worktree add -q --detach "$GITHUB_WORKSPACE/main-projects-verify" "$PINNED_MAIN_SHA"
+          test "$(git -C "$GITHUB_WORKSPACE/main-projects-verify" rev-parse HEAD)" = "$PINNED_MAIN_SHA"
+          for file in "${expected[@]}"; do
+            test "$(git -C candidate rev-parse "HEAD:$file")" = "$(git -C candidate rev-parse "$PINNED_MAIN_SHA:$file")"
+            set +e
+            timeout 45s php "$GITHUB_WORKSPACE/main-projects-verify/$file" >"/tmp/p01-main-projects-$(basename "$file").txt" 2>&1
+            status=$?
+            set -e
+            if [ "$status" -eq 0 ]; then
+              echo "MAIN_PROJECTS_CONTRACT_UNEXPECTED_PASS=$file"
+              exit 92
+            fi
+            echo "MAIN_PROJECTS_PREEXISTING_FAIL=$file"
+          done
+          echo P01_CANONICAL_PROJECTS_MAIN_DEBT_CONFIRMED=3
+          echo P01_IA5_CHANGED_FILE_REGRESSION_COUNT=0
+          echo P01_FULL_CANONICAL_GATE=BLOCKED_MAIN_PROJECTS_DEBT
+
       - name: Classify canonical failures safely (no private source artifact)
         if: failure()
         shell: bash
@@ -130,6 +173,7 @@ jobs:
           echo P01_IA5_CANONICAL_FAILURE_DIAG_COMPLETE=YES
 
       - name: Focused frontstage JS and PHP syntax contract
+        id: focus
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -149,6 +193,7 @@ jobs:
           echo P01_IA5_FOCUSED_SOURCE_CONTRACTS=PASS
 
       - name: Build exact maintenance artifacts
+        id: artifact
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -161,6 +206,7 @@ jobs:
           echo P01_MAINTENANCE_BUILD=PASS
 
       - name: Verify clean FULL and Atomic UPDATE
+        id: install_upgrade
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -293,6 +339,7 @@ jobs:
 
 
       - name: Isolated desktop browser and frontstage save gate
+        id: browser
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -472,6 +519,7 @@ jobs:
           echo P01_IA5_EXACT_BROWSER_GATE=PASS
 
       - name: Isolated owner and CSRF HTTP gate
+        id: security
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -490,6 +538,7 @@ jobs:
           echo P01_IA5_OWNER_CSRF_HTTP=PASS
 
       - name: Isolated protected SQLite backup restore
+        id: restore
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -517,9 +566,35 @@ jobs:
           PHP
           (cd /tmp/p01-maintenance-gate/target-full && php cli/verify.php) | grep -Fx VERIFY_PASS=YES
 
-      - name: Finish without publishing
+      - name: Report scoped proof and explicitly block full gate when main has debt
+        if: always()
         shell: bash
+        env:
+          CANONICAL_RESULT: ${{ steps.canonical.outcome }}
+          ATTRIBUTION_RESULT: ${{ steps.projects_main_attribution.outcome }}
+          FOCUS_RESULT: ${{ steps.focus.outcome }}
+          ARTIFACT_RESULT: ${{ steps.artifact.outcome }}
+          INSTALL_RESULT: ${{ steps.install_upgrade.outcome }}
+          BROWSER_RESULT: ${{ steps.browser.outcome }}
+          SECURITY_RESULT: ${{ steps.security.outcome }}
+          RESTORE_RESULT: ${{ steps.restore.outcome }}
         run: |
           set -Eeuo pipefail
-          echo P01_IA5_EXACT_CANDIDATE_GATE=PASS
           echo NO_TAG_NO_RELEASE_NO_DISTRIBUTION_NO_PRODUCTION=YES
+          for value in "$FOCUS_RESULT" "$ARTIFACT_RESULT" "$INSTALL_RESULT" "$BROWSER_RESULT" "$SECURITY_RESULT" "$RESTORE_RESULT"; do
+            if [ "$value" != success ]; then
+              echo P01_IA5_SCOPED_R3_GATE=FAIL_OR_INCOMPLETE
+              exit 82
+            fi
+          done
+          echo P01_IA5_SCOPED_R3_GATE=PASS
+          if [ "$CANONICAL_RESULT" != success ]; then
+            if [ "$ATTRIBUTION_RESULT" != success ]; then
+              echo P01_FULL_CANONICAL_GATE=UNCLASSIFIED_FAIL
+              exit 83
+            fi
+            echo P01_FULL_CANONICAL_GATE=BLOCKED_MAIN_PROJECTS_DEBT
+            exit 84
+          fi
+          echo P01_FULL_CANONICAL_GATE=PASS
+          echo P01_IA5_EXACT_CANDIDATE_GATE=PASS
