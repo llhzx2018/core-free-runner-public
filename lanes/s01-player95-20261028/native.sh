@@ -21,20 +21,20 @@ cli plugin install /tmp/new.zip --activate
 echo STEP_FRESH_VERSION
 test "$(cli plugin get vf-tool-m3u8 --field=version)" = '1.25.95'
 echo STEP_INTEGRITY_ORIGINAL
-cli eval 'if (!function_exists("vf_tool_m3u8_hls_js_url")) { WP_CLI::error("ENGINE_FUNCTION_MISSING"); } if (!vf_tool_m3u8_hls_js_url([])) { WP_CLI::error("LOCAL_HLS_UNAVAILABLE"); }'
+cli eval 'require_once WP_PLUGIN_DIR."/vf-tool-m3u8/includes/settings-engine.php"; if (!function_exists("vf_tool_m3u8_hls_js_url")) { WP_CLI::error("ENGINE_FUNCTION_MISSING"); } if (!vf_tool_m3u8_hls_js_url([])) { WP_CLI::error("LOCAL_HLS_UNAVAILABLE"); }'
 echo STEP_INTEGRITY_TAMPER
 docker exec "$WP" cp /var/www/html/wp-content/plugins/vf-tool-m3u8/public/vendor/hls.js/hls.min.js /tmp/hls-good.js
 docker exec "$WP" sh -c 'printf tampered > /var/www/html/wp-content/plugins/vf-tool-m3u8/public/vendor/hls.js/hls.min.js'
-cli eval 'if (vf_tool_m3u8_hls_js_url([]) !== "") { exit(1); }' >/dev/null
+cli eval 'require_once WP_PLUGIN_DIR."/vf-tool-m3u8/includes/settings-engine.php"; if (vf_tool_m3u8_hls_js_url([]) !== "") { exit(1); }' >/dev/null
 docker exec "$WP" cp /tmp/hls-good.js /var/www/html/wp-content/plugins/vf-tool-m3u8/public/vendor/hls.js/hls.min.js
-cli eval 'if (!vf_tool_m3u8_hls_js_url([])) { exit(1); }' >/dev/null
+cli eval 'require_once WP_PLUGIN_DIR."/vf-tool-m3u8/includes/settings-engine.php"; if (!vf_tool_m3u8_hls_js_url([])) { exit(1); }' >/dev/null
 echo STEP_INSTALL_PREDECESSOR
 cli plugin install /tmp/old.zip --force --activate >/dev/null
 test "$(cli plugin get vf-tool-m3u8 --field=version)" = '1.25.94'
 cli option add vf_player95_protected '{"playlist":"synthetic","favorite":true}' --format=json >/dev/null
 PID=$(cli post create --post_type=page --post_status=publish --post_title='Player fixture' --post_name=player-test --post_content='[vf_m3u8_player]' --porcelain)
 cli post meta add "$PID" _vf_player95_protected 'synthetic-owned-meta' >/dev/null
-snapshot(){ printf '%s\n' "$(cli option get vf_player95_protected --format=json)" "$(cli post get "$PID" --field=post_content)" "$(cli post meta get "$PID" _vf_player95_protected)" | sha256sum | cut -d' ' -f1; }
+snapshot(){ cli eval 'foreach (["vf_m3u8_settings","vf_m3u8_settings_revisions","vf_m3u8_settings_audit","vf_tool_m3u8_settings"] as $key) { echo $key."=".hash("sha256",serialize(get_option($key)))."\n"; }' | sha256sum | cut -d' ' -f1; printf '%s\n' "$(cli option get vf_player95_protected --format=json)" "$(cli post get "$PID" --field=post_content)" "$(cli post meta get "$PID" _vf_player95_protected)" | sha256sum | cut -d' ' -f1; }
 echo STEP_SNAPSHOT
 snapshot > proof/state-before.sha256
 cli plugin install /tmp/new.zip --force --activate >/dev/null
@@ -49,4 +49,5 @@ cli plugin install /tmp/new.zip --force --activate >/dev/null
 cli plugin install /tmp/new.zip --force --activate >/dev/null
 test "$(cli plugin get vf-tool-m3u8 --field=version)" = '1.25.95'
 snapshot > proof/state-after.sha256;cmp proof/state-before.sha256 proof/state-after.sha256
+cli eval '$r=VF_M3U8_Runtime_Authority_V1::snapshot(WP_PLUGIN_DIR."/vf-tool-m3u8"); if (is_wp_error($r)) { WP_CLI::error($r->get_error_message()); } unset($r["files"]); echo wp_json_encode($r);' > proof/runtime-authority.json
 echo '{"status":"PASS","clean_install":"1.25.95","sequence":["1.25.94","1.25.95","1.25.94","1.25.95","1.25.95"],"tampered_hls":"REJECTED","synthetic_option_content_meta":"BYTE_IDENTICAL","production":"UNTOUCHED"}' > proof/native-lifecycle.json
