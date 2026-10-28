@@ -1,4 +1,4 @@
-name: TEMP P07 MySQL to MariaDB export-shape proof
+name: TEMP P07 strict MySQL to MariaDB full-SQL equivalence proof
 on:
   pull_request:
     branches: [main]
@@ -45,15 +45,15 @@ jobs:
           test -s "$RUNNER_TEMP/source.sql"
           test -s "$RUNNER_TEMP/target.sql"
           echo P07_SYNTHETIC_CROSS_ENGINE_IMPORT_PASS
-      - name: Checkout exact P07 verifier for diagnostic-only analysis
+      - name: Checkout exact P07 strict cross-engine verifier
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-server-ops
-          ref: a14a80d2693fa9326e4b6262ffbbb0f03fdc1348
+          ref: c82f8cb359f76aa876cba1b903c78c24ad551342
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           path: p07
-      - name: Compare synthetic dump representations without accepting mismatches
+      - name: Prove exact synthetic schema and data parity with negative mutations
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -64,17 +64,31 @@ jobs:
           root=pathlib.Path(sys.argv[1])
           src,dst=root/"source.sql",root/"target.sql"
           print(verify.sql_comparison_diagnostic(src,dst))
-          try:
-              source_data=verify.sql_data_fingerprint(src)
-              target_data=verify.sql_data_fingerprint(dst)
-              print("SYNTHETIC_ROW_SUMMARY_MATCH", source_data == target_data)
-              print("SYNTHETIC_ROW_COUNTS", source_data["data_statements"], target_data["data_statements"])
-          except verify.RestoreVerifyError:
-              print("SYNTHETIC_ROW_SUMMARY_BLOCKED_CURRENT_VERIFIER")
-          try:
-              print("SYNTHETIC_SQL_COMPARE",compare_database_dumps(src,dst))
-          except PullMigrationError as exc:
-              print("SYNTHETIC_SQL_COMPARE_BLOCKED",str(exc).split("[SQL_DIFF_V1")[0])
+          expected="CROSS_ENGINE_KNOWN_DUMP_FORMAT_SQL_EXACT"
+          observed=compare_database_dumps(src,dst)
+          assert observed==expected,(observed,expected)
+          print("P07_REAL_MYSQL84_MARIADB118_STRICT_EQUIVALENCE_PASS",observed)
+          original=dst.read_text(encoding="utf-8")
+          import re
+          mutations=[
+              ("row",original.replace("single quote:", "altered quote:",1)),
+              ("index",original.replace("idx_value", "idx_other",1)),
+              ("charset",original.replace("COLLATE=utf8mb4_unicode_ci", "COLLATE=utf8mb4_general_ci",1)),
+              ("guarded_ddl",original.replace("ENABLE KEYS", "DISABLE KEYS",1)),
+              ("unmatched_trigger",original+"\nCREATE TRIGGER bogus BEFORE INSERT ON `t0` FOR EACH ROW SET @bogus=1;\n"),
+          ]
+          for label,changed in mutations:
+              assert changed!=original,label
+              dst.write_text(changed,encoding="utf-8")
+              try:
+                  compare_database_dumps(src,dst)
+              except PullMigrationError:
+                  print("P07_TRUE_MISMATCH_BLOCKED",label)
+              else:
+                  raise AssertionError("accepted synthetic data/schema corruption: "+label)
+          dst.write_text(original,encoding="utf-8")
+          assert compare_database_dumps(src,dst)==expected
+          print("P07_REAL_CROSS_ENGINE_FAIL_CLOSED_PROOF_PASS")
           PY
           echo 'SOURCE_SYNTHETIC_DUMP_FIRST_LINES'
           sed -n '1,58p' "$RUNNER_TEMP/source.sql"
@@ -84,7 +98,8 @@ jobs:
           grep -m 1 '^INSERT' "$RUNNER_TEMP/source.sql"
           echo 'TARGET_SYNTHETIC_INSERT'
           grep -m 1 '^INSERT' "$RUNNER_TEMP/target.sql"
-          echo P07_CROSS_ENGINE_DIAGNOSTIC_ONLY_DONE
+          PYTHONPATH=p07/lib python3 -m unittest discover -s p07/tests -p 'test_cross_engine_sql_format.py' -v
+          echo P07_CROSS_ENGINE_STRICT_PROOF_DONE
       - name: Purge disposable SQL dumps and containers
         if: always()
         run: |
