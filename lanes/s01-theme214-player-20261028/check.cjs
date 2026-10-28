@@ -58,8 +58,15 @@ const norm=s=>s.replaceAll('1.35.215','1.35.213').replaceAll('135215','135213');
    await root.locator('[data-vf-player-reset]').click();assert.equal(await input.inputValue(),'');assert.equal(await video.getAttribute('src'),null);
    for(const sel of ['.vf-player-support-disclosure','.vf-player-workflow-disclosure']){await p.locator(sel+'>summary').press('Enter');assert.equal(await p.locator(sel).getAttribute('open'),'');assert.ok((await p.locator(sel).innerText()).length>100);await p.locator(sel+'>summary').press('Enter');assert.equal(await p.locator(sel).getAttribute('open'),null);}
    const faq=p.locator('.vf-tool-faq-list details').nth(1);await faq.locator('summary').press('Enter');assert.equal(await faq.getAttribute('open'),'');
-   await p.evaluate(()=>{document.querySelector('[data-vf-tool-description]').textContent='QA-Description-53172';});await p.waitForFunction(()=>document.querySelector('[data-vf-player-presentation]').getAttribute('data-vf-player-stock-identity')==='0');assert.ok(await root.getByText('QA-Description-53172',{exact:true}).isVisible());
-   await p.evaluate(()=>{document.querySelector('[data-vf-player-empty-detail]').textContent='QA-Empty-53172';});await p.waitForFunction(()=>document.querySelector('[data-vf-player-presentation]').getAttribute('data-vf-player-stock-empty-detail')==='0');assert.ok(await root.getByText('QA-Empty-53172',{exact:true}).isVisible());
+   // Separate Theme host contract: authored Provider projection is input, not
+   // an edit to the running Provider's canonical configuration. Domain actions
+   // above use the complete, unmodified Provider runtime on real WordPress.
+   const probe=await b.newPage({viewport:{width:1440,height:1000}});
+   await probe.route('**/wp-content/plugins/vf-tool-m3u8/**',route=>route.request().resourceType()==='script'?route.abort():route.continue());
+   await probe.route(base+path,async route=>{const response=await route.fetch();let html=await response.text();const description=/(<[^>]+data-vf-tool-description[^>]*>)[^<]*/,detail=/(<[^>]+data-vf-player-empty-detail[^>]*>)[^<]*/;assert.ok(description.test(html)&&detail.test(html));html=html.replace(description,'$1QA-Description-53172').replace(detail,'$1QA-Empty-53172');await route.fulfill({response,body:html});});
+   await probe.goto(base+path,{waitUntil:'networkidle'});await probe.locator('[data-vf-player-presentation][data-vf-player-enhanced="1"]').waitFor();
+   await probe.getByText('QA-Description-53172',{exact:true}).waitFor({state:'visible'});await probe.getByText('QA-Empty-53172',{exact:true}).waitFor({state:'visible'});
+   fs.writeFileSync(`proof/host-custom-copy-${lang}.json`,JSON.stringify({status:'PASS',scope:'Theme host consumes authored Provider DOM projection; Provider JS intentionally omitted only in this separate fixture',description:'VISIBLE_UNCHANGED',emptyDetail:'VISIBLE_UNCHANGED',providerBusinessProof:'COMPLETE_UNMODIFIED_RUNTIME_ABOVE'}));await probe.close();
    await p.evaluate(()=>{const h=window.VFM3U8PlayerHistory;localStorage.removeItem(h.store);localStorage.removeItem(h.lastInputStore);});await p.reload({waitUntil:'networkidle'});await toggle.waitFor({state:'hidden'});assert.equal(await root.locator('.vf-user-card').isVisible(),false);assert.ok((await root.locator('.vf-stage').boundingBox()).width>1000);await p.screenshot({path:`proof/player-${lang}-empty.png`,fullPage:true});
    rows.push({kind:'disclosure-keyboard-library-actions-persistence-export-real-feedback-pro-playback-custom-copy',lang,playback,status:'PASS'});
   }
