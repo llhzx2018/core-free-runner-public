@@ -335,7 +335,57 @@ def _cross_engine_schema(sql: str) -> str:
     return sql
 
 
-def sql_cross_engine_known_format_fingerprint(path: Path) -> tuple[str, int]:
+
+_SQL_CANON_CLASSES = ("database", "schema", "data", "versioned", "other")
+
+
+def _sql_canon_class(statement: str) -> str:
+    upper = statement.upper()
+    if upper.startswith(("CREATE DATABASE ", "USE ")):
+        return "database"
+    if upper.startswith(("CREATE TABLE ", "DROP TABLE ", "ALTER TABLE ",
+                         "CREATE VIEW ", "CREATE TRIGGER ")):
+        return "schema"
+    if upper.startswith(("INSERT INTO ", "REPLACE INTO ", "UPDATE ", "DELETE FROM ")):
+        return "data"
+    if statement.startswith(("/*!", "/*M!")):
+        return "versioned"
+    return "other"
+
+
+def sql_cross_engine_known_format_diagnostic(source: Path, target: Path) -> str:
+    """Privacy-safe normalized class comparison; never outputs SQL or hashes."""
+    buckets: list[dict[str, Any]] = []
+    status: list[str] = []
+    for path in (source, target):
+        profile: dict[str, Any] = {}
+        try:
+            sql_cross_engine_known_format_fingerprint(path, profile=profile)
+            status.append("OK")
+        except RestoreVerifyError as exc:
+            message = str(exc)
+            if message.startswith("custom SQL delimiters"):
+                status.append("CUSTOM_DELIMITER")
+            elif message.startswith("cross-engine SQL statement exceeds"):
+                status.append("STATEMENT_LIMIT")
+            elif message.startswith("cross-engine SQL literal is unterminated"):
+                status.append("UNTERMINATED_LITERAL")
+            elif message.startswith("cross-engine SQL statement is unterminated"):
+                status.append("UNTERMINATED_STATEMENT")
+            else:
+                status.append("UNSUPPORTED")
+        buckets.append(profile)
+    parts = ["SQL_CANON_V2", "parse=" + ":".join(status)]
+    for name in _SQL_CANON_CLASSES:
+        left = buckets[0].get(name)
+        right = buckets[1].get(name)
+        n0, n1 = left[0] if left else 0, right[0] if right else 0
+        equal = n0 == n1 and (left[1].digest() if left else b"") == (right[1].digest() if right else b"")
+        parts.append(f"{name}={'EQUAL' if equal else 'DIFFER'}({n0}:{n1})")
+    return " ".join(parts)
+
+
+def sql_cross_engine_known_format_fingerprint(path: Path, *, profile: dict[str, Any] | None = None) -> tuple[str, int]:
     """Hash whole SQL statements; refuse unknown syntax, data or DDL changes.
 
     This check is intentionally narrower than a semantic SQL comparison.
@@ -383,8 +433,15 @@ def sql_cross_engine_known_format_fingerprint(path: Path) -> tuple[str, int]:
                 pending_size = 0
                 if statement.upper().startswith("CREATE TABLE "):
                     create_count += 1
-                digest.update(statement.encode("utf-8"))
+                encoded = statement.encode("utf-8")
+                digest.update(encoded)
                 digest.update(b"\n")
+                if profile is not None:
+                    group = _sql_canon_class(statement)
+                    entry = profile.setdefault(group, [0, hashlib.sha256()])
+                    entry[0] += 1
+                    entry[1].update(encoded)
+                    entry[1].update(b"\n")
                 statements += 1
     except (OSError, EOFError, UnicodeError) as exc:
         raise RestoreVerifyError("cross-engine SQL dump cannot be read") from exc

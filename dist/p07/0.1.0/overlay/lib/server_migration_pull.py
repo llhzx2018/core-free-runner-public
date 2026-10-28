@@ -1298,6 +1298,14 @@ def compare_database_dumps(source_dump: Path, target_dump: Path) -> str:
                 diagnostic = " [" + verify_engine.sql_comparison_diagnostic(source_dump, target_dump) + "]"
             except verify_engine.RestoreVerifyError:
                 diagnostic = " [SQL_DIFF_V1_UNAVAILABLE]"
+            # Treat normalized statement mismatch as an observable failure,
+            # not as proof of an equivalent cross-engine database.
+            try:
+                diagnostic += " [" + verify_engine.sql_cross_engine_known_format_diagnostic(
+                    source_dump, target_dump
+                ) + "]"
+            except verify_engine.RestoreVerifyError:
+                diagnostic += " [SQL_CANON_V2_UNAVAILABLE]"
         raise PullMigrationError(f"MySQL verification failed [{reason}]{diagnostic}") from exc
     raise PullMigrationError("MySQL logical-content verification failed [SCHEMA_OR_DATA_MISMATCH]")
 
