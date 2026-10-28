@@ -740,8 +740,9 @@ def local_target_db_engine_version() -> str:
             continue
         output = (p.stdout + " " + p.stderr).lower()
         if p.returncode == 0 and "mariadb" in output:
-            if re.search(r"(?<![0-9])10\.11(?:\.[0-9]+)?(?![0-9])", output):
-                return "MARIADB_10.11"
+            for version in ("10.11", "11.8"):
+                if re.search(rf"(?<![0-9]){re.escape(version)}(?:\.[0-9]+)?(?![0-9])", output):
+                    return f"MARIADB_{version}"
             return "MARIADB_OTHER"
         if p.returncode == 0 and ("mysql" in output or "percona" in output):
             return "MYSQL_OR_PERCONA"
@@ -775,9 +776,13 @@ def local_target_active_db_engine_version() -> str:
     if len(fields) != 2:
         return "UNKNOWN"
     version, comment = fields
-    if re.match(r"^(?:5[.]5[.]5-)?10[.]11[.][0-9]+[-+]MariaDB(?:$|[-+])", version, re.I):
-        if "percona" not in comment.lower() and "mysql community" not in comment.lower():
-            return "MARIADB_10.11"
+    if "percona" not in comment.lower() and "mysql community" not in comment.lower():
+        for supported in ("10.11", "11.8"):
+            if re.match(
+                rf"^(?:5[.]5[.]5-)?{re.escape(supported)}[.][0-9]+[-+]MariaDB(?:$|[-+])",
+                version, re.I,
+            ):
+                return f"MARIADB_{supported}"
     if "mariadb" in version.lower():
         return "MARIADB_OTHER"
     if "mysql" in comment.lower() or "percona" in comment.lower():
@@ -785,16 +790,31 @@ def local_target_active_db_engine_version() -> str:
     return "UNKNOWN"
 
 
-def require_mariadb_1011_target() -> None:
-    # Both installed daemon identity and the active root socket must agree.
-    # Fail closed before creating/importing target databases or freezing SOURCE.
-    if (
-        local_target_db_engine_version() != "MARIADB_10.11"
-        or local_target_active_db_engine_version() != "MARIADB_10.11"
-    ):
+def required_mariadb_engine_local() -> str:
+    """Read-only OS/CloudPanel compatibility check for the receiving VPS."""
+    try:
+        os_release = Path("/etc/os-release").read_text(encoding="utf-8")
+        os_id, version_id = legacy.parse_os_release(os_release)
+        return legacy.cloudpanel_db_engine_for_os(os_id, version_id)
+    except (OSError, legacy.ServerMigrationError) as exc:
         raise PullMigrationError(
-            "NEW_SERVER_REQUIRES_MARIADB_10_11: "
-            "新服务器必须实际运行 MariaDB 10.11（含本机数据库连接验证）；"
+            "NEW_SERVER_MARIADB_OS_UNSUPPORTED: 不能确认当前系统支持的 MariaDB 版本；"
+            "已停止迁移，不会修改数据库"
+        ) from exc
+
+
+def require_mariadb_target() -> None:
+    # Both daemon binary and the live root socket must match the OS-specific
+    # CloudPanel MariaDB engine. Fail closed before any import or SOURCE freeze.
+    expected = required_mariadb_engine_local()
+    if (
+        local_target_db_engine_version() != expected
+        or local_target_active_db_engine_version() != expected
+    ):
+        display_version = expected.removeprefix("MARIADB_")
+        raise PullMigrationError(
+            f"NEW_SERVER_REQUIRES_{expected.replace('.', '_')}: "
+            f"新服务器必须实际运行 MariaDB {display_version}（含本机数据库连接验证）；"
             "如本机 root socket 无法只读验证，请先检查 CloudPanel/数据库服务。"
             "已停止迁移，不会自动卸载或替换任何已有数据库"
         )
@@ -865,7 +885,7 @@ def target_preflight_local(source_plan: dict[str, Any]) -> dict[str, Any]:
         raise PullMigrationError("CURRENT_SERVER_CLOUDPANEL_MISSING")
     if not cloudpanel_database_server_ready_local():
         raise PullMigrationError("CURRENT_SERVER_CLOUDPANEL_DATABASE_SERVER_INCOMPLETE")
-    require_mariadb_1011_target()
+    require_mariadb_target()
     required = ("clpctl", "rsync", "python3", "curl", "systemctl", "crontab", "runuser")
     missing = [name for name in required if shutil.which(name) is None]
     if missing:
@@ -941,8 +961,10 @@ def local_bootstrap_preflight() -> dict[str, Any]:
         os_id, version_id = legacy.parse_os_release(text)
     except OSError as exc:
         raise PullMigrationError("current server OS cannot be identified") from exc
-    if (os_id, version_id) not in legacy.SUPPORTED_BOOTSTRAP_OS:
-        raise PullMigrationError(f"unsupported OS for CloudPanel: {os_id} {version_id}")
+    try:
+        db_engine = legacy.cloudpanel_db_engine_for_os(os_id, version_id)
+    except legacy.ServerMigrationError as exc:
+        raise PullMigrationError(f"unsupported OS/MariaDB pair for CloudPanel: {os_id} {version_id}") from exc
     arch = os.uname().machine
     cores = os.cpu_count() or 0
     mem_kb = 0
@@ -1015,6 +1037,7 @@ def local_bootstrap_preflight() -> dict[str, Any]:
         "hardware_baseline_is_advisory": True,
         "environment_advisories": environment_advisories,
         "installer_sha256": legacy.CLOUDPANEL_INSTALLER_SHA256,
+        "db_engine": db_engine,
         "writes_performed": False,
     }
 
@@ -1024,7 +1047,7 @@ def bootstrap_local_cloudpanel(confirm: str) -> dict[str, Any]:
         raise PullMigrationError("explicit confirmation required: BOOTSTRAP_LOCAL_CLOUDPANEL")
     preflight = local_bootstrap_preflight()
     cloud_hint = "" if preflight["cloud_hint"] == "generic" else str(preflight["cloud_hint"])
-    script = legacy.cloudpanel_bootstrap_script(cloud_hint)
+    script = legacy.cloudpanel_bootstrap_script(cloud_hint, preflight["db_engine"])
     proc = subprocess.run(
         ["bash", "-lc", script],
         text=True,
@@ -1033,7 +1056,11 @@ def bootstrap_local_cloudpanel(confirm: str) -> dict[str, Any]:
         timeout=5400,
     )
     if proc.returncode != 0 or not cloudpanel_ready_local():
-        raise PullMigrationError("CloudPanel installation on current server failed")
+        raise PullMigrationError(
+            f"CLOUDPANEL_INSTALL_FAILED_{preflight['db_engine']}: "
+            f"CloudPanel 安装未完成（安装进程退出码 {proc.returncode}）；"
+            "不自动重试或覆盖现有组件，请先检查目标机安装状态"
+        )
     if not cloudpanel_database_server_ready_local():
         user_count = cloudpanel_user_count_local()
         if user_count == 0:
@@ -1045,6 +1072,7 @@ def bootstrap_local_cloudpanel(confirm: str) -> dict[str, Any]:
                 "os_id": preflight["os_id"],
                 "version_id": preflight["version_id"],
                 "cloud_hint": preflight["cloud_hint"],
+                "db_engine": preflight["db_engine"],
                 "first_admin_required": True,
                 "dns_changed": False,
                 "source_changed": False,
@@ -1060,6 +1088,7 @@ def bootstrap_local_cloudpanel(confirm: str) -> dict[str, Any]:
         "installer_checksum_verified": True,
         "os_id": preflight["os_id"],
         "version_id": preflight["version_id"],
+        "db_engine": preflight["db_engine"],
         "dns_changed": False,
         "source_changed": False,
         "secrets_emitted": False,
@@ -2256,7 +2285,7 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
         raise PullMigrationError(
             "new-server CloudPanel database server metadata is missing; migration cannot resume safely"
         )
-    require_mariadb_1011_target()
+    require_mariadb_target()
     transition_migration_status(state, "PREPARING")
     state.pop("last_error_class", None)
     save_state(state)
@@ -2317,7 +2346,7 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
     if confirm != f"CUTOVER_PULL:{mid}":
         raise PullMigrationError(f"explicit confirmation required: CUTOVER_PULL:{mid}")
 
-    require_mariadb_1011_target()
+    require_mariadb_target()
 
     # Run all completeness work while the old server is still serving traffic.
     # This keeps missing assets out of the maintenance window and ensures we do

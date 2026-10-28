@@ -43,22 +43,26 @@ SQLITE_HEADER = b"SQLite format 3\x00"
 # executes an unverified remote installer.
 CLOUDPANEL_INSTALLER_URL = "https://installer.cloudpanel.io/ce/v2/install.sh"
 CLOUDPANEL_INSTALLER_SHA256 = "8146dbe0a488e7088b04071b0c34d59aa0ab1fe9dcec382d395fd155c9e6c476"
-# Owner policy: fresh CloudPanel installs use MariaDB 10.11; NEVER replace an existing engine.
-# CloudPanel official installer accepts DB_ENGINE=MARIADB_10.11.
-CLOUDPANEL_BOOTSTRAP_DB_ENGINE = "MARIADB_10.11"
+# Owner policy: fresh installs use a CloudPanel-supported MariaDB for that OS.
+# Never change or replace the database engine of an existing CloudPanel server.
+# CloudPanel's official OS/DB_ENGINE matrix (Vultr installer, 2026-10-28):
+# Debian 13 -> MariaDB 11.8; Debian 12 / Ubuntu 22.04, 24.04 -> MariaDB 10.11.
+# Ubuntu 26.04 is deliberately excluded until its MariaDB 12.3 migration
+# compatibility has been separately validated.
+CLOUDPANEL_BOOTSTRAP_DB_ENGINE = "MARIADB_10.11"  # legacy default, not OS-neutral
+CLOUDPANEL_BOOTSTRAP_DB_ENGINES = {
+    ("ubuntu", "22.04"): "MARIADB_10.11",
+    ("ubuntu", "24.04"): "MARIADB_10.11",
+    ("debian", "12"): "MARIADB_10.11",
+    ("debian", "13"): "MARIADB_11.8",
+}
 CLOUDPANEL_MIN_CORES = 1
 # MemTotal is lower than provider-advertised RAM because firmware/kernel reserve
 # some memory; accept a genuine 2 GB class VM without weakening the product floor.
 CLOUDPANEL_MIN_MEMORY_BYTES = 1_900_000_000
 CLOUDPANEL_MIN_DISK_BYTES = 10 * 1024**3
 SUPPORTED_BOOTSTRAP_ARCH = {"x86_64", "aarch64", "arm64"}
-SUPPORTED_BOOTSTRAP_OS = {
-    ("ubuntu", "22.04"),
-    ("ubuntu", "24.04"),
-    ("ubuntu", "26.04"),
-    ("debian", "12"),
-    ("debian", "13"),
-}
+SUPPORTED_BOOTSTRAP_OS = set(CLOUDPANEL_BOOTSTRAP_DB_ENGINES)
 
 PROTECTED_DB_CONFIGS = (
     "wp-config.php",
@@ -76,6 +80,16 @@ PROTECTED_DB_CONFIGS = (
 
 class ServerMigrationError(RuntimeError):
     pass
+
+
+def cloudpanel_db_engine_for_os(os_id: str, version_id: str) -> str:
+    """Choose a CloudPanel-supported MariaDB engine before any installer write."""
+    engine = CLOUDPANEL_BOOTSTRAP_DB_ENGINES.get((os_id, version_id))
+    if engine is None:
+        raise ServerMigrationError(
+            f"CloudPanel MariaDB bootstrap is unsupported on {os_id} {version_id}"
+        )
+    return engine
 
 
 def now_utc() -> str:
@@ -239,7 +253,9 @@ def detect_cloud_hint(text: str) -> str:
     return ""
 
 
-def cloudpanel_bootstrap_script(cloud_hint: str) -> str:
+def cloudpanel_bootstrap_script(cloud_hint: str, db_engine: str) -> str:
+    if db_engine not in CLOUDPANEL_BOOTSTRAP_DB_ENGINES.values():
+        raise ServerMigrationError(f"CloudPanel MariaDB engine is unsupported: {db_engine}")
     cloud_env = f"CLOUD={shlex.quote(cloud_hint)} " if cloud_hint else ""
     return (
         "set -euo pipefail; "
@@ -249,7 +265,7 @@ def cloudpanel_bootstrap_script(cloud_hint: str) -> str:
         "apt-get -y install curl wget sudo rsync cron; "
         f"curl -fSsS {shlex.quote(CLOUDPANEL_INSTALLER_URL)} -o /root/cloudpanel-install.sh; "
         f"echo {shlex.quote(CLOUDPANEL_INSTALLER_SHA256 + '  /root/cloudpanel-install.sh')} | sha256sum -c -; "
-        f"{cloud_env}DB_ENGINE={shlex.quote(CLOUDPANEL_BOOTSTRAP_DB_ENGINE)} "
+        f"{cloud_env}DB_ENGINE={shlex.quote(db_engine)} "
         "bash /root/cloudpanel-install.sh; "
         "rm -f /root/cloudpanel-install.sh; "
         "command -v clpctl >/dev/null 2>&1; "
@@ -269,11 +285,7 @@ def target_bootstrap_preflight(target: dict[str, Any]) -> dict[str, Any]:
         raise ServerMigrationError("target OS cannot be identified")
 
     os_id, version_id = parse_os_release(os_proc.stdout)
-    if (os_id, version_id) not in SUPPORTED_BOOTSTRAP_OS:
-        raise ServerMigrationError(
-            "target OS is not supported for guarded CloudPanel bootstrap: "
-            f"{os_id} {version_id}"
-        )
+    db_engine = cloudpanel_db_engine_for_os(os_id, version_id)
 
     resource_cmd = (
         "set -eu; "
@@ -374,7 +386,7 @@ def target_bootstrap_preflight(target: dict[str, Any]) -> dict[str, Any]:
         "cores": cores,
         "memory_bytes": memory_bytes,
         "disk_bytes": disk_bytes,
-        "db_engine": CLOUDPANEL_BOOTSTRAP_DB_ENGINE,
+        "db_engine": db_engine,
         "installer_sha256": CLOUDPANEL_INSTALLER_SHA256,
         "writes_performed": False,
     }
@@ -390,7 +402,7 @@ def bootstrap_target_cloudpanel(
     cloud_hint = "" if preflight["cloud_hint"] == "generic" else str(preflight["cloud_hint"])
     proc = remote(
         {"target": target},
-        cloudpanel_bootstrap_script(cloud_hint),
+        cloudpanel_bootstrap_script(cloud_hint, preflight["db_engine"]),
         timeout=5400,
         check=False,
     )
@@ -408,7 +420,7 @@ def bootstrap_target_cloudpanel(
         "cores": preflight["cores"],
         "memory_bytes": preflight["memory_bytes"],
         "disk_bytes": preflight["disk_bytes"],
-        "db_engine": CLOUDPANEL_BOOTSTRAP_DB_ENGINE,
+        "db_engine": preflight["db_engine"],
         "installer_checksum_verified": True,
         "dns_changed": False,
         "source_changed": False,

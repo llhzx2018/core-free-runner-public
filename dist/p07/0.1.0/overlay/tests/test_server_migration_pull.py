@@ -35,6 +35,11 @@ class TargetPullContractTests(unittest.TestCase):
         )
         live.start()
         self.addCleanup(live.stop)
+        required = mock.patch.object(
+            pull, "required_mariadb_engine_local", return_value="MARIADB_10.11"
+        )
+        required.start()
+        self.addCleanup(required.stop)
 
     def test_wrong_target_engine_fails_without_inventory_mutation(self) -> None:
         with mock.patch.object(pull, "cloudpanel_ready_local", return_value=True), \

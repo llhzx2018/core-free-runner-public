@@ -85,7 +85,7 @@ NEW SERVER（当前机器 / 接收端）
 
 - **Migration State Ownership**：主迁移状态、Migration ID、断点续传状态与目标事务标记全部由 NEW SERVER 持有；OLD SERVER 只能保留 Recovery Point、受控 helper 与 transient staging，不得成为主 Authority；
 - **Business Data Direction**：网站文件、VF/Press 隐藏业务数据、MySQL dump、SQLite snapshot、Cron/PM2 metadata 与所需 NVM Runtime 的业务传输必须由 NEW SERVER 发起并从 OLD SERVER 拉取；控制面为执行 helper 而上传的无业务 Secret 运行时代码不改变 Pull Model 语义；
-- **Target Bootstrap**：当前新服务器已有 CloudPanel 时绝不重装；仅当当前机通过“受支持 OS/架构 + ≥1 Core + 2 GB 级内存 + ≥10 GB 磁盘 + 无 CloudPanel/MySQL/MariaDB/Nginx/Apache + 无 80/443 Web 服务 + 无现有 htdocs”空机 Gate 时，才允许使用发布时固定的 CloudPanel 官方 installer URL + SHA256 安装，默认 MySQL 8.4；
+- **Target Bootstrap**：当前新服务器已有 CloudPanel 时绝不重装；仅当当前机通过“受支持 OS/架构 + ≥1 Core + 2 GB 级内存 + ≥10 GB 磁盘 + 无 CloudPanel/MySQL/MariaDB/Nginx/Apache + 无 80/443 Web 服务 + 无现有 htdocs”空机 Gate 时，才允许使用发布时固定的 CloudPanel 官方 installer URL + SHA256 安装，按 CloudPanel 官方 OS 兼容矩阵选择 MariaDB：Debian 13 使用 11.8（`MARIADB_11.8`），Debian 12 / Ubuntu 22.04、24.04 使用 10.11（`MARIADB_10.11`）；未验证的 OS/数据库组合 fail closed；仅限全新空机，已有 CloudPanel / MySQL / Percona / MariaDB 数据库不得被自动替换；
 - **Lazy Dependency**：进入服务器迁移时才检查 OpenSSH client 与 rsync；OLD SERVER 如仅缺 rsync，只有用户确认开始迁移后才允许通过 apt 按需补齐；不得在 Toolbox 启动或其它 Slot 入口预装；
 - **No Overwrite**：NEW SERVER 上同域名、同 Site User、同数据库名或已存在 `/home/<site_user>` 任一冲突都必须在业务写入前阻断；只允许本次 transaction-owned 资源做清理/重试；
 - **Prepare No Double-run**：首轮迁入期间 OLD 保持在线，NEW 的 Cron / PM2 / system Cron 只暂存不得启动；
