@@ -6,7 +6,7 @@ if(!password) throw new Error('BLOCKED_FIXTURE: synthetic owner password unavail
 const passed=[],failed=[],notApplicable=[];
 const expect=(ok,why)=>{if(!ok)throw new Error(why)};
 const record=async(name,run)=>{
- try{await run();passed.push(name);console.log('BROWSER_PASS:'+name)}
+ try{const before=notApplicable.length;await run();if(notApplicable.length===before){passed.push(name);console.log('BROWSER_PASS:'+name)}}
  catch(e){failed.push({case:name,reason:String(e?.message||e).slice(0,300)});console.log('BROWSER_FAIL:'+name+':'+String(e?.message||e).slice(0,180))}
 };
 const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
