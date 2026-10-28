@@ -1247,6 +1247,16 @@ def compare_database_dumps(source_dump: Path, target_dump: Path) -> str:
         guarded_after, guarded_after_count = verify_engine.sql_guarded_session_fingerprint(target_dump)
         if guarded_before == guarded_after and guarded_before_count == guarded_after_count:
             return "CROSS_ENGINE_GUARDED_SESSION_SQL_EXACT"
+        # The exact full-SQL cross-engine gate accepts only enumerated, proven
+        # dump presentation differences; every data literal and DDL is hashed.
+        try:
+            cross_before = verify_engine.sql_cross_engine_known_format_fingerprint(source_dump)
+            cross_after = verify_engine.sql_cross_engine_known_format_fingerprint(target_dump)
+            if cross_before == cross_after:
+                return "CROSS_ENGINE_KNOWN_DUMP_FORMAT_SQL_EXACT"
+        except verify_engine.RestoreVerifyError:
+            # Unknown syntax never gains equivalence from this new gate.
+            pass
         if (
             verify_engine.sql_structure_fingerprint(source_dump)
             == verify_engine.sql_structure_fingerprint(target_dump)
