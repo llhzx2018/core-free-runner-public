@@ -1,0 +1,155 @@
+name: TEMP P07 release96 exact-source build gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release96-proof.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  p07-release96:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      EXPECTED_P07_SHA: 3ebaca86b6e321f479d2ea29fb36be4c7922f6e0
+      PUBLIC_BASE_SHA: 74f9eee39272ddbae15e1536787e90163ebc5b28
+    steps:
+      - name: Verify transient private-source access
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo P07_PRIVATE_READ_CAPABILITY_UNAVAILABLE; exit 78; }
+
+      - name: Checkout exact private P07 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 3ebaca86b6e321f479d2ea29fb36be4c7922f6e0
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: transient-p07-private
+
+      - name: Checkout immutable public release95 baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: 74f9eee39272ddbae15e1536787e90163ebc5b28
+          persist-credentials: false
+          path: transient-p07-public-base
+
+      - name: Exact-source migration and identity regression
+        working-directory: transient-p07-private
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_P07_SHA"
+          test "$(cat VERSION)" = '0.1.0'
+          test "$(cat BUILD_ID)" = '0.1.0-release96'
+          bash -n bin/vfops-init-ui
+          PYTHONPATH=lib python3 -m unittest -v tests.test_mariadb_owner_policy tests.test_server_migration tests.test_server_migration_pull tests.test_cross_engine_sql_format tests.test_p07_bundle_identity
+          echo P07_RELEASE94_EXACT_SOURCE_TEST_PASS
+
+      - name: Assemble candidate and validate immutable trust pins
+        working-directory: transient-p07-private
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/p07_candidate_bundle.py --product-root . --public-root ../transient-p07-public-base --output "$RUNNER_TEMP/p07-release96-candidate" --product-sha "$EXPECTED_P07_SHA" --build 0.1.0-release96 --care 0.1.0-rc65
+          bash -n "$RUNNER_TEMP/p07-release96-candidate/installers/p07-final.sh"
+          bash -n "$RUNNER_TEMP/p07-release96-candidate/installers/p07.sh"
+          bash -n "$RUNNER_TEMP/p07-release96-candidate/installers/p07-toolbox.sh"
+          bash -n "$RUNNER_TEMP/p07-release96-candidate/installers/p07-system-care.sh"
+          python3 - "$RUNNER_TEMP/p07-release96-candidate" "$EXPECTED_P07_SHA" <<'PY'
+          import json, pathlib, sys
+          root, sha = pathlib.Path(sys.argv[1]), sys.argv[2]
+          a = json.loads((root / "candidate_attestation.json").read_text())
+          assert a["product_source_sha"] == sha
+          assert a["product_build"] == "0.1.0-release96"
+          assert a["system_care_build"] == "0.1.0-rc65"
+          assert a["runtime_file_count"] == 44
+          assert a["status"] == "FORMAL_STAGING_NOT_PUBLISHED"
+          assert not any(a["negative"].values())
+          print("P07_RELEASE94_BUNDLE_IDENTITY_PASS", a["runtime_manifest_blob"], a["final_installer_blob"])
+          PY
+
+      - name: Isolated clean install upgrade idempotence failure recovery and rollback
+        run: |
+          set -Eeuo pipefail
+          root="$RUNNER_TEMP/p07-release96-isolated"
+          mkdir -p "$root"
+          base="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/74f9eee39272ddbae15e1536787e90163ebc5b28"
+          next="file://$RUNNER_TEMP/p07-release96-candidate"
+          curl -fsSL --retry 3 "$base/installers/p07-final.sh" -o "$root/release95.sh"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1
+          export P07_INSTALL_DIR="$root/installed" P07_PREVIOUS_DIR="$root/previous" P07_BIN_LINK="$root/vfops"
+          sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 P07_INSTALL_DIR="$P07_INSTALL_DIR" P07_PREVIOUS_DIR="$P07_PREVIOUS_DIR" P07_BIN_LINK="$P07_BIN_LINK" P07_PUBLIC_ROOT="$base" bash "$root/release95.sh" >"$root/old.log" 2>&1 || { tail -n 80 "$root/old.log"; exit 1; }
+          test "$("$root/vfops" --build-id)" = '0.1.0-release95'
+          printf 'UNTOUCHED\n' > "$root/user-sentinel"
+          sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 P07_INSTALL_DIR="$P07_INSTALL_DIR" P07_PREVIOUS_DIR="$P07_PREVIOUS_DIR" P07_BIN_LINK="$P07_BIN_LINK" P07_PUBLIC_ROOT="$next" bash "$RUNNER_TEMP/p07-release96-candidate/installers/p07-final.sh" >"$root/upgrade.log" 2>&1 || { tail -n 80 "$root/upgrade.log"; exit 1; }
+          test "$("$root/vfops" --build-id)" = '0.1.0-release96'
+          test "$(cat "$root/previous/BUILD_ID")" = '0.1.0-release95'
+          test "$(cat "$root/user-sentinel")" = 'UNTOUCHED'
+          sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 P07_INSTALL_DIR="$P07_INSTALL_DIR" P07_PREVIOUS_DIR="$P07_PREVIOUS_DIR" P07_BIN_LINK="$P07_BIN_LINK" P07_PUBLIC_ROOT="$next" bash "$RUNNER_TEMP/p07-release96-candidate/installers/p07-final.sh" >"$root/repeat.log" 2>&1
+          grep -Fq '已是当前版本，无需下载或重复安装' "$root/repeat.log"
+          sudo cp "$root/installed/.runtime-manifest.gitblob" "$root/runtime.saved"
+          printf 'TAMPER\n' | sudo tee -a "$root/installed/.runtime-manifest.gitblob" >/dev/null
+          if sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 P07_INSTALL_DIR="$P07_INSTALL_DIR" P07_PREVIOUS_DIR="$P07_PREVIOUS_DIR" P07_BIN_LINK="$P07_BIN_LINK" P07_PUBLIC_ROOT="file:///deliberately-absent-p07" bash "$RUNNER_TEMP/p07-release96-candidate/installers/p07-final.sh" >"$root/negative.log" 2>&1; then echo P07_EXPECTED_FAILURE_NOT_BLOCKED; exit 1; fi
+          test "$(cat "$root/installed/BUILD_ID")" = '0.1.0-release96'
+          sudo cp "$root/runtime.saved" "$root/installed/.runtime-manifest.gitblob"
+          test "$("$root/vfops" --build-id)" = '0.1.0-release96'
+          test ! -e "$root/installed.new"
+          sudo mv "$root/installed" "$root/failed-upgrade"
+          sudo mv "$root/previous" "$root/installed"
+          test "$("$root/vfops" --build-id)" = '0.1.0-release95'
+          test "$(cat "$root/user-sentinel")" = 'UNTOUCHED'
+          export P07_INSTALL_DIR="$root/fresh-installed" P07_PREVIOUS_DIR="$root/fresh-previous" P07_BIN_LINK="$root/fresh-vfops"
+          sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 P07_INSTALL_DIR="$P07_INSTALL_DIR" P07_PREVIOUS_DIR="$P07_PREVIOUS_DIR" P07_BIN_LINK="$P07_BIN_LINK" P07_PUBLIC_ROOT="$next" bash "$RUNNER_TEMP/p07-release96-candidate/installers/p07-final.sh" >"$root/fresh.log" 2>&1 || { tail -n 80 "$root/fresh.log"; exit 1; }
+          test "$("$root/fresh-vfops" --build-id)" = '0.1.0-release96'
+          test ! -e "$root/fresh-previous"
+          echo P07_RELEASE94_ISOLATED_INSTALL_UPGRADE_IDEMPOTENCE_FAILURE_ROLLBACK_PASS
+
+      - name: Checkout authorized publication channel after all machine gates
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: 74f9eee39272ddbae15e1536787e90163ebc5b28
+          token: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          persist-credentials: true
+          path: transient-p07-release-publish
+
+      - name: Stage only verified public release payload on review branch
+        env:
+          VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$VF_RELEASE_WRITE_TOKEN" || { echo P07_RELEASE_WRITE_CAPABILITY_MISSING; exit 78; }
+          src="$RUNNER_TEMP/p07-release96-candidate"
+          dst=transient-p07-release-publish
+          test "$(git -C "$dst" rev-parse HEAD)" = "$PUBLIC_BASE_SHA"
+          test "$(git -C transient-p07-private rev-parse HEAD)" = "$EXPECTED_P07_SHA"
+          test "$(cat "$src/dist/p07/0.1.0/overlay/BUILD_ID")" = '0.1.0-release96'
+          test "$(cat "$src/packages/p07-system-care/0.1.0-rc65/VERSION")" = '0.1.0-rc65'
+          git -C "$dst" switch -c release/p07-release96-package-20261028
+          cp -a "$src/dist/p07/0.1.0/overlay/." "$dst/dist/p07/0.1.0/overlay/"
+          mkdir -p "$dst/packages/p07-system-care/0.1.0-rc65"
+          cp -a "$src/packages/p07-system-care/0.1.0-rc65/." "$dst/packages/p07-system-care/0.1.0-rc65/"
+          cp "$src/installers/p07.sh" "$src/installers/p07-final.sh" "$src/installers/p07-toolbox.sh" "$src/installers/p07-system-care.sh" "$dst/installers/"
+          git -C "$dst" config user.name 'VictorForge'
+          git -C "$dst" config user.email 'llhzx2018@gmail.com'
+          git -C "$dst" add -- dist/p07/0.1.0/overlay packages/p07-system-care/0.1.0-rc65 installers/p07.sh installers/p07-final.sh installers/p07-toolbox.sh installers/p07-system-care.sh
+          git -C "$dst" diff --cached --check
+          git -C "$dst" diff --cached --quiet && { echo P07_STAGING_EMPTY; exit 1; }
+          git -C "$dst" commit -m 'release(P07): stage verified release96 and System Care rc65 distribution'
+          git -C "$dst" push --set-upstream origin release/p07-release96-package-20261028
+          echo P07_RELEASE94_REVIEW_BRANCH_READY
+          git -C "$dst" rev-parse HEAD
+          git -C "$dst" hash-object installers/p07.sh installers/p07-final.sh installers/p07-toolbox.sh installers/p07-system-care.sh
+          git -C "$dst" hash-object dist/p07/0.1.0/overlay/RUNTIME.gitblob dist/p07/0.1.0/overlay/MANIFEST.gitblob
+          git -C "$dst" hash-object packages/p07-system-care/0.1.0-rc65/MANIFEST.gitblob
+
+      - name: Purge private checkout and staging
+        if: always()
+        run: |
+          rm -rf -- transient-p07-private transient-p07-public-base transient-p07-release-publish "$RUNNER_TEMP/p07-release96-candidate"
+          echo P07_PRIVATE_RUNTIME_CLEANUP_DONE
