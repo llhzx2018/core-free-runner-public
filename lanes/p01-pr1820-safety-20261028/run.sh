@@ -21,7 +21,7 @@ gate() {
     gate_names+=("$name"); gate_states+=("FAIL")
     failed=$((failed+1))
     echo "GATE $name FAIL exit=$code"
-    grep -E '^(P01_|PASS |FAIL |CANONICAL_|MISSING_|CURRENT_|BASELINE_|REGRESSION_)' "$output" | tail -n 30 || true
+    grep -E '^(P01_|PASS |FAIL |CANONICAL_|NEW_UNIT_REGRESSION=|CHANGED_TEST_FAILURE=|MISSING_|CURRENT_|BASELINE_|REGRESSION_)' "$output" | tail -n 30 || true
   fi
 }
 echo "PROOF_BOUNDARY=EXACT_SOURCE_SYNTHETIC_ONLY"
@@ -66,5 +66,8 @@ with open(sys.argv[1],"w",encoding="utf-8") as f: json.dump(value,f,sort_keys=Tr
 print("P01_GATES_EVALUATED="+str(len(names)))
 print("P01_GATE_FAILURE_COUNT="+str(value["failed_gates"]))
 PY
-test "$failed" -eq 0
+if [ "$failed" -ne 0 ]; then
+  echo "P01_ISOLATED_SAFETY_PROOF=FAIL_REQUIRES_TRIAGE"
+  exit 1
+fi
 echo "P01_ISOLATED_SAFETY_PROOF=PASS_FOCUSED_WITH_LIMITATIONS"
