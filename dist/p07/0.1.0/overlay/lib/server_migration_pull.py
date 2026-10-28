@@ -1239,6 +1239,14 @@ def compare_database_dumps(source_dump: Path, target_dump: Path) -> str:
         after, after_count = verify_engine.sql_fingerprint(target_dump)
         if before == after and before_count == after_count:
             return "CANONICAL_SQL_EXACT"
+        # MariaDB/MySQL may emit the same executed SET directive behind
+        # different old-version guards. Before invoking conservative schema
+        # parsing, accept only a strict complete-SQL digest where every
+        # conditional DDL byte, row literal, and delimiter remains covered.
+        guarded_before, guarded_before_count = verify_engine.sql_guarded_session_fingerprint(source_dump)
+        guarded_after, guarded_after_count = verify_engine.sql_guarded_session_fingerprint(target_dump)
+        if guarded_before == guarded_after and guarded_before_count == guarded_after_count:
+            return "CROSS_ENGINE_GUARDED_SESSION_SQL_EXACT"
         if (
             verify_engine.sql_structure_fingerprint(source_dump)
             == verify_engine.sql_structure_fingerprint(target_dump)
