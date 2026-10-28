@@ -111,7 +111,7 @@ GUARD_VARIABLES = (
 def table_default_charset(create: str) -> str | None:
     # Match only table options after the *last* table-level closing bracket.
     # Ambiguity yields UNKNOWN rather than a guessed equivalence.
-    pos = re.search(r"\)\s+ENGINE\s*=", create, re.I)
+    pos = re.search(r"\)\s*ENGINE\s*=", create, re.I)
     if not pos:
         return None
     options = create[pos.start():]
