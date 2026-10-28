@@ -1,4 +1,4 @@
-name: p01-ia5-unified-r7-current-main-v247476-preflight
+name: p01-ia5-unified-r8-backup-policy-v247476-preflight
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: p01-ia5-unified-r7-b6bbe06
+  group: p01-ia5-unified-r8-6630350
   cancel-in-progress: false
 
 jobs:
@@ -25,7 +25,7 @@ jobs:
       PRODUCT_REPO: llhzx2018/vf-start
       VERSION: 2.47.476
       SOURCE: 2.47.475
-      TARGET_SHA: b6bbe06a931104e660ae36fe8679d80c6bb49271
+      TARGET_SHA: 66303508b67d40dc7f35519ff535ada5b8b90a7c
       TAG: v2.47.476
       BASE_TAG: v2.47.475
       ART: /tmp/p01-ia5-candidate-artifacts
@@ -191,6 +191,7 @@ jobs:
              node tests/unit/p01_ia5_management_tabs_r4_contract.cjs
              node tests/unit/p01_ia5_global_diagnostics_r5_contract.cjs
              node tests/unit/p01_ia5_global_backup_r6_contract.cjs
+             node tests/unit/p01_ia5_global_backup_policy_r7_contract.cjs
           )
           echo P01_IA5_FOCUSED_SOURCE_CONTRACTS=PASS
 
@@ -555,6 +556,50 @@ jobs:
                       await page.unroute('**/api.php?action=backup_create');
                       assert.equal(page.url(),beforeUrl,'backup dialog does not navigate');
                       console.log('P01_IA5_GLOBAL_R6_BACKUP_CONFIRM_DOUBLECLICK_UNKNOWN=PASS');
+                      // Explicit guarded policy editor: no read until click; dirty blocks switching and persists on error.
+                      const policyRoot=globalHub.locator('[data-vf-global-group-panel="data"] [data-vf-global-policy-root]');
+                      await policyRoot.locator('summary').click();
+                      const priorPolicy=(await (await context.request.get(origin+'/api.php?action=backup_policy')).json()).policy;
+                      assert.ok(priorPolicy&&Number.isInteger(priorPolicy.interval_hours));
+                      assert.match(await policyRoot.locator('[data-vf-global-policy-state]').textContent(),/尚未读取/);
+                      await policyRoot.locator('[data-vf-global-policy-load]').click();
+                      await page.waitForFunction(()=>!!document.querySelector('[data-vf-global-policy-editor]')&&!document.querySelector('[data-vf-global-policy-editor]').hidden,null,{timeout:12000});
+                      const intervalInput=policyRoot.locator('[data-vf-global-policy-interval]');
+                      const newHours=priorPolicy.interval_hours===720?719:priorPolicy.interval_hours+1;
+                      await intervalInput.fill(String(newHours));
+                      assert.match(await policyRoot.locator('[data-vf-global-policy-state]').textContent(),/有未保存修改/);
+                      await globalHub.locator('[data-vf-global-group="settings"]').click();
+                      assert.equal(await globalHub.locator('[data-vf-global-group-panel="data"]').isVisible(),true,'dirty policy blocks task switch');
+                      assert.equal(await policyRoot.locator('[data-vf-global-policy-discard]').isVisible(),true);
+                      await policyRoot.locator('[data-vf-global-policy-discard-cancel]').click();
+                      await policyRoot.locator('[data-vf-global-policy-save]').click();
+                      assert.equal(await policyRoot.locator('[data-vf-global-policy-confirmation]').isVisible(),true);
+                      await policyRoot.locator('[data-vf-global-policy-cancel]').click();
+                      assert.match(await policyRoot.locator('[data-vf-global-policy-state]').textContent(),/有未保存修改/);
+                      await policyRoot.locator('[data-vf-global-policy-save]').click();
+                      let policyPosts=0;
+                      await page.route('**/api.php?action=backup_policy_save',async route=>{policyPosts++;await route.continue();});
+                      await policyRoot.locator('[data-vf-global-policy-commit]').evaluate(button=>{button.click();button.click();});
+                      await page.waitForFunction(()=>document.querySelector('[data-vf-global-policy-state]')?.textContent?.includes('已保存'),null,{timeout:20000});
+                      assert.equal(policyPosts,1,'policy double submission forbidden');
+                      assert.equal((await (await context.request.get(origin+'/api.php?action=backup_policy')).json()).policy.interval_hours,newHours);
+                      await page.unroute('**/api.php?action=backup_policy_save');
+                      const nextHours=newHours===720?719:newHours+1;
+                      await intervalInput.fill(String(nextHours));
+                      await policyRoot.locator('[data-vf-global-policy-save]').click();
+                      await page.route('**/api.php?action=backup_policy_save',route=>route.abort('failed'));
+                      await policyRoot.locator('[data-vf-global-policy-commit]').click();
+                      await page.waitForFunction(()=>document.querySelector('[data-vf-global-policy-state]')?.textContent?.includes('保存失败'),null,{timeout:12000});
+                      assert.equal(await intervalInput.inputValue(),String(nextHours),'failed save retains entered value');
+                      await page.unroute('**/api.php?action=backup_policy_save');
+                      await globalHub.locator('[data-vf-global-group="settings"]').click();
+                      assert.equal(await globalHub.locator('[data-vf-global-group-panel="data"]').isVisible(),true);
+                      await policyRoot.locator('[data-vf-global-policy-discard-confirm]').click();
+                      await globalHub.locator('[data-vf-global-group="settings"]').click();
+                      assert.equal(await globalHub.locator('[data-vf-global-group-panel="settings"]').isVisible(),true);
+                      assert.equal(page.url(),beforeUrl,'policy edits stay on current page');
+                      console.log('P01_IA5_GLOBAL_R7_POLICY_DIRTY_SAVE_FAILURE=PASS');
+
 
                     }
                     console.log('P01_IA5_GLOBAL_R2_READ_'+width+'=PASS');
@@ -640,6 +685,8 @@ jobs:
               }
               const platformDenied=await guest.request.get(origin+'/platform-api.php?action=status');
               assert.equal(platformDenied.status(),401,'Guest denied plugin runtime');
+              const policyGuest=await guest.request.post(origin+'/api.php?action=backup_policy_save',{data:{enabled:true,interval_hours:5}});
+              assert.equal(policyGuest.status(),401,'Guest denied backup policy mutation');
               const guestBootstrap=await guest.request.get(origin+'/api.php?action=bootstrap');
               assert.equal(guestBootstrap.status(),200);
               const projection=await guestBootstrap.json();
@@ -721,11 +768,11 @@ jobs:
           echo NO_TAG_NO_RELEASE_NO_DISTRIBUTION_NO_PRODUCTION=YES
           for value in "$FOCUS_RESULT" "$ARTIFACT_RESULT" "$INSTALL_RESULT" "$BROWSER_RESULT" "$SECURITY_RESULT" "$RESTORE_RESULT"; do
             if [ "$value" != success ]; then
-              echo P01_IA5_SCOPED_R7_GATE=FAIL_OR_INCOMPLETE
+              echo P01_IA5_SCOPED_R8_GATE=FAIL_OR_INCOMPLETE
               exit 82
             fi
           done
-          echo P01_IA5_SCOPED_R7_GATE=PASS
+          echo P01_IA5_SCOPED_R8_GATE=PASS
           if [ "$CANONICAL_RESULT" != success ]; then
             if [ "$ATTRIBUTION_RESULT" != success ]; then
               echo P01_FULL_CANONICAL_GATE=UNCLASSIFIED_FAIL
