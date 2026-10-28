@@ -95,6 +95,81 @@ def parse_dump(path: Path) -> tuple[dict[str, str], dict[str, str], Counter]:
     return tables, drops, guards
 
 
+
+# This second-stage forensic report only adds fixed-vocabulary shape counters.
+# It does not print database identifiers, charset names, literals or SQL.
+SAFE_TYPES = {"CHAR", "VARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "ENUM", "SET", "DECIMAL", "FLOAT", "DOUBLE", "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT"}
+STRING_TYPES = {"CHAR", "VARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT", "ENUM", "SET"}
+NUMERIC_TYPES = {"DECIMAL", "FLOAT", "DOUBLE", "TINYINT", "SMALLINT", "MEDIUMINT", "INT", "INTEGER", "BIGINT"}
+GUARD_VARIABLES = (
+    "CHARACTER_SET_CLIENT", "CHARACTER_SET_RESULTS", "COLLATION_CONNECTION",
+    "TIME_ZONE", "SQL_NOTES", "NOTE_VERBOSITY", "UNIQUE_CHECKS",
+    "FOREIGN_KEY_CHECKS", "SQL_MODE", "AUTOCOMMIT", "NAMES",
+)
+
+
+def table_default_charset(create: str) -> str | None:
+    # Match only table options after the *last* table-level closing bracket.
+    # Ambiguity yields UNKNOWN rather than a guessed equivalence.
+    pos = re.search(r"\)\s+ENGINE\s*=", create, re.I)
+    if not pos:
+        return None
+    options = create[pos.start():]
+    match = re.search(
+        r"\b(?:DEFAULT\s+)?(?:CHARSET|CHARACTER\s+SET)\s*=?\s*([A-Za-z0-9_]+)\b",
+        options, re.I,
+    )
+    return match.group(1).lower() if match else None
+
+
+def nearest_column_type(tokens: list[str], index: int) -> str:
+    # Never expose the actual column identifier.
+    for item in range(index - 1, max(-1, index - 100), -1):
+        if tokens[item].startswith("\x60"):
+            next_index = item + 1
+            if next_index < index:
+                kind = tokens[next_index].upper()
+                return kind if kind in SAFE_TYPES else "OTHER"
+            return "OTHER"
+    return "OTHER"
+
+
+def guard_shapes(path: Path) -> tuple[Counter, Counter]:
+    unknown_sets, others = Counter(), Counter()
+    with gzip.open(path, "rt", encoding="utf-8", errors="strict") as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line.startswith(("/*!", "/*M!")):
+                continue
+            matched = re.fullmatch(
+                r"/\*(?:!|M!)[0-9]{5,6}\s+(.+?)\s*\*/;?", line, re.I
+            )
+            if not matched:
+                others["UNPARSED"] += 1
+                continue
+            body = matched.group(1).strip()
+            verb = re.match(r"([A-Za-z]+)", body)
+            verb = verb.group(1).upper() if verb else "OTHER"
+            if verb == "SET":
+                if verify._cross_engine_known_session(line):
+                    continue
+                family = "OTHER"
+                for key in GUARD_VARIABLES:
+                    if re.search(r"(?<![A-Za-z0-9_])" + key + r"(?![A-Za-z0-9_])", body, re.I):
+                        family = key
+                        break
+                unknown_sets[family] += 1
+            elif verb not in {"ALTER", "CREATE", "DROP", "RENAME", "TRUNCATE"}:
+                others[verb if verb in SAFE_GUARD_VERBS else "OTHER"] += 1
+    return unknown_sets, others
+
+
+def print_bounded(name: str, values: Counter) -> None:
+    print(name + "=" + (" ".join(
+        f"{key}:{values[key]}" for key in sorted(values)
+        if re.fullmatch(r"[A-Z_]{1,40}", key)
+    ) or "NONE"))
+
 def summary(a: Path, b: Path) -> None:
     src, sd, sg = parse_dump(a)
     dst, td, tg = parse_dump(b)
@@ -107,8 +182,18 @@ def summary(a: Path, b: Path) -> None:
     print("GUARD_COUNTS_SOURCE=" + " ".join(f"{k}:{v}" for k, v in sorted(sg.items())))
     print("GUARD_COUNTS_TARGET=" + " ".join(f"{k}:{v}" for k, v in sorted(tg.items())))
     patterns: Counter = Counter()
+    charset_status: Counter = Counter()
+    charset_types: Counter = Counter()
+    default_status: Counter = Counter()
+    footer_status: Counter = Counter()
     mismatched = 0
     for name in common:
+        src_charset = table_default_charset(src[name])
+        dst_charset = table_default_charset(dst[name])
+        if src_charset and dst_charset:
+            footer_status["EQUAL" if src_charset == dst_charset else "DIFFER"] += 1
+        else:
+            footer_status["UNPROVEN"] += 1
         if src[name] == dst[name]:
             continue
         mismatched += 1
@@ -122,6 +207,33 @@ def summary(a: Path, b: Path) -> None:
         ).get_opcodes():
             if op == "equal":
                 continue
+            lhs_tokens = left[i0:i1]
+            rhs_tokens = right[j0:j1]
+            if (op == "delete" and len(lhs_tokens) == 3
+                    and lhs_tokens[0].upper() == "CHARACTER"
+                    and lhs_tokens[1].upper() == "SET"
+                    and re.fullmatch(r"[A-Za-z0-9_]+", lhs_tokens[2])):
+                kind = nearest_column_type(left, i0)
+                charset_types[kind] += 1
+                if (src_charset and dst_charset
+                        and src_charset == dst_charset == lhs_tokens[2].lower()
+                        and kind in STRING_TYPES):
+                    charset_status["EFFECTIVE_DEFAULT_EQUAL"] += 1
+                elif src_charset and dst_charset and src_charset != dst_charset:
+                    charset_status["TABLE_DEFAULT_DIFFER"] += 1
+                elif src_charset and dst_charset and lhs_tokens[2].lower() != src_charset:
+                    charset_status["EXPLICIT_NONDEFAULT"] += 1
+                else:
+                    charset_status["UNPROVEN"] += 1
+            if op == "replace" and len(lhs_tokens) == 1 and lhs_tokens[0].startswith("'"):
+                literal = lhs_tokens[0][1:-1]
+                rhs = "".join(rhs_tokens)
+                kind = nearest_column_type(left, i0)
+                if (kind in NUMERIC_TYPES and literal == rhs
+                        and re.fullmatch(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?", literal)):
+                    default_status["NUMERIC_EXACT"] += 1
+                else:
+                    default_status["UNPROVEN"] += 1
             context = category(left[i0 - 1]) if i0 else "START"
             lhs = "+".join(category(v) for v in left[i0:min(i1, i0 + 3)]) or "EMPTY"
             rhs = "+".join(category(v) for v in right[j0:min(j1, j0 + 3)]) or "EMPTY"
@@ -129,6 +241,16 @@ def summary(a: Path, b: Path) -> None:
     print(f"CREATE_TABLE_MISMATCHES={mismatched}:{len(common)}")
     for i, (pattern, count) in enumerate(patterns.most_common(16), 1):
         print(f"DIFF_{i}=" + ":".join(pattern) + f":{count}")
+    print_bounded("TABLE_DEFAULT_CHARSET", footer_status)
+    print_bounded("EXPLICIT_CHARSET_STATUS", charset_status)
+    print_bounded("EXPLICIT_CHARSET_TYPES", charset_types)
+    print_bounded("NUMERIC_DEFAULT_STATUS", default_status)
+    source_unknown, source_other = guard_shapes(a)
+    target_unknown, target_other = guard_shapes(b)
+    print_bounded("GUARD_UNKNOWN_SET_SOURCE", source_unknown)
+    print_bounded("GUARD_UNKNOWN_SET_TARGET", target_unknown)
+    print_bounded("GUARD_OTHER_SOURCE", source_other)
+    print_bounded("GUARD_OTHER_TARGET", target_other)
     print("PROBE_REDACTED=YES")
     print("PROBE_IS_VERIFICATION_PASS=NO")
 
