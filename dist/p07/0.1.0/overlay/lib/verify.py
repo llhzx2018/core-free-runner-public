@@ -141,6 +141,81 @@ def sql_guarded_session_fingerprint(path: Path) -> tuple[str, int]:
     return digest.hexdigest(), statements
 
 
+
+# The diagnostic below is only a reason-code aid. It never grants a SQL parity
+# PASS: its bounded-memory per-line categories are not a SQL semantic parser.
+_SQL_DIFF_CLASSES = (
+    "conditional_ddl", "guarded_set", "guarded_other",
+    "ddl_head", "row_head", "delimiter", "continuation",
+)
+_SQL_DIFF_DDL_RE = re.compile(
+    r"\b(?:CREATE|ALTER|DROP|RENAME|TRUNCATE|TRIGGER|INDEX|EVENT|PROCEDURE|FUNCTION|VIEW)\b",
+    re.IGNORECASE,
+)
+_SQL_DIFF_HEAD_DDL_RE = re.compile(
+    r"^(?:CREATE|ALTER|DROP|RENAME|TRUNCATE)\s+", re.IGNORECASE,
+)
+_SQL_DIFF_HEAD_ROW_RE = re.compile(
+    r"^(?:INSERT|REPLACE|UPDATE|DELETE|LOAD|COPY)\s+", re.IGNORECASE,
+)
+
+
+def _sql_line_diff_profile(path: Path) -> dict[str, tuple[int, int, int]]:
+    """Aggregate line hashes without retaining SQL or large row-value buffers."""
+    mask = (1 << 128) - 1
+    counters = {key: [0, 0, 0] for key in _SQL_DIFF_CLASSES}
+    opener = gzip.open if path.name.endswith(".gz") else open
+    try:
+        with opener(path, "rt", encoding="utf-8", errors="strict") as handle:
+            for raw in handle:
+                line = raw.strip()
+                if not line or line.startswith(("--", "#")):
+                    continue
+                guarded_set = _GUARDED_SESSION_SET_RE.fullmatch(line)
+                if guarded_set:
+                    cls = "guarded_set"
+                    version = int(guarded_set.group("version"))
+                    flavor = guarded_set.group("flavor").upper()
+                    if ((flavor == "!" and 40000 <= version <= 50699)
+                            or (flavor == "M!" and 100000 <= version <= 110899)):
+                        line = "GUARDED_SESSION_SET " + guarded_set.group("statement")
+                elif line.startswith(("/*!", "/*M!")):
+                    cls = ("conditional_ddl" if _SQL_DIFF_DDL_RE.search(line)
+                           else "guarded_other")
+                elif line.upper().startswith("DELIMITER "):
+                    cls = "delimiter"
+                elif _SQL_DIFF_HEAD_DDL_RE.match(line):
+                    cls = "ddl_head"
+                elif _SQL_DIFF_HEAD_ROW_RE.match(line):
+                    cls = "row_head"
+                else:
+                    cls = "continuation"
+                # The digest never leaves this process. The diagnostic emits
+                # only equality flags and bounded integer counts, no SQL,
+                # table names, literal values, or paths.
+                value = int.from_bytes(
+                    hashlib.blake2b(line.encode("utf-8"), digest_size=16).digest(), "big"
+                )
+                counters[cls][0] += 1
+                counters[cls][1] = (counters[cls][1] + value) & mask
+                counters[cls][2] ^= value
+    except (OSError, EOFError, UnicodeError) as exc:
+        raise RestoreVerifyError("SQL comparison diagnostic is unavailable") from exc
+    return {key: tuple(values) for key, values in counters.items()}
+
+
+def sql_comparison_diagnostic(source: Path, target: Path) -> str:
+    """Private-dump comparison summary; informative only, never a success gate."""
+    before = _sql_line_diff_profile(source)
+    after = _sql_line_diff_profile(target)
+    parts = []
+    for key in _SQL_DIFF_CLASSES:
+        lhs, rhs = before[key], after[key]
+        result = "EQUAL" if lhs == rhs else "DIFFER"
+        parts.append(f"{key}={result}({lhs[0]}:{rhs[0]})")
+    return "SQL_DIFF_V1 " + " ".join(parts)
+
+
 _CREATE_OBJECT_RE = re.compile(
     r"^CREATE\s+(?:TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?`?([A-Za-z0-9_.$-]+)`?",
     re.IGNORECASE,

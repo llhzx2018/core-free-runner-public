@@ -1281,7 +1281,14 @@ def compare_database_dumps(source_dump: Path, target_dump: Path) -> str:
             reason = "SQL_CONTENT_UNREADABLE"
         elif detail.startswith("SQL dump has no comparable logical content"):
             reason = "NO_COMPARABLE_LOGICAL_CONTENT"
-        raise PullMigrationError(f"MySQL verification failed [{reason}]") from exc
+        diagnostic = ""
+        if reason == "CONDITIONAL_DDL":
+            # Diagnostics must not change the fail-closed decision or echo SQL.
+            try:
+                diagnostic = " [" + verify_engine.sql_comparison_diagnostic(source_dump, target_dump) + "]"
+            except verify_engine.RestoreVerifyError:
+                diagnostic = " [SQL_DIFF_V1_UNAVAILABLE]"
+        raise PullMigrationError(f"MySQL verification failed [{reason}]{diagnostic}") from exc
     raise PullMigrationError("MySQL logical-content verification failed [SCHEMA_OR_DATA_MISMATCH]")
 
 
