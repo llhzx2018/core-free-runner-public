@@ -145,6 +145,68 @@ def nearest_column_type(tokens: list[str], index: int) -> str:
     return "OTHER"
 
 
+# Redacted, bounded SQL grammar tokens for source-only vendor-guard analysis.
+# All user-defined identifiers, numeric values and string literals are hidden.
+FIXED_GRAMMAR = {
+    "SET", "USE", "CREATE", "ALTER", "DROP", "TRIGGER", "VIEW",
+    "PROCEDURE", "FUNCTION", "EVENT", "INVISIBLE", "VISIBLE",
+    "DEFINER", "SQL", "MODE", "SQL_MODE", "SQL_NOTES", "TIME_ZONE",
+    "SQL_LOG_BIN", "SQL_SECURITY", "CHARACTER_SET_CLIENT",
+    "CHARACTER_SET_RESULTS", "COLLATION_CONNECTION",
+    "NAMES", "LOCK", "UNLOCK", "TABLES", "KEY", "KEYS", "ENABLE",
+    "DISABLE", "CHECK", "CONSTRAINT", "INDEX", "ALGORITHM",
+    "UNIQUE_CHECKS", "FOREIGN_KEY_CHECKS", "AUTOCOMMIT", "SESSION",
+    "GLOBAL", "LOCAL", "DEFAULT", "CHARSET", "COLLATE",
+    "SQL_NO_CACHE", "SQL_SAFE_UPDATES", "GTID_NEXT", "GTID_PURGED",
+}
+
+
+def guarded_grammar(path: Path) -> tuple[Counter, Counter]:
+    unknown_set = Counter()
+    other = Counter()
+    with gzip.open(path, "rt", encoding="utf-8", errors="strict") as handle:
+        for raw in handle:
+            line = raw.strip()
+            if not line.startswith(("/*!", "/*M!")):
+                continue
+            match = re.fullmatch(r"/\*(?:!|M!)[0-9]{5,6}\s+(.+?)\s*\*/;?", line, re.I)
+            if not match:
+                continue
+            body = match.group(1).strip()
+            tokens = TOKEN.findall(body)
+            first = tokens[0].upper() if tokens else ""
+            if first in {"ALTER", "CREATE", "DROP", "RENAME", "TRUNCATE"}:
+                continue
+            if first == "SET" and verify._cross_engine_known_session(line):
+                continue
+            classified: list[str] = []
+            for token in tokens[:20]:
+                if token.startswith("\x60"):
+                    item = "IDENT"
+                elif token.startswith(("'", '"')):
+                    item = "LITERAL"
+                elif token.isdecimal():
+                    item = "NUMBER"
+                elif token.upper() in FIXED_GRAMMAR:
+                    item = token.upper()
+                elif token in {"@", "=", ",", ".", "(", ")"}:
+                    item = token
+                else:
+                    item = "WORD" if token[:1].isalpha() or token[:1] == "_" else "PUNCT"
+                classified.append(item)
+            profile = "+".join(classified)[:160] if classified else "EMPTY"
+            profile += "+MORE" if len(tokens) > 20 else ""
+            (unknown_set if first == "SET" else other)[profile] += 1
+    return unknown_set, other
+
+
+def print_grammars(prefix: str, data: Counter) -> None:
+    for number, (shape, count) in enumerate(data.most_common(12), 1):
+        # Only ASCII fixed grammar categories ever reach this output.
+        assert re.fullmatch(r"[A-Z0-9_@=,.()+-]{1,170}", shape)
+        print(f"{prefix}_{number}={count}:{shape}")
+
+
 def guard_shapes(path: Path) -> tuple[Counter, Counter]:
     unknown_sets, others = Counter(), Counter()
     with gzip.open(path, "rt", encoding="utf-8", errors="strict") as handle:
@@ -274,6 +336,12 @@ def summary(a: Path, b: Path) -> None:
     print_bounded("GUARD_UNKNOWN_SET_TARGET", target_unknown)
     print_bounded("GUARD_OTHER_SOURCE", source_other)
     print_bounded("GUARD_OTHER_TARGET", target_other)
+    source_unknown_g, source_other_g = guarded_grammar(a)
+    target_unknown_g, target_other_g = guarded_grammar(b)
+    print_grammars("UNKNOWN_SET_GRAMMAR_SOURCE", source_unknown_g)
+    print_grammars("UNKNOWN_SET_GRAMMAR_TARGET", target_unknown_g)
+    print_grammars("OTHER_GUARD_GRAMMAR_SOURCE", source_other_g)
+    print_grammars("OTHER_GUARD_GRAMMAR_TARGET", target_other_g)
     print("PROBE_REDACTED=YES")
     print("PROBE_IS_VERIFICATION_PASS=NO")
 
