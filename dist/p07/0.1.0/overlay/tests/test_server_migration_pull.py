@@ -76,6 +76,41 @@ class TargetPullContractTests(unittest.TestCase):
             with self.assertRaisesRegex(pull.PullMigrationError, "logical-content verification failed"):
                 pull.compare_database_dumps(source, target)
 
+    def test_conditional_ddl_block_reports_fixed_nonsecret_reason(self) -> None:
+        import gzip
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "source.sql.gz"
+            target = Path(td) / "target.sql.gz"
+            with gzip.open(source, "wt", encoding="utf-8") as f:
+                f.write(
+                    "CREATE TABLE t (id int);\n"
+                    "/*!50003 CREATE TRIGGER audit BEFORE INSERT ON t FOR EACH ROW SET @x=1 */;\n"
+                    "INSERT INTO t VALUES (1);\n"
+                )
+            with gzip.open(target, "wt", encoding="utf-8") as f:
+                f.write(
+                    "/*!40101 SET NAMES utf8mb4 */;\n"
+                    "CREATE TABLE t (id int);\n"
+                    "INSERT INTO t VALUES (1);\n"
+                )
+            with self.assertRaisesRegex(
+                pull.PullMigrationError, r"MySQL verification failed \[CONDITIONAL_DDL\]"
+            ):
+                pull.compare_database_dumps(source, target)
+
+    def test_unreadable_sql_dump_reports_fixed_nonsecret_reason(self) -> None:
+        import gzip
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "source.sql.gz"
+            target = Path(td) / "target.sql.gz"
+            source.write_bytes(b"not gzip SQL, deliberately broken")
+            with gzip.open(target, "wt", encoding="utf-8") as f:
+                f.write("CREATE TABLE t (id int);\n")
+            with self.assertRaisesRegex(
+                pull.PullMigrationError, r"MySQL verification failed \[SQL_DUMP_UNREADABLE\]"
+            ):
+                pull.compare_database_dumps(source, target)
+
     def test_progress_note_is_opt_in_and_secret_free_channel(self) -> None:
         import io
         from contextlib import redirect_stderr
