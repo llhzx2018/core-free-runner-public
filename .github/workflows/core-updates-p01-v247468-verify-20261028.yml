@@ -1,0 +1,71 @@
+name: P01 V247468 one-time independent update channel verification
+on:
+  push:
+    branches: [task/core-updates-p01-v247468-verify-20261028]
+    paths: ['.github/workflows/core-updates-p01-v247468-verify-20261028.yml']
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/core-updates-p01-v247468-verify-20261028.yml']
+permissions:
+  contents: read
+env:
+  CHANNEL_SHA: b1f7071f269b5aab07b8ed7b537a43034559328e
+  RELEASE_SHA: c35b01552622e289a986dd563170a12dc1ab0dfc
+  RELEASE_ID: "426163461"
+  TARGET_VERSION: "2.47.468"
+  TARGET_ASSET_SHA: 2fc95c2087afb39cdb33e52f586330c8961de91c47f2dae878c75ed35f15fd15
+  TARGET_ASSET_BYTES: "3148922"
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Transient exact-channel checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-updates
+          ref: b1f7071f269b5aab07b8ed7b537a43034559328e
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: channel
+      - name: Verify release metadata and channel source
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C channel rev-parse HEAD)" = "$CHANNEL_SHA"
+          python3 channel/scripts/check_manifest_contract.py
+          jq -e --arg sha "$RELEASE_SHA" --argjson rel "$RELEASE_ID" --arg ver "$TARGET_VERSION" --arg hash "$TARGET_ASSET_SHA" --arg bytes "$TARGET_ASSET_BYTES" \
+            '.project_id=="P01" and .target_version==$ver and .current_version=="2.47.467" and .update_type=="ATOMIC" and .product_identity==$sha and .release_id==$rel and .schema_from==.schema_to and .backup_required==true and .rollback_supported==true and .asset_sha256==$hash and .asset_bytes==($bytes|tonumber) and .schema_from=="2026102201" and (.from_versions==["2.47.467"])' channel/projects/P01.json >/dev/null
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.47.468 > /tmp/p01-release.json
+          jq -e --arg sha "$RELEASE_SHA" --argjson rel "$RELEASE_ID" '.id==$rel and .tag_name=="v2.47.468" and .draft==false and .prerelease==false' /tmp/p01-release.json >/dev/null
+          gh api repos/llhzx2018/vf-start/git/ref/tags/v2.47.468 --jq '.object.sha' | grep -Fx "$RELEASE_SHA"
+          jq -e --arg name "VF_Start_V2.47.468_UPDATE.zip" --argjson bytes "$TARGET_ASSET_BYTES" --arg digest "sha256:$TARGET_ASSET_SHA" '.assets[] | select(.name==$name and .size==$bytes and .digest==$digest)' /tmp/p01-release.json >/dev/null
+          echo P01_CHANNEL_EXACT_RELEASE_IDENTITY=PASS
+      - name: Run canonical update contract and PHP regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd channel
+          find update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php update-core/php/tests/run.php
+          echo P01_CHANNEL_PHP_AND_MANIFEST=PASS
+      - name: Public metadata receipt
+        if: success()
+        shell: bash
+        run: |
+          mkdir -p proof
+          printf '{"scope":"exact P01 channel, release digest, manifest/php","result":"PASS_INDEPENDENT","channel_sha":"%s","product_sha":"%s","run_id":"%s"}\n' "$CHANNEL_SHA" "$RELEASE_SHA" "$GITHUB_RUN_ID" > proof/metadata.json
+      - name: Publish metadata only
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-v247468-channel-${{ github.run_id }}
+          path: proof/metadata.json
+          retention-days: 14
+      - name: Remove transient private channel checkout
+        if: always()
+        shell: bash
+        run: rm -rf -- channel
