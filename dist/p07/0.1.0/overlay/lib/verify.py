@@ -284,8 +284,8 @@ def _cross_engine_known_session(sql: str) -> bool:
         return False
     version = int(guard.group("version"))
     flavor = guard.group("flavor").upper()
-    if not ((flavor == "!" and 40000 <= version <= 50699)
-            or (flavor == "M!" and 100000 <= version <= 110899)):
+    if not ((flavor == "!" and 40000 <= version <= 89999)
+            or (flavor == "M!" and 100000 <= version <= 119999)):
         return False
     statement = re.sub(r"\s+", " ", guard.group("statement").strip())
     return any(pattern.fullmatch(statement) for pattern in _CROSS_ENGINE_SESSION_RE)
@@ -321,22 +321,55 @@ def _cross_engine_schema(sql: str) -> str:
         r"(\x60[A-Za-z0-9_]+\x60\s+(?:TINYTEXT|TEXT|MEDIUMTEXT|LONGTEXT))"
         r"\s+DEFAULT NULL(?=\s*[,)])", r"\1", sql, flags=re.I,
     )
-    # MariaDB reports this legacy display width; neither side uses ZEROFILL.
-    def strip_display_width(match: re.Match[str]) -> str:
-        column = match.group(0)
-        if re.search(r"\bZEROFILL\b", column, re.I):
-            return column
-        return re.sub(r"\bBIGINT\(20\)(?=\s|[,)]|$)", "bigint", column, flags=re.I)
-
-    sql = re.sub(
-        r"\x60[A-Za-z0-9_]+\x60\s+BIGINT\(20\)[^,)]*(?=,|\))",
-        strip_display_width, sql, flags=re.I,
+    # MySQL 8.4 omits integer display widths in SHOW CREATE while MariaDB
+    # 11.8 reports *default* legacy widths. These are presentation metadata,
+    # never column capacity. Only default widths are accepted; an explicit
+    # non-default width or ZEROFILL stays byte-significant.
+    default_integer_widths = {
+        "tinyint": (4, 3),
+        "smallint": (6, 5),
+        "mediumint": (9, 8),
+        "int": (11, 10),
+        "integer": (11, 10),
+        "bigint": (20, 20),
+    }
+    column_with_width = re.compile(
+        r"(?P<prefix>\x60[A-Za-z0-9_]+\x60\s+)"
+        r"(?P<type>TINYINT|SMALLINT|MEDIUMINT|INT|INTEGER|BIGINT)"
+        r"\((?P<width>[0-9]{1,3})\)"
+        r"(?P<attrs>[^,)]*)(?=,|\))",
+        re.I,
     )
+
+    def drop_only_default_display_width(match: re.Match[str]) -> str:
+        attrs = match.group("attrs")
+        if re.search(r"\bZEROFILL\b", attrs, re.I):
+            return match.group(0)
+        signed, unsigned = default_integer_widths[match.group("type").lower()]
+        expected = unsigned if re.search(r"\bUNSIGNED\b", attrs, re.I) else signed
+        if int(match.group("width")) != expected:
+            return match.group(0)
+        return match.group("prefix") + match.group("type") + attrs
+
+    sql = column_with_width.sub(drop_only_default_display_width, sql)
     return sql
 
 
 
-_SQL_CANON_CLASSES = ("database", "schema", "data", "versioned", "other")
+_SQL_CANON_CLASSES = ("database", "schema", "data", "versioned", "guard_set", "guard_ddl", "guard_other", "other")
+
+
+def _sql_canon_guard_class(statement: str) -> str:
+    """Safe fixed-class grouping only; never reveal guard body or values."""
+    guard = re.match(r"^/\*(?:!|M!)[0-9]{5,6}\s+([^*]*?)\s*\*/;?$", statement, re.I | re.S)
+    if not guard:
+        return "guard_other"
+    body = guard.group(1).strip().upper()
+    if body.startswith("SET "):
+        return "guard_set"
+    if body.startswith(("ALTER ", "CREATE ", "DROP ", "RENAME ", "TRUNCATE ")):
+        return "guard_ddl"
+    return "guard_other"
 
 
 def _sql_canon_class(statement: str) -> str:
@@ -442,6 +475,11 @@ def sql_cross_engine_known_format_fingerprint(path: Path, *, profile: dict[str, 
                     entry[0] += 1
                     entry[1].update(encoded)
                     entry[1].update(b"\n")
+                    if group == "versioned":
+                        sub = profile.setdefault(_sql_canon_guard_class(statement), [0, hashlib.sha256()])
+                        sub[0] += 1
+                        sub[1].update(encoded)
+                        sub[1].update(b"\n")
                 statements += 1
     except (OSError, EOFError, UnicodeError) as exc:
         raise RestoreVerifyError("cross-engine SQL dump cannot be read") from exc
