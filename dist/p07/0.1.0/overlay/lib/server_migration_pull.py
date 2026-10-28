@@ -15,6 +15,7 @@ import shlex
 import shutil
 import sqlite3
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -749,6 +750,76 @@ def local_target_db_engine_version() -> str:
     return "UNKNOWN"
 
 
+def local_target_live_mariadb_process_version(
+    *,
+    proc_root: Path = Path("/proc"),
+    socket_path: Path = Path("/run/mysqld/mysqld.sock"),
+) -> str:
+    """Credential-free proof that the active MariaDB service owns the SQL socket.
+
+    CloudPanel creates a password-protected master account. A root socket
+    ERROR 1045 is expected there; it is not permission to skip engine checks.
+    Accept only the *running* systemd MainPID's executable version, and only
+    when that exact PID owns the responding local Unix socket inode.
+    """
+    systemctl = shutil.which("systemctl")
+    if systemctl is None:
+        return "UNKNOWN"
+    try:
+        state = subprocess.run(
+            [systemctl, "show", "mariadb.service",
+             "--property=ActiveState,MainPID", "--no-pager"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if state.returncode != 0:
+            return "UNKNOWN"
+        values = dict(
+            line.split("=", 1) for line in state.stdout.splitlines()
+            if "=" in line
+        )
+        if values.get("ActiveState") != "active":
+            return "UNKNOWN"
+        pid = int(values.get("MainPID", "0"))
+        if pid <= 1:
+            return "UNKNOWN"
+        proc_exe = proc_root / str(pid) / "exe"
+        target = os.readlink(proc_exe)
+        if target.endswith(" (deleted)") or Path(target).name not in ("mariadbd", "mysqld"):
+            return "UNKNOWN"
+        running = subprocess.run(
+            [str(proc_exe), "--version"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        output = (running.stdout + " " + running.stderr).lower()
+        if running.returncode != 0 or "mariadb" not in output:
+            return "UNKNOWN"
+        version = "MARIADB_OTHER"
+        for supported in ("10.11", "11.8"):
+            if re.search(rf"(?<![0-9]){re.escape(supported)}(?:[.][0-9]+)?(?![0-9])", output):
+                version = f"MARIADB_{supported}"
+                break
+        socket_real = socket_path.resolve(strict=True)
+        if not stat.S_ISSOCK(socket_real.stat().st_mode):
+            return "UNKNOWN"
+        inode = ""
+        for line in (proc_root / "net" / "unix").read_text(encoding="utf-8").splitlines()[1:]:
+            fields = line.split(None, 7)
+            if len(fields) == 8 and Path(fields[7]).resolve() == socket_real:
+                inode = fields[6]
+                break
+        if not inode:
+            return "UNKNOWN"
+        for fd in (proc_root / str(pid) / "fd").iterdir():
+            try:
+                if os.readlink(fd) == f"socket:[{inode}]":
+                    return version
+            except OSError:
+                continue
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return "UNKNOWN"
+    return "UNKNOWN"
+
+
 def local_target_active_db_engine_version() -> str:
     """Verify the *running* local SQL server through a credential-free root socket.
 
@@ -771,6 +842,16 @@ def local_target_active_db_engine_version() -> str:
     except (OSError, subprocess.TimeoutExpired):
         return "UNKNOWN"
     if p.returncode != 0:
+        # CloudPanel's master root is intentionally password-protected.
+        # Accept only the exact access-denied class plus an independently
+        # proven active MariaDB process owning this Unix socket.
+        if (
+            p.returncode == 1
+            and "ERROR 1045 (28000)" in p.stderr
+            and "Access denied for user 'root'@'localhost'" in p.stderr
+            and "(using password: NO)" in p.stderr
+        ):
+            return local_target_live_mariadb_process_version()
         return "UNKNOWN"
     fields = p.stdout.strip().split("\t")
     if len(fields) != 2:
