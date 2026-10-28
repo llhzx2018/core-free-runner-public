@@ -122,6 +122,17 @@ def table_default_charset(create: str) -> str | None:
     return match.group(1).lower() if match else None
 
 
+def table_default_collation(create: str) -> str | None:
+    pos = re.search(r"\)\s*ENGINE\s*=", create, re.I)
+    if not pos:
+        return None
+    match = re.search(
+        r"\bCOLLATE\s*=?\s*([A-Za-z0-9_]+)\b",
+        create[pos.start():], re.I,
+    )
+    return match.group(1).lower() if match else None
+
+
 def nearest_column_type(tokens: list[str], index: int) -> str:
     # Never expose the actual column identifier.
     for item in range(index - 1, max(-1, index - 100), -1):
@@ -190,6 +201,8 @@ def summary(a: Path, b: Path) -> None:
     for name in common:
         src_charset = table_default_charset(src[name])
         dst_charset = table_default_charset(dst[name])
+        src_collation = table_default_collation(src[name])
+        dst_collation = table_default_collation(dst[name])
         if src_charset and dst_charset:
             footer_status["EQUAL" if src_charset == dst_charset else "DIFFER"] += 1
         else:
@@ -209,22 +222,32 @@ def summary(a: Path, b: Path) -> None:
                 continue
             lhs_tokens = left[i0:i1]
             rhs_tokens = right[j0:j1]
-            if (op == "delete" and len(lhs_tokens) == 3
+            if (op == "delete" and len(lhs_tokens) >= 3
                     and lhs_tokens[0].upper() == "CHARACTER"
                     and lhs_tokens[1].upper() == "SET"
                     and re.fullmatch(r"[A-Za-z0-9_]+", lhs_tokens[2])):
                 kind = nearest_column_type(left, i0)
                 charset_types[kind] += 1
-                if (src_charset and dst_charset
-                        and src_charset == dst_charset == lhs_tokens[2].lower()
-                        and kind in STRING_TYPES):
-                    charset_status["EFFECTIVE_DEFAULT_EQUAL"] += 1
-                elif src_charset and dst_charset and src_charset != dst_charset:
-                    charset_status["TABLE_DEFAULT_DIFFER"] += 1
-                elif src_charset and dst_charset and lhs_tokens[2].lower() != src_charset:
-                    charset_status["EXPLICIT_NONDEFAULT"] += 1
-                else:
+                explicit_collation = (
+                    lhs_tokens[4].lower()
+                    if len(lhs_tokens) == 5 and lhs_tokens[3].upper() == "COLLATE"
+                    and re.fullmatch(r"[A-Za-z0-9_]+", lhs_tokens[4])
+                    else None
+                )
+                if len(lhs_tokens) not in (3, 5) or (len(lhs_tokens) == 5 and not explicit_collation):
+                    charset_status["COMPLEX_UNPROVEN"] += 1
+                elif kind not in STRING_TYPES or not src_charset or not dst_charset:
                     charset_status["UNPROVEN"] += 1
+                elif src_charset != dst_charset or lhs_tokens[2].lower() != src_charset:
+                    charset_status["TABLE_OR_EXPLICIT_DIFFER"] += 1
+                elif not explicit_collation:
+                    # Source collation may be charset default rather than table default.
+                    charset_status["COLLATION_UNPROVEN"] += 1
+                elif (src_collation and dst_collation and
+                        src_collation == dst_collation == explicit_collation):
+                    charset_status["EFFECTIVE_CHARSET_COLLATION_EQUAL"] += 1
+                else:
+                    charset_status["COLLATION_DIFFER_OR_UNPROVEN"] += 1
             if op == "replace" and len(lhs_tokens) == 1 and lhs_tokens[0].startswith("'"):
                 literal = lhs_tokens[0][1:-1]
                 rhs = "".join(rhs_tokens)
