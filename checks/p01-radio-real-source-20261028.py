@@ -80,6 +80,7 @@ def classify(station):
         result['stream_probe']="no-safe-https-direct-url"
         return result
     result['stream_host']=urlparse(url).hostname
+    result['stream_url']=url  # publicly listed direct broadcast URL; read-only playback proof
     kind='HLS' if station.get('hls')==1 or re.search(r'\.m3u8(?:\?|$)',url,re.I) else 'other'
     result['stream_kind']=kind
     v=fetch_url(url,origin=True,limit=4096,timeout=7)
