@@ -1,0 +1,204 @@
+name: S01-C01 Theme trusted formal publisher
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/s01-c01-theme-publish.yml']
+  push:
+    branches: ['release/s01-c01/*']
+    paths: ['release-requests/S01-C01.json']
+permissions:
+  contents: read
+concurrency:
+  group: s01-c01-theme-formal-publisher
+  cancel-in-progress: false
+jobs:
+  validate:
+    name: Public-safe trusted publisher contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify dedicated trigger and release request schema
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_REPOSITORY" = "llhzx2018/core-free-runner-public"
+          if test "$GITHUB_EVENT_NAME" = "pull_request"; then
+            test -f .github/workflows/s01-c01-theme-publish.yml
+            echo THEME_TRUSTED_PUBLISHER_PR_STATIC_PASS
+            exit 0
+          fi
+          test "$GITHUB_EVENT_NAME" = "push"
+          test -f release-requests/S01-C01.json
+          jq -e '
+            .schema == "vf-s01-theme-formal-request/v1" and
+            .project_id == "S01-C01" and
+            .product_repository == "llhzx2018/vf-tools-theme" and
+            .mode == "exact-source-formal" and
+            (.owner_authorized == true) and
+            (.version | type == "string" and test("^[0-9]+[.][0-9]+[.][0-9]+$")) and
+            (.source_version | type == "string" and test("^[0-9]+[.][0-9]+[.][0-9]+$")) and
+            (.tested_sha | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.tested_tree | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.merged_sha | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.src_tree | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.proof_runner_id | type == "number" and . > 0) and
+            (.proof_runner_head_sha | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.proof_attempt | type == "number" and . > 0) and
+            (.asset_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+            (.asset_bytes | type == "number" and . > 100000) and
+            (.runtime_files | type == "number" and . > 100) and
+            (.notes | type == "string" and length > 16) and
+            .version != .source_version
+          ' release-requests/S01-C01.json >/dev/null
+          VERSION="$(jq -r .version release-requests/S01-C01.json)"
+          test "$GITHUB_REF_NAME" = "release/s01-c01/v$VERSION"
+          echo "S01_C01_TRUSTED_FORMAL_REQUEST_STATIC_PASS version=$VERSION"
+  publish:
+    name: Verified Theme ZIP to private immutable release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/heads/release/s01-c01/') && github.repository == 'llhzx2018/core-free-runner-public'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_REPO: llhzx2018/vf-tools-theme
+      REQUEST: release-requests/S01-C01.json
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+      READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Checkout trusted publisher and approved request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify private permissions and approved machine proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN" || { echo BLOCKED_RELEASE_WRITE_CAPABILITY; exit 78; }
+          test -n "$READ_TOKEN" || { echo BLOCKED_PRIVATE_READ_CAPABILITY; exit 78; }
+          VERSION="$(jq -r .version "$REQUEST")"
+          SOURCE="$(jq -r .source_version "$REQUEST")"
+          test "$GITHUB_REF_NAME" = "release/s01-c01/v$VERSION"
+          RUN="$(jq -r .proof_runner_id "$REQUEST")"
+          PROOF_HEAD="$(jq -r .proof_runner_head_sha "$REQUEST")"
+          PROOF_ATTEMPT="$(jq -r .proof_attempt "$REQUEST")"
+          INFO="$(gh api "repos/llhzx2018/core-free-runner-public/actions/runs/$RUN")"
+          test "$(jq -r .conclusion <<<"$INFO")" = "success"
+          test "$(jq -r .head_sha <<<"$INFO")" = "$PROOF_HEAD"
+          test "$(jq -r .run_attempt <<<"$INFO")" = "$PROOF_ATTEMPT"
+          {
+            echo "VERSION=$VERSION"
+            echo "SOURCE_VERSION=$SOURCE"
+            echo "TAG=v$VERSION"
+            echo "ARTIFACT=vf-tools-theme_V$VERSION.zip"
+            echo "APPROVED_SHA=$(jq -r .merged_sha "$REQUEST")"
+            echo "EXPECTED_FILES=$(jq -r .runtime_files "$REQUEST")"
+            echo "EXPECTED_SHA=$(jq -r .asset_sha256 "$REQUEST")"
+            echo "EXPECTED_BYTES=$(jq -r .asset_bytes "$REQUEST")"
+          } >> "$GITHUB_ENV"
+          echo THEME_EXACT_PUBLIC_MACHINE_PROOF_PASS
+      - name: Check private product exact identity without persisting source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" product
+          git -C product checkout -q main
+          PRODUCT_MAIN="$(git -C product rev-parse HEAD)"
+          PRODUCT_SRC="$(git -C product rev-parse HEAD:src)"
+          test "$(cat product/VERSION)" = "$VERSION"
+          test "$(git -C product rev-parse "${APPROVED_SHA}^{tree}")" = "$(jq -r .tested_tree "$REQUEST")"
+          test "$(git -C product rev-parse "${APPROVED_SHA}:src")" = "$(jq -r .src_tree "$REQUEST")"
+          test "$PRODUCT_SRC" = "$(jq -r .src_tree "$REQUEST")"
+          git -C product merge-base --is-ancestor "$APPROVED_SHA" HEAD
+          test -z "$(git -C product diff --name-only "$APPROVED_SHA" HEAD -- src)"
+          test "$(gh api "repos/$PRODUCT_REPO/git/ref/heads/main" --jq .object.sha)" = "$PRODUCT_MAIN"
+          find product/src -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/theme-php-lint.txt
+          node --check product/src/assets/js/main.js
+          echo "PRODUCT_MAIN=$PRODUCT_MAIN" >> "$GITHUB_ENV"
+          echo THEME_MAIN_SOURCE_TREE_EXACT_PASS
+      - name: Build deterministic 476-file WordPress Theme package
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path,PurePosixPath
+          import hashlib,io,os,zipfile
+          root=Path('product/src')
+          files=sorted(p for p in root.rglob('*') if p.is_file())
+          assert len(files)==int(os.environ['EXPECTED_FILES'])
+          def build():
+              b=io.BytesIO()
+              with zipfile.ZipFile(b,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for p in files:
+                      assert not p.is_symlink()
+                      info=zipfile.ZipInfo(str(PurePosixPath('vf-tools-theme')/p.relative_to(root)),date_time=(1980,1,1,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.external_attr=(p.stat().st_mode & 0o777)<<16
+                      z.writestr(info,p.read_bytes(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+              return b.getvalue()
+          data=build()
+          assert data==build()
+          assert len(data)==int(os.environ['EXPECTED_BYTES'])
+          assert hashlib.sha256(data).hexdigest()==os.environ['EXPECTED_SHA']
+          out=Path('/tmp')/os.environ['ARTIFACT']
+          out.write_bytes(data)
+          with zipfile.ZipFile(out) as z:
+              assert z.testzip() is None
+              assert 'Version: '+os.environ['VERSION'] in z.read('vf-tools-theme/style.css').decode()
+              assert all('..' not in PurePosixPath(n).parts for n in z.namelist())
+          print('THEME_EXACT_REPRODUCIBLE_RELEASE_ASSET_PASS')
+          PY
+      - name: Create immutable approved tag and formal release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(gh api "repos/$PRODUCT_REPO/git/ref/heads/main" --jq .object.sha)" = "$PRODUCT_MAIN"
+          if gh api "repos/$PRODUCT_REPO/git/ref/tags/$TAG" >/tmp/theme-existing-tag.json 2>/dev/null; then
+            test "$(jq -r .object.sha /tmp/theme-existing-tag.json)" = "$APPROVED_SHA" || { echo TAG_COLLISION; exit 81; }
+          else
+            gh api --method POST "repos/$PRODUCT_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$APPROVED_SHA" >/tmp/theme-created-tag.json
+          fi
+          test "$(gh api "repos/$PRODUCT_REPO/git/ref/tags/$TAG" --jq .object.sha)" = "$APPROVED_SHA"
+          if gh release view "$TAG" -R "$PRODUCT_REPO" >/dev/null 2>&1; then
+            echo EXISTING_RELEASE_REFUSE_REPLACEMENT >&2; exit 82
+          fi
+          {
+            echo "# VF Tools Theme V$VERSION"
+            jq -r .notes "$REQUEST"
+            echo "Source: $APPROVED_SHA"
+            echo "Verified public Runner: $(jq -r .proof_runner_id "$REQUEST")"
+            echo "Files: $EXPECTED_FILES"
+            echo "Bytes: $EXPECTED_BYTES"
+            echo "SHA256: $EXPECTED_SHA"
+            echo "Production unchanged; Owner upgrades manually."
+          } >/tmp/theme-release-notes.md
+          gh release create "$TAG" "/tmp/$ARTIFACT" -R "$PRODUCT_REPO" --title "VF Tools Theme V$VERSION" --notes-file /tmp/theme-release-notes.md --verify-tag
+      - name: Read back actual remote formal release asset
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$PRODUCT_REPO/releases/tags/$TAG" >/tmp/theme-formal-release.json
+          test "$(jq -r .tag_name /tmp/theme-formal-release.json)" = "$TAG"
+          test "$(jq -r .draft /tmp/theme-formal-release.json)" = false
+          test "$(jq -r .prerelease /tmp/theme-formal-release.json)" = false
+          test "$(gh api "repos/$PRODUCT_REPO/git/ref/tags/$TAG" --jq .object.sha)" = "$APPROVED_SHA"
+          test "$(jq -r --arg n "$ARTIFACT" '.assets[]|select(.name==$n)|.size' /tmp/theme-formal-release.json)" = "$EXPECTED_BYTES"
+          mkdir -p /tmp/theme214-readback
+          gh release download "$TAG" -R "$PRODUCT_REPO" -D /tmp/theme214-readback -p "$ARTIFACT"
+          test "$(sha256sum "/tmp/theme214-readback/$ARTIFACT" | cut -d ' ' -f1)" = "$EXPECTED_SHA"
+          {
+            echo THEME_FORMAL_RELEASE_REMOTE_ASSET_READBACK_PASS
+            echo "TAG=$TAG"
+            echo "TAG_TARGET=$APPROVED_SHA"
+            echo "ASSET=$ARTIFACT"
+            echo "ASSET_BYTES=$EXPECTED_BYTES"
+            echo "ASSET_SHA256=$EXPECTED_SHA"
+            echo 'Distribution and Production remain separate gates.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Clean transient private repository
+        if: always()
+        shell: bash
+        run: |
+          rm -rf product /tmp/theme214-readback
