@@ -1,0 +1,128 @@
+name: TEMP P07 default integer display widths cross-engine proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-default-width-proof.yml'
+permissions:
+  contents: read
+jobs:
+  export-parity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Start disposable MySQL 8.4 and MariaDB 11.8
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run -d --name p07-mysql-fixture -e MYSQL_ROOT_PASSWORD=synthetic --health-cmd="mysqladmin ping -uroot -psynthetic" mysql:8.4
+          docker run -d --name p07-maria-fixture -e MARIADB_ROOT_PASSWORD=synthetic --health-cmd="healthcheck.sh --connect --innodb_initialized" mariadb:11.8
+          for i in $(seq 1 90); do
+            if docker exec p07-mysql-fixture mysqladmin ping -uroot -psynthetic --silent >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          for i in $(seq 1 90); do
+            if docker exec p07-maria-fixture mariadb --protocol=TCP -h127.0.0.1 -uroot -psynthetic --batch --skip-column-names -e 'SELECT 1' >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          docker exec p07-mysql-fixture mysqladmin ping -uroot -psynthetic --silent
+          docker exec p07-maria-fixture mariadb --protocol=TCP -h127.0.0.1 -uroot -psynthetic --batch --skip-column-names -e 'SELECT 1'
+      - name: Create synthetic 84-table legacy site and cross-engine dumps
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY' > "$RUNNER_TEMP/fixture.sql"
+          print("CREATE DATABASE demo CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; USE demo;")
+          for i in range(84):
+              print(f"CREATE TABLE t{i} (id INT UNSIGNED NOT NULL AUTO_INCREMENT, tiny TINYINT DEFAULT NULL, small SMALLINT UNSIGNED DEFAULT NULL, medium MEDIUMINT DEFAULT NULL, value LONGTEXT COLLATE utf8mb4_unicode_ci, KEY idx_value(id), PRIMARY KEY (id)) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;")
+              if i < 9:
+                  for n in range(4):
+                      print(f"INSERT INTO t{i} (value) VALUES ('row{n}: single quote: \\'quote\\'');")
+          PY
+          docker exec -i p07-mysql-fixture mysql -uroot -psynthetic < "$RUNNER_TEMP/fixture.sql"
+          docker exec p07-mysql-fixture mysqldump -uroot -psynthetic --set-gtid-purged=OFF --skip-comments --databases demo > "$RUNNER_TEMP/source.sql"
+          docker exec -i p07-maria-fixture mariadb -uroot -psynthetic < "$RUNNER_TEMP/source.sql"
+          docker exec p07-maria-fixture mariadb-dump -uroot -psynthetic --skip-comments --databases demo > "$RUNNER_TEMP/target.sql"
+          test -s "$RUNNER_TEMP/source.sql"
+          test -s "$RUNNER_TEMP/target.sql"
+          echo P07_SYNTHETIC_CROSS_ENGINE_IMPORT_PASS
+      - name: Checkout exact P07 strict cross-engine verifier
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: f4945d99ac623ce8be3ff946a82dc729a0bea2ae
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p07
+      - name: Prove exact synthetic schema and data parity with negative mutations
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          PYTHONPATH=p07/lib python3 - "$RUNNER_TEMP" <<'PY'
+          import pathlib,sys
+          import verify
+          from server_migration_pull import compare_database_dumps, PullMigrationError
+          root=pathlib.Path(sys.argv[1])
+          src,dst=root/"source.sql",root/"target.sql"
+          print(verify.sql_comparison_diagnostic(src,dst))
+          expected="CROSS_ENGINE_KNOWN_DUMP_FORMAT_SQL_EXACT"
+          # Synthetic data only: bounded first-difference dump-shape diagnostic.
+          import unittest.mock
+          def capture(path):
+              captured=[]
+              class Digest:
+                  def update(self,payload):
+                      if payload != b"\n":
+                          captured.append(payload.decode("utf-8"))
+                  def hexdigest(self): return "synthetic"
+              with unittest.mock.patch.object(verify.hashlib,"sha256",side_effect=lambda:Digest()):
+                  verify.sql_cross_engine_known_format_fingerprint(path)
+              return captured
+          src_statements, dst_statements=capture(src),capture(dst)
+          print("P07_SYNTHETIC_STATEMENT_COUNTS",len(src_statements),len(dst_statements))
+          for offset,(left,right) in enumerate(zip(src_statements,dst_statements)):
+              if left != right:
+                  print("P07_SYNTHETIC_FIRST_DIFFERENCE_INDEX",offset)
+                  print("P07_SYNTHETIC_SOURCE_STATEMENT",left[:500])
+                  print("P07_SYNTHETIC_TARGET_STATEMENT",right[:500])
+                  break
+          observed=compare_database_dumps(src,dst)
+          assert observed==expected,(observed,expected)
+          print("P07_REAL_MYSQL84_MARIADB118_STRICT_EQUIVALENCE_PASS",observed)
+          original=dst.read_text(encoding="utf-8")
+          import re
+          mutations=[
+              ("row",original.replace("single quote:", "altered quote:",1)),
+              ("index",original.replace("idx_value", "idx_other",1)),
+              ("charset",original.replace("COLLATE=utf8mb4_unicode_ci", "COLLATE=utf8mb4_general_ci",1)),
+              ("guarded_ddl",original.replace("ENABLE KEYS", "DISABLE KEYS",1)),
+              ("unmatched_trigger",original+"\nCREATE TRIGGER bogus BEFORE INSERT ON `t0` FOR EACH ROW SET @bogus=1;\n"),
+          ]
+          for label,changed in mutations:
+              assert changed!=original,label
+              dst.write_text(changed,encoding="utf-8")
+              try:
+                  compare_database_dumps(src,dst)
+              except PullMigrationError:
+                  print("P07_TRUE_MISMATCH_BLOCKED",label)
+              else:
+                  raise AssertionError("accepted synthetic data/schema corruption: "+label)
+          dst.write_text(original,encoding="utf-8")
+          assert compare_database_dumps(src,dst)==expected
+          print("P07_REAL_CROSS_ENGINE_FAIL_CLOSED_PROOF_PASS")
+          PY
+          echo 'SOURCE_SYNTHETIC_DUMP_FIRST_LINES'
+          sed -n '1,58p' "$RUNNER_TEMP/source.sql"
+          echo 'TARGET_SYNTHETIC_DUMP_FIRST_LINES'
+          sed -n '1,75p' "$RUNNER_TEMP/target.sql"
+          echo 'SOURCE_SYNTHETIC_INSERT'
+          grep -m 1 '^INSERT' "$RUNNER_TEMP/source.sql"
+          echo 'TARGET_SYNTHETIC_INSERT'
+          grep -m 1 '^INSERT' "$RUNNER_TEMP/target.sql"
+          PYTHONPATH=p07/lib python3 -m unittest discover -s p07/tests -p 'test_cross_engine_sql_format.py' -v
+          echo P07_CROSS_ENGINE_STRICT_PROOF_DONE
+      - name: Purge disposable SQL dumps and containers
+        if: always()
+        run: |
+          docker rm -f p07-mysql-fixture p07-maria-fixture || true
+          rm -f -- "$RUNNER_TEMP/source.sql" "$RUNNER_TEMP/target.sql" "$RUNNER_TEMP/fixture.sql"
