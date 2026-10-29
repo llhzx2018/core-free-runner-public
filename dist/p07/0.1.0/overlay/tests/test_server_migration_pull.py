@@ -41,6 +41,47 @@ class TargetPullContractTests(unittest.TestCase):
         required.start()
         self.addCleanup(required.stop)
 
+    def test_sql_guard_failure_evidence_keeps_only_fixed_counts(self) -> None:
+        diagnostic = (
+            "MySQL verification failed [CONDITIONAL_DDL] "
+            "[SQL_DIFF_V1 conditional_ddl=DIFFER(1:0)] "
+            "[SQL_GUARD_FLOW_V1 probe=3 assignment=3 safe_assignment=2 "
+            "prepare=3 execute=3 deallocate=3 unknown_set=1 unknown_control=0 "
+            "recognized=0 outcome=UNKNOWN_CONTROL_GRAMMAR] "
+            "PRIVATE_SQL_VALUE=NEVER_PERSIST"
+        )
+        state = {"status": "PREPARE_FAILED", "schema": pull.SCHEMA}
+        pull.retain_safe_sql_guard_failure(state, pull.PullMigrationError(diagnostic))
+        result = state["last_sql_guard_failure"]
+        self.assertEqual(result["reason"], "CONDITIONAL_DDL")
+        self.assertTrue(result["flow"].startswith("SQL_GUARD_FLOW_V1 probe=3"))
+        self.assertIn("outcome=UNKNOWN_CONTROL_GRAMMAR", result["flow"])
+        self.assertNotIn("PRIVATE_SQL_VALUE", json.dumps(result))
+        self.assertNotIn("SQL_DIFF_V1", json.dumps(result))
+        with mock.patch.object(pull, "post_migration_audit", return_value={}):
+            self.assertEqual(pull.summary(state)["last_sql_guard_failure"], result)
+
+    def test_sql_guard_evidence_does_not_record_unknown_exception_text(self) -> None:
+        state = {"status": "PREPARE_FAILED"}
+        pull.retain_safe_sql_guard_failure(
+            state,
+            pull.PullMigrationError(
+                "MySQL verification failed [CONDITIONAL_DDL] "
+                "[SQL_GUARD_FLOW_V1 probe=1 assignment=0 safe_assignment=0 "
+                "prepare=0 execute=0 deallocate=0 unknown_set=0 unknown_control=0 "
+                "recognized=0 outcome=MADE_UP] SECRET_VALUE"
+            ),
+        )
+        self.assertEqual(
+            state["last_sql_guard_failure"],
+            {"reason": "CONDITIONAL_DDL", "flow": "SQL_GUARD_FLOW_V1_UNAVAILABLE"},
+        )
+        state.clear()
+        pull.retain_safe_sql_guard_failure(
+            state, pull.PullMigrationError("new-server MySQL import failed: PRIVATE_DB")
+        )
+        self.assertNotIn("last_sql_guard_failure", state)
+
     def test_wrong_target_engine_fails_without_inventory_mutation(self) -> None:
         with mock.patch.object(pull, "cloudpanel_ready_local", return_value=True), \
              mock.patch.object(pull, "cloudpanel_database_server_ready_local", return_value=True), \

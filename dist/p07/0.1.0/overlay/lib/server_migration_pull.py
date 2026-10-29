@@ -53,6 +53,34 @@ class PullMigrationError(RuntimeError):
     pass
 
 
+# Extract only verifier-owned fixed labels and decimal counts. Even if an
+# upstream exception contains SQL text or a database name, never persist it.
+_SQL_GUARD_FLOW_EVIDENCE_RE = re.compile(
+    r"\[(SQL_GUARD_FLOW_V1 "
+    r"probe=[0-9]{1,10} assignment=[0-9]{1,10} "
+    r"safe_assignment=[0-9]{1,10} prepare=[0-9]{1,10} "
+    r"execute=[0-9]{1,10} deallocate=[0-9]{1,10} "
+    r"unknown_set=[0-9]{1,10} unknown_control=[0-9]{1,10} "
+    r"recognized=[0-9]{1,10} outcome=(?:RECOGNIZED|UNSAFE_BRANCH|"
+    r"UNKNOWN_CONTROL_GRAMMAR|NO_COMPLETE_DYNAMIC_GROUP|"
+    r"UNBALANCED_STAGES|SEQUENCE_REJECTED))\]"
+)
+
+
+def retain_safe_sql_guard_failure(state: dict[str, Any], error: Exception) -> None:
+    """Persist only fixed MySQL guard counts before transient SQL is cleaned."""
+    if not isinstance(error, PullMigrationError):
+        return
+    detail = str(error)
+    if not detail.startswith("MySQL verification failed [CONDITIONAL_DDL]"):
+        return
+    match = _SQL_GUARD_FLOW_EVIDENCE_RE.search(detail)
+    state["last_sql_guard_failure"] = {
+        "reason": "CONDITIONAL_DDL",
+        "flow": match.group(1) if match else "SQL_GUARD_FLOW_V1_UNAVAILABLE",
+    }
+
+
 def now_utc() -> str:
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
 
@@ -2438,6 +2466,7 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
     require_mariadb_target()
     transition_migration_status(state, "PREPARING")
     state.pop("last_error_class", None)
+    state.pop("last_sql_guard_failure", None)
     save_state(state)
     try:
         progress_note("首轮迁入 · 正在刷新旧服务器完整资产清单")
@@ -2481,6 +2510,7 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
     except Exception as exc:
         transition_migration_status(state, "PREPARE_FAILED")
         state["last_error_class"] = exc.__class__.__name__
+        retain_safe_sql_guard_failure(state, exc)
         save_state(state)
         if isinstance(exc, PullMigrationError):
             raise
@@ -2575,6 +2605,7 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
     transition_migration_status(state, "CUTOVER_RUNNING")
     state["cutover_started_at"] = now_utc()
     state.pop("last_error_class", None)
+    state.pop("last_sql_guard_failure", None)
     save_state(state)
     try:
         progress_note("1/7 · 正在进入短维护窗口并保护旧服务器运行状态")
@@ -2650,6 +2681,7 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
             ),
         )
         state["last_error_class"] = exc.__class__.__name__
+        retain_safe_sql_guard_failure(state, exc)
         save_state(state)
         if isinstance(exc, PullMigrationError):
             raise
@@ -2805,6 +2837,7 @@ def summary(state: dict[str, Any]) -> dict[str, Any]:
         "schema": state.get("schema"),
         "migration_id": state.get("migration_id"),
         "status": state.get("status"),
+        "last_sql_guard_failure": state.get("last_sql_guard_failure"),
         "direction": state.get("direction"),
         "current_server_role": state.get("current_server_role"),
         "old_server_ip": (state.get("source") or {}).get("ip"),
