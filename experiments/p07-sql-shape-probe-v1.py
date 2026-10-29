@@ -254,7 +254,7 @@ def proven_create_table_shape(sql: str) -> str:
             r"(?P<column>\x60[A-Za-z0-9_]+\x60\s+(?:"
             r"TINYTEXT|TEXT|MEDIUMTEXT|LONGTEXT|"
             r"CHAR\([1-9][0-9]{0,4}\)|VARCHAR\([1-9][0-9]{0,4}\)))"
-            r"\s+CHARACTER SET (?P<charset>[A-Za-z0-9_]+)"
+            r"\s*CHARACTER SET (?P<charset>[A-Za-z0-9_]+)"
             r"\s+COLLATE (?P<collation>[A-Za-z0-9_]+)(?=\s|,|\))",
             re.I,
         )
@@ -269,7 +269,7 @@ def proven_create_table_shape(sql: str) -> str:
         r"(?:DECIMAL|NUMERIC|FLOAT|DOUBLE)"
         r"(?:\([0-9]{1,3}(?:,[0-9]{1,3})?\))?"
         r"(?:\s+(?:UNSIGNED|SIGNED|ZEROFILL|NOT NULL|NULL))*"
-        r"\s+DEFAULT\s+)"
+        r"\s*DEFAULT\s+)"
         r"'(?P<literal>-?(?:0|[1-9][0-9]*)\.[0-9]+)'(?=\s|[,)]|$)",
         re.I,
     )
