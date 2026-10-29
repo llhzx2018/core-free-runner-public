@@ -1,4 +1,4 @@
-name: p01-ia5-unified-r14-native-protected-restore-current-v247478-preflight
+name: p01-ia5-unified-r15-native-jobs-and-restore-current-v247478-preflight
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: p01-ia5-unified-r14-00b7164
+  group: p01-ia5-unified-r15-8fdec75
   cancel-in-progress: false
 
 jobs:
@@ -25,7 +25,7 @@ jobs:
       PRODUCT_REPO: llhzx2018/vf-start
       VERSION: 2.47.478
       SOURCE: 2.47.477
-      TARGET_SHA: 00b7164d4ed7413a6f2e78a9b16ef3c424c8e1c8
+      TARGET_SHA: 8fdec750739f0a1388ae79822d456b91a160aaf6
       TAG: v2.47.478
       BASE_TAG: v2.47.477
       ART: /tmp/p01-ia5-candidate-artifacts
@@ -198,6 +198,7 @@ jobs:
              node tests/unit/p01_ia5_global_security_sessions_r11_contract.cjs
              node tests/unit/p01_ia5_global_login_security_r12_contract.cjs
               node tests/unit/p01_ia5_global_backup_restore_r13_contract.cjs
+              node tests/unit/p01_ia5_global_jobs_r15_contract.cjs
           )
           echo P01_IA5_FOCUSED_SOURCE_CONTRACTS=PASS
 
@@ -355,6 +356,9 @@ jobs:
           mkdir -p /tmp/p01-ia5-browser-deps
           npm install --prefix /tmp/p01-ia5-browser-deps --no-audit --no-fund playwright@1.56.1 >/tmp/p01-npm-install.log
           PLAYWRIGHT_BROWSERS_PATH=/tmp/p01-ia5-browsers /tmp/p01-ia5-browser-deps/node_modules/.bin/playwright install --with-deps chromium >/tmp/p01-browser-install.log
+          # Synthetic stopped task is written ONLY to disposable isolated FULL.
+          # No worker or execution process is started by this fixture.
+          (cd /tmp/p01-maintenance-gate/target-full && php -r 'require "app/bootstrap.php"; $j=new VfJobManager(vf_db()); $task=$j->enqueue("integrity","ia5-r15-synthetic"); $j->requestStop((int)$task["id"]); echo "P01_IA5_R15_SYNTHETIC_STOPPED_JOB=PASS\\n";')
           (cd /tmp/p01-maintenance-gate/target-full && php -S 127.0.0.1:18521 -t . >/tmp/p01-ia5-browser-server.log 2>&1) &
           server_pid=$!
           trap 'kill "$server_pid" >/dev/null 2>&1 || true' EXIT
@@ -982,6 +986,70 @@ jobs:
               assert.equal(await page.getByText('IA5 Release Synthetic Continue').count(),0,'restored fixture no longer has synthetic add-and-continue');
               assert.ok(page.url().includes('/channels.php'),'restore remains on original frontstage page');
               console.log('P01_IA5_BROWSER_R13_PROTECTED_RESTORE_PREVIEW_CANCEL_FAIL_CLOSED_ROLLBACK_SNAPSHOT_DOUBLECLICK=PASS');
+
+              // R15: Synthetic STOPPED task was created in disposable FULL before
+              // R6 snapshot. Restore preserves that fixture; only explicit UI
+              // clicks queue or stop it. No poll, execute or generic enqueue UI.
+              const afterRestoreSecurity=await context.request.get(origin+'/api.php?action=security_sessions');
+              if(afterRestoreSecurity.status()===401){
+                const loginAgain=await context.request.post(origin+'/api.php?action=login',{data:{password:'ReleaseGate!18511'}});
+                assert.equal(loginAgain.status(),200,'isolated Owner re-login after restore');
+                await page.goto(origin+'/channels.php?view=directory',{waitUntil:'domcontentloaded'});
+              }else assert.equal(afterRestoreSecurity.status(),200,'Owner session remains valid after restore');
+              const jobsSnapshot=await context.request.get(origin+'/api.php?action=jobs_list&limit=60');
+              assert.equal(jobsSnapshot.status(),200);
+              const jobsData=await jobsSnapshot.json();
+              const fixture=jobsData.jobs.find(r=>r.scope==='ia5-r15-synthetic');
+              assert.ok(fixture,'synthetic stopped job persists through protected restore');
+              assert.equal(fixture.state,'stopped');
+              await page.locator('[data-vf-global-manage-open]').click();
+              const jobsHub=page.locator('dialog[data-vf-local-management]');
+              await jobsHub.locator('[data-vf-global-group="system"]').click();
+              const jobsRoot=jobsHub.locator('[data-vf-global-jobs-root]');
+              assert.equal(await jobsRoot.count(),1,'single native cross-site task manager');
+              assert.match(await jobsRoot.locator('[data-vf-global-jobs-state]').textContent(),/尚未读取/);
+              assert.equal(await jobsRoot.locator('[data-vf-global-jobs-prepare="retry"]').isDisabled(),true);
+              await jobsRoot.locator('summary').click();
+              await jobsRoot.locator('[data-vf-global-jobs-load]').click();
+              await page.waitForFunction(()=>document.querySelector('[data-vf-global-jobs-state]')?.textContent?.includes('已读取'),null,{timeout:12000});
+              await jobsRoot.locator('[data-vf-global-jobs-select]').selectOption(String(fixture.id));
+              assert.equal(await jobsRoot.locator('[data-vf-global-jobs-prepare="stop"]').isDisabled(),true,'stopped job cannot be stopped twice');
+              await jobsRoot.locator('[data-vf-global-jobs-prepare="retry"]').click();
+              await jobsRoot.locator('[data-vf-global-jobs-cancel]').click();
+              assert.match(await jobsRoot.locator('[data-vf-global-jobs-state]').textContent(),/已取消/);
+              assert.equal((await (await context.request.get(origin+'/api.php?action=jobs_list&limit=60')).json()).jobs.find(x=>x.id===fixture.id).state,'stopped','cancel does not retry job');
+              await jobsRoot.locator('[data-vf-global-jobs-prepare="retry"]').click();
+              await page.route('**/api.php?action=job_retry',r=>r.fulfill({status:503,contentType:'application/json',body:'{"ok":false,"error":"合成任务重试故障"}'}));
+              await jobsRoot.locator('[data-vf-global-jobs-commit]').click();
+              await page.waitForFunction(()=>document.querySelector('[data-vf-global-jobs-state]')?.textContent?.includes('结果未确认'),null,{timeout:12000});
+              assert.equal(await jobsRoot.locator('[data-vf-global-jobs-prepare="retry"]').isDisabled(),true,'unknown retry blocks blind repeats');
+              await page.unroute('**/api.php?action=job_retry');
+              await jobsRoot.locator('[data-vf-global-jobs-load]').click();
+              await page.waitForFunction(()=>document.querySelector('[data-vf-global-jobs-state]')?.textContent?.includes('已读取'),null,{timeout:12000});
+              await jobsRoot.locator('[data-vf-global-jobs-select]').selectOption(String(fixture.id));
+              await jobsRoot.locator('[data-vf-global-jobs-prepare="retry"]').click();
+              let retries=0;
+              await page.route('**/api.php?action=job_retry',async r=>{retries++;await r.continue();});
+              await jobsRoot.locator('[data-vf-global-jobs-commit]').evaluate(button=>{button.click();button.click();});
+              await page.waitForFunction(()=>document.querySelector('[data-vf-global-jobs-state]')?.textContent?.includes('已确认'),null,{timeout:15000});
+              assert.equal(retries,1,'doubleclick submits one task retry');
+              await page.unroute('**/api.php?action=job_retry');
+              assert.equal((await (await context.request.get(origin+'/api.php?action=jobs_list&limit=60')).json()).jobs.find(x=>x.id===fixture.id).state,'queued');
+              await jobsRoot.locator('[data-vf-global-jobs-load]').click();
+              await page.waitForFunction(()=>document.querySelector('[data-vf-global-jobs-state]')?.textContent?.includes('已读取'),null,{timeout:12000});
+              await jobsRoot.locator('[data-vf-global-jobs-select]').selectOption(String(fixture.id));
+              await jobsRoot.locator('[data-vf-global-jobs-prepare="stop"]').click();
+              let stops=0;
+              await page.route('**/api.php?action=job_stop',async r=>{stops++;await r.continue();});
+              await jobsRoot.locator('[data-vf-global-jobs-commit]').evaluate(button=>{button.click();button.click();});
+              await page.waitForFunction(()=>document.querySelector('[data-vf-global-jobs-state]')?.textContent?.includes('已确认'),null,{timeout:15000});
+              assert.equal(stops,1,'doubleclick submits one task stop');
+              await page.unroute('**/api.php?action=job_stop');
+              assert.equal((await (await context.request.get(origin+'/api.php?action=jobs_list&limit=60')).json()).jobs.find(x=>x.id===fixture.id).state,'stopped','synthetic task ends stopped');
+              assert.equal(await jobsHub.locator('iframe').count(),0,'jobs never embedded backstage');
+              assert.equal(page.url().includes('/channels.php'),true,'jobs keeps current channel page');
+              console.log('P01_IA5_BROWSER_R15_CROSS_SITE_JOBS_READ_CANCEL_UNKNOWN_RETRY_STOP_DOUBLECLICK=PASS');
+
               assert.deepEqual(failures,[],'no JavaScript runtime errors');
               console.log('P01_IA5_BROWSER_PRIVATE_PROJECTION=PASS');
               await context.close();
@@ -1029,6 +1097,13 @@ jobs:
             csrf_restore=$(curl -sS -b "$cookie" -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18522/api.php?action=$action")
             test "$csrf_restore" = 419
           done
+          for action in job_stop job_retry; do
+            guest_job=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18522/api.php?action=$action")
+            test "$guest_job" = 401
+            csrf_job=$(curl -sS -b "$cookie" -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18522/api.php?action=$action")
+            test "$csrf_job" = 419
+          done
+          echo P01_IA5_JOBS_OWNER_CSRF_HTTP=PASS
           echo P01_IA5_RESTORE_OWNER_CSRF_HTTP=PASS
           echo P01_IA5_LOGIN_SECURITY_OWNER_CSRF_HTTP=PASS
           echo P01_IA5_SESSIONS_OWNER_AND_CSRF_HTTP=PASS
@@ -1081,11 +1156,11 @@ jobs:
           echo NO_TAG_NO_RELEASE_NO_DISTRIBUTION_NO_PRODUCTION=YES
           for value in "$FOCUS_RESULT" "$ARTIFACT_RESULT" "$INSTALL_RESULT" "$BROWSER_RESULT" "$SECURITY_RESULT" "$RESTORE_RESULT"; do
             if [ "$value" != success ]; then
-              echo P01_IA5_SCOPED_R14_GATE=FAIL_OR_INCOMPLETE
+              echo P01_IA5_SCOPED_R15_GATE=FAIL_OR_INCOMPLETE
               exit 82
             fi
           done
-          echo P01_IA5_SCOPED_R14_GATE=PASS
+          echo P01_IA5_SCOPED_R15_GATE=PASS
           if [ "$CANONICAL_RESULT" != success ]; then
             if [ "$ATTRIBUTION_RESULT" != success ]; then
               echo P01_FULL_CANONICAL_GATE=UNCLASSIFIED_FAIL
