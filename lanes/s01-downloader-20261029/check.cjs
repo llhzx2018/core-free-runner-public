@@ -9,8 +9,14 @@ const {chromium}=require('playwright');const fs=require('fs'),assert=require('as
   assert.ok(await root.locator('[data-downloader-url]').isVisible());assert.ok(await root.locator('[data-vf-dl-id="analyzeBtn"]').isVisible());
   const metrics=await page.evaluate(()=>({width:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth}));assert.ok(metrics.scroll<=metrics.width+1,'horizontal page overflow');
   await root.locator('[data-downloader-url]').fill('https://example.invalid/video.m3u8');await root.locator('[data-vf-dl-id="clearBtn"]').click();assert.equal(await root.locator('[data-downloader-url]').inputValue(),'');
-  await root.locator('[data-vf-downloader-mode-button="pro"]').click();assert.equal(await root.locator('[data-vf-downloader-mode-button="pro"]').getAttribute('aria-selected'),'true');
-  await root.locator('[data-vf-downloader-mode-button="normal"]').click();assert.equal(await root.locator('[data-vf-downloader-mode-button="normal"]').getAttribute('aria-selected'),'true');
+  await root.locator('[data-vf-downloader-mode-button="pro"]').click();await root.locator('[data-vf-downloader-mode-button="pro"][aria-checked="true"]').waitFor({timeout:4000});
+  await root.locator('[data-vf-downloader-mode-button="normal"]').click();await root.locator('[data-vf-downloader-mode-button="normal"][aria-checked="true"]').waitFor({timeout:4000});
+  if(width===1440){
+   await page.route('https://download-fixture.invalid/**',async route=>{const u=route.request().url();const body=u.endsWith('/fixture.m3u8')?'#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\none.ts\n#EXTINF:2.0,\ntwo.ts\n#EXT-X-ENDLIST\n':u.endsWith('/one.ts')?'SEGMENT-ONE':u.endsWith('/two.ts')?'SEGMENT-TWO':'';await route.fulfill({status:body?200:404,headers:{'access-control-allow-origin':'*','content-type':u.endsWith('.m3u8')?'application/vnd.apple.mpegurl':'video/mp2t'},body});});
+   await root.locator('[data-downloader-url]').fill('https://download-fixture.invalid/fixture.m3u8');
+   const pending=page.waitForEvent('download',{timeout:20000});await root.locator('[data-vf-dl-id="analyzeBtn"]').click();const download=await pending;
+   const payload=fs.readFileSync(await download.path()).toString();assert.equal(payload,'SEGMENT-ONESEGMENT-TWO','download content/order');
+  }
   await page.screenshot({path:`proof/downloader-${lang}-${width}.png`,fullPage:true});proof.push({language:lang,width,description:text,controls:'PASS',overflow:'PASS'});await page.close();
  }
  fs.writeFileSync('proof/downloader.json',JSON.stringify({status:'PASS',cases:proof,production:'UNTOUCHED'},null,2));
