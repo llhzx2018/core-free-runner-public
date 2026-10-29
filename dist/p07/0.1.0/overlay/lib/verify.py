@@ -629,27 +629,53 @@ def _cross_engine_known_dynamic_guard_lines(path: Path) -> set[int]:
         length == len(prepares) == len(executes) == len(deallocates)
     ):
         return set()
-    last_done = 0
-    for index in range(length):
-        variable, flag, assign_line = assignments[index]
-        stmt, source_var, prepare_line = prepares[index]
-        execute_stmt, execute_line = executes[index]
-        dealloc_stmt, dealloc_line = deallocates[index]
-        if not (
-            source_var == variable and stmt == execute_stmt == dealloc_stmt
-            and last_done < assign_line < prepare_line < execute_line < dealloc_line
-            and any(probe_flag == flag and probe_line < assign_line
-                    for probe_flag, probe_line in probes)
-        ):
-            return set()
-        last_done = dealloc_line
-    # Orphaned metadata SELECT statements cannot be silently omitted.
-    if any(not any(probe_flag == flag and probe_line < assign_line
-                   for _, flag, assign_line in assignments)
-           for probe_flag, probe_line in probes):
+
+    # Match guarded session-only commands by their actual source-line order,
+    # not by the list index of each command class. Some safe MySQL dumps
+    # prepare multiple statements before executing and deallocating them.
+    # Every assignment must be consumed exactly once, and every PREPARE must
+    # have exactly one subsequent EXECUTE and DEALLOCATE. Unknown or unsafe
+    # branches already fail closed in the scanner above.
+    events: list[tuple[int, str, str, str]] = (
+        [(line, "probe", flag, "") for flag, line in probes]
+        + [(line, "assign", variable, flag) for variable, flag, line in assignments]
+        + [(line, "prepare", statement, variable)
+           for statement, variable, line in prepares]
+        + [(line, "execute", statement, "") for statement, line in executes]
+        + [(line, "deallocate", statement, "") for statement, line in deallocates]
+    )
+    events.sort(key=lambda event: event[0])
+    seen_probes: set[str] = set()
+    used_probes: set[str] = set()
+    unconsumed_variables: dict[str, str] = {}
+    active_statements: dict[str, bool] = {}
+    completed = 0
+    for _, action, identifier, related in events:
+        if action == "probe":
+            seen_probes.add(identifier)
+        elif action == "assign":
+            if related not in seen_probes or identifier in unconsumed_variables:
+                return set()
+            unconsumed_variables[identifier] = related
+            used_probes.add(related)
+        elif action == "prepare":
+            if identifier in active_statements or related not in unconsumed_variables:
+                return set()
+            del unconsumed_variables[related]
+            active_statements[identifier] = False
+        elif action == "execute":
+            if identifier not in active_statements or active_statements[identifier]:
+                return set()
+            active_statements[identifier] = True
+        elif action == "deallocate":
+            if active_statements.get(identifier) is not True:
+                return set()
+            del active_statements[identifier]
+            completed += 1
+    if (completed != length or unconsumed_variables or active_statements
+            or seen_probes != used_probes):
         return set()
     return known_lines
-
 
 _SQL_CANON_CLASSES = ("database", "schema", "data", "versioned", "guard_set", "guard_ddl", "guard_other", "other")
 
