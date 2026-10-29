@@ -29,6 +29,7 @@ import package as package_engine
 import server_migration as legacy
 import transport
 import verify as verify_engine
+import sql_diff_evidence as sql_diff_probe
 
 SCHEMA = "vf-server-ops.server-migration.target-pull.v1"
 ROOT = Path(__file__).resolve().parents[1]
@@ -1259,6 +1260,68 @@ def source_export_database(
     )
     if proc.returncode != 0:
         raise PullMigrationError(f"old-server MySQL export failed: {database}")
+
+
+def diagnose_sql_difference(mid: str, domain: str) -> dict[str, Any]:
+    """One selected DB, advisory read/export only; never resumes migration.
+
+    SQL is kept in private temporary files and removed even on failure.
+    No database import, target-site creation, state mutation, or cutover occurs.
+    """
+    state = load_state(mid)
+    if state.get("status") != "PREPARE_FAILED":
+        raise PullMigrationError("SQL_DIAGNOSTIC_REQUIRES_PREPARE_FAILED")
+    selected = [
+        site for site in state.get("sites", [])
+        if isinstance(site, dict) and site.get("domain") == domain
+    ]
+    if len(selected) != 1:
+        raise PullMigrationError("SQL_DIAGNOSTIC_SITE_NOT_IN_MIGRATION")
+    databases = selected[0].get("mysql_databases")
+    if not isinstance(databases, list) or len(databases) != 1:
+        raise PullMigrationError("SQL_DIAGNOSTIC_SINGLE_DATABASE_REQUIRED")
+    database = databases[0]
+    if not isinstance(database, str) or not database:
+        raise PullMigrationError("SQL_DIAGNOSTIC_DATABASE_INVALID")
+    if not state.get("source_runtime_path") or not state.get("source"):
+        raise PullMigrationError("SQL_DIAGNOSTIC_SOURCE_RUNTIME_UNAVAILABLE")
+
+    # Independent random path prevents collision with any previous migration
+    # export; this procedure does not reuse import/target transaction paths.
+    token = os.urandom(16).hex()
+    remote_file = f"{remote_staging_root(state)}/advisory-{token}.sql.gz"
+    try:
+        with tempfile.TemporaryDirectory(prefix="vfops-sql-evidence-") as directory:
+            root = Path(directory)
+            os.chmod(root, 0o700)
+            source_dump = root / "source.sql.gz"
+            target_dump = root / "target.sql.gz"
+            try:
+                source_export_database(state, database, remote_file)
+                pull_path(state["source"], remote_file, source_dump)
+                cloudpanel.export_database(database, target_dump, clpctl="clpctl")
+                evidence = sql_diff_probe.diagnostic(source_dump, target_dump)
+            except (
+                PullMigrationError, cloudpanel.CloudPanelError,
+                transport.TransportError, OSError, ValueError,
+            ) as exc:
+                raise PullMigrationError("SQL_DIAGNOSTIC_EXPORT_UNAVAILABLE") from exc
+    finally:
+        # Delete only the unpredictable file created for this invocation.
+        source_remote(
+            state["source"],
+            f"rm -f -- {shlex.quote(remote_file)}",
+            timeout=60,
+            check=False,
+        )
+    return {
+        "status": "ADVISORY_DIAGNOSTIC_ONLY",
+        "database_writes_performed": False,
+        "migration_state_modified": False,
+        "dns_changed": False,
+        "source_deleted": False,
+        "evidence": evidence,
+    }
 
 
 def compare_database_dumps(source_dump: Path, target_dump: Path) -> str:
@@ -3382,6 +3445,10 @@ def main() -> int:
     rollback.add_argument("--migration-id", required=True)
     rollback.add_argument("--confirm", required=True)
 
+    diagnose = sub.add_parser("diagnose-sql")
+    diagnose.add_argument("--migration-id", required=True)
+    diagnose.add_argument("--domain", required=True)
+
     status = sub.add_parser("status")
     status.add_argument("--migration-id", required=True)
 
@@ -3479,6 +3546,8 @@ def main() -> int:
             ))
         elif args.command == "rollback":
             result = summary(rollback_migration(args.migration_id, args.confirm))
+        elif args.command == "diagnose-sql":
+            result = diagnose_sql_difference(args.migration_id, args.domain)
         elif args.command == "status":
             result = summary(load_state(args.migration_id))
         elif args.command == "source-nginx-status":
