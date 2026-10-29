@@ -1,4 +1,4 @@
-name: p01-ia5-unified-r10-native-token-current-v247477-preflight
+name: p01-ia5-unified-r11-native-security-current-v247477-preflight
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: p01-ia5-unified-r10-0a0ff5b
+  group: p01-ia5-unified-r11-cb678f9
   cancel-in-progress: false
 
 jobs:
@@ -25,7 +25,7 @@ jobs:
       PRODUCT_REPO: llhzx2018/vf-start
       VERSION: 2.47.477
       SOURCE: 2.47.476
-      TARGET_SHA: 0a0ff5b42da30d96530527803d428887288b3ccf
+      TARGET_SHA: cb678f9129901656392f92d654c7d7e6c18c9ee7
       TAG: v2.47.477
       BASE_TAG: v2.47.476
       ART: /tmp/p01-ia5-candidate-artifacts
@@ -195,6 +195,7 @@ jobs:
              node tests/unit/p01_ia5_global_settings_r8_contract.cjs
              node tests/unit/p01_ia5_global_browser_helper_r9_contract.cjs
              node tests/unit/p01_ia5_global_helper_token_r10_contract.cjs
+             node tests/unit/p01_ia5_global_security_sessions_r11_contract.cjs
           )
           echo P01_IA5_FOCUSED_SOURCE_CONTRACTS=PASS
 
@@ -365,7 +366,7 @@ jobs:
           'use strict';
           const assert=require('node:assert/strict');
            const fs=require('node:fs');
-          const {chromium}=require('playwright');
+          const {chromium,request}=require('playwright');
           const origin='http://127.0.0.1:18521';
           (async()=>{
             const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
@@ -602,6 +603,48 @@ jobs:
                       assert.equal(page.url(),beforeUrl,'native token lifecycle keeps business page');
                       await page.unroute('**/api.php?action=plugin_token_regenerate');
                       console.log('P01_IA5_BROWSER_R10_TOKEN_OWNER_ROTATE_REVOKE_DIRTY_UNKNOWN_DOUBLECLICK=PASS');
+
+                      // R11: synthetic second Owner session is revoked while the current
+                      // management session remains valid. No session hash/IP reaches DOM.
+                      const extraOwner=await request.newContext({baseURL:origin});
+                      try {
+                        const otherLogin=await extraOwner.post('/api.php?action=login',{data:{password:'ReleaseGate!18511'}});
+                        assert.equal(otherLogin.status(),200,'second isolated Owner session logged in');
+                        await globalHub.locator('[data-vf-global-group="data"]').click();
+                        const sessionsRoot=globalHub.locator('[data-vf-global-sessions-root]');
+                        assert.equal(await sessionsRoot.count(),1,'one native sessions management');
+                        assert.equal(await sessionsRoot.locator('[data-vf-global-sessions-prepare]').isDisabled(),true,'no mutation before explicit read');
+                        await sessionsRoot.locator('summary').click();
+                        await sessionsRoot.locator('[data-vf-global-sessions-load]').click();
+                        await page.waitForFunction(()=>document.querySelector('[data-vf-global-sessions-state]')?.textContent?.includes('已读取'),null,{timeout:12000});
+                        assert.equal(await sessionsRoot.locator('[data-vf-global-sessions-prepare]').isEnabled(),true,'second session detected');
+                        const sessionsText=await sessionsRoot.locator('[data-vf-global-sessions-values]').innerText();
+                        assert.match(sessionsText,/其它有效会话/);
+                        assert.doesNotMatch(sessionsText,/sessionHash|userAgent|ip_address|127\.0\.0\.1|Mozilla/);
+                        await sessionsRoot.locator('[data-vf-global-sessions-prepare]').click();
+                        await sessionsRoot.locator('[data-vf-global-sessions-cancel]').click();
+                        assert.equal(await (await extraOwner.get('/api.php?action=security_sessions')).status(),200,'cancel did not revoke');
+                        await page.route('**/api.php?action=security_sessions_revoke_others',r=>r.fulfill({status:503,contentType:'application/json',body:'{"ok":false,"error":"合成安全服务失败"}'}));
+                        await sessionsRoot.locator('[data-vf-global-sessions-prepare]').click();
+                        await sessionsRoot.locator('[data-vf-global-sessions-commit]').click();
+                        await page.waitForFunction(()=>document.querySelector('[data-vf-global-sessions-state]')?.textContent?.includes('待核对'),null,{timeout:12000});
+                        assert.equal(await sessionsRoot.locator('[data-vf-global-sessions-prepare]').isDisabled(),true,'unknown session outcome blocks blind retry');
+                        await page.unroute('**/api.php?action=security_sessions_revoke_others');
+                        await sessionsRoot.locator('[data-vf-global-sessions-load]').click();
+                        await page.waitForFunction(()=>document.querySelector('[data-vf-global-sessions-state]')?.textContent?.includes('已读取'),null,{timeout:12000});
+                        let sessionPosts=0;
+                        await page.route('**/api.php?action=security_sessions_revoke_others',async r=>{sessionPosts++;await r.continue();});
+                        await sessionsRoot.locator('[data-vf-global-sessions-prepare]').click();
+                        await page.evaluate(()=>{const b=document.querySelector('[data-vf-global-sessions-commit]');b.click();b.click();});
+                        await page.waitForFunction(()=>document.querySelector('[data-vf-global-sessions-state]')?.textContent?.includes('已完成'),null,{timeout:15000});
+                        assert.equal(sessionPosts,1,'double-click revoked others once');
+                        assert.equal((await extraOwner.get('/api.php?action=security_sessions')).status(),401,'other Owner session invalidated');
+                        assert.equal((await context.request.get(origin+'/api.php?action=security_sessions')).status(),200,'current Owner session preserved');
+                        assert.equal(await sessionsRoot.locator('[data-vf-global-sessions-prepare]').isDisabled(),true,'no other sessions remain');
+                        await page.unroute('**/api.php?action=security_sessions_revoke_others');
+                        console.log('P01_IA5_BROWSER_R11_OTHER_SESSIONS_REVOKED_CURRENT_PRESERVED=PASS');
+                      } finally {await extraOwner.dispose();}
+
 
                     }
                     if(width===1440) {
@@ -850,6 +893,13 @@ jobs:
             missing=$(curl -sS -b "$cookie" -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18522/api.php?action=$action")
             test "$missing" = 419
           done
+          guest_sessions=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18522/api.php?action=security_sessions)
+          test "$guest_sessions" = 401
+          guest_revoke=$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18522/api.php?action=security_sessions_revoke_others)
+          test "$guest_revoke" = 401
+          csrf_revoke=$(curl -sS -b "$cookie" -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18522/api.php?action=security_sessions_revoke_others)
+          test "$csrf_revoke" = 419
+          echo P01_IA5_SESSIONS_OWNER_AND_CSRF_HTTP=PASS
           echo P01_IA5_HELPER_TOKEN_OWNER_AND_CSRF_HTTP=PASS
           echo P01_IA5_OWNER_CSRF_HTTP=PASS
 
@@ -899,11 +949,11 @@ jobs:
           echo NO_TAG_NO_RELEASE_NO_DISTRIBUTION_NO_PRODUCTION=YES
           for value in "$FOCUS_RESULT" "$ARTIFACT_RESULT" "$INSTALL_RESULT" "$BROWSER_RESULT" "$SECURITY_RESULT" "$RESTORE_RESULT"; do
             if [ "$value" != success ]; then
-              echo P01_IA5_SCOPED_R10_GATE=FAIL_OR_INCOMPLETE
+              echo P01_IA5_SCOPED_R11_GATE=FAIL_OR_INCOMPLETE
               exit 82
             fi
           done
-          echo P01_IA5_SCOPED_R10_GATE=PASS
+          echo P01_IA5_SCOPED_R11_GATE=PASS
           if [ "$CANONICAL_RESULT" != success ]; then
             if [ "$ATTRIBUTION_RESULT" != success ]; then
               echo P01_FULL_CANONICAL_GATE=UNCLASSIFIED_FAIL
