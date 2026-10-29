@@ -9,6 +9,9 @@ assert.equal(await page.locator('.vf-tool-breadcrumb').isVisible(),false);assert
 const geometry=await page.evaluate(()=>({w:document.documentElement.clientWidth,sw:document.documentElement.scrollWidth}));assert.ok(geometry.sw<=geometry.w+1);
 await root.locator('[data-vf-embed-url]').fill('https://example.invalid/stream.m3u8');await root.locator('[data-vf-embed-generate]').click();await root.locator('[data-vf-embed-recommended-code]').waitFor({state:'visible',timeout:10000});
 const code=await root.locator('[data-vf-embed-recommended-code]').inputValue();assert.ok(code.includes('<iframe'),'actual iframe code');
+const label=(await root.locator('[data-vf-embed-copy-recommended]').innerText()).trim();
+fs.writeFileSync('proof/embed-primary-'+lang+'.json',JSON.stringify({label}));
+assert.ok(lang==='zh'?label.includes('复制'):/copy/i.test(label),'generated code primary action must describe copying, got: '+label);
 await root.locator('[data-vf-embed-mode-button="pro"]').click();await root.locator('[data-vf-embed-mode-button="pro"][aria-selected="true"]').waitFor({timeout:5000});
 await root.locator('[data-vf-embed-mode-button="simple"]').click();await root.locator('[data-vf-embed-mode-button="simple"][aria-selected="true"]').waitFor({timeout:5000});
 await page.screenshot({path:`proof/embed-${lang}-${width}.png`,fullPage:true});
