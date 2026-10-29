@@ -16,7 +16,7 @@ const {chromium}=require('playwright');const fs=require('fs'),assert=require('as
    await page.waitForFunction(()=>{const r=document.querySelector('.vf-converter');return r&&['completed','blocked'].includes(r.dataset.vfConverterTaskState)},null,{timeout:60000});
    const state=await target.getAttribute('data-vf-converter-task-state');
    const result=await target.innerText();
-   const probe=await target.evaluate(r=>({planSegments:r.__vfConverterLastResult?.plan?.segmentCount ?? null,metric:r.querySelector('[data-converter-metric="segments"]')?.textContent ?? null,resources:Array.from(r.querySelectorAll('[data-converter-output-meta]')).map(x=>x.textContent),ready:r.dataset.vfConverterOutputReady}));
+   const probe=await target.evaluate(r=>({planSegments:r.__vfConverterLastResult?.plan?.segmentCount ?? null,metric:r.querySelector('[data-converter-metric="segments"]')?.textContent ?? null,resources:Array.from(r.querySelectorAll('[data-converter-output-meta]')).map(x=>x.textContent),ready:r.dataset.vfConverterOutputReady,meta:r.querySelector('.vf-converter-meta')?.outerHTML ?? null,fileSegment:r.querySelector('[data-converter-file-segments]')?.outerHTML ?? null}));
    fs.writeFileSync('proof/converter-sample-'+lang+'.json',JSON.stringify({state,probe,text:result.slice(-6000)}));
    assert.equal(state,'completed','bundled sample should finish');
    assert.equal(await target.getAttribute('data-vf-converter-output-ready'),'1','output must be ready');
