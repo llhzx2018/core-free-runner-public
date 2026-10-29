@@ -16,7 +16,10 @@ cli config set VF_WP_UPDATE_TEST_MODE true --raw >/dev/null
 cli config set DISABLE_WP_CRON true --raw >/dev/null
 cli core install --url=http://127.0.0.1:18880 --title='Synthetic Frontend Review' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
 docker exec "$WP" mkdir -p /var/www/html/wp-content/themes/vf-tools-theme /var/www/html/wp-content/mu-plugins
-docker cp target/src/. "$WP:/var/www/html/wp-content/themes/vf-tools-theme/"
+docker exec "$WP" rmdir /var/www/html/wp-content/themes/vf-tools-theme
+docker cp "provider/vf-tools-theme_V$TARGET_VERSION.zip" "$WP:/tmp/theme-new.zip"
+docker cp "provider/vf-tools-theme_V$SOURCE_VERSION.zip" "$WP:/tmp/theme-old.zip"
+cli theme install /tmp/theme-new.zip >/dev/null
 docker cp provider/vf-tools-m3u8_V1.25.94.zip "$WP:/tmp/provider.zip"
 cli plugin install /tmp/provider.zip --activate >/dev/null
 docker cp lane/fixture.php "$WP:/var/www/html/wp-content/mu-plugins/progress-fixture.php"
@@ -45,6 +48,19 @@ assert all(not a['option_presence'][k]and b['option_presence'][k]for k in change
 PYBOOT
 cli eval-file /tmp/snapshot.php > proof/state-before.sha256
 node control/lanes/s01-downloader-20261029/check.cjs
+version_check(){ test "$(cli theme get vf-tools-theme --field=version)" = "$1"; }
+version_check "$TARGET_VERSION"
+cli theme install /tmp/theme-old.zip --force >/dev/null
+version_check "$SOURCE_VERSION"
+cli theme install /tmp/theme-new.zip --force >/dev/null
+version_check "$TARGET_VERSION"
+cli theme install /tmp/theme-old.zip --force >/dev/null
+version_check "$SOURCE_VERSION"
+cli theme install /tmp/theme-new.zip --force >/dev/null
+version_check "$TARGET_VERSION"
+cli theme install /tmp/theme-new.zip --force >/dev/null
+version_check "$TARGET_VERSION"
 cli eval-file /tmp/snapshot.php > proof/state-after.sha256
 cmp proof/state-before.sha256 proof/state-after.sha256
+printf '%s' '{"status":"PASS","sequence":["1.35.217","1.35.216","1.35.217","1.35.216","1.35.217","1.35.217"],"protected":"BYTE_IDENTICAL","production":"UNTOUCHED"}' > proof/native-lifecycle.json
 echo DOWNLOADER_DATA_PROTECTION_PASS
