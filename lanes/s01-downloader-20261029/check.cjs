@@ -16,7 +16,7 @@ const {chromium}=require('playwright');const fs=require('fs'),assert=require('as
    await root.locator('[data-downloader-url]').fill('https://download-fixture.invalid/fixture.m3u8');
    const pending=page.waitForEvent('download',{timeout:20000});await root.locator('[data-vf-dl-id="analyzeBtn"]').click();const download=await pending;
    const payload=fs.readFileSync(await download.path()).toString();assert.equal(payload,'SEGMENT-ONESEGMENT-TWO','download content/order');
-   await page.waitForFunction(()=>{const b=document.querySelector('#barFill'),p=document.querySelector('#progressBar');return b && p && p.getAttribute('aria-valuenow')==='100' && b.getBoundingClientRect().width >= p.getBoundingClientRect().width-2;},null,{timeout:5000});
+   await page.waitForFunction(()=>{const b=document.querySelector('[data-vf-dl-id="barFill"]'),p=document.querySelector('[data-vf-dl-id="progressBar"]');return b && p && p.getAttribute('aria-valuenow')==='100' && b.getBoundingClientRect().width >= p.getBoundingClientRect().width-2;},null,{timeout:5000});
   }
   await page.screenshot({path:`proof/downloader-${lang}-${width}.png`,fullPage:true});proof.push({language:lang,width,description:text,controls:'PASS',overflow:'PASS'});await page.close();
  }
