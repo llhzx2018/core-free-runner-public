@@ -1,0 +1,334 @@
+name: p01-ia5-ghapp-v247483-final-machine-gate
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-ia5-ghapp-v247483-final-gate.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-ia5-ghapp-final-ceba-f952
+  cancel-in-progress: false
+
+jobs:
+  isolated-github-app:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor == 'llhzx2018' &&
+      startsWith(github.event.pull_request.title, 'test(P01):')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      TARGET_SHA: f9521a2fe5d453ce41cca0f251d88d1e22cee029
+      TARGET_BRANCH: feat/p01-project-github-app-readonly-20261029
+      INTEGRATION_SHA: ceba971ac7275a239c8572ab2ac6468162cf62aa
+      INTEGRATION_BRANCH: main
+      VERSION: 2.47.483
+      SOURCE: 2.47.482
+      ART: /tmp/p01-ghapp-ia5-artifacts
+      REL: /tmp/p01-ghapp-ia5-prior-release
+    steps:
+      - name: Checkout existing trusted public Runner control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install PHP test runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd php-xml unzip jq >/dev/null
+          php -m | grep -Fx pdo_sqlite
+          php -m | grep -Fx openssl
+          php -m | grep -Fx curl
+          echo P01_GITHUB_APP_TEST_RUNTIME=PASS
+
+      - name: Resolve immutable P01 private source from authorized read channel
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          remote_sha="$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/heads/${TARGET_BRANCH}" | awk '{print $1}')"
+          test "$remote_sha" = "$TARGET_SHA"
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" candidate
+          git -C candidate fetch -q origin "$TARGET_SHA"
+          git -C candidate checkout -q --detach FETCH_HEAD
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "2.47.482"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "2.47.482"
+          echo P01_GITHUB_APP_EXACT_SOURCE=PASS
+
+      - name: Compose pinned GitHub App candidate onto current verified P01 main in runner only
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          actual_ia_sha="$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/heads/${INTEGRATION_BRANCH}" | awk '{print $1}')"
+          test "$actual_ia_sha" = "$INTEGRATION_SHA"
+          git -C candidate fetch -q origin "$INTEGRATION_SHA"
+          test "$(git -C candidate rev-parse FETCH_HEAD)" = "$INTEGRATION_SHA"
+          git -C candidate -c user.email=ci@localhost -c user.name=IsolatedCI merge --no-commit --no-ff "$INTEGRATION_SHA"
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "2.47.483"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "2.47.483"
+          test -f candidate/src/app/ProjectGithubApp.php
+          test -f candidate/src/assets/project-github-app.js
+          test -f candidate/src/assets/local-subsite-management.js
+          test -f candidate/tests/unit/p01_ia5_no_backend_hops_r31_contract.cjs
+          git -C candidate diff --check
+          echo P01_GITHUB_APP_IA5_PINNED_PAIR=PASS
+          COMBINED_TREE="$(git -C candidate write-tree)"
+          COMBINED_SHA="$(git -C candidate -c user.name=IsolatedCI -c user.email=ci@localhost commit-tree "$COMBINED_TREE" -p "$TARGET_SHA" -p "$INTEGRATION_SHA" -m "test-only pinned P01 GitHub App plus IA V5")"
+          test "$(git -C candidate cat-file -p "$COMBINED_SHA" | head -n1)" = "tree $COMBINED_TREE"
+          echo "COMBINED_SHA=$COMBINED_SHA" >> "$GITHUB_ENV"
+          echo "COMBINED_TREE=$COMBINED_TREE" >> "$GITHUB_ENV"
+          echo P01_GITHUB_APP_IA5_RUNNER_ONLY_MERGE=PASS
+
+      - name: Exact combined canonical regression versus formal baseline
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          git clone -q --depth 1 --branch "v${SOURCE}" "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" stable
+          test "$(tr -d '\\r\\n ' < stable/VERSION)" = "$SOURCE"
+          git -C candidate worktree add -q --detach "$GITHUB_WORKSPACE/composite-unit" "$COMBINED_SHA"
+          test "$(git -C composite-unit rev-parse HEAD^{tree})" = "$COMBINED_TREE"
+          bash composite-unit/tests/canonical_release_regression.sh composite-unit stable --require-zero-debt | tee /tmp/p01-final-canonical.txt
+          grep -Fx 'P01_CANONICAL_UNIT_REGRESSION=PASS' /tmp/p01-final-canonical.txt
+          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-final-canonical.txt
+          echo P01_IA5_GHAPP_FINAL_CANONICAL=PASS
+
+      - name: Cross-branch frontstage, Owner security and IA V5 focused regressions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          (
+            cd candidate
+            php tests/unit/frontend_subsite_shell_v247106_contract.php
+            php tests/unit/global_account_actions_contract.php
+            php tests/unit/p01_local_management_r1_contract.php
+            php tests/unit/p01_local_management_r6_task_focus_contract.php
+            php tests/unit/six_resource_frontend_admin_bridge_contract.php
+            node tests/unit/p01_home_favorites_native_contract.cjs
+            for contract in tests/unit/p01_ia5_*_contract.cjs; do
+              node "$contract"
+            done
+          )
+          echo P01_GITHUB_APP_IA5_CROSS_BRANCH_CONTRACTS=PASS
+
+      - name: PHP JavaScript syntax and scoped contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          find candidate/src -type f -name '*.php' -print0 | xargs -0 -r -n1 php -l >/dev/null
+          find candidate/src -type f -name '*.js' -print0 | xargs -0 -r -n1 node --check >/dev/null
+          php -l candidate/tests/unit/project_github_app_security_contract.php >/dev/null
+          node --check candidate/tests/unit/project_github_app_dialog_contract.cjs
+          (
+            cd candidate
+            php tests/unit/project_github_app_security_contract.php
+            php tests/unit/project_github_app_csp_contract.php
+            php tests/unit/project_github_app_matching_contract.php
+            php tests/unit/project_github_app_write_contract.php
+            php tests/unit/project_github_sync_v247177_contract.php
+            node tests/unit/project_github_app_dialog_contract.cjs
+            node tests/unit/project_github_app_account_links_contract.cjs
+            node tests/unit/project_git_source_disclosure_contract.cjs
+          )
+          echo P01_GITHUB_APP_FOCUSED_CONTRACT=PASS
+
+      - name: Verify private credentials never become repository assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test ! -e candidate/src/app/.runtime.php
+          test ! -d candidate/src/github-app
+          test ! -e candidate/src/github-app/registration.php
+          git -C candidate diff --check
+          git -C candidate ls-files | grep -F "src/app/ProjectGithubApp.php" >/dev/null
+          git -C candidate ls-files | grep -F "src/assets/local-subsite-management.js" >/dev/null
+          echo P01_GITHUB_APP_NO_PRIVATE_ASSET=PASS
+
+      - name: Read back previous formal release assets as upgrade baseline
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          mkdir -p "$REL/full" "$REL/update"
+          gh release download "v${SOURCE}" -R "$PRODUCT_REPO" -D "$REL" -p "VF-Start-V${SOURCE}-FULL.zip" -p "VF_Start_V${SOURCE}_UPDATE.zip"
+          unzip -q "$REL/VF-Start-V${SOURCE}-FULL.zip" -d "$REL/full"
+          unzip -q "$REL/VF_Start_V${SOURCE}_UPDATE.zip" -d "$REL/update"
+          test "$(tr -d '\r\n ' < "$REL/full/VERSION.txt")" = "$SOURCE"
+          test -f "$REL/update/repair-v${SOURCE}.php"
+          echo P01_GHAPP_IA5_OFFICIAL_BASELINE=PASS
+
+      - name: Build exact maintenance artifacts
+        id: artifact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ART"
+          python3 scripts/p01-maintenance-release.py             --candidate candidate/src             --baseline-full "$REL/full"             --baseline-repair "$REL/update/repair-v${SOURCE}.php"             --out "$ART"             --version "$VERSION"             --source-version "$SOURCE"             --target-sha "$COMBINED_SHA"             --target-tree "$COMBINED_TREE" | tee /tmp/p01-maintenance-build.json
+
+          test -f "$ART/VF-Start-V${VERSION}-FULL.zip"
+          test -f "$ART/VF_Start_V${VERSION}_UPDATE.zip"
+          test -f "$ART/P01_MAINTENANCE_ARTIFACT_RECEIPT.json"
+          echo P01_MAINTENANCE_BUILD=PASS
+
+      - name: Verify clean FULL and Atomic UPDATE
+        id: install_upgrade
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FULL="$ART/VF-Start-V${VERSION}-FULL.zip"
+          UPDATE="$ART/VF_Start_V${VERSION}_UPDATE.zip"
+          WORK="/tmp/p01-maintenance-gate"
+          rm -rf "$WORK"
+          mkdir -p "$WORK/update"
+          unzip -q "$UPDATE" -d "$WORK/update"
+          REPAIR="$WORK/update/repair-v${VERSION}.php"
+
+          test -f "$REPAIR"
+          test "$(unzip -Z1 "$UPDATE")" = "repair-v${VERSION}.php"
+          unzip -t "$FULL" >/dev/null
+          unzip -t "$UPDATE" >/dev/null
+          php -l "$REPAIR" >/dev/null
+          php "$REPAIR" --self-test | tee /tmp/p01-atomic-selftest.json
+          grep -Fq '"ok":true' /tmp/p01-atomic-selftest.json
+
+          assert_no_private_payload() {
+            local zip="$1"
+            if unzip -Z1 "$zip" | grep -Ei '(^|/)(\.runtime\.php|.*\.sqlite3?$|.*\.db$|private/|backups?/|sessions?/|tokens?/|staging/)' >/tmp/p01-private-hits.txt; then
+              cat /tmp/p01-private-hits.txt
+              echo PRIVATE_PAYLOAD_LEAK
+              exit 90
+            fi
+          }
+          assert_no_private_payload "$FULL"
+          assert_no_private_payload "$UPDATE"
+
+          install_full() {
+            local zip="$1" root="$2" port="$3" title="$4"
+            local cookie="/tmp/cookie-$port.txt"
+            rm -rf "$root" "$cookie"
+            mkdir -p "$root"
+            unzip -q "$zip" -d "$root"
+            (
+              cd "$root"
+              php -S 127.0.0.1:"$port" -t . >"/tmp/server-$port.log" 2>&1 &
+              echo $! >"/tmp/server-$port.pid"
+            )
+            local pid
+            pid="$(cat "/tmp/server-$port.pid")"
+            trap 'kill "$pid" >/dev/null 2>&1 || true' RETURN
+            for _ in $(seq 1 50); do
+              if curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$port/setup.php" -o "/tmp/setup-$port.html"; then break; fi
+              sleep 1
+            done
+            local csrf
+            csrf="$(python3 - "/tmp/setup-$port.html" <<'PY'
+          import re,sys
+          text=open(sys.argv[1],encoding="utf-8").read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert m
+          print(m.group(1))
+          PY
+          )"
+            local pass="ReleaseGate!${port}"
+            curl -fsS -c "$cookie" -b "$cookie" -X POST "http://127.0.0.1:$port/setup.php"               --data-urlencode "setup_csrf=$csrf"               --data-urlencode "site_title=$title"               --data-urlencode "admin_password=$pass"               --data-urlencode "admin_password_confirm=$pass"               -o "/tmp/setup-post-$port.html"
+            (cd "$root" && php cli/verify.php) | tee "/tmp/verify-$port.txt"
+            grep -Fx 'VERIFY_PASS=YES' "/tmp/verify-$port.txt"
+            local revisit
+            revisit="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/setup.php")"
+            test "$revisit" = 302
+            local body status
+            body="$(php -r 'echo json_encode(["password"=>$argv[1]], JSON_UNESCAPED_SLASHES);' "$pass")"
+            status="$(curl -sS -c "$cookie" -b "$cookie" -o "/tmp/login-$port.json" -w '%{http_code}' -H 'Content-Type: application/json' --data "$body" "http://127.0.0.1:$port/api.php?action=login")"
+            test "$status" = 200
+            grep -Fq '"ok":true' "/tmp/login-$port.json"
+            kill "$pid" >/dev/null 2>&1 || true
+            trap - RETURN
+          }
+
+          install_full "$FULL" "$WORK/target-full" 18511 "VF Start V$VERSION FULL Gate"
+          test "$(tr -d '\r\n ' < "$WORK/target-full/VERSION.txt")" = "$VERSION"
+          echo P01_CLEAN_FULL_INSTALL=PASS
+
+          install_full "$REL/VF-Start-V${SOURCE}-FULL.zip" "$WORK/upgrade" 18512 "VF Start V$SOURCE Upgrade Source"
+          cat >"$WORK/upgrade/sentinel.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require __DIR__.'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $cat=$repo->createCategory(['name'=>'Release Sentinel','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+          $link=$repo->saveLink(null,['surface'=>'start','category_id'=>$cat,'title'=>'Release Sentinel Link','url'=>'https://example.com/release-sentinel','description'=>'must survive atomic','tags'=>['release-sentinel'],'is_private'=>1,'is_pending'=>0]);
+          file_put_contents('/tmp/p01-sentinel-id.txt',(string)$link['id']);
+          PHP
+          php "$WORK/upgrade/sentinel.php"
+          php -r 'require $argv[1]."/app/bootstrap.php"; $dir=VF_PRIVATE_ROOT."/github-app"; if(!is_dir($dir) && !mkdir($dir,0700,true))exit(2); $p=$dir."/registration.php"; $v="<?php return [\"isolated_canary\" => \"not_a_real_key\"];"; if(file_put_contents($p,$v)===false)exit(3); chmod($dir,0700); chmod($p,0600); echo hash_file("sha256",$p);' "$WORK/upgrade" > /tmp/p01-ghapp-upgrade-canary.sha
+          rm "$WORK/upgrade/sentinel.php"
+          cp "$REPAIR" "$WORK/upgrade/repair-v${VERSION}.php"
+          php "$WORK/upgrade/repair-v${VERSION}.php" --verify-source="$WORK/upgrade" | tee /tmp/p01-source-verify.json
+          grep -Fq '"ok":true' /tmp/p01-source-verify.json
+          php "$WORK/upgrade/repair-v${VERSION}.php" --run="$WORK/upgrade" | tee /tmp/p01-atomic-success.json
+          grep -Fq '"ok":true' /tmp/p01-atomic-success.json
+          test "$(tr -d '\r\n ' < "$WORK/upgrade/VERSION.txt")" = "$VERSION"
+          (cd "$WORK/upgrade" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          php -r 'require $argv[1]."/app/bootstrap.php"; $id=(int)trim(file_get_contents("/tmp/p01-sentinel-id.txt")); $s=vf_db()->prepare("SELECT title,is_private FROM links WHERE id=?"); $s->execute([$id]); $r=$s->fetch(PDO::FETCH_ASSOC); if(!$r||$r["title"]!=="Release Sentinel Link"||(int)$r["is_private"]!==1) exit(1); echo "SENTINEL_PRESERVED\n";' "$WORK/upgrade"
+
+          cp "$REPAIR" "$WORK/upgrade/repair-v${VERSION}.php"
+          php "$WORK/upgrade/repair-v${VERSION}.php" --run="$WORK/upgrade" | tee /tmp/p01-atomic-repeat.json
+          grep -Fq '"already_current":true' /tmp/p01-atomic-repeat.json
+          php -r 'require $argv[1]."/app/bootstrap.php"; $p=VF_PRIVATE_ROOT."/github-app/registration.php"; if(!is_file($p) || hash_file("sha256",$p)!==$argv[2] || ((fileperms($p)&0777)!==0600))exit(4); echo "GHAPP_CREDENTIAL_CANARY_PRESERVED=PASS\\n";' "$WORK/upgrade" "$(cat /tmp/p01-ghapp-upgrade-canary.sha)"
+          echo P01_GHAPP_CREDENTIAL_ATOMIC_SURVIVAL=PASS
+          echo P01_ATOMIC_UPGRADE_AND_IDEMPOTENCY=PASS
+
+          install_full "$REL/VF-Start-V${SOURCE}-FULL.zip" "$WORK/rollback" 18513 "VF Start V$SOURCE Rollback Source"
+          cat >"$WORK/rollback/sentinel.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require __DIR__.'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $cat=$repo->createCategory(['name'=>'Rollback Sentinel','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+          $link=$repo->saveLink(null,['surface'=>'start','category_id'=>$cat,'title'=>'Rollback Sentinel Link','url'=>'https://example.com/rollback-sentinel','description'=>'must survive rollback','tags'=>['rollback-sentinel'],'is_private'=>1,'is_pending'=>0]);
+          file_put_contents('/tmp/p01-rollback-id.txt',(string)$link['id']);
+          PHP
+          php "$WORK/rollback/sentinel.php"
+          php -r 'require $argv[1]."/app/bootstrap.php"; $dir=VF_PRIVATE_ROOT."/github-app"; if(!is_dir($dir) && !mkdir($dir,0700,true))exit(2); $p=$dir."/registration.php"; $v="<?php return [\"isolated_canary\" => \"not_a_real_key\"];"; if(file_put_contents($p,$v)===false)exit(3); chmod($dir,0700); chmod($p,0600); echo hash_file("sha256",$p);' "$WORK/rollback" > /tmp/p01-ghapp-rollback-canary.sha
+          rm "$WORK/rollback/sentinel.php"
+          cp "$REPAIR" "$WORK/rollback/repair-v${VERSION}.php"
+          set +e
+          VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$WORK/rollback/repair-v${VERSION}.php" --run="$WORK/rollback" >/tmp/p01-rollback.out 2>/tmp/p01-rollback.err
+          rollback_rc=$?
+          set -e
+          test "$rollback_rc" -ne 0
+          test "$(tr -d '\r\n ' < "$WORK/rollback/VERSION.txt")" = "$SOURCE"
+          (cd "$WORK/rollback" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          php -r 'require $argv[1]."/app/bootstrap.php"; $id=(int)trim(file_get_contents("/tmp/p01-rollback-id.txt")); $s=vf_db()->prepare("SELECT title FROM links WHERE id=?"); $s->execute([$id]); if($s->fetchColumn()!=="Rollback Sentinel Link") exit(1); echo "ROLLBACK_SENTINEL_PRESERVED\n";' "$WORK/rollback"
+          php -r 'require $argv[1]."/app/bootstrap.php"; $p=VF_PRIVATE_ROOT."/github-app/registration.php"; if(!is_file($p) || hash_file("sha256",$p)!==$argv[2] || ((fileperms($p)&0777)!==0600))exit(4); echo "GHAPP_CREDENTIAL_CANARY_PRESERVED=PASS\\n";' "$WORK/rollback" "$(cat /tmp/p01-ghapp-rollback-canary.sha)"
+          echo P01_GHAPP_CREDENTIAL_ROLLBACK_SURVIVAL=PASS
+          echo P01_ATOMIC_ROLLBACK=PASS
+
+          unzip -p "$FULL" VERSION.txt | tr -d '\r\n ' | grep -Fx "$VERSION"
+          unzip -p "$FULL" release-manifest.json | php -r '$m=json_decode(stream_get_contents(STDIN),true); if(($m["version"]??"")!==$argv[1]||($m["source_version"]??"")!==$argv[2]||empty($m["maintenance_release"]["schema_unchanged"])) exit(1); echo "P01_RELEASE_MANIFEST=PASS\n";' "$VERSION" "$SOURCE"
+          echo P01_MAINTENANCE_ARTIFACT_GATE=PASS
+
+
+
+      - name: Finished isolated candidate validation
+        shell: bash
+        run: |
+          echo P01_GITHUB_APP_IA5_FULL_ATOMIC_MACHINE_GATE=PASS
