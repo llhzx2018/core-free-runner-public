@@ -77,32 +77,10 @@ done
 TMP_DIR="$(mktemp -d -t p07-current.XXXXXX)"
 NEW_DIR="${INSTALL_DIR}.new"
 COMMITTED=0
-OLD_MOVED=0
-NEW_INSTALLED=0
 
 cleanup() {
   local rc=$?
   trap - EXIT
-  # Abort after a partially completed path swap must leave the old runtime
-  # available. The flags are set only after this invocation moved each path.
-  if (( rc != 0 && COMMITTED == 0 )); then
-    if (( NEW_INSTALLED == 1 )); then
-      rm -rf "$INSTALL_DIR" 2>/dev/null || true
-    fi
-    if (( OLD_MOVED == 1 )); then
-      if mv "$PREVIOUS_DIR" "$INSTALL_DIR"; then
-        # Existing links to the canonical install path become valid again.
-        # If the link location itself caused the failure, keep the old tree.
-        ln -sfn "$INSTALL_DIR/bin/vfops-user" "$BIN_LINK" 2>/dev/null || true
-        say "安装失败，已恢复安装前的旧版本目录。"
-      else
-        printf '安装失败且自动恢复旧版失败；旧版备份位于：%s\n' "$PREVIOUS_DIR" >&2
-      fi
-    elif (( NEW_INSTALLED == 1 )) && [[ -L "$BIN_LINK" ]] && \
-         [[ "$(readlink "$BIN_LINK" 2>/dev/null || true)" == "$INSTALL_DIR/bin/vfops-user" ]]; then
-      rm -f "$BIN_LINK" 2>/dev/null || true
-    fi
-  fi
   rm -rf "$TMP_DIR" "$NEW_DIR" 2>/dev/null || true
   exit "$rc"
 }
@@ -152,15 +130,21 @@ cp -a "$SRC_DIR"/. "$NEW_DIR"/
 if [[ -e "$INSTALL_DIR" ]]; then
   rm -rf "$PREVIOUS_DIR"
   mv "$INSTALL_DIR" "$PREVIOUS_DIR"
-  OLD_MOVED=1
 fi
 mv "$NEW_DIR" "$INSTALL_DIR"
-NEW_INSTALLED=1
 mkdir -p "$(dirname "$BIN_LINK")"
 ln -sfn "$INSTALL_DIR/bin/vfops-user" "$BIN_LINK"
 
 if ! verify_installed_current; then
-  fail "安装后自检未通过，将恢复安装前版本。"
+  say "安装后自检未通过，正在恢复安装前版本..."
+  rm -rf "$INSTALL_DIR"
+  if [[ -e "$PREVIOUS_DIR" ]]; then
+    mv "$PREVIOUS_DIR" "$INSTALL_DIR"
+    ln -sfn "$INSTALL_DIR/bin/vfops-user" "$BIN_LINK"
+  else
+    rm -f "$BIN_LINK"
+  fi
+  fail "已回滚，未保留不完整的新版本。"
 fi
 
 COMMITTED=1

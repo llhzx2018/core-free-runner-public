@@ -26,7 +26,7 @@ for mode in upgrade first_install; do
       P07_INSTALL_DIR="$install_dir" \
       P07_PREVIOUS_DIR="$previous_dir" \
       P07_BIN_LINK="$blocker/vfops" \
-      bash "$ROOT/installers/p07-final.sh" >"$case_root/installer.log" 2>&1; then
+      bash "$ROOT/experiments/p07-installer-rollback-candidate.sh" >"$case_root/installer.log" 2>&1; then
     printf 'P07_ROLLBACK_TEST=FAIL: unexpected installer success (%s)\n' "$mode" >&2
     exit 1
   fi
