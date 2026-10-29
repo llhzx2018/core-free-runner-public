@@ -25,7 +25,7 @@ jobs:
       PRODUCT_REPO: llhzx2018/vf-start
       VERSION: 2.47.483
       SOURCE: 2.47.482
-      TARGET_SHA: 9608e2220667d844e8bee52e4b477ca789039d0e
+      TARGET_SHA: 1a4be37e1f1faa8abd4568ec81c91fd5873db8ff
       TAG: v2.47.483
       BASE_TAG: v2.47.482
       ART: /tmp/p01-ia5-candidate-artifacts
@@ -217,6 +217,7 @@ jobs:
               node tests/unit/p01_ia5_remote_watch_r33_contract.cjs
               node tests/unit/p01_ia5_remote_channels_r34_contract.cjs
               node tests/unit/p01_ia5_resource_actions_r35_contract.cjs
+              node tests/unit/p01_ia5_basic_resource_editor_r36_contract.cjs
               node tests/unit/p01_ia5_no_backend_hops_r31_contract.cjs
           )
           echo P01_IA5_FOCUSED_SOURCE_CONTRACTS=PASS
@@ -1349,6 +1350,66 @@ jobs:
               await page.unroute('**/api.php?action=favorite');
               await page.unroute('**/api.php?action=pending');
               console.log('P01_IA5_BROWSER_R35_RESOURCE_FAVORITE_PENDING_REAL_SOURCE_REVERT=PASS');
+              // R36: same-dialog conservative editor: title-only on Channels,
+              // no URL rewriting or metadata clobber, explicit confirm,
+              // real SQLite readback, stale snapshot denial and unknown lock.
+              let r36Writes=0;
+              await page.route('**/api.php?action=link_basic_patch',async route=>{
+                r36Writes++;await route.continue();
+              });
+              const r36Open=inventory.locator('[data-vf-global-inventory-basic-open]');
+              assert.equal(await r36Open.isEnabled(),true,'normal Channel URL admits title edit');
+              await r36Open.click();
+              const r36Editor=inventory.locator('[data-vf-global-inventory-basic-editor]');
+              const r36Title=r36Editor.locator('[data-vf-global-inventory-basic-title]');
+              const r36Url=r36Editor.locator('[data-vf-global-inventory-basic-url]');
+              const r36Prepare=r36Editor.locator('[data-vf-global-inventory-basic-prepare]');
+              assert.equal(await r36Editor.isVisible(),true,'editor is inside current management dialog');
+              assert.equal(await r36Url.evaluate(input=>input.readOnly),true,
+                'specialized Channel URL cannot be rewritten by generic editor');
+              await r36Title.fill(r35Original.title+' R36 Edited');
+              await page.keyboard.press('Escape');
+              assert.equal(await globalOps.evaluate(e=>e.open),true,'Esc never discards dirty basic edit');
+              assert.equal(await r36Prepare.isEnabled(),true);
+              await r36Prepare.click();
+              assert.equal(await inventory.locator('[data-vf-global-inventory-confirmation]').isVisible(),true);
+              await inventory.locator('[data-vf-global-inventory-cancel]').click();
+              assert.equal(r36Writes,0,'cancel confirmation makes no write');
+              await r36Prepare.click();
+              await inventory.locator('[data-vf-global-inventory-commit]').click();
+              await page.waitForFunction(()=>document.querySelector('[data-vf-global-inventory-state]')?.textContent?.includes('已保存资源标题'),null,{timeout:12000});
+              assert.equal(r36Writes,1,'one explicit basic edit POST');
+              const r36List=async()=>{
+                const response=await context.request.get(origin+
+                  '/api.php?action=resource_inventory&surface=channels&q=IA5%20Release%20Synthetic%20Channel');
+                assert.equal(response.status(),200);
+                const body=await response.json();
+                return body.rows.find(r=>Number(r.id)===Number(r35Original.id));
+              };
+              const r36Changed=await r36List();
+              assert.equal(r36Changed.title,r35Original.title+' R36 Edited');
+              assert.equal(r36Changed.url,r35Original.url,'specialized source URL retained');
+              assert.equal(Number(r36Changed.is_private),Number(r35Original.is_private));
+              assert.equal(Number(r36Changed.is_favorite),Number(r35Original.is_favorite));
+              assert.equal(Number(r36Changed.is_pending),Number(r35Original.is_pending));
+              await r36Open.click();
+              await r36Title.fill(r35Original.title);
+              await r36Prepare.click();
+              await inventory.locator('[data-vf-global-inventory-commit]').click();
+              await page.waitForFunction(()=>document.querySelector('[data-vf-global-inventory-state]')?.textContent?.includes('已保存资源标题'),null,{timeout:12000});
+              assert.equal((await r36List()).title,r35Original.title,'title restored after real SQL edit');
+              const r36Csrf=await page.locator('meta[name="csrf-token"]').getAttribute('content');
+              assert.ok(r36Csrf,'real Owner CSRF');
+              const r36Stale=await context.request.post(origin+'/api.php?action=link_basic_patch',{
+                headers:{'X-CSRF-Token':r36Csrf},
+                data:{id:r35Original.id,title:'STALE SHOULD REJECT',url:r35Original.url,
+                  expected_title:r36Changed.title,expected_url:r36Changed.url,
+                  expected_updated_at:r36Changed.updated_at}
+              });
+              assert.equal(r36Stale.status(),409,'stale version refuses overwrite');
+              assert.equal((await r36List()).title,r35Original.title,'stale edit did not mutate');
+              await page.unroute('**/api.php?action=link_basic_patch');
+              console.log('P01_IA5_BROWSER_R36_BASIC_EDITOR_DIRTY_CAS_SQLITE_REVERT=PASS');
               await page.keyboard.press('Escape');
               await page.waitForFunction(()=>!document.querySelector('[data-vf-local-management]')?.open,null,{timeout:6000});
               const guest=await browser.newContext({viewport:{width:1440,height:900}});
@@ -1723,6 +1784,13 @@ jobs:
           yt_get=$(curl -sS -b "$cookie" -o /dev/null -w '%{http_code}' http://127.0.0.1:18522/youtube-channel-updates.php)
           test "$yt_get" = 405
           echo P01_IA5_R34_YOUTUBE_OWNER_CSRF_HTTP=PASS
+          basic_guest=$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18522/api.php?action=link_basic_patch -H 'Content-Type: application/json' -d '{"id":1}')
+          test "$basic_guest" = 401
+          basic_csrf=$(curl -sS -b "$cookie" -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18522/api.php?action=link_basic_patch -H 'Content-Type: application/json' -d '{"id":1}')
+          test "$basic_csrf" = 419
+          basic_get=$(curl -sS -b "$cookie" -o /dev/null -w '%{http_code}' http://127.0.0.1:18522/api.php?action=link_basic_patch)
+          test "$basic_get" = 405
+          echo P01_IA5_R36_BASIC_EDITOR_OWNER_CSRF_HTTP=PASS
           for action in plugin_token_regenerate plugin_token_revoke; do
             denied=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18522/api.php?action=$action")
             test "$denied" = 401
