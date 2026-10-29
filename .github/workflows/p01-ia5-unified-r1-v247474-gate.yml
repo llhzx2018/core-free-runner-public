@@ -1,4 +1,4 @@
-name: p01-ia5-unified-r29d-home-v247483-preflight
+name: p01-ia5-unified-r30-music-v247483-preflight
 
 on:
   pull_request:
@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: p01-ia5-unified-r29d-15cc115
+  group: p01-ia5-unified-r30-5d1b3de
   cancel-in-progress: false
 
 jobs:
@@ -25,7 +25,7 @@ jobs:
       PRODUCT_REPO: llhzx2018/vf-start
       VERSION: 2.47.483
       SOURCE: 2.47.482
-      TARGET_SHA: 15cc115289f88bbaae5778d50e151e30d0f818c0
+      TARGET_SHA: 5d1b3de63bd984fc3996d36ee99ea63b60e892b8
       TAG: v2.47.483
       BASE_TAG: v2.47.482
       ART: /tmp/p01-ia5-candidate-artifacts
@@ -213,6 +213,7 @@ jobs:
               node tests/unit/p01_ia5_remote_inbox_r28_contract.cjs
               node tests/unit/p01_home_favorites_native_contract.cjs
               node tests/unit/p01_ia5_remote_home_r29_contract.cjs
+              node tests/unit/p01_ia5_remote_music_r30_contract.cjs
           )
           echo P01_IA5_FOCUSED_SOURCE_CONTRACTS=PASS
 
@@ -1034,8 +1035,60 @@ jobs:
               assert.doesNotMatch(await remoteManagerR25.locator('[data-vf-local-home-status]').textContent(),/读取失败/);
               assert.match(page.url(),/channels\.php/,'Home remote task never changes route');
               await page.unroute('**/api.php?action=bootstrap**');
-              assert.equal(await remoteManagerR25.locator('[data-vf-management-tab="music"]').isDisabled(),true,
-                'unsupported specialist remote editor remains explicitly unavailable');
+
+              // R30: Music is a separate canonical private SQLite domain.
+              // Use its real CSRF POST and Owner GET inside this dialog, never iframe or navigation.
+              let musicReadsR30=0,musicWritesR30=0;
+              await page.route('**/api.php?action=music_playlist_inventory**',async route=>{
+                musicReadsR30++;await route.continue();
+              });
+              await page.route('**/music-home.php',async route=>{
+                if(route.request().method()==='POST')musicWritesR30++;
+                await route.continue();
+              });
+              await remoteManagerR25.locator('[data-vf-management-tab="music"]').click();
+              assert.equal(await remoteManagerR25.locator('[data-vf-management-tab="music"]').getAttribute('aria-selected'),'true');
+              assert.equal(await remoteManagerR25.locator('[data-vf-remote-music-root]').isVisible(),true);
+              assert.equal(musicReadsR30,0,'cross-domain Music selection causes no network requests');
+              const musicTaskR30=remoteManagerR25.locator('[data-vf-remote-music-root]');
+              await musicTaskR30.locator('[data-vf-remote-music-load]').click();
+              await page.waitForFunction(()=>{
+                const s=document.querySelector('[data-vf-remote-music-status]')?.textContent||'';
+                return s.includes('已读取')||s.includes('数据不可用')||s.includes('读取失败');
+              },null,{timeout:12000});
+              assert.match(await musicTaskR30.locator('[data-vf-remote-music-status]').textContent(),/已读取/);
+              assert.equal(musicReadsR30,1,'Music reads canonical Owner inventory only after click');
+              const syntheticPlaylist='IA5-R30-安全隔离-'+Date.now();
+              const musicName=musicTaskR30.locator('[data-vf-remote-music-name]');
+              await musicName.fill(syntheticPlaylist);
+              assert.equal(await musicTaskR30.locator('[data-vf-remote-music-prepare]').isDisabled(),false);
+              await musicTaskR30.locator('[data-vf-remote-music-prepare]').click();
+              assert.equal(await musicTaskR30.locator('[data-vf-remote-music-confirmation]').isVisible(),true);
+              await remoteManagerR25.locator('[data-vf-management-tab="global"]').click();
+              assert.equal(await remoteManagerR25.locator('[data-vf-management-tab="music"]').getAttribute('aria-selected'),'true',
+                'Music draft dirty guard blocks cross-tab navigation without deletion');
+              await musicTaskR30.locator('[data-vf-remote-music-commit]').click();
+              await page.waitForFunction(()=>{
+                return (document.querySelector('[data-vf-remote-music-status]')?.textContent||'').includes('已创建并核对');
+              },null,{timeout:18000});
+              assert.equal(musicWritesR30,1,'create dispatch once to canonical Music form writer');
+              assert.equal(musicReadsR30,2,'create result reconciled with Owner inventory readback');
+              const selectedPlaylist=await musicTaskR30.locator('[data-vf-remote-music-choice]').inputValue();
+              assert.ok(Number(selectedPlaylist)>0,'new playlist verified by canonical SQLite identity');
+              const renamedPlaylist=syntheticPlaylist+'-已重命名';
+              await musicName.fill(renamedPlaylist);
+              await musicTaskR30.locator('[data-vf-remote-music-prepare]').click();
+              await musicTaskR30.locator('[data-vf-remote-music-commit]').click();
+              await page.waitForFunction(()=>{
+                return (document.querySelector('[data-vf-remote-music-status]')?.textContent||'').includes('已重命名并核对');
+              },null,{timeout:18000});
+              assert.equal(musicWritesR30,2,'rename dispatch exactly once to canonical Music writer');
+              assert.equal(musicReadsR30,3,'rename read back from Music SQLite');
+              assert.equal(await musicTaskR30.locator('[data-vf-remote-music-choice]').inputValue(),selectedPlaylist);
+              assert.match(page.url(),/channels\.php/,'Music remote management stays on original page');
+              await page.unroute('**/api.php?action=music_playlist_inventory**');
+              await page.unroute('**/music-home.php');
+              console.log('P01_IA5_BROWSER_R30_MUSIC_CANONICAL_CREATE_RENAME_DIRTY_ZERO_LOAD=PASS');
               await remoteManagerR25.locator('[data-vf-management-tab="global"]').click();
               assert.equal(await remoteManagerR25.locator('[data-vf-remote-home-root]').isVisible(),false,'Home editor restored to current-page task container');
               assert.equal(await remoteManagerR25.locator('[data-vf-global-inventory-surface]').isDisabled(),false,'global filter restored');
@@ -1509,6 +1562,15 @@ jobs:
           csrf2=$(curl -sS -b "$cookie" -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18522/music-import.php -d 'vf_frontstage_json=1')
           test "$csrf1" = 419
           test "$csrf2" = 419
+          music_guest=$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:18522/api.php?action=music_playlist_inventory)
+          test "$music_guest" = 401
+          music_guest_post=$(curl -sS -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18522/music-home.php -d 'action=create_playlist&name=GuestDenied')
+          test "$music_guest_post" = 403
+          music_csrf_post=$(curl -sS -b "$cookie" -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:18522/music-home.php -d 'action=create_playlist&name=CsrfDenied')
+          test "$music_csrf_post" = 419
+          music_owner=$(curl -fsS -b "$cookie" http://127.0.0.1:18522/api.php?action=music_playlist_inventory | jq -r '.ok')
+          test "$music_owner" = true
+          echo P01_IA5_R30_MUSIC_OWNER_CSRF_DENY=PASS
           for action in plugin_token_regenerate plugin_token_revoke; do
             denied=$(curl -sS -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:18522/api.php?action=$action")
             test "$denied" = 401
