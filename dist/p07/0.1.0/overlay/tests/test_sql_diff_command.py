@@ -32,7 +32,7 @@ class SQLDiagnosticCommandTests(unittest.TestCase):
             patch.object(migration, "pull_path") as pull,
             patch.object(migration.cloudpanel, "export_database") as export_new,
             patch.object(migration.sql_diff_probe, "diagnostic", return_value={
-                "schema": "SQL_DIFF_EVIDENCE_V1", "verification": "NOT_A_PASS_GATE",
+                "schema": "SQL_DIFF_EVIDENCE_V2", "verification": "NOT_A_PASS_GATE",
             }),
             patch.object(migration, "source_remote") as cleanup,
             patch.object(migration, "save_state") as state_write,

@@ -102,5 +102,82 @@ class SqlDiffEvidenceTests(unittest.TestCase):
         self.assertEqual(result["schema_difference"]["mismatched_tables"], 0)
 
 
+    def test_three_unsafe_dynamic_ddl_branches_are_classified_without_names(self):
+        source = "CREATE TABLE \u0060secret\u0060 (\u0060id\u0060 INT);\n"
+        for idx, command in enumerate((
+            "CREATE TABLE hidden (x INT)",
+            "ALTER TABLE hidden ADD COLUMN token TEXT",
+            "DROP TABLE hidden",
+        ), start=1):
+            source += (
+                f"/*!80000 SET @q{idx}=IF(@flag, '{command}', 'SELECT 1') */;\n"
+            )
+        result = self.probe(source, "CREATE TABLE \u0060secret\u0060 (\u0060id\u0060 INT);\n")
+        guard = result["dynamic_guard"]
+        self.assertEqual(guard["recognized_unsafe"], 3)
+        self.assertEqual(guard["unsafe_yes_branches"], 3)
+        self.assertEqual(guard["unsafe_no_branches"], 0)
+        self.assertEqual(guard["unsafe_branch_classes"]["DDL_CREATE"], 1)
+        self.assertEqual(guard["unsafe_branch_classes"]["DDL_ALTER"], 1)
+        self.assertEqual(guard["unsafe_branch_classes"]["DDL_DROP"], 1)
+        self.assertEqual(result["schema"], "SQL_DIFF_EVIDENCE_V2")
+        self.assertEqual(result["verification"], "NOT_A_PASS_GATE")
+        for secret in ("hidden", "token", "secret", "flag", "q1"):
+            self.assertNotIn(secret, json.dumps(result))
+
+    def test_unsafe_data_and_session_classifications_do_not_authorize(self):
+        source = (
+            "CREATE TABLE \u0060private_table\u0060 (\u0060id\u0060 INT);\n"
+            "/*!50003 SET @q=IF(@found, 'UPDATE private_table SET id=7', 'SET @x=1') */;\n"
+            "/*!50003 SET @r=IF(@found, 'SET GLOBAL sql_notes=0', 'SELECT 1') */;\n"
+        )
+        result = self.probe(source, "CREATE TABLE \u0060private_table\u0060 (\u0060id\u0060 INT);\n")
+        guard = result["dynamic_guard"]
+        self.assertEqual(guard["recognized_unsafe"], 2)
+        self.assertEqual(guard["unsafe_branch_classes"]["DATA_MUTATION"], 1)
+        self.assertEqual(guard["unsafe_branch_classes"]["SESSION_UNPROVEN"], 1)
+        self.assertEqual(guard["recognized_safe"], 0)
+        self.assertEqual(result["verification"], "NOT_A_PASS_GATE")
+        self.assertNotIn("private_table", json.dumps(result))
+
+    def test_dml_fingerprint_equal_is_advisory_and_redacted(self):
+        info = [
+            {"objects": ["super_private_table"], "data_hash": "PRIVATE_HASH", "data_statements": 4},
+            {"objects": ["super_private_table"], "data_hash": "PRIVATE_HASH", "data_statements": 4},
+        ]
+        with patch.object(evidence.verify, "sql_data_fingerprint", side_effect=info):
+            result = evidence.data_content_evidence(Path("left.sql"), Path("right.sql"))
+        self.assertEqual(result["comparison"], "FINGERPRINT_EQUAL_NOT_VERIFIED")
+        self.assertEqual(result["source_dml_statements"], 4)
+        self.assertEqual(result["target_dml_statements"], 4)
+        self.assertNotIn("PRIVATE_HASH", json.dumps(result))
+        self.assertNotIn("super_private_table", json.dumps(result))
+
+    def test_dml_fingerprint_changed_or_empty_never_equals(self):
+        base = {"objects": ["private"], "data_hash": "hash_a", "data_statements": 1}
+        different = {"objects": ["private"], "data_hash": "hash_b", "data_statements": 1}
+        with patch.object(evidence.verify, "sql_data_fingerprint", side_effect=[base, different]):
+            changed = evidence.data_content_evidence(Path("left.sql"), Path("right.sql"))
+        self.assertEqual(changed["comparison"], "FINGERPRINT_DIFFER")
+        empty = {"objects": ["private"], "data_hash": "empty", "data_statements": 0}
+        with patch.object(evidence.verify, "sql_data_fingerprint", side_effect=[empty, empty]):
+            none = evidence.data_content_evidence(Path("left.sql"), Path("right.sql"))
+        self.assertEqual(none["comparison"], "NO_DML_STATEMENTS")
+        self.assertNotIn("private", json.dumps(changed))
+        self.assertNotIn("private", json.dumps(none))
+
+    def test_unavailable_data_fingerprint_does_not_erase_schema_evidence(self):
+        with patch.object(evidence.verify, "sql_data_fingerprint",
+                          side_effect=evidence.verify.RestoreVerifyError("private SQL string")):
+            result = self.probe(
+                "CREATE TABLE \u0060private\u0060 (\u0060id\u0060 INT);\n",
+                "CREATE TABLE \u0060private\u0060 (\u0060id\u0060 INT);\n",
+            )
+        self.assertEqual(result["data_content"], {"comparison": "UNAVAILABLE"})
+        self.assertEqual(result["schema_difference"]["mismatched_tables"], 0)
+        self.assertEqual(result["verification"], "NOT_A_PASS_GATE")
+        self.assertNotIn("private", json.dumps(result))
+
+
 if __name__ == "__main__":
     unittest.main()
