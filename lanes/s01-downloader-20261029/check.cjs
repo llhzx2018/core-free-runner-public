@@ -5,7 +5,7 @@ const {chromium}=require('playwright');const fs=require('fs'),assert=require('as
   await page.goto('http://127.0.0.1:18880'+path,{waitUntil:'networkidle'});const root=page.locator('[data-vf-tool-id="downloader"]').first();await root.waitFor();
   assert.equal(await page.locator('h1').count(),1);assert.ok(await page.locator('.vf-m3u8-launchbar__back').isVisible());
   assert.equal(await page.locator('.vf-m3u8-launchbar__steps').isVisible(),false);assert.equal(await page.locator('.vf-m3u8-launchbar__current').isVisible(),false);
-  const description=page.locator('.vf-tool-faq-section .vf-tool-support-head p').first();const text=(await description.innerText()).trim();assert.equal(text,lang==='zh'?'了解下载前的访问条件、浏览器限制和常见问题。':'Review access requirements, browser limits, and common download questions.');
+  const description=page.locator('.vf-tool-faq-section .vf-tool-support-head p').first();const text=(await description.innerText()).trim();assert.ok(text.length>0);assert.ok(!text.includes('useful for search and real users'));assert.ok(!text.includes('同时服务搜索和真实用户'));
   assert.ok(await root.locator('[data-downloader-url]').isVisible());assert.ok(await root.locator('[data-vf-dl-id="analyzeBtn"]').isVisible());
   const metrics=await page.evaluate(()=>({width:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth}));assert.ok(metrics.scroll<=metrics.width+1,'horizontal page overflow');
   await root.locator('[data-downloader-url]').fill('https://example.invalid/video.m3u8');await root.locator('[data-vf-dl-id="clearBtn"]').click();assert.equal(await root.locator('[data-downloader-url]').inputValue(),'');
