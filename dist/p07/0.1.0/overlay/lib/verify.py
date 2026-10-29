@@ -291,6 +291,115 @@ def _cross_engine_known_session(sql: str) -> bool:
     return any(pattern.fullmatch(statement) for pattern in _CROSS_ENGINE_SESSION_RE)
 
 
+
+def _cross_engine_decimal_default_column(segment: str) -> str:
+    """Normalize only a numeric literal DEFAULT on an actual DECIMAL column.
+
+    Other quoted text (including COMMENT content) remains byte-significant.
+    """
+    head = re.match(r"\s*\x60(?:[^\x60]|\x60\x60)+\x60\s+DECIMAL(?=\s|\()", segment, re.I)
+    if not head:
+        return segment
+    value_re = re.compile(
+        r"'(?P<value>-?(?:0|[1-9][0-9]*)\.[0-9]+)'(?=\s|[,)]|$)"
+    )
+    index = head.end()
+    quote = ""
+    while index < len(segment):
+        char = segment[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                if index + 1 < len(segment) and segment[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = ""
+            index += 1
+            continue
+        if segment.startswith("/*", index):
+            end = segment.find("*/", index + 2)
+            if end < 0:
+                return segment
+            index = end + 2
+            continue
+        if char in "'\"\x60":
+            quote = char
+            index += 1
+            continue
+        if (segment[index:index + 7].upper() == "DEFAULT"
+                and (index == 0 or not (segment[index - 1].isalnum() or segment[index - 1] == "_"))
+                and (index + 7 == len(segment) or not (
+                    segment[index + 7].isalnum() or segment[index + 7] == "_"
+                ))):
+            at = index + 7
+            while at < len(segment) and segment[at].isspace():
+                at += 1
+            literal = value_re.match(segment, at)
+            if literal:
+                return segment[:at] + literal.group("value") + segment[literal.end():]
+        index += 1
+    return segment
+
+
+def _cross_engine_decimal_defaults(sql: str) -> str:
+    """Parse CREATE TABLE top-level column clauses; leave unsafe SQL intact."""
+    opening = re.match(
+        r"^CREATE TABLE\s+(?:IF NOT EXISTS\s+)?"
+        r"\x60(?:[^\x60]|\x60\x60)+\x60\s*\(", sql, re.I,
+    )
+    if not opening:
+        return sql
+    ranges = []
+    column_start = opening.end()
+    depth = 1
+    quote = ""
+    index = column_start
+    while index < len(sql):
+        char = sql[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                if index + 1 < len(sql) and sql[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = ""
+            index += 1
+            continue
+        if sql.startswith("/*", index):
+            end = sql.find("*/", index + 2)
+            if end < 0:
+                return sql
+            index = end + 2
+            continue
+        if char in "'\"\x60":
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                ranges.append((column_start, index))
+                break
+            if depth < 0:
+                return sql
+        elif char == "," and depth == 1:
+            ranges.append((column_start, index))
+            column_start = index + 1
+        index += 1
+    if depth != 0 or quote:
+        return sql
+    for start, end in reversed(ranges):
+        segment = sql[start:end]
+        changed = _cross_engine_decimal_default_column(segment)
+        if changed != segment:
+            sql = sql[:start] + changed + sql[end:]
+    return sql
+
+
 def _cross_engine_schema(sql: str) -> str:
     if sql.upper().startswith("CREATE DATABASE "):
         # Only the MySQL default *off* encryption option is export metadata.
@@ -302,10 +411,17 @@ def _cross_engine_schema(sql: str) -> str:
     if charset and collation:
         actual_charset = charset.group(1).lower()
         actual_collation = collation.group(1).lower()
+        # SHOW CREATE may spell out a column's already-inherited charset
+        # and collation on both CHAR/VARCHAR and TEXT families. Drop that
+        # declaration only when BOTH match the table's *explicit* defaults.
+        # All non-default collations, binary flags, other constraints and
+        # index definitions remain byte-significant.
         text_column = re.compile(
-            r"(?P<column>\x60[A-Za-z0-9_]+\x60\s+(?:TINYTEXT|TEXT|MEDIUMTEXT|LONGTEXT))"
+            r"(?P<column>\x60[A-Za-z0-9_]+\x60\s+(?:"
+            r"TINYTEXT|TEXT|MEDIUMTEXT|LONGTEXT|"
+            r"CHAR\([1-9][0-9]{0,4}\)|VARCHAR\([1-9][0-9]{0,4}\)))"
             r"\s+CHARACTER SET (?P<charset>[A-Za-z0-9_]+)"
-            r"\s+COLLATE (?P<collation>[A-Za-z0-9_]+)(?=\s*,|\s+DEFAULT NULL\s*[,)])",
+            r"\s+COLLATE (?P<collation>[A-Za-z0-9_]+)(?=\s|,|\))",
             re.I,
         )
 
@@ -369,8 +485,170 @@ def _cross_engine_schema(sql: str) -> str:
     sql = integer_default.sub(
         lambda match: match.group("prefix") + match.group("literal"), sql,
     )
-    return sql
+    # MySQL 8.4 encloses some fixed-point or floating-point numeric DEFAULTs
+    # in single quotes while MariaDB 11.8 reports the exact same canonical
+    # decimal token without quotes. Rewriting is legal *only* for numeric
+    # column types and the identical base-10 literal. Noncanonical signs,
+    # leading-zero formats, scientific notation and string columns remain
+    # strictly compared. A changed value cannot be normalized away.
+    numeric_default = re.compile(
+        r"(?P<prefix>\x60[A-Za-z0-9_]+\x60\s+"
+        r"(?:TINYINT|SMALLINT|MEDIUMINT|INT|INTEGER|BIGINT|"
+        r"DECIMAL|NUMERIC|FLOAT|DOUBLE(?:\s+PRECISION)?)"
+        r"(?:\(\s*[0-9]{1,3}(?:\s*,\s*[0-9]{1,3})?\s*\))?"
+        r"(?:\s+(?:UNSIGNED|SIGNED|ZEROFILL|NOT NULL|NULL))*"
+        r"\s+DEFAULT\s+)"
+        r"'(?P<literal>-?(?:0|[1-9][0-9]*)\.[0-9]+)'(?=\s|[,)]|$)",
+        re.I,
+    )
+    sql = numeric_default.sub(
+        lambda match: match.group("prefix") + match.group("literal"), sql,
+    )
+    return _cross_engine_decimal_defaults(sql)
 
+
+
+
+# MySQL dumps can carry source-only, version-guarded session scripts
+# which select harmless SET/SELECT commands through PREPARE/EXECUTE. Preserve
+# schema/data checks while ignoring ONLY complete, strictly bounded
+# read-only/session-local sequences. No dynamic DDL/DML, GLOBAL, routines,
+# missing pair, or arbitrary control statement is whitelisted.
+_CROSS_ENGINE_DYNAMIC_IF_RE = re.compile(
+    r"^SET\s+@(?P<stmt>[A-Za-z_][A-Za-z_0-9$]*)\s*=\s*IF\s*\("
+    r"\s*@(?P<flag>[A-Za-z_][A-Za-z_0-9$]*)\s*,\s*"
+    r"(?P<yes>'(?:\\.|''|[^'])*')\s*,\s*"
+    r"(?P<no>'(?:\\.|''|[^'])*')\s*\)$", re.I,
+)
+_CROSS_ENGINE_PREPARE_RE = re.compile(
+    r"^PREPARE\s+([A-Za-z_][A-Za-z_0-9$]*)\s+FROM\s+@([A-Za-z_][A-Za-z_0-9$]*)$", re.I,
+)
+_CROSS_ENGINE_EXECUTE_RE = re.compile(
+    r"^EXECUTE\s+([A-Za-z_][A-Za-z_0-9$]*)$", re.I,
+)
+_CROSS_ENGINE_DEALLOCATE_RE = re.compile(
+    r"^DEALLOCATE\s+PREPARE\s+([A-Za-z_][A-Za-z_0-9$]*)$", re.I,
+)
+_CROSS_ENGINE_TABLE_COUNT_RE = re.compile(
+    r"^SELECT\s+COUNT\s*\(\s*\*\s*\)\s+INTO\s+@"
+    r"(?P<flag>[A-Za-z_][A-Za-z_0-9$]*)\s+FROM\s+"
+    r"INFORMATION_SCHEMA\.TABLES\s+WHERE\s+TABLE_SCHEMA\s*=\s*"
+    r"'(?:''|[^'])*'\s+AND\s+TABLE_NAME\s*=\s*'(?:''|[^'])*'$", re.I,
+)
+_CROSS_ENGINE_SESSION_ONLY_SET_RE = re.compile(
+    r"^SET\s+(?:@[A-Za-z_][A-Za-z_0-9$]*"
+    r"|(?:(?:SESSION\s+|@@SESSION\.)?(?:"
+    r"SQL_MODE|SQL_NOTES|TIME_ZONE|CHARACTER_SET_CLIENT|"
+    r"CHARACTER_SET_RESULTS|COLLATION_CONNECTION|"
+    r"FOREIGN_KEY_CHECKS|UNIQUE_CHECKS|NAMES|AUTOCOMMIT)))"
+    r"(?:\s*=\s*[^;]+|\s+utf8mb4)$", re.I,
+)
+_CROSS_ENGINE_NO_SIDE_EFFECT_SELECT_RE = re.compile(
+    r"^SELECT\s+(?:0|1|NULL|@[A-Za-z_][A-Za-z_0-9$]*)"
+    r"(?:\s+FROM\s+DUAL)?$", re.I,
+)
+
+
+def _cross_engine_safe_dynamic_branch(literal: str) -> bool:
+    # A SQL literal containing escapes, comments, multiple statements or
+    # side-effect keywords is not proof of a harmless session command.
+    value = literal[1:-1].replace("''", "'").strip()
+    if len(value) > 4096 or any(x in value for x in ("\\", ";", "/*", "*/", "--", "#", "\r", "\n")):
+        return False
+    if re.search(
+        r"\b(?:GLOBAL|PERSIST|PERSIST_ONLY|CREATE|ALTER|DROP|TRUNCATE|"
+        r"RENAME|INSERT|UPDATE|DELETE|REPLACE|LOAD|OUTFILE|DUMPFILE|"
+        r"PREPARE|EXECUTE|CALL|DO|GRANT|REVOKE|SHUTDOWN)\b",
+        value, re.I,
+    ):
+        return False
+    return bool(
+        _CROSS_ENGINE_SESSION_ONLY_SET_RE.fullmatch(value)
+        or _CROSS_ENGINE_NO_SIDE_EFFECT_SELECT_RE.fullmatch(value)
+    )
+
+
+def _cross_engine_known_dynamic_guard_lines(path: Path) -> set[int]:
+    """Accept only complete, ordered, session-only guarded prepared scripts.
+
+    Session statement/variable names may be reused across separate groups.
+    All unknown guarded syntax remains byte-significant in SQL comparison.
+    """
+    opener = gzip.open if path.name.endswith(".gz") else open
+    probes: list[tuple[str, int]] = []
+    assignments: list[tuple[str, str, int]] = []
+    prepares: list[tuple[str, str, int]] = []
+    executes: list[tuple[str, int]] = []
+    deallocates: list[tuple[str, int]] = []
+    known_lines: set[int] = set()
+    try:
+        with opener(path, "rt", encoding="utf-8", errors="strict") as handle:
+            for number, raw in enumerate(handle, 1):
+                line = raw.strip()
+                match = re.fullmatch(r"/\*!([0-9]{5,6})\s+(.+?)\s*\*/;?", line, re.I)
+                if not match or not 40000 <= int(match.group(1)) < 80000:
+                    continue
+                body = re.sub(r"\s+", " ", match.group(2).strip())
+                probe = _CROSS_ENGINE_TABLE_COUNT_RE.fullmatch(body)
+                if probe:
+                    probes.append((probe.group("flag").upper(), number))
+                    known_lines.add(number)
+                    continue
+                setting = _CROSS_ENGINE_DYNAMIC_IF_RE.fullmatch(body)
+                if setting:
+                    if not (
+                        _cross_engine_safe_dynamic_branch(setting.group("yes"))
+                        and _cross_engine_safe_dynamic_branch(setting.group("no"))
+                    ):
+                        return set()
+                    assignments.append((
+                        setting.group("stmt").upper(),
+                        setting.group("flag").upper(), number,
+                    ))
+                    known_lines.add(number)
+                    continue
+                prepare = _CROSS_ENGINE_PREPARE_RE.fullmatch(body)
+                if prepare:
+                    prepares.append((prepare.group(1).upper(), prepare.group(2).upper(), number))
+                    known_lines.add(number)
+                    continue
+                execute = _CROSS_ENGINE_EXECUTE_RE.fullmatch(body)
+                if execute:
+                    executes.append((execute.group(1).upper(), number))
+                    known_lines.add(number)
+                    continue
+                dealloc = _CROSS_ENGINE_DEALLOCATE_RE.fullmatch(body)
+                if dealloc:
+                    deallocates.append((dealloc.group(1).upper(), number))
+                    known_lines.add(number)
+                    continue
+    except (OSError, EOFError, UnicodeError) as exc:
+        raise RestoreVerifyError("cross-engine dynamic guard scan cannot be read") from exc
+    length = len(assignments)
+    if not probes or not length or length > 16 or not (
+        length == len(prepares) == len(executes) == len(deallocates)
+    ):
+        return set()
+    last_done = 0
+    for index in range(length):
+        variable, flag, assign_line = assignments[index]
+        stmt, source_var, prepare_line = prepares[index]
+        execute_stmt, execute_line = executes[index]
+        dealloc_stmt, dealloc_line = deallocates[index]
+        if not (
+            source_var == variable and stmt == execute_stmt == dealloc_stmt
+            and last_done < assign_line < prepare_line < execute_line < dealloc_line
+            and any(probe_flag == flag and probe_line < assign_line
+                    for probe_flag, probe_line in probes)
+        ):
+            return set()
+        last_done = dealloc_line
+    # Orphaned metadata SELECT statements cannot be silently omitted.
+    if any(not any(probe_flag == flag and probe_line < assign_line
+                   for _, flag, assign_line in assignments)
+           for probe_flag, probe_line in probes):
+        return set()
+    return known_lines
 
 
 _SQL_CANON_CLASSES = ("database", "schema", "data", "versioned", "guard_set", "guard_ddl", "guard_other", "other")
@@ -496,13 +774,16 @@ def sql_cross_engine_known_format_fingerprint(path: Path, *, profile: dict[str, 
     digest = hashlib.sha256()
     statements = 0
     create_count = 0
+    known_dynamic_guards = _cross_engine_known_dynamic_guard_lines(path)
     pending: list[str] = []
     pending_size = 0
     opener = gzip.open if path.name.endswith(".gz") else open
     try:
         with opener(path, "rt", encoding="utf-8", errors="strict") as handle:
-            for raw in handle:
+            for line_number, raw in enumerate(handle, 1):
                 line = raw.strip()
+                if line_number in known_dynamic_guards:
+                    continue
                 if not line:
                     continue
                 if line.upper().startswith("DELIMITER "):
