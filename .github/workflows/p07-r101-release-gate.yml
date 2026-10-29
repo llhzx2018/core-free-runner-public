@@ -1,0 +1,151 @@
+name: P07 release101 exact-source gated staging
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p07-r101-release-gate.yml']
+permissions:
+  contents: read
+jobs:
+  verify-stage:
+    if: github.repository == 'llhzx2018/core-free-runner-public' && github.head_ref == 'test/p07-r101-release-gate' && github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PRODUCT_SHA: 1773b63498f2a4a050041bf04abecdfaf3373d72
+      PUBLIC_SHA: ecc6035657a86877ae3cf9b45d1a1309349ec288
+      PRODUCT: ${{ github.workspace }}/p07-private
+      PUBLIC: ${{ github.workspace }}/p07-public
+      STAGE: ${{ github.workspace }}/p07-release101-stage
+    steps:
+      - name: Verify configured private-read capability
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo P07_PRIVATE_READ_UNAVAILABLE; exit 78; }
+      - name: Checkout immutable product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 1773b63498f2a4a050041bf04abecdfaf3373d72
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p07-private
+      - name: Checkout immutable public release100 baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: ecc6035657a86877ae3cf9b45d1a1309349ec288
+          persist-credentials: false
+          path: p07-public
+      - name: Verify candidate, build exact package and test isolated install/upgrade/rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C "$PRODUCT" rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(git -C "$PUBLIC" rev-parse HEAD)" = "$PUBLIC_SHA"
+          test "$(cat "$PRODUCT/BUILD_ID")" = 0.1.0-release101
+          cd "$PRODUCT"
+          export PYTHONPATH="$PWD/lib:$PWD"
+          python3 -m compileall -q lib/verify.py lib/server_migration_pull.py scripts/p07_candidate_bundle.py
+          for module in test_cross_engine_sql_format.py test_server_migration_pull.py test_server_migration.py test_p07_bundle_identity.py test_mariadb_owner_policy.py test_verify.py test_release13_mysql_snapshot.py test_restore_as_real_db_compat.py test_secret_scan.py; do
+            python3 -m unittest discover -s tests -p "$module" -v
+          done
+          echo P07_R101_EXACT_SOURCE_TESTS_PASS
+          test ! -e "$STAGE"
+          published="$PUBLIC/installers/p07-final.sh"
+          grep -Fq 'OLD_MOVED=0' "$published"
+          grep -Fq 'NEW_INSTALLED=0' "$published"
+          test "$(git -C "$PUBLIC" hash-object "$published")" = "$(git -C "$PUBLIC" rev-parse HEAD:installers/p07-final.sh)"
+          cp "$published" "$PUBLIC/experiments/p07-installer-rollback-candidate.sh"
+          python3 "$PRODUCT/scripts/p07_candidate_bundle.py" --product-root "$PRODUCT" --public-root "$PUBLIC" --output "$STAGE" --product-sha "$PRODUCT_SHA" --build 0.1.0-release101 --care 0.1.0-rc69
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          stage=Path(os.environ['STAGE'])
+          product=Path(os.environ['PRODUCT'])
+          a=json.loads((stage/'candidate_attestation.json').read_text())
+          assert (a['product_source_sha'],a['product_build'],a['system_care_build'],a['status'])==(os.environ['PRODUCT_SHA'],'0.1.0-release101','0.1.0-rc69','FORMAL_STAGING_NOT_PUBLISHED')
+          def blob(p):
+              b=p.read_bytes()
+              return hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest()
+          for root,manifests in ((stage/'dist/p07/0.1.0/overlay',('RUNTIME.gitblob','MANIFEST.gitblob')),(stage/'packages/p07-system-care/0.1.0-rc69',('MANIFEST.gitblob',))):
+              for manifest in manifests:
+                  seen=set()
+                  for line in (root/manifest).read_text().splitlines():
+                      sha,rel=line.split('  ',1)
+                      assert rel not in seen and '..' not in Path(rel).parts
+                      seen.add(rel)
+                      assert blob(root/rel)==sha,(manifest,rel)
+          assert blob(stage/'dist/p07/0.1.0/overlay/lib/verify.py')==blob(product/'lib/verify.py')
+          assert blob(stage/'installers/p07-final.sh')==a['final_installer_blob']
+          assert blob(stage/'dist/p07/0.1.0/overlay/RUNTIME.gitblob')==a['runtime_manifest_blob']
+          assert blob(stage/'dist/p07/0.1.0/overlay/MANIFEST.gitblob')==a['overlay_manifest_blob']
+          print('P07_R101_MANIFEST_EXACT_SOURCE_PASS')
+          PY
+          bash -n "$STAGE/installers/p07.sh" "$STAGE/installers/p07-final.sh" "$STAGE/installers/p07-system-care.sh" "$STAGE/installers/p07-toolbox.sh"
+          proof="$RUNNER_TEMP/p07-r101-isolated"
+          mkdir -p "$proof"
+          old="file://$PUBLIC"
+          new="file://$STAGE"
+          # Clean install: one disposable root, no real VPS or services.
+          sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 P07_INSTALL_DIR="$proof/clean" P07_PREVIOUS_DIR="$proof/clean.previous" P07_BIN_LINK="$proof/clean-vfops" P07_PUBLIC_ROOT="$new" bash "$STAGE/installers/p07-final.sh" >"$proof/clean.log" 2>&1 || { tail -n 40 "$proof/clean.log"; exit 1; }
+          test "$("$proof/clean-vfops" --build-id)" = 0.1.0-release101
+          sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 P07_INSTALL_DIR="$proof/live" P07_PREVIOUS_DIR="$proof/previous" P07_BIN_LINK="$proof/vfops" P07_PUBLIC_ROOT="$old" bash "$PUBLIC/installers/p07-final.sh" >"$proof/old.log" 2>&1 || { tail -n 40 "$proof/old.log"; exit 1; }
+          test "$("$proof/vfops" --build-id)" = 0.1.0-release100
+          printf 'PRESERVED\n' > "$proof/owner-sentinel"
+          sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 P07_INSTALL_DIR="$proof/live" P07_PREVIOUS_DIR="$proof/previous" P07_BIN_LINK="$proof/vfops" P07_PUBLIC_ROOT="$new" bash "$STAGE/installers/p07-final.sh" >"$proof/upgrade.log" 2>&1 || { tail -n 40 "$proof/upgrade.log"; exit 1; }
+          test "$("$proof/vfops" --build-id)" = 0.1.0-release101
+          test "$(cat "$proof/previous/BUILD_ID")" = 0.1.0-release100
+          test "$(cat "$proof/owner-sentinel")" = PRESERVED
+          sudo env P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 P07_INSTALL_DIR="$proof/live" P07_PREVIOUS_DIR="$proof/previous" P07_BIN_LINK="$proof/vfops" P07_PUBLIC_ROOT="$new" bash "$STAGE/installers/p07-final.sh" >"$proof/repeat.log" 2>&1
+          grep -Fq '已是当前版本，无需下载或重复安装' "$proof/repeat.log"
+          # A tampered payload cannot be installed.
+          cp "$STAGE/dist/p07/0.1.0/overlay/lib/verify.py" "$proof/verify.saved"
+          printf '\n# CHANGED\n' >> "$STAGE/dist/p07/0.1.0/overlay/lib/verify.py"
+          if P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 P07_INSTALL_DIR="$proof/tampered" P07_PREVIOUS_DIR="$proof/tampered.previous" P07_BIN_LINK="$proof/tampered-vfops" P07_PUBLIC_ROOT="$new" bash "$STAGE/installers/p07-final.sh" >"$proof/tampered.log" 2>&1; then echo TAMPER_ALLOWED; exit 1; fi
+          test ! -e "$proof/tampered"
+          cp "$proof/verify.saved" "$STAGE/dist/p07/0.1.0/overlay/lib/verify.py"
+          # Inject a post-swap link failure: both upgrade and clean-install rollback.
+          for mode in upgrade clean; do
+            case_root="$proof/fail-$mode"
+            mkdir -p "$case_root"
+            if [[ "$mode" == upgrade ]]; then mkdir -p "$case_root/runtime"; printf 'OLD\n' > "$case_root/runtime/sentinel"; fi
+            : > "$case_root/not-directory"
+            if P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1 P07_INSTALL_DIR="$case_root/runtime" P07_PREVIOUS_DIR="$case_root/previous" P07_BIN_LINK="$case_root/not-directory/vfops" P07_PUBLIC_ROOT="$new" bash "$STAGE/installers/p07-final.sh" >"$case_root/abort.log" 2>&1; then echo ROLLBACK_FAILURE; exit 1; fi
+            test ! -e "$case_root/previous"
+            test ! -e "$case_root/runtime.new"
+            if [[ "$mode" == upgrade ]]; then test "$(cat "$case_root/runtime/sentinel")" = OLD; else test ! -e "$case_root/runtime"; fi
+          done
+          sudo mv "$proof/live" "$proof/failed-r101"
+          sudo mv "$proof/previous" "$proof/live"
+          test "$("$proof/vfops" --build-id)" = 0.1.0-release100
+          test "$(cat "$proof/owner-sentinel")" = PRESERVED
+          echo P07_R101_CLEAN_INSTALL_UPGRADE_IDEMPOTENCE_CORRUPTION_ATOMIC_ROLLBACK_PASS
+      - name: Stage exact tested bytes on separate branch, without merging
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN" || { echo P07_RELEASE_WRITE_UNAVAILABLE; exit 78; }
+          git -C "$PUBLIC" restore -- experiments/p07-installer-rollback-candidate.sh
+          test -z "$(git -C "$PUBLIC" status --porcelain)"
+          git -C "$PUBLIC" fetch origin refs/heads/release/p07-r101-staging
+          test "$(git -C "$PUBLIC" rev-parse FETCH_HEAD)" = ecc6035657a86877ae3cf9b45d1a1309349ec288
+          git -C "$PUBLIC" switch -c release/p07-r101-staging FETCH_HEAD
+          cp -a "$STAGE/dist/p07/0.1.0/overlay/." "$PUBLIC/dist/p07/0.1.0/overlay/"
+          mkdir -p "$PUBLIC/packages/p07-system-care/0.1.0-rc69"
+          cp -a "$STAGE/packages/p07-system-care/0.1.0-rc69/." "$PUBLIC/packages/p07-system-care/0.1.0-rc69/"
+          for n in p07.sh p07-final.sh p07-toolbox.sh p07-system-care.sh; do cp "$STAGE/installers/$n" "$PUBLIC/installers/$n"; done
+          cp "$STAGE/candidate_attestation.json" "$PUBLIC/experiments/p07-release101-attestation.json"
+          git -C "$PUBLIC" add dist/p07/0.1.0/overlay packages/p07-system-care/0.1.0-rc69 installers/p07.sh installers/p07-final.sh installers/p07-toolbox.sh installers/p07-system-care.sh experiments/p07-release101-attestation.json
+          git -C "$PUBLIC" diff --cached --check
+          git -C "$PUBLIC" config user.name 'github-actions[bot]'
+          git -C "$PUBLIC" config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git -C "$PUBLIC" commit -m 'stage(P07): exact-source release101 SQL diagnostic evidence'
+          gh auth setup-git
+          git -C "$PUBLIC" push origin HEAD:refs/heads/release/p07-r101-staging
+          echo P07_R101_STAGED_BRANCH_PUSHED
+      - name: Clear private checkout
+        if: always()
+        run: rm -rf p07-private
