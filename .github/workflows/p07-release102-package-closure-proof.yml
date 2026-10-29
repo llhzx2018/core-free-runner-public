@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
-      PRODUCT_SHA: fd016a57246df0174fbaa2b6f225ce6fd76013c7
+      PRODUCT_SHA: 058fac7c1f476fa0021444fb36fa15c1df4e8f84
     steps:
       - name: Require configured private source read capability
         env:
@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-server-ops
-          ref: fd016a57246df0174fbaa2b6f225ce6fd76013c7
+          ref: 058fac7c1f476fa0021444fb36fa15c1df4e8f84
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           path: p07-private
@@ -120,6 +120,80 @@ jobs:
           test "$("$root/vfops" --build-id)" = 0.1.0-release101
           test "$(cat "$root/external-state")" = PRESERVE_EXTERNAL_VFOPS_STATE
           echo P07_RELEASE102_TO_RELEASE101_RECOVERY_PASS
+      - name: Stage release102 public distribution candidate as a draft PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN" || { echo P07_RELEASE_WRITE_CAPABILITY_MISSING; exit 78; }
+          candidate="$RUNNER_TEMP/p07-release102-candidate"
+          test -f "$candidate/candidate_attestation.json"
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = 672ae979f28dce8f05ba36d7bb056394e3f49e81 || { echo P07_PUBLIC_MAIN_MOVED; exit 78; }
+          git switch -c release/p07-release102-distribution-20261029 origin/main
+          cp -a "$candidate/dist/p07/0.1.0/overlay/." dist/p07/0.1.0/overlay/
+          cp -a "$candidate/installers/." installers/
+          cp -a "$candidate/packages/p07-system-care/0.1.0-rc71" packages/p07-system-care/
+          cp "$candidate/candidate_attestation.json" experiments/p07-release102-attestation.json
+          python3 - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          a=json.loads(Path('experiments/p07-release102-attestation.json').read_text())
+          assert a['status']=='FORMAL_STAGING_NOT_PUBLISHED'
+          assert a['product_source_sha']=='058fac7c1f476fa0021444fb36fa15c1df4e8f84'
+          assert a['product_build']=='0.1.0-release102'
+          assert a['system_care_build']=='0.1.0-rc71'
+          def blob(p):
+              data=p.read_bytes()
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          root=Path('dist/p07/0.1.0/overlay')
+          def check_manifest(root,name):
+              paths=set()
+              for line in (root/name).read_text().splitlines():
+                  sha,path=line.split('  ',1)
+                  assert path not in paths and '..' not in Path(path).parts
+                  paths.add(path)
+                  assert blob(root/path)==sha,path
+              return paths
+          runtime=check_manifest(root,'RUNTIME.gitblob')
+          full=check_manifest(root,'MANIFEST.gitblob')
+          care=Path('packages/p07-system-care/0.1.0-rc71')
+          check_manifest(care,'MANIFEST.gitblob')
+          assert len(runtime)==45 and len(full)==98,(len(runtime),len(full))
+          assert runtime <= full
+          assert 'lib/sql_diff_evidence.py' in runtime
+          assert {'tests/test_sql_diff_command.py','tests/test_sql_diff_evidence.py'} <= full
+          assert blob(root/'RUNTIME.gitblob')==a['runtime_manifest_blob']
+          assert blob(root/'MANIFEST.gitblob')==a['overlay_manifest_blob']
+          assert blob(care/'MANIFEST.gitblob')==a['system_care_manifest_blob']
+          assert blob(Path('installers/p07-final.sh'))==a['final_installer_blob']
+          assert a['final_installer_blob'] in Path('installers/p07.sh').read_text()
+          assert not any(a['negative'].values())
+          gate=Path('.github/workflows/p07-distribution-gate.yml')
+          content=gate.read_text()
+          pins={
+              '0.1.0-release101':'0.1.0-release102',
+              '0.1.0-rc70':'0.1.0-rc71',
+              '1773b63498f2a4a050041bf04abecdfaf3373d72':a['product_source_sha'],
+              'b7c969c701d4c732969f92959d2c87e3641cf744':a['runtime_manifest_blob'],
+              '8258665ac294cba2c3263797a0e1254c8b7eb3c8':a['final_installer_blob'],
+              '7f1a9291555694e87ae43b61f271ac36e6fe04bd':a['system_care_manifest_blob']
+          }
+          for old,new in pins.items():
+              assert old in content,old
+              content=content.replace(old,new)
+          gate.write_text(content)
+          print('P07_RELEASE102_PUBLIC_STAGING_PREFLIGHT_PASS')
+          PY
+          bash -n installers/p07.sh installers/p07-final.sh installers/p07-toolbox.sh installers/p07-system-care.sh
+          git add dist/p07/0.1.0/overlay installers/p07.sh installers/p07-final.sh installers/p07-toolbox.sh installers/p07-system-care.sh packages/p07-system-care/0.1.0-rc71 experiments/p07-release102-attestation.json .github/workflows/p07-distribution-gate.yml
+          test -n "$(git diff --cached --name-only)"
+          git -c user.name='VF Release Runner' -c user.email='vf-release-runner@users.noreply.github.com' commit -m 'chore(p07): stage release102 exact-source public distribution'
+          gh auth setup-git
+          git push origin HEAD:refs/heads/release/p07-release102-distribution-20261029
+          gh pr create -R llhzx2018/core-free-runner-public --head release/p07-release102-distribution-20261029 --base main --draft --title 'P07 release102 verified distribution candidate' --body 'Exact source 058fac7c1f476fa0021444fb36fa15c1df4e8f84, targeted 190 tests, installed release101 upgrade, fail-closed, clean install and rollback PASS (#40882652910). Public distribution PR only; no migration or Production writes.'
+          echo P07_RELEASE102_PUBLIC_DISTRIBUTION_DRAFT_CREATED
       - name: Remove isolated candidate and private source
         if: always()
         shell: bash
