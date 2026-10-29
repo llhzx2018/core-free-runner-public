@@ -37,6 +37,66 @@ jobs:
           set -Eeuo pipefail
           python3 -m py_compile experiments/p07-sql-shape-probe-v2.py experiments/p07-sql-shape-probe-v3.py experiments/p07-sql-shape-probe-v4.py
           echo P07_REDACTED_PROBE_V2_V3_V4_SYNTAX_PASS
+      - name: MySQL 8.4 to MariaDB 11.8 isolated SQL transfer
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker run -d --name p07-proof-mysql -e MYSQL_ROOT_PASSWORD=p07-synthetic-only mysql:8.4 >/dev/null
+          trap 'docker rm -f p07-proof-mysql p07-proof-maria >/dev/null 2>&1 || true' EXIT
+          docker run -d --name p07-proof-maria -e MARIADB_ROOT_PASSWORD=p07-synthetic-only mariadb:11.8 >/dev/null
+          ready=0
+          for attempt in $(seq 1 90); do
+            if docker exec p07-proof-mysql mysql -uroot -pp07-synthetic-only -Nse 'SELECT 1' >/dev/null 2>&1 \
+                && docker exec p07-proof-maria mariadb -uroot -pp07-synthetic-only -Nse 'SELECT 1' >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 2
+          done
+          test "$ready" = 1
+          docker exec p07-proof-mysql mysql -uroot -pp07-synthetic-only -e "
+            CREATE DATABASE p07_isolated CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+            USE p07_isolated;
+            CREATE TABLE sample (
+              id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+              price DECIMAL(12,6) NOT NULL DEFAULT '0.000000',
+              title VARCHAR(80) CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci NOT NULL,
+              detail LONGTEXT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci,
+              PRIMARY KEY (id),
+              KEY idx_title (title)
+            ) ENGINE=InnoDB AUTO_INCREMENT=900 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            INSERT INTO sample (id, price, title, detail) VALUES
+              (1, 12.500000, 'record-one', 'synthetic-only'),
+              (2, 0.000000, 'record-two', NULL);
+          "
+          docker exec p07-proof-mysql mysqldump -uroot -pp07-synthetic-only \
+            --single-transaction --skip-comments --skip-extended-insert \
+            --set-gtid-purged=OFF --no-tablespaces --databases p07_isolated > /tmp/p07-engine-source.sql
+          docker exec -i p07-proof-maria mariadb -uroot -pp07-synthetic-only < /tmp/p07-engine-source.sql
+          docker exec p07-proof-maria mariadb-dump -uroot -pp07-synthetic-only \
+            --single-transaction --skip-comments --skip-extended-insert \
+            --databases p07_isolated > /tmp/p07-engine-target.sql
+          value="$(docker exec p07-proof-maria mariadb -uroot -pp07-synthetic-only -Nse \
+            "SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA='p07_isolated' AND TABLE_NAME='sample'")"
+          test "$value" = 900
+          count="$(docker exec p07-proof-maria mariadb -uroot -pp07-synthetic-only -Nse \
+            "SELECT COUNT(*) FROM p07_isolated.sample")"
+          test "$count" = 2
+          PYTHONPATH=source-p07/lib:source-p07 python3 -c '
+          from pathlib import Path
+          from server_migration_pull import compare_database_dumps
+          mode = compare_database_dumps(
+              Path("/tmp/p07-engine-source.sql"),
+              Path("/tmp/p07-engine-target.sql"),
+          )
+          assert mode in {
+              "CANONICAL_SQL_EXACT",
+              "CROSS_ENGINE_GUARDED_SESSION_SQL_EXACT",
+              "CROSS_ENGINE_KNOWN_DUMP_FORMAT_SQL_EXACT",
+              "CROSS_ENGINE_LOGICAL_CONTENT",
+          }, mode
+          print("P07_MYSQL84_TO_MARIADB118_SYNTHETIC_TRANSFER_PASS", mode)
+          '
       - name: No production server or database touch
         shell: bash
         run: |
