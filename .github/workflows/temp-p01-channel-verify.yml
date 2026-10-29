@@ -1,0 +1,110 @@
+name: TEMP P01 exact v2.47.479 distribution channel proof
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p01-channel-verify.yml'
+      - '.github/ephemeral/p01-channel-verify.json'
+
+permissions:
+  contents: read
+
+env:
+  TARGET_REPO: llhzx2018/core-updates
+  TARGET_VERSION: 2.47.479
+  TARGET_SHA: 649edbe29a23a8fabc9b663de1b835273bf35172
+  TARGET_TREE: b1b336344648ce6a0779f54d48f3bb9bd7dae795
+
+jobs:
+  channel:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout public proof control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Verify rendered ephemeral source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_spec.py audit-rendered \
+            --spec .github/ephemeral/p01-channel-verify.json \
+            --input .github/workflows/temp-p01-channel-verify.yml
+          echo P01_CHANNEL_LANE_IDENTITY=PASS
+
+      - name: Exact channel checkout and manifest identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git clone -q --no-checkout https://github.com/llhzx2018/core-updates.git channel
+          git -C channel fetch -q --depth 1 origin "$TARGET_SHA"
+          git -C channel checkout -q --detach FETCH_HEAD
+          test "$(git -C channel rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C channel rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          jq -e '
+            .schema_version == "1.0" and
+            .project_id == "P01" and .component_id == "APP" and .enabled == true and
+            .current_version == "2.47.478" and .target_version == "2.47.479" and
+            .update_type == "ATOMIC" and .from_versions == ["2.47.478"] and
+            .schema_from == "2026102201" and .schema_to == "2026102201" and
+            .repository == "llhzx2018/vf-start" and .release_tag == "v2.47.479" and
+            .release_id == 427355644 and
+            .product_identity == "3bb29def8154d3e14ced966efd41a4529c0d3b6b" and
+            .asset_name == "VF_Start_V2.47.479_UPDATE.zip" and
+            .asset_bytes == 3321354 and
+            .asset_sha256 == "98cc2da3575e4a4cbbd0797c1f0ecc385815f35fdd0bce6db04f55e24f64fd20" and
+            .backup_required == true and .rollback_supported == true
+          ' channel/projects/P01.json >/dev/null
+          echo P01_CHANNEL_EXACT_MANIFEST=PASS
+
+      - name: Reproduce native contract and Update Core tests in isolation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip >/dev/null
+          (
+            cd channel
+            python3 scripts/check_manifest_contract.py
+            find update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/tmp/p01-channel-php-lint.txt
+            php update-core/php/tests/run.php
+          ) | tee /tmp/p01-channel-native.txt
+          echo P01_CHANNEL_NATIVE_CONTRACT_PHP_TESTS=PASS
+
+      - name: Verify original formal release tag and remote asset digest
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          gh api repos/llhzx2018/vf-start/git/ref/tags/v2.47.479 \
+            --jq '.object.sha' | grep -Fx '3bb29def8154d3e14ced966efd41a4529c0d3b6b'
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.47.479 \
+            --jq '.id' | grep -Fx '427355644'
+          mkdir -p /tmp/p01-channel-assets
+          gh release download v2.47.479 -R llhzx2018/vf-start \
+            -D /tmp/p01-channel-assets \
+            -p VF_Start_V2.47.479_UPDATE.zip \
+            -p VF-Start-V2.47.479-FULL.zip
+          test "$(stat -c %s /tmp/p01-channel-assets/VF_Start_V2.47.479_UPDATE.zip)" = 3321354
+          test "$(sha256sum /tmp/p01-channel-assets/VF_Start_V2.47.479_UPDATE.zip | awk '{print $1}')" = 98cc2da3575e4a4cbbd0797c1f0ecc385815f35fdd0bce6db04f55e24f64fd20
+          test "$(stat -c %s /tmp/p01-channel-assets/VF-Start-V2.47.479-FULL.zip)" = 1513977
+          test "$(sha256sum /tmp/p01-channel-assets/VF-Start-V2.47.479-FULL.zip | awk '{print $1}')" = 20141ef52f888c995fd1b62479d934765a08412f3d54bd6ae0e44f8c760a0e28
+          echo P01_CHANNEL_RELEASE_BYTES_SHA256=PASS
+
+      - name: Clean isolated channel checkout
+        if: always()
+        shell: bash
+        run: |
+          if [ -d channel ]; then
+            find channel -type f -delete
+            find channel -depth -type d -empty -delete
+          fi
+          echo P01_CHANNEL_CLEANUP=PASS
