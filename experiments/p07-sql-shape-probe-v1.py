@@ -207,6 +207,91 @@ def print_grammars(prefix: str, data: Counter) -> None:
         print(f"{prefix}_{number}={count}:{shape}")
 
 
+
+# Redacted control-flow evidence for version-gated SQL. MySQL dump sources
+# sometimes embed dynamically PREPAREd statements. Unlike harmless SET
+# formatting, the source-only PREPARE/EXECUTE pair may execute schema DDL.
+# These counts are forensic signals, never an approval to bypass validation.
+_DYNAMIC_SET_IF_RE = re.compile(
+    r"^SET\s+@([A-Za-z_][A-Za-z_0-9$]*)\s*=\s*([A-Za-z_][A-Za-z_0-9$]*)"
+    r"\s*\(\s*@([A-Za-z_][A-Za-z_0-9$]*)\s*,\s*"
+    r"('(?:\\.|''|[^'])*')\s*,\s*('(?:\\.|''|[^'])*')\s*\)$",
+    re.I,
+)
+_PREPARE_FROM_VAR_RE = re.compile(
+    r"^PREPARE\s+([A-Za-z_][A-Za-z_0-9$]*)\s+FROM\s+@([A-Za-z_][A-Za-z_0-9$]*)$",
+    re.I,
+)
+_EXECUTE_STMT_RE = re.compile(r"^EXECUTE\s+([A-Za-z_][A-Za-z_0-9$]*)$", re.I)
+_DEALLOCATE_STMT_RE = re.compile(
+    r"^DEALLOCATE\s+PREPARE\s+([A-Za-z_][A-Za-z_0-9$]*)$", re.I,
+)
+_BRANCH_VERBS = frozenset(
+    "ALTER CREATE DROP SELECT SET UPDATE DELETE INSERT REPLACE "
+    "LOCK UNLOCK DO CALL BEGIN COMMIT ROLLBACK TRUNCATE RENAME".split()
+)
+
+
+def _branch_verb(sql_literal: str) -> str:
+    # Do not print SQL, raw literal tokens, or identifiers.
+    content = sql_literal[1:-1].replace("''", "'")
+    head = re.match(r"\s*([A-Za-z_]+)", content)
+    keyword = head.group(1).upper() if head else ""
+    return keyword if keyword in _BRANCH_VERBS else "OTHER"
+
+
+def dynamic_guard_activity(path: Path) -> tuple[Counter, Counter]:
+    activity, branches = Counter(), Counter()
+    assigned: set[str] = set()
+    prepared: set[str] = set()
+    executed: set[str] = set()
+    deallocated: set[str] = set()
+    prepared_variables: list[str] = []
+    with gzip.open(path, "rt", encoding="utf-8", errors="strict") as handle:
+        for raw in handle:
+            line = raw.strip()
+            match = re.fullmatch(r"/\*(?:!|M!)[0-9]{5,6}\s+(.+?)\s*\*/;?", line, re.I)
+            if not match:
+                continue
+            body = match.group(1).strip()
+            if _cross_engine_safe_set(line):
+                continue
+            setting = _DYNAMIC_SET_IF_RE.fullmatch(body)
+            if setting:
+                activity["SET_IF" if setting.group(2).upper() == "IF" else "SET_OTHER_FUNC"] += 1
+                assigned.add(setting.group(1).upper())
+                branches[_branch_verb(setting.group(4))] += 1
+                branches[_branch_verb(setting.group(5))] += 1
+                continue
+            prepare = _PREPARE_FROM_VAR_RE.fullmatch(body)
+            if prepare:
+                activity["PREPARE"] += 1
+                prepared.add(prepare.group(1).upper())
+                prepared_variables.append(prepare.group(2).upper())
+                continue
+            execute = _EXECUTE_STMT_RE.fullmatch(body)
+            if execute:
+                activity["EXECUTE"] += 1
+                executed.add(execute.group(1).upper())
+                continue
+            dealloc = _DEALLOCATE_STMT_RE.fullmatch(body)
+            if dealloc:
+                activity["DEALLOCATE"] += 1
+                deallocated.add(dealloc.group(1).upper())
+                continue
+            if re.search(r"\bSELECT\b.*\bINFORMATION_SCHEMA\s*\.\s*TABLES\b", body, re.I):
+                activity["SELECT_INFO_TABLES"] += 1
+    for variable in prepared_variables:
+        activity["PREPARE_USES_SET_VAR" if variable in assigned else "PREPARE_OTHER_VAR"] += 1
+    if prepared:
+        activity["EXECUTE_PAIR_MATCH" if prepared == executed else "EXECUTE_PAIR_DIFF"] += 1
+        activity["DEALLOCATE_PAIR_MATCH" if prepared == deallocated else "DEALLOCATE_PAIR_DIFF"] += 1
+    return activity, branches
+
+
+def _cross_engine_safe_set(line: str) -> bool:
+    return verify._cross_engine_known_session(line)
+
 def guard_shapes(path: Path) -> tuple[Counter, Counter]:
     unknown_sets, others = Counter(), Counter()
     with gzip.open(path, "rt", encoding="utf-8", errors="strict") as handle:
@@ -342,6 +427,10 @@ def summary(a: Path, b: Path) -> None:
     print_grammars("UNKNOWN_SET_GRAMMAR_TARGET", target_unknown_g)
     print_grammars("OTHER_GUARD_GRAMMAR_SOURCE", source_other_g)
     print_grammars("OTHER_GUARD_GRAMMAR_TARGET", target_other_g)
+    for side, dump in (("SOURCE", a), ("TARGET", b)):
+        activity, branches = dynamic_guard_activity(dump)
+        print_bounded("DYNAMIC_GUARD_ACTIVITY_" + side, activity)
+        print_bounded("DYNAMIC_BRANCH_VERBS_" + side, branches)
     print("PROBE_REDACTED=YES")
     print("PROBE_IS_VERIFICATION_PASS=NO")
 
