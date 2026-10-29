@@ -240,6 +240,43 @@ def _branch_verb(sql_literal: str) -> str:
     return keyword if keyword in _BRANCH_VERBS else "OTHER"
 
 
+
+def proven_create_table_shape(sql: str) -> str:
+    """Private-only preflight against the exact *candidate* safe normalizations.
+
+    Unlike probe printouts, this never discards indexes, defaults, constraints,
+    actual column charset changes or differing SQL literals.
+    """
+    table_charset = table_default_charset(sql)
+    table_collation = table_default_collation(sql)
+    if table_charset and table_collation:
+        explicit = re.compile(
+            r"(?P<column>\x60[A-Za-z0-9_]+\x60\s+(?:"
+            r"TINYTEXT|TEXT|MEDIUMTEXT|LONGTEXT|"
+            r"CHAR\([1-9][0-9]{0,4}\)|VARCHAR\([1-9][0-9]{0,4}\)))"
+            r"\s+CHARACTER SET (?P<charset>[A-Za-z0-9_]+)"
+            r"\s+COLLATE (?P<collation>[A-Za-z0-9_]+)(?=\s|,|\))",
+            re.I,
+        )
+        def inherited(match: re.Match[str]) -> str:
+            if (match.group("charset").lower() == table_charset and
+                    match.group("collation").lower() == table_collation):
+                return match.group("column")
+            return match.group(0)
+        sql = explicit.sub(inherited, sql)
+    numeric = re.compile(
+        r"(?P<prefix>\x60[A-Za-z0-9_]+\x60\s+"
+        r"(?:DECIMAL|NUMERIC|FLOAT|DOUBLE)"
+        r"(?:\([0-9]{1,3}(?:,[0-9]{1,3})?\))?"
+        r"(?:\s+(?:UNSIGNED|SIGNED|ZEROFILL|NOT NULL|NULL))*"
+        r"\s+DEFAULT\s+)"
+        r"'(?P<literal>-?(?:0|[1-9][0-9]*)\.[0-9]+)'(?=\s|[,)]|$)",
+        re.I,
+    )
+    sql = numeric.sub(lambda m: m.group("prefix") + m.group("literal"), sql)
+    return verify._cross_engine_space(sql)
+
+
 def dynamic_guard_activity(path: Path) -> tuple[Counter, Counter]:
     activity, branches = Counter(), Counter()
     assigned: set[str] = set()
@@ -408,6 +445,8 @@ def summary(a: Path, b: Path) -> None:
             lhs = "+".join(category(v) for v in left[i0:min(i1, i0 + 3)]) or "EMPTY"
             rhs = "+".join(category(v) for v in right[j0:min(j1, j0 + 3)]) or "EMPTY"
             patterns[(op.upper(), context, lhs, rhs)] += 1
+    proven_equal = sum(proven_create_table_shape(src[name]) == proven_create_table_shape(dst[name]) for name in common)
+    print(f"PROVEN_CREATE_TABLES_EQUAL={proven_equal}:{len(common)}")
     print(f"CREATE_TABLE_MISMATCHES={mismatched}:{len(common)}")
     for i, (pattern, count) in enumerate(patterns.most_common(16), 1):
         print(f"DIFF_{i}=" + ":".join(pattern) + f":{count}")
