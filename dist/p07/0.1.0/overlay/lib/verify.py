@@ -749,6 +749,62 @@ def _sql_shape_feature_counts(path: Path) -> dict[str, int]:
     return counts
 
 
+
+def sql_dynamic_guard_flow_diagnostic(path: Path) -> str:
+    """Source-only, fixed-count SQL guard flow evidence; no SQL text or literals."""
+    names = ("probe", "assignment", "safe_assignment", "prepare",
+             "execute", "deallocate", "unknown_set", "unknown_control")
+    counts = {name: 0 for name in names}
+    opener = gzip.open if path.name.endswith(".gz") else open
+    try:
+        with opener(path, "rt", encoding="utf-8", errors="strict") as handle:
+            for raw in handle:
+                line = raw.strip()
+                match = re.fullmatch(r"/\*!([0-9]{5,6})\s+(.+?)\s*\*/;?", line, re.I)
+                if not match or not 40000 <= int(match.group(1)) < 80000:
+                    continue
+                body = re.sub(r"\s+", " ", match.group(2).strip())
+                if _CROSS_ENGINE_TABLE_COUNT_RE.fullmatch(body):
+                    counts["probe"] += 1
+                elif assignment := _CROSS_ENGINE_DYNAMIC_IF_RE.fullmatch(body):
+                    counts["assignment"] += 1
+                    if (_cross_engine_safe_dynamic_branch(assignment.group("yes"))
+                            and _cross_engine_safe_dynamic_branch(assignment.group("no"))):
+                        counts["safe_assignment"] += 1
+                elif _CROSS_ENGINE_PREPARE_RE.fullmatch(body):
+                    counts["prepare"] += 1
+                elif _CROSS_ENGINE_EXECUTE_RE.fullmatch(body):
+                    counts["execute"] += 1
+                elif _CROSS_ENGINE_DEALLOCATE_RE.fullmatch(body):
+                    counts["deallocate"] += 1
+                elif re.match(r"^SET\s+@", body, re.I) and not _cross_engine_known_session(line):
+                    counts["unknown_set"] += 1
+                elif re.match(r"^(?:PREPARE|EXECUTE|DEALLOCATE)\s", body, re.I):
+                    counts["unknown_control"] += 1
+        recognized = len(_cross_engine_known_dynamic_guard_lines(path))
+    except (OSError, EOFError, UnicodeError) as exc:
+        raise RestoreVerifyError("SQL dynamic guard flow diagnostic is unavailable") from exc
+
+    length = counts["assignment"]
+    if counts["unknown_set"] or counts["unknown_control"]:
+        outcome = "UNKNOWN_CONTROL_GRAMMAR"
+    elif counts["safe_assignment"] != length:
+        outcome = "UNSAFE_BRANCH"
+    elif not length or not counts["probe"]:
+        outcome = "NO_COMPLETE_DYNAMIC_GROUP"
+    elif not (length == counts["prepare"] == counts["execute"]
+              == counts["deallocate"]):
+        outcome = "UNBALANCED_STAGES"
+    elif not recognized:
+        outcome = "SEQUENCE_REJECTED"
+    else:
+        outcome = "RECOGNIZED"
+    return "SQL_GUARD_FLOW_V1 " + " ".join(
+        f"{name}={counts[name]}" for name in names
+    ) + f" recognized={recognized} outcome={outcome}"
+
+
+
 def sql_cross_engine_shape_diagnostic(source: Path, target: Path) -> str:
     """Reason-code counts only; this is not a SQL parity approval gate."""
     before = _sql_shape_feature_counts(source)
