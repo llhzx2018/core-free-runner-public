@@ -56,9 +56,74 @@ jobs:
           test "$(grep -c '  lib/sql_diff_evidence.py' "$RUNNER_TEMP/p07-release102-candidate/dist/p07/0.1.0/overlay/RUNTIME.gitblob")" = 1
           test "$(grep -c '  tests/test_sql_diff_evidence.py' "$RUNNER_TEMP/p07-release102-candidate/dist/p07/0.1.0/overlay/MANIFEST.gitblob")" = 1
           echo P07_RELEASE102_ISOLATED_PACKAGE_PASS
-      - name: Remove transient private checkout
+      - name: Isolated release101 to release102 install upgrade and rollback gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          base="$PWD"
+          candidate="$RUNNER_TEMP/p07-release102-candidate"
+          root="$RUNNER_TEMP/p07-release102-install-gate"
+          mkdir -p "$root"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1
+          export P07_PREVIOUS_DIR="$root/previous" P07_BIN_LINK="$root/vfops"
+          export P07_INSTALL_DIR="$root/installed"
+          export P07_PUBLIC_ROOT="file://$base"
+          echo PRESERVE_EXTERNAL_VFOPS_STATE > "$root/external-state"
+          # A genuine release101 installed runtime is the upgrade baseline.
+          bash "$base/installers/p07-final.sh" > "$root/old-install.log" 2>&1
+          test "$("$root/vfops" --build-id)" = 0.1.0-release101
+          test -f "$root/installed/.runtime-manifest.gitblob"
+          echo P07_RELEASE101_ISOLATED_BASELINE_PASS
+          # Failure AFTER the runtime directory swap must automatically restore release101.
+          touch "$root/not-a-directory"
+          if P07_PUBLIC_ROOT="file://$candidate" P07_BIN_LINK="$root/not-a-directory/vfops" bash "$candidate/installers/p07-final.sh" > "$root/injected-failure.log" 2>&1; then
+            echo P07_FAILURE_INJECTION_NOT_REJECTED >&2
+            exit 1
+          fi
+          test "$("$root/vfops" --build-id)" = 0.1.0-release101
+          test "$(cat "$root/installed/BUILD_ID")" = 0.1.0-release101
+          test ! -e "$root/installed.new"
+          test ! -e "$root/previous"
+          echo P07_RELEASE102_FAILURE_ATOMIC_ROLLBACK_PASS
+          # Successful upgrade must preserve the previous release and external state.
+          P07_PUBLIC_ROOT="file://$candidate" bash "$candidate/installers/p07-final.sh" > "$root/upgrade.log" 2>&1
+          test "$("$root/vfops" --build-id)" = 0.1.0-release102
+          test "$(cat "$root/previous/BUILD_ID")" = 0.1.0-release101
+          test -f "$root/installed/lib/sql_diff_evidence.py"
+          test "$(cat "$root/external-state")" = PRESERVE_EXTERNAL_VFOPS_STATE
+          echo P07_RELEASE101_TO_RELEASE102_ISOLATED_UPGRADE_PASS
+          # Repeating the same exact release must short-circuit, not destroy rollback.
+          P07_PUBLIC_ROOT="file://$candidate" bash "$candidate/installers/p07-final.sh" > "$root/repeat.log" 2>&1
+          grep -Fq '已是当前版本，无需下载或重复安装' "$root/repeat.log"
+          test "$(cat "$root/previous/BUILD_ID")" = 0.1.0-release101
+          echo P07_RELEASE102_IDEMPOTENT_REPEAT_PASS
+          # A tampered distribution must be refused before touching the installation.
+          cp -a "$candidate" "$root/corrupt-distribution"
+          printf '#tampered\n' >> "$root/corrupt-distribution/dist/p07/0.1.0/overlay/lib/sql_diff_evidence.py"
+          rm -rf "$root/clean-install"
+          if P07_PUBLIC_ROOT="file://$root/corrupt-distribution" P07_INSTALL_DIR="$root/clean-install" P07_PREVIOUS_DIR="$root/clean-previous" P07_BIN_LINK="$root/clean-vfops" bash "$candidate/installers/p07-final.sh" > "$root/corrupt.log" 2>&1; then
+            echo P07_TAMPERED_DISTRIBUTION_WAS_ACCEPTED >&2
+            exit 1
+          fi
+          test ! -e "$root/clean-install"
+          test "$("$root/vfops" --build-id)" = 0.1.0-release102
+          echo P07_RELEASE102_TAMPER_FAIL_CLOSED_PASS
+          # Fresh install with the untampered candidate, isolated to a new path.
+          P07_PUBLIC_ROOT="file://$candidate" P07_INSTALL_DIR="$root/fresh" P07_PREVIOUS_DIR="$root/fresh-previous" P07_BIN_LINK="$root/fresh-vfops" bash "$candidate/installers/p07-final.sh" > "$root/fresh.log" 2>&1
+          test "$("$root/fresh-vfops" --build-id)" = 0.1.0-release102
+          test ! -e "$root/fresh-previous"
+          test -f "$root/fresh/lib/sql_diff_evidence.py"
+          echo P07_RELEASE102_FRESH_ISOLATED_INSTALL_PASS
+          # Recovery uses the retained immutable release101 tree, not a re-migration.
+          mv "$root/installed" "$root/replaced-102"
+          mv "$root/previous" "$root/installed"
+          test "$("$root/vfops" --build-id)" = 0.1.0-release101
+          test "$(cat "$root/external-state")" = PRESERVE_EXTERNAL_VFOPS_STATE
+          echo P07_RELEASE102_TO_RELEASE101_RECOVERY_PASS
+      - name: Remove isolated candidate and private source
         if: always()
         shell: bash
         run: |
+          rm -rf -- "$RUNNER_TEMP/p07-release102-candidate" "$RUNNER_TEMP/p07-release102-install-gate"
           if [ -d p07-private ]; then rm -rf -- p07-private; fi
-          echo P07_PRIVATE_CHECKOUT_CLEANUP_DONE
+          echo P07_PRIVATE_AND_ISOLATED_FIXTURES_CLEANUP_DONE
