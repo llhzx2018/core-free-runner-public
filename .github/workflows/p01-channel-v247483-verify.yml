@@ -1,0 +1,81 @@
+name: p01-channel-v247483-verify
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-channel-v247483-verify.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  channel-gate:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SOURCE_SHA: 1406f184cdc35a0be42430ef6b923364a3ccc95a
+      PRODUCT_SHA: 6796f710040e4cf82886b749f668f57dcbb61840
+      UPDATE_SHA256: 62c447a4491ae2bb2c1ce3c5433a59c454e904add1e33671fc7c5af86d579891
+    steps:
+      - name: Checkout one-off public verification lane
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify one-off lane only adds this workflow
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git fetch -q origin main
+          mapfile -t changes < <(git diff --name-only origin/main "${{ github.event.pull_request.head.sha }}")
+          test "${#changes[@]}" -eq 1
+          test "${changes[0]}" = '.github/workflows/p01-channel-v247483-verify.yml'
+          echo P01_CHANNEL_LANE_SCOPE=PASS
+      - name: Verify exact private manifest in transient worktree
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          trap 'rm -rf channel-check' EXIT
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/core-updates.git" channel-check
+          git -C channel-check fetch -q --depth 1 origin "$SOURCE_SHA"
+          git -C channel-check checkout -q --detach FETCH_HEAD
+          test "$(git -C channel-check rev-parse HEAD)" = "$SOURCE_SHA"
+          jq -e --arg id "$PRODUCT_SHA" --arg hash "$UPDATE_SHA256" '
+            .project_id=="P01" and .enabled==true and .current_version=="2.47.483" and
+            .target_version=="2.47.483" and .from_versions==["2.47.483"] and
+            .schema_from==.schema_to and .update_type=="ATOMIC" and
+            .release_tag=="v2.47.483" and .release_id==428000330 and
+            .product_identity==$id and .asset_name=="VF_Start_V2.47.483_UPDATE.zip" and
+            .asset_bytes==3565126 and .asset_sha256==$hash and
+            .backup_required==true and .rollback_supported==true
+          ' channel-check/projects/P01.json >/dev/null
+          python3 channel-check/scripts/check_manifest_contract.py
+          php -v | head -1
+          find channel-check/update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php channel-check/update-core/php/tests/run.php
+          echo P01_CHANNEL_MANIFEST_AND_UPDATE_CORE=PASS
+      - name: Match published Release tag, exact source and asset metadata
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          headers=(-H "Authorization: Bearer $READ_TOKEN" -H 'Accept: application/vnd.github+json')
+          curl -fsSL "${headers[@]}" https://api.github.com/repos/llhzx2018/vf-start/git/ref/tags/v2.47.483 -o /tmp/p01-tag.json
+          jq -e --arg id "$PRODUCT_SHA" '.object.sha==$id' /tmp/p01-tag.json >/dev/null
+          curl -fsSL "${headers[@]}" https://api.github.com/repos/llhzx2018/vf-start/releases/tags/v2.47.483 -o /tmp/p01-release.json
+          jq -e --arg id "$PRODUCT_SHA" --arg digest "sha256:$UPDATE_SHA256" '
+            .id==428000330 and .tag_name=="v2.47.483" and .draft==false and .prerelease==false and
+            any(.assets[]; .name=="VF_Start_V2.47.483_UPDATE.zip" and .size==3565126 and .digest==$digest) and
+            (.body | contains($id))
+          ' /tmp/p01-release.json >/dev/null
+          echo P01_CHANNEL_EXACT_RELEASE_ASSET=PASS
