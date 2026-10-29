@@ -1,0 +1,146 @@
+name: P07 release98 exact-source staging
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release98-stage.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  stage:
+    if: github.repository == 'llhzx2018/core-free-runner-public' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' && github.event.pull_request.head.ref == 'task/p07-installer-abort-rollback-20261029'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RELEASE_REPO: llhzx2018/core-free-runner-public
+      PRODUCT_SHA: 4342c6dcf7e8b39d1e0401b90d21aa2a712bad35
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 4342c6dcf7e8b39d1e0401b90d21aa2a712bad35
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: source-p07
+      - name: Exact identity and candidate assembly
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          test "$(git -C source-p07 rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(cat source-p07/BUILD_ID)" = '0.1.0-release98'
+          PYTHONPATH=source-p07 python3 -m unittest discover -s source-p07/tests -p test_p07_bundle_identity.py -v
+          work="$(mktemp -d -t p07-release98.XXXXXX)"
+          echo "$work" > "$RUNNER_TEMP/p07-release98-work"
+          python3 source-p07/scripts/p07_candidate_bundle.py \
+            --product-root source-p07 --public-root . --output "$work/staged" \
+            --product-sha "$PRODUCT_SHA" --build 0.1.0-release98 --care 0.1.0-rc67
+          cmp source-p07/lib/verify.py "$work/staged/dist/p07/0.1.0/overlay/lib/verify.py"
+          cmp source-p07/lib/server_migration_pull.py "$work/staged/dist/p07/0.1.0/overlay/lib/server_migration_pull.py"
+          for f in "$work"/staged/installers/*.sh; do bash -n "$f"; done
+          echo P07_RELEASE98_EXACT_SOURCE_ASSEMBLY_PASS
+      - name: Fresh install, previous release upgrade, idempotency and rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          work="$(cat "$RUNNER_TEMP/p07-release98-work")"
+          stage="$work/staged"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          export P07_INSTALL_DIR="$work/fresh/runtime" P07_PREVIOUS_DIR="$work/fresh/runtime.previous" P07_BIN_LINK="$work/fresh/bin/vfops"
+          mkdir -p "$work/fresh/bin"
+          P07_PUBLIC_ROOT="file://$stage" bash "$stage/installers/p07.sh"
+          test "$(NO_COLOR=1 "$P07_BIN_LINK" --build-id)" = '0.1.0-release98'
+          P07_PUBLIC_ROOT="file://$stage" bash "$stage/installers/p07.sh"
+          test "$(NO_COLOR=1 "$P07_BIN_LINK" --build-id)" = '0.1.0-release98'
+          cmp source-p07/lib/verify.py "$P07_INSTALL_DIR/lib/verify.py"
+          export P07_INSTALL_DIR="$work/upgrade/runtime" P07_PREVIOUS_DIR="$work/upgrade/runtime.previous" P07_BIN_LINK="$work/upgrade/bin/vfops"
+          mkdir -p "$work/upgrade/bin"
+          P07_PUBLIC_ROOT="file://$PWD" bash installers/p07.sh
+          test "$(NO_COLOR=1 "$P07_BIN_LINK" --build-id)" = '0.1.0-release97'
+          P07_PUBLIC_ROOT="file://$stage" bash "$stage/installers/p07.sh"
+          test "$(NO_COLOR=1 "$P07_BIN_LINK" --build-id)" = '0.1.0-release98'
+          test "$(NO_COLOR=1 "$P07_PREVIOUS_DIR/bin/vfops-user" --build-id)" = '0.1.0-release97'
+          export P07_INSTALL_DIR="$work/abort/runtime" P07_PREVIOUS_DIR="$work/abort/runtime.previous" P07_BIN_LINK="$work/abort/bin/vfops"
+          mkdir -p "$work/abort/bin"
+          P07_PUBLIC_ROOT="file://$PWD" bash installers/p07.sh
+          test "$(NO_COLOR=1 "$P07_BIN_LINK" --build-id)" = '0.1.0-release97'
+          : > "$work/abort/not-a-directory"
+          export P07_BIN_LINK="$work/abort/not-a-directory/vfops"
+          if P07_PUBLIC_ROOT="file://$stage" bash "$stage/installers/p07.sh"; then exit 1; fi
+          test "$(NO_COLOR=1 "$P07_INSTALL_DIR/bin/vfops-user" --build-id)" = '0.1.0-release97'
+          test ! -e "$P07_PREVIOUS_DIR"
+          test ! -e "${P07_INSTALL_DIR}.new"
+          test ! -e /opt/vf-server-ops
+          echo P07_RELEASE98_INSTALL_UPGRADE_ROLLBACK_PASS
+      - name: Stage verified byte-identical release into PR branch
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          work="$(cat "$RUNNER_TEMP/p07-release98-work")"
+          stage="$work/staged"
+          cp -a "$stage/dist/p07/0.1.0/overlay/." dist/p07/0.1.0/overlay/
+          cp -a "$stage/packages/p07-system-care/0.1.0-rc67" packages/p07-system-care/
+          cp "$stage/installers/p07.sh" "$stage/installers/p07-final.sh" "$stage/installers/p07-toolbox.sh" "$stage/installers/p07-system-care.sh" installers/
+          cp "$stage/candidate_attestation.json" experiments/p07-release98-attestation.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          a=json.loads(Path('experiments/p07-release98-attestation.json').read_text())
+          assert a['status']=='FORMAL_STAGING_NOT_PUBLISHED'
+          assert a['product_build']=='0.1.0-release98'
+          assert a['product_source_sha']=='4342c6dcf7e8b39d1e0401b90d21aa2a712bad35'
+          m={
+            '0.1.0-release97':'0.1.0-release98',
+            '0.1.0-rc66':'0.1.0-rc67',
+            'cf40589f1fd5e82f7b81ac8b4c523629476a2cc9':a['final_installer_blob'],
+            'ace8208b99f523712cf4ffa842fab775aa0e20e2':a['runtime_manifest_blob'],
+            '5ed5effc3ffe6df069123374d774c85d0470ff0f':a['system_care_manifest_blob'],
+            '9ca2caac49fe79f9d10420d689cdf6b7a65047f5':a['product_source_sha'],
+          }
+          paths=[Path('.github/workflows/p07-distribution-gate.yml'),Path('.github/workflows/p07-beginner-menu-gate.yml'),Path('.github/workflows/p07-system-care-smoke.yml')]
+          for path in paths:
+            raw=path.read_text()
+            revised=raw
+            for old,new in m.items(): revised=revised.replace(old,new)
+            if revised==raw: raise SystemExit('no identity changes for '+str(path))
+            path.write_text(revised)
+          PY
+          python3 - <<'PY'
+          import hashlib,json,re
+          from pathlib import Path
+          a=json.loads(Path('experiments/p07-release98-attestation.json').read_text())
+          blob=lambda p:hashlib.sha1(b'blob '+str(len(p.read_bytes())).encode()+b'\0'+p.read_bytes()).hexdigest()
+          root=Path('dist/p07/0.1.0/overlay')
+          for name in ('RUNTIME.gitblob','MANIFEST.gitblob'):
+            for line in (root/name).read_text().splitlines():
+              sha,rel=line.split('  ',1)
+              assert blob(root/rel)==sha,rel
+          assert blob(root/'RUNTIME.gitblob')==a['runtime_manifest_blob']
+          assert blob(root/'MANIFEST.gitblob')==a['overlay_manifest_blob']
+          assert blob(Path('installers/p07-final.sh'))==a['final_installer_blob']
+          assert 'EXPECTED_BLOB="'+a['final_installer_blob']+'"' in Path('installers/p07.sh').read_text()
+          care=Path('packages/p07-system-care/0.1.0-rc67')
+          for line in (care/'MANIFEST.gitblob').read_text().splitlines():
+            sha,rel=line.split('  ',1)
+            assert blob(care/rel)==sha,rel
+          assert blob(care/'MANIFEST.gitblob')==a['system_care_manifest_blob']
+          PY
+          rm -rf source-p07
+          git config user.name 'VF Release Bot'
+          git config user.email 'release-bot@users.noreply.github.com'
+          git add dist/p07/0.1.0/overlay packages/p07-system-care/0.1.0-rc67 installers/p07.sh installers/p07-final.sh installers/p07-toolbox.sh installers/p07-system-care.sh experiments/p07-release98-attestation.json .github/workflows/p07-distribution-gate.yml .github/workflows/p07-beginner-menu-gate.yml .github/workflows/p07-system-care-smoke.yml
+          git diff --cached --quiet && { echo P07_RELEASE98_NOTHING_TO_STAGE; exit 78; }
+          current="$(gh api "repos/$RELEASE_REPO/git/ref/heads/task/p07-installer-abort-rollback-20261029" --jq '.object.sha')"
+          test "$current" = "$HEAD_SHA" || { echo P07_RELEASE98_BRANCH_MOVED; exit 78; }
+          git commit -m 'release(P07): stage verified release98 runtime and SHA-pinned installers'
+          git push "https://x-access-token:${GH_TOKEN}@github.com/$RELEASE_REPO.git" HEAD:refs/heads/task/p07-installer-abort-rollback-20261029
+          echo P07_RELEASE98_FORMAL_STAGED_BRANCH_PASS
