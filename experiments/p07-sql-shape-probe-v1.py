@@ -445,8 +445,28 @@ def summary(a: Path, b: Path) -> None:
             lhs = "+".join(category(v) for v in left[i0:min(i1, i0 + 3)]) or "EMPTY"
             rhs = "+".join(category(v) for v in right[j0:min(j1, j0 + 3)]) or "EMPTY"
             patterns[(op.upper(), context, lhs, rhs)] += 1
-    proven_equal = sum(proven_create_table_shape(src[name]) == proven_create_table_shape(dst[name]) for name in common)
+    proven_equal = 0
+    proven_patterns = Counter()
+    for name in common:
+        left = proven_create_table_shape(src[name])
+        right = proven_create_table_shape(dst[name])
+        if left == right:
+            proven_equal += 1
+            continue
+        lt, rt = TOKEN.findall(left), TOKEN.findall(right)
+        if len(lt) > 20000 or len(rt) > 20000:
+            proven_patterns["TOO_MANY_TOKENS"] += 1
+            continue
+        for op, i0, i1, j0, j1 in SequenceMatcher(
+            a=lt, b=rt, autojunk=False
+        ).get_opcodes():
+            if op != "equal":
+                left_type = "+".join(category(v) for v in lt[i0:min(i1, i0 + 3)]) or "EMPTY"
+                right_type = "+".join(category(v) for v in rt[j0:min(j1, j0 + 3)]) or "EMPTY"
+                proven_patterns[op.upper() + ":" + left_type + ":" + right_type] += 1
     print(f"PROVEN_CREATE_TABLES_EQUAL={proven_equal}:{len(common)}")
+    for number, (pattern, count) in enumerate(proven_patterns.most_common(8), 1):
+        print(f"PROVEN_DIFF_{number}={pattern}:{count}")
     print(f"CREATE_TABLE_MISMATCHES={mismatched}:{len(common)}")
     for i, (pattern, count) in enumerate(patterns.most_common(16), 1):
         print(f"DIFF_{i}=" + ":".join(pattern) + f":{count}")
