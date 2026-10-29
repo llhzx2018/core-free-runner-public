@@ -43,6 +43,51 @@ jobs:
           python3 -B scripts/secret_scan.py --root .
           git diff --exit-code
           echo P07_DB_ENGINE_TARGET_EXACT_SOURCE_PASS
+      - name: Real ephemeral MySQL 8.4 and MariaDB 11.8 round-trip (no VPS)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p07-private
+          fixture_dir="$(mktemp -d -p "$RUNNER_TEMP" p07-sql-fixture-XXXXXX)"
+          trap 'docker rm -f p07-fixture-mysql84 p07-fixture-mariadb118 >/dev/null 2>&1 || true; rm -rf -- "$fixture_dir"' EXIT
+          docker run --rm -d --network none --name p07-fixture-mysql84 -e MYSQL_ALLOW_EMPTY_PASSWORD=yes mysql:8.4 >/dev/null
+          docker run --rm -d --network none --name p07-fixture-mariadb118 -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=yes mariadb:11.8 >/dev/null
+          for i in $(seq 1 90); do
+            if docker exec p07-fixture-mysql84 mysql -uroot -N -e 'SELECT 1' >/dev/null 2>&1 && docker exec p07-fixture-mariadb118 mariadb -uroot -N -e 'SELECT 1' >/dev/null 2>&1; then break; fi
+            sleep 2
+          done
+          docker exec p07-fixture-mysql84 mysql -uroot -N -e 'SELECT 1' >/dev/null
+          docker exec p07-fixture-mariadb118 mariadb -uroot -N -e 'SELECT 1' >/dev/null
+          for engine in mysql84 mariadb118; do
+            if [[ "$engine" == mysql84 ]]; then server=p07-fixture-mysql84; cli=mysql; else server=p07-fixture-mariadb118; cli=mariadb; fi
+            docker exec "$server" "$cli" -uroot -e "CREATE DATABASE vfops_fixture CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci; USE vfops_fixture; CREATE TABLE sample (id INT NOT NULL PRIMARY KEY, payload VARCHAR(64) NOT NULL); INSERT INTO sample VALUES (1, 'alpha'), (2, 'beta');"
+          done
+          docker exec p07-fixture-mysql84 mysqldump -uroot --single-transaction --skip-comments --skip-dump-date --set-gtid-purged=OFF vfops_fixture > "$fixture_dir/mysql-source.sql"
+          docker exec p07-fixture-mariadb118 mariadb -uroot -e 'DROP DATABASE vfops_fixture; CREATE DATABASE vfops_fixture CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci'
+          if ! docker exec -i p07-fixture-mariadb118 mariadb -uroot vfops_fixture < "$fixture_dir/mysql-source.sql" > "$fixture_dir/import-out" 2> "$fixture_dir/import-err"; then echo MYSQL_TO_MARIADB_IMPORT_BLOCKED; exit 31; fi
+          docker exec p07-fixture-mariadb118 mariadb-dump -uroot --single-transaction --skip-comments --skip-dump-date vfops_fixture > "$fixture_dir/mariadb-result.sql"
+          gzip -n -c "$fixture_dir/mysql-source.sql" > "$fixture_dir/mysql-source.sql.gz"
+          gzip -n -c "$fixture_dir/mariadb-result.sql" > "$fixture_dir/mariadb-result.sql.gz"
+          PYTHONPATH="$PWD/lib:$PWD" python3 -B -c 'import sys; from pathlib import Path; from server_migration_pull import compare_database_dumps; print("MYSQL_TO_MARIADB=" + compare_database_dumps(Path(sys.argv[1]), Path(sys.argv[2])))' "$fixture_dir/mysql-source.sql.gz" "$fixture_dir/mariadb-result.sql.gz"
+          docker exec p07-fixture-mysql84 mysql -uroot -e 'DROP DATABASE vfops_fixture; CREATE DATABASE vfops_fixture CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci'
+          if ! docker exec -i p07-fixture-mysql84 mysql -uroot vfops_fixture < "$fixture_dir/mariadb-result.sql" > "$fixture_dir/import-out" 2> "$fixture_dir/import-err"; then echo MARIADB_TO_MYSQL_IMPORT_BLOCKED; exit 32; fi
+          docker exec p07-fixture-mysql84 mysqldump -uroot --single-transaction --skip-comments --skip-dump-date --set-gtid-purged=OFF vfops_fixture > "$fixture_dir/mysql-result.sql"
+          gzip -n -c "$fixture_dir/mysql-result.sql" > "$fixture_dir/mysql-result.sql.gz"
+          PYTHONPATH="$PWD/lib:$PWD" python3 -B -c 'import sys; from pathlib import Path; from server_migration_pull import compare_database_dumps; print("MARIADB_TO_MYSQL=" + compare_database_dumps(Path(sys.argv[1]), Path(sys.argv[2])))' "$fixture_dir/mariadb-result.sql.gz" "$fixture_dir/mysql-result.sql.gz"
+          test "$(docker exec p07-fixture-mysql84 mysql -uroot -N -e 'SELECT COUNT(*), SUM(id) FROM vfops_fixture.sample')" =         if: always()
+        shell: bash
+        run: |
+          rm -rf -- p07-private
+          echo P07_PRIVATE_SOURCE_CLEANUP_PASS
+2\t3'
+          test "$(docker exec p07-fixture-mariadb118 mariadb -uroot -N -e 'SELECT COUNT(*), SUM(id) FROM vfops_fixture.sample')" =         if: always()
+        shell: bash
+        run: |
+          rm -rf -- p07-private
+          echo P07_PRIVATE_SOURCE_CLEANUP_PASS
+2\t3'
+          echo P07_REAL_ENGINES_BIDIRECTIONAL_FIXTURE_PASS
+
       - name: Remove private checkout
         if: always()
         shell: bash
