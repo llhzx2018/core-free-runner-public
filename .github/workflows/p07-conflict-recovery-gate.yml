@@ -1,0 +1,74 @@
+name: P07 conflict recovery non-executable work order safety gate
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-conflict-recovery-gate.yml'
+      - 'experiments/p07-conflict-recovery/**'
+permissions:
+  contents: read
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Pin exact candidate and untouched release109 runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root=dist/p07/0.1.0/overlay
+          test "$(cat "$root/BUILD_ID")" = 0.1.0-release109
+          test "$(git hash-object experiments/p07-conflict-recovery/lib/migration_conflict_recovery.py)" = cc7856692ecf9ef5bb2852b181a78bfebd9ad226
+          test "$(git hash-object experiments/p07-conflict-recovery/tests/test_migration_conflict_recovery.py)" = 4e35869177f1c1a89c6a05403665b768405ea84b
+          cp -a "$root" "$RUNNER_TEMP/p07-recovery-test"
+          cp experiments/p07-conflict-recovery/lib/migration_conflict_recovery.py "$RUNNER_TEMP/p07-recovery-test/lib/"
+          cp experiments/p07-conflict-recovery/tests/test_migration_conflict_recovery.py "$RUNNER_TEMP/p07-recovery-test/tests/"
+          echo P07_RECOVERY_EXACT_SOURCE_PASS
+      - name: Fail-closed work order, SQL and migration regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-recovery-test"
+          python3 -m py_compile lib/migration_conflict_recovery.py tests/test_migration_conflict_recovery.py
+          PYTHONPATH=lib python3 -m unittest -v \
+            tests.test_migration_conflict_recovery \
+            tests.test_sql_pk_conflict_evidence \
+            tests.test_sql_multiset_evidence \
+            tests.test_sql_readback_stability \
+            tests.test_sql_row_evidence \
+            tests.test_sql_diff_evidence \
+            tests.test_sql_diff_command \
+            tests.test_multiline_dml_integrity \
+            tests.test_verify \
+            tests.test_server_migration_pull
+          echo P07_RECOVERY_FAIL_CLOSED_AND_REGRESSIONS_PASS
+      - name: No database writes or hidden ability to approve readiness
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-recovery-test"
+          python3 - <<'PY'
+          import ast
+          from pathlib import Path
+          path=Path('lib/migration_conflict_recovery.py')
+          node=ast.parse(path.read_text())
+          permitted={'__future__', 'typing'}
+          for item in ast.walk(node):
+              if isinstance(item,ast.Import):
+                  raise AssertionError('IMPORT_NOT_ALLOWED_IN_PURE_PLAN')
+              if isinstance(item,ast.ImportFrom):
+                  assert item.module in permitted, 'UNEXPECTED_DEPENDENCY'
+          for token in ("execute(", "subprocess", "mysql", "mariadb", "connect(", "DELETE FROM", "DROP TABLE"):
+              assert token not in path.read_text(), 'MUTATION_CAPABILITY_UNPROVEN'
+          text=path.read_text()
+          assert '"data_writes_allowed": False' in text
+          assert '"migration_resume_allowed": False' in text
+          assert '"cutover_allowed": False' in text
+          PY
+          for path in lib/verify.py lib/server_migration_pull.py lib/cloudpanel.py bin/vfops BUILD_ID; do
+            test "$(git hash-object "dist/p07/0.1.0/overlay/$path")" = "$(git hash-object "$RUNNER_TEMP/p07-recovery-test/$path")"
+          done
+          echo P07_RECOVERY_NO_DB_OR_INSTALLER_MUTATION_PASS
