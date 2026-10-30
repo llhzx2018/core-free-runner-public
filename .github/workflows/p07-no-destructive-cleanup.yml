@@ -1,0 +1,68 @@
+name: P07 hard-deny legacy target DB/site cleanup after failed migration
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-no-destructive-cleanup.yml'
+      - 'experiments/p07-no-target-delete/**'
+permissions:
+  contents: read
+jobs:
+  preservation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Match exact product candidate and existing release110
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat dist/p07/0.1.0/overlay/BUILD_ID)" = "0.1.0-release110"
+          test "$(git hash-object experiments/p07-no-target-delete/lib/server_migration.py)" = e466627da956540e856e38e594178ee11cbf607a
+          test "$(git hash-object experiments/p07-no-target-delete/tests/test_server_migration.py)" = 19f9d607e0d281f3716213159ddb113a03fd0c3e
+          test "$(git hash-object experiments/p07-no-target-delete/tests/test_target_cleanup_protection.py)" = 573f1ab28448270f1c5d66722ab7f51223b93517
+          cp -a dist/p07/0.1.0/overlay "$RUNNER_TEMP/p07-cleanup-denial"
+          cp experiments/p07-no-target-delete/lib/server_migration.py "$RUNNER_TEMP/p07-cleanup-denial/lib/"
+          cp experiments/p07-no-target-delete/tests/test_server_migration.py "$RUNNER_TEMP/p07-cleanup-denial/tests/"
+          cp experiments/p07-no-target-delete/tests/test_target_cleanup_protection.py "$RUNNER_TEMP/p07-cleanup-denial/tests/"
+          chmod +x "$RUNNER_TEMP/p07-cleanup-denial/bin/"*
+          echo P07_LEGACY_DELETE_DENIAL_EXACT_SOURCE_PASS
+      - name: Run adversarial target retention and existing migration recovery suites
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-cleanup-denial"
+          python3 -m py_compile lib/server_migration.py tests/test_server_migration.py tests/test_target_cleanup_protection.py
+          PYTHONPATH=lib python3 -m unittest -v \
+            tests.test_target_cleanup_protection \
+            tests.test_server_migration \
+            tests.test_server_migration_pull \
+            tests.test_migration_no_overwrite_resume \
+            tests.test_migration_conflict_recovery \
+            tests.test_restore_as_verified \
+            tests.test_sql_pk_conflict_evidence \
+            tests.test_verify
+          echo P07_LEGACY_NO_DESTRUCTIVE_CLEANUP_REGRESSIONS_PASS
+      - name: Verify cleanup function is no-delete at AST and no other runtime changed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-cleanup-denial"
+          python3 - <<'PY'
+          import ast
+          from pathlib import Path
+          code=Path('lib/server_migration.py').read_text()
+          tree=ast.parse(code)
+          cleanup=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='target_cleanup_site_local')
+          expr=ast.unparse(cleanup)
+          for token in ('cleanup_database(', 'cleanup_site(', '.unlink(', 'os.remove(', 'subprocess.run('):
+              assert token not in expr, 'DESTRUCTIVE_CLEANUP_DID_NOT_CLOSE'
+          assert "'RETAINED_RECOVERY_REQUIRED'" in expr or '"RETAINED_RECOVERY_REQUIRED"' in expr
+          assert "'NOT_ESTABLISHED'" in expr or '"NOT_ESTABLISHED"' in expr
+          PY
+          for path in lib/server_migration_pull.py lib/verify.py lib/cloudpanel.py lib/migration_conflict_recovery.py bin/vfops BUILD_ID; do
+            test "$(git hash-object "$GITHUB_WORKSPACE/dist/p07/0.1.0/overlay/$path")" = "$(git hash-object "$RUNNER_TEMP/p07-cleanup-denial/$path")"
+          done
+          echo P07_LEGACY_ROLLBACK_NO_DELETE_FAIL_CLOSED_PASS
