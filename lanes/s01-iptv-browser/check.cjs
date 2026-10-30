@@ -23,6 +23,6 @@ const {chromium}=require('playwright'),fs=require('fs');
   const contents=fs.readFileSync(await dl.path(),'utf8');if(!contents.includes('#EXTM3U')||!contents.includes('#EXTINF'))throw Error('invalid export');
   await p.screenshot({path:'proof/iptv-'+lang+'-'+width+'-sample.png',fullPage:true});
   checks.push({lang,width,count,search:'PASS',m3uExport:'PASS',overflow:'PASS'});await ctx.close();
- }}finally{await b.close()}
+ }}}finally{await b.close()}
  fs.writeFileSync('proof/iptv-check.json',JSON.stringify({status:'PASS',checks},null,2));console.log(JSON.stringify({status:'PASS',checks}));
 })().catch(e=>{console.error(e);process.exitCode=1});
