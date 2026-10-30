@@ -98,13 +98,15 @@ def draft(result: Mapping[str, Any]) -> dict[str, Any]:
         if len(tuple_by_ord) != len(counts):
             raise InvalidAdvisoryEvidence("CONFLICT_TABLE_IDENTITY_UNPROVEN")
         work = []
+        seen_ordinals = set()
         pks = {"source_only_keys": 0, "target_only_keys": 0,
                "same_key_changed_literals": 0, "identical_key_identical_literals": 0}
         for entry in differences:
             row = _object(entry)
             ordinal = _number(row.get("table_ordinal"))
-            if not 1 <= ordinal <= total or ordinal not in tuple_by_ord:
+            if not 1 <= ordinal <= total or ordinal not in tuple_by_ord or ordinal in seen_ordinals:
                 raise InvalidAdvisoryEvidence("CONFLICT_TABLE_IDENTITY_UNPROVEN")
+            seen_ordinals.add(ordinal)
             counts_row = tuple_by_ord[ordinal]
             source_only = _number(row.get("source_only_keys"))
             target_only = _number(row.get("target_only_keys"))
@@ -160,3 +162,104 @@ def draft(result: Mapping[str, Any]) -> dict[str, Any]:
         }
     except (InvalidAdvisoryEvidence, KeyError, TypeError):
         return _fail("CROSS_EVIDENCE_INCOMPLETE_OR_INCONSISTENT")
+
+
+# These are review-slot selections, not database primary keys. Ordinals have
+# no stable identity across dumps; never generate SQL or claim live-row proof.
+_POLICY_SCHEMA = "P07_CONFLICT_POLICY_REVIEW_V1"
+_MAX_REVIEW_SLOTS = 500
+_ALLOWED_CHOICES = {
+    "SOURCE_ONLY": frozenset(("RETAIN_SOURCE_COPY", "DEFER_REVIEW")),
+    "TARGET_ONLY": frozenset(("RETAIN_TARGET_COPY", "DEFER_REVIEW")),
+    "SAME_KEY_LITERAL_DIFFER": frozenset((
+        "PREFER_SOURCE_AFTER_SEMANTIC_PROOF",
+        "PREFER_TARGET_AFTER_SEMANTIC_PROOF",
+        "MANUAL_MERGE_REVIEW",
+        "FORMAT_EQUIVALENCE_REVIEW",
+        "DEFER_REVIEW",
+    )),
+}
+_UNRESOLVED_CHOICES = frozenset((
+    "DEFER_REVIEW", "MANUAL_MERGE_REVIEW", "FORMAT_EQUIVALENCE_REVIEW",
+))
+
+
+def _policy_response(status: str, *, expected: int = 0,
+                     selected: int = 0, unresolved: int = 0) -> dict[str, Any]:
+    """Never reflect caller text, values, keys, SQL, hosts or approval claims."""
+    return {
+        "schema": _POLICY_SCHEMA,
+        "status": status,
+        "expected_review_slots": expected,
+        "selected_review_slots": selected,
+        "unresolved_review_slots": unresolved,
+        "primary_keys_bound_to_review_slots": False,
+        "source_recovery_verified": False,
+        "target_recovery_verified": False,
+        "live_row_semantics_verified": False,
+        "operator_approval_verified": False,
+        "dynamic_sql_verified": False,
+        "data_writes_allowed": False,
+        "migration_resume_allowed": False,
+        "cutover_allowed": False,
+        "verification": "NOT_A_PASS_GATE",
+    }
+
+
+def review_policy(advisory: Mapping[str, Any], selections: Any) -> dict[str, Any]:
+    """Validate privacy-safe, non-executable choices for *each* advisory slot.
+
+    A review slot is only (table ordinal, category, position in that category).
+    It is NOT a primary key, row fingerprint or deterministic row mapping.
+    The output cannot approve a data change even with complete selections or
+    caller-supplied proof/approval flags. Real policies must be bound to actual
+    private row identities, semantic evidence and restored recovery points.
+    """
+    work_order = draft(advisory)
+    if work_order["status"] != "BLOCKED_RECOVERY_AND_OPERATOR_DECISIONS":
+        return _policy_response("BLOCKED_ADVISORY_UNPROVEN")
+    expected: dict[tuple[int, str, int], None] = {}
+    for table in work_order["conflicts"]:
+        table_ordinal = table["table_ordinal"]
+        for kind, count_field in (
+            ("SOURCE_ONLY", "source_only_keys"),
+            ("TARGET_ONLY", "target_only_keys"),
+            ("SAME_KEY_LITERAL_DIFFER", "same_key_changed_literals"),
+        ):
+            count = table[count_field]
+            if len(expected) + count > _MAX_REVIEW_SLOTS:
+                return _policy_response("BLOCKED_REVIEW_SCOPE_LIMIT")
+            for position in range(1, count + 1):
+                expected[(table_ordinal, kind, position)] = None
+    total = len(expected)
+    if type(selections) is not list or len(selections) > total:
+        return _policy_response("BLOCKED_INVALID_SELECTION", expected=total)
+    recorded: dict[tuple[int, str, int], str] = {}
+    for item in selections:
+        if type(item) is not dict or set(item) != {
+            "table_ordinal", "kind", "item_ordinal", "decision"
+        }:
+            return _policy_response("BLOCKED_INVALID_SELECTION", expected=total)
+        ordinal, kind, position, decision = (
+            item["table_ordinal"], item["kind"],
+            item["item_ordinal"], item["decision"],
+        )
+        if (type(ordinal) is not int or type(position) is not int
+                or type(kind) is not str or type(decision) is not str):
+            return _policy_response("BLOCKED_INVALID_SELECTION", expected=total)
+        slot = (ordinal, kind, position)
+        if (slot not in expected or slot in recorded
+                or decision not in _ALLOWED_CHOICES.get(kind, ())):
+            return _policy_response("BLOCKED_INVALID_SELECTION", expected=total)
+        recorded[slot] = decision
+    unresolved = total - len(recorded) + sum(
+        choice in _UNRESOLVED_CHOICES for choice in recorded.values()
+    )
+    status = (
+        "BLOCKED_EXTERNAL_RECOVERY_AND_ROW_PROOF"
+        if unresolved == 0
+        else "BLOCKED_OPERATOR_REVIEW_INCOMPLETE"
+    )
+    return _policy_response(
+        status, expected=total, selected=len(recorded), unresolved=unresolved,
+    )
