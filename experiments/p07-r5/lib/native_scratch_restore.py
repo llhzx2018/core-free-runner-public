@@ -230,6 +230,8 @@ def restore_one(sql_path: Path, expected_tables: int) -> int:
             os.chown(base, uid, gid)
         datadir = base / "db"
         datadir.mkdir(mode=0o700)
+        if os.geteuid() == 0:
+            os.chown(datadir, uid, gid)
         sock = base / "sql.sock"
         init = [
             bins["mariadb-install-db"], "--no-defaults",
