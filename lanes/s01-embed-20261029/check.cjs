@@ -1,7 +1,7 @@
 const {chromium}=require('playwright');const fs=require('fs'),assert=require('assert/strict');
 (async()=>{const browser=await chromium.launch({headless:true});const proof=[];try{
 for(const lang of ['en','zh'])for(const width of [1024,1440]){
-const page=await browser.newPage({viewport:{width,height:1000}});let before=[];page.on('request',r=>{if(/\.m3u8(?:[?#]|$)/i.test(r.url()))before.push(r.url())});
+const page=await browser.newPage({viewport:{width,height:1000}});await page.addInitScript(()=>{Object.defineProperty(navigator,'clipboard',{configurable:true,value:{writeText:async value=>{window.__copiedText=value}}})});let before=[];page.on('request',r=>{if(/\.m3u8(?:[?#]|$)/i.test(r.url()))before.push(r.url())});
 await page.goto('http://127.0.0.1:18880'+(lang==='zh'?'/zh/embed/':'/embed/'),{waitUntil:'networkidle'});
 const root=page.locator('[data-vf-embed-generator]').first();await root.waitFor();
 assert.equal(await page.locator('h1').count(),1);assert.equal(before.length,0,'initial render must not load a stream');
@@ -12,6 +12,7 @@ const code=await root.locator('[data-vf-embed-recommended-code]').inputValue();a
 const label=(await root.locator('[data-vf-embed-copy-recommended]').innerText()).trim();
 fs.writeFileSync('proof/embed-primary-'+lang+'.json',JSON.stringify({label}));
 assert.ok(lang==='zh'?label.includes('复制'):/copy/i.test(label),'generated code primary action must describe copying, got: '+label);
+await root.locator('[data-vf-embed-copy-recommended]').click();await page.waitForFunction(()=>typeof window.__copiedText==='string');assert.equal(await page.evaluate(()=>window.__copiedText),code,'copy must write recommended code');
 await root.locator('[data-vf-embed-mode-button="pro"]').click();await root.locator('[data-vf-embed-mode-button="pro"][aria-selected="true"]').waitFor({timeout:5000});
 await root.locator('[data-vf-embed-mode-button="simple"]').click();await root.locator('[data-vf-embed-mode-button="simple"][aria-selected="true"]').waitFor({timeout:5000});
 await page.screenshot({path:`proof/embed-${lang}-${width}.png`,fullPage:true});

@@ -20,6 +20,7 @@ docker cp target/src/. "$WP:/var/www/html/wp-content/themes/vf-tools-theme/"
 docker cp provider/vf-tools-m3u8_V1.25.96.zip "$WP:/tmp/provider.zip"
 cli plugin install /tmp/provider.zip --activate >/dev/null
 docker cp provider-source/src/public/js/tool-runtime-i18n.js "$WP:/var/www/html/wp-content/plugins/vf-tool-m3u8/public/js/tool-runtime-i18n.js"
+docker cp provider-source/src/public/dist/embed.js "$WP:/var/www/html/wp-content/plugins/vf-tool-m3u8/public/dist/embed.js"
 docker cp lane/fixture.php "$WP:/var/www/html/wp-content/mu-plugins/progress-fixture.php"
 docker exec "$WP" chown -R www-data:www-data /var/www/html/wp-content/themes/vf-tools-theme
 cli theme activate vf-tools-theme >/dev/null
