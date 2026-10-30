@@ -1,0 +1,101 @@
+name: P07 PR244 isolated candidate package upgrade rollback gate
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-pr244-candidate-upgrade-proof.yml'
+permissions:
+  contents: read
+jobs:
+  candidate:
+    if: ${{ github.repository == 'llhzx2018/core-free-runner-public' && github.head_ref == 'test/p07-pr244-package-proof-20261030' && github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_SHA: 6fbba32cafe3cf84d740d84af19422cc727516fd
+    steps:
+      - name: Checkout published public baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Require existing private read capability
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo P07_PRIVATE_READ_UNAVAILABLE; exit 78; }
+      - name: Checkout pinned product PR draft
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 6fbba32cafe3cf84d740d84af19422cc727516fd
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p07-private
+      - name: Verify package builder and changed SQL source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p07-private rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(cat p07-private/BUILD_ID)" = 0.1.0-release103
+          python3 -B -m py_compile p07-private/scripts/p07_candidate_bundle.py p07-private/lib/server_migration_pull.py p07-private/lib/verify.py
+          (cd p07-private && python3 -B -m unittest discover -s tests -p 'test_p07_bundle_identity.py' -v)
+          (cd p07-private && python3 -B scripts/secret_scan.py --root .)
+          echo P07_PACKAGE_EXACT_SOURCE_PRECHECK_PASS
+      - name: Build unpublished release104-rc1 and verify identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -B p07-private/scripts/p07_candidate_bundle.py --product-root p07-private --public-root . --output "$RUNNER_TEMP/p07-pr244-candidate" --product-sha "$PRODUCT_SHA" --build 0.1.0-release104-rc1 --care 0.1.0-rc73
+          python3 - <<'PY'
+          import json,os,hashlib
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])/'p07-pr244-candidate'
+          meta=json.loads((root/'candidate_attestation.json').read_text())
+          assert meta['status']=='CANDIDATE_ONLY_NOT_PUBLISHED'
+          assert meta['product_source_sha']==os.environ['PRODUCT_SHA']
+          assert meta['product_build']=='0.1.0-release104-rc1'
+          assert meta['system_care_build']=='0.1.0-rc73'
+          assert meta['runtime_file_count']>=45
+          assert not any(meta['negative'].values())
+          runtime=(root/'dist/p07/0.1.0/overlay/RUNTIME.gitblob').read_text()
+          for dep in ('lib/verify.py','lib/server_migration_pull.py','lib/sql_diff_evidence.py','lib/cloudpanel.py','BUILD_ID'):
+              assert any(line.endswith('  '+dep) for line in runtime.splitlines()), dep
+          assert (root/'installers/p07-final.sh').exists()
+          print('P07_RC104_MANIFEST_CLOSURE_PASS')
+          PY
+          bash -n "$RUNNER_TEMP/p07-pr244-candidate/installers/p07-final.sh" "$RUNNER_TEMP/p07-pr244-candidate/installers/p07.sh" "$RUNNER_TEMP/p07-pr244-candidate/installers/p07-toolbox.sh"
+      - name: Test existing release103 to RC upgrade, abort rollback and fresh install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          base="$PWD"
+          candidate="$RUNNER_TEMP/p07-pr244-candidate"
+          root="$RUNNER_TEMP/p07-pr244-install"
+          mkdir -p "$root"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1
+          export P07_INSTALL_DIR="$root/installed" P07_PREVIOUS_DIR="$root/previous" P07_BIN_LINK="$root/vfops"
+          P07_PUBLIC_ROOT="file://$base" bash installers/p07-final.sh > "$root/baseline.log" 2>&1
+          test "$("$root/vfops" --build-id)" = "0.1.0-release103"
+          touch "$root/notdir"
+          if P07_PUBLIC_ROOT="file://$candidate" P07_BIN_LINK="$root/notdir/vfops" bash "$candidate/installers/p07-final.sh" > "$root/fail.log" 2>&1; then
+            echo P07_EXPECTED_FAILURE_DID_NOT_OCCUR
+            exit 1
+          fi
+          test "$("$root/vfops" --build-id)" = "0.1.0-release103"
+          test ! -e "$root/previous"
+          P07_PUBLIC_ROOT="file://$candidate" bash "$candidate/installers/p07-final.sh" > "$root/upgrade.log" 2>&1
+          test "$("$root/vfops" --build-id)" = "0.1.0-release104-rc1"
+          test "$(cat "$root/previous/BUILD_ID")" = "0.1.0-release103"
+          for required in lib/verify.py lib/server_migration_pull.py lib/sql_diff_evidence.py lib/cloudpanel.py; do
+            test -f "$root/installed/$required"
+          done
+          P07_PUBLIC_ROOT="file://$candidate" P07_INSTALL_DIR="$root/fresh" P07_PREVIOUS_DIR="$root/freshprev" P07_BIN_LINK="$root/freshvfops" bash "$candidate/installers/p07-final.sh" > "$root/fresh.log" 2>&1
+          test "$("$root/freshvfops" --build-id)" = "0.1.0-release104-rc1"
+          test ! -e "$root/freshprev"
+          echo P07_RC104_ISOLATED_INSTALL_UPGRADE_ROLLBACK_PASS
+      - name: Cleanup candidate and private source
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- p07-private "$RUNNER_TEMP/p07-pr244-candidate" "$RUNNER_TEMP/p07-pr244-install"
+          echo P07_PRIVATE_TEMP_CLEANUP_PASS
