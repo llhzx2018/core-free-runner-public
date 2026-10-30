@@ -1,0 +1,105 @@
+name: S01 IPTV candidate install and recovery proof
+on:
+  push:
+    branches: [task/s01-iptv-proof-20261030]
+    paths: ['.github/workflows/s01-iptv-upgrade-20261030.yml']
+permissions:
+  contents: read
+env:
+  TARGET_VERSION: 1.35.219
+  SOURCE_VERSION: 1.35.218
+  TARGET_SHA: 5437d9b4c74e8f10074c307d9de6b3fc5f9ae688
+  TARGET_TREE: dcc94fa12c6797b07adaffac7ba67faaba0c37d9
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: control
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 02d4591eed025a3d3a67bc0a150b3ddc448c2ab8
+          persist-credentials: false
+          path: established
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: 5437d9b4c74e8f10074c307d9de6b3fc5f9ae688
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - name: Build and verify exact package
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p proof provider
+          test "$(git -C target rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C target rev-parse 'HEAD^{tree}')" = "$TARGET_TREE"
+          test "$(cat target/VERSION)" = "$TARGET_VERSION"
+          git -C target diff --check 3a18aae11fb8a0dc829b35fb6930a67a36d31d99 HEAD
+          find target/src -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          node --check target/src/assets/js/main.js
+          for file in src/inc/modules/module-faq.php src/inc/seo-parts/seo-jsonld.php tests/player-faq-copy-contract.php tests/player-advanced-seo-jsonld-contract.php; do
+            if test -f "target/$file"; then php -l "target/$file"; fi
+          done
+          for file in tests/player-faq-copy-contract.php tests/player-advanced-seo-jsonld-contract.php; do
+            if test -f "target/$file"; then php "target/$file"; fi
+          done
+          echo INDEPENDENT_PLAYER_PHP_CONTRACTS_PASS
+          python3 - <<'PY'
+          from pathlib import Path,PurePosixPath
+          import hashlib,io,json,os,subprocess,zipfile
+          root=Path('target/src')
+          files=sorted(p for p in root.rglob('*') if p.is_file())
+          assert len(files)==476
+          def build():
+              b=io.BytesIO()
+              with zipfile.ZipFile(b,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for p in files:
+                      assert not p.is_symlink()
+                      info=zipfile.ZipInfo(str(PurePosixPath('vf-tools-theme')/p.relative_to(root)),date_time=(1980,1,1,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.external_attr=(p.stat().st_mode & 0o777)<<16
+                      z.writestr(info,p.read_bytes(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+              return b.getvalue()
+          data=build()
+          assert data==build()
+          out=Path('provider')/('vf-tools-theme_V'+os.environ['TARGET_VERSION']+'.zip')
+          out.write_bytes(data)
+          with zipfile.ZipFile(out) as z:
+              assert z.testzip() is None
+              assert 'Version: '+os.environ['TARGET_VERSION'] in z.read('vf-tools-theme/style.css').decode()
+              assert all('..' not in PurePosixPath(n).parts for n in z.namelist())
+          rec=dict(status='PASS',version=os.environ['TARGET_VERSION'],source=os.environ['TARGET_SHA'],tree=os.environ['TARGET_TREE'],src_tree=subprocess.check_output(['git','-C','target','rev-parse','HEAD:src']).decode().strip(),bytes=len(data),sha256=hashlib.sha256(data).hexdigest(),files=len(files),production='UNTOUCHED')
+          Path('proof/package.json').write_text(json.dumps(rec,indent=2))
+          print('EXACT_PACKAGE_PASS '+json.dumps(rec))
+          PY
+          gh release download v1.35.218 --repo llhzx2018/vf-tools-theme --pattern vf-tools-theme_V1.35.218.zip --dir provider
+          echo 'dc59368826dfdc7c0ff3a58996c9e0a9d00cdae9e7a7cf290c6db0fbf0053d69  provider/vf-tools-theme_V1.35.218.zip' | sha256sum -c
+          gh release download v1.35.216 --repo llhzx2018/vf-tools-theme --pattern vf-tools-theme_V1.35.216.zip --dir provider
+          echo '1aa03833d4c8f94741461c1d4611a35391c1116f4a6b2cfaf9c59e2e112c1f26  provider/vf-tools-theme_V1.35.216.zip' | sha256sum -c
+          gh release download v1.25.94 --repo llhzx2018/vf-tools-m3u8 --pattern vf-tools-m3u8_V1.25.94.zip --dir provider
+          echo '70b90d40da5d69fc7819bd7ada3f15fb0145e64822b788bd94956c7827b2df03  provider/vf-tools-m3u8_V1.25.94.zip' | sha256sum -c
+          npm install --no-audit --no-fund playwright@1.62.1
+          npx playwright install chromium
+          cp -a established/lanes/s01-frontend-design-20261017 lane
+      - name: WordPress install, regression, upgrade and rollback
+        run: bash control/lanes/s01-iptv-browser/native-upgrade.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s01-iptv-upgrade-${{ github.run_id }}
+          path: proof/
+          retention-days: 14
+      - name: Clean private sources
+        if: always()
+        run: rm -rf target provider lane
+
+# Include the currently installed 1.35.216 baseline.
+
+# Run affected player PHP contract on the exact candidate.
