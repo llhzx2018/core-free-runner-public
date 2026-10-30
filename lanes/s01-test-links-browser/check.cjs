@@ -6,6 +6,7 @@ for(const lang of ['en','zh'])for(const width of [1024,1440]){
  const response=await p.goto('http://127.0.0.1:18880'+(lang==='zh'?'/zh':'')+'/m3u8-test-links/',{waitUntil:'networkidle'});
  if(!response.ok())throw Error('route status '+response.status());
  const root=p.locator('[data-vf-test-links-productized]').first();await root.waitFor();
+ if(await root.locator('.vf-tl-selection').isVisible())throw Error('empty selection panel visible');
  if(manifests!==0)throw Error('page made unsolicited manifest request');
  if(await p.locator('.vf-tool-breadcrumb').isVisible()||await p.locator('.vf-m3u8-launchbar__steps').isVisible())throw Error('duplicate navigation visible');
  const dims=await p.evaluate(()=>({scroll:document.documentElement.scrollWidth,client:document.documentElement.clientWidth}));if(dims.scroll>dims.client+1)throw Error('overflow '+JSON.stringify(dims));
@@ -16,7 +17,7 @@ for(const lang of ['en','zh'])for(const width of [1024,1440]){
  await root.locator('[data-vf-test-links-search]').fill('');await p.waitForTimeout(250);if(await rows.count()<3)throw Error('search reset failed');
  await root.locator('[data-vf-test-links-fav-row]').first().click();await root.locator('[data-vf-test-links-tab-button="favorites"]').click();
  if(await rows.count()<1)throw Error('favorite filter failed');await root.locator('[data-vf-test-links-tab-button="library"]').click();
- await root.locator('[data-vf-test-links-sample]').click();if(!await root.locator('[data-vf-test-links-current]').inputValue())throw Error('sample selection did not populate URL');
+ await root.locator('[data-vf-test-links-sample]').click();if(!await root.locator('[data-vf-test-links-current]').inputValue())throw Error('sample selection did not populate URL'); if(!await root.locator('.vf-tl-selection').isVisible())throw Error('selected details panel missing');
  await root.locator('[data-vf-test-links-verify-selected]').click();await root.locator('[data-vf-test-links-result]').waitFor({state:'visible',timeout:15000});
  if(manifests<1)throw Error('test did not make manifest request');
  await p.screenshot({path:'proof/test-links-'+lang+'-'+width+'-result.png',fullPage:true});
