@@ -957,10 +957,7 @@ def _sql_data_statement_terminator(line: str, quote: str, escaped: bool) -> tupl
             raise RestoreVerifyError("SQL data contains multiple statements on one line")
         elif c == ";":
             return True, quote, escaped
-        elif c == "#" or line.startswith("/*", i) or (
-            line.startswith("--", i)
-            and (i + 2 >= len(line) or line[i + 2].isspace())
-        ):
+        elif c == "#" or line.startswith("/*", i) or line.startswith("--", i):
             raise RestoreVerifyError("SQL data contains unproven inline comment")
         i += 1
     return False, quote, escaped
