@@ -1,0 +1,66 @@
+name: P07 target database preservation and resume denial exact-source
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-target-data-preservation.yml'
+      - 'experiments/p07-target-data-preservation/**'
+permissions:
+  contents: read
+jobs:
+  safety:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Immutable exact candidate identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat dist/p07/0.1.0/overlay/BUILD_ID)" = 0.1.0-release109
+          test "$(git hash-object experiments/p07-target-data-preservation/lib/server_migration.py)" = 814cfe9240522aac49c17482a575c3915f40cf8f
+          test "$(git hash-object experiments/p07-target-data-preservation/lib/server_migration_pull.py)" = 0c82913ea5f83be3281172cbf2ea710a99289d66
+          test "$(git hash-object experiments/p07-target-data-preservation/tests/test_server_migration.py)" = 643386bdf448a55de5aa1f5e0036560525bd8fe5
+          test "$(git hash-object experiments/p07-target-data-preservation/tests/test_migration_no_overwrite_resume.py)" = 0a80ec4b5f4f3f64b8e9b21b347f07199a272017
+          cp -a dist/p07/0.1.0/overlay "$RUNNER_TEMP/p07-database-preservation"
+          for p in lib/server_migration.py lib/server_migration_pull.py tests/test_server_migration.py tests/test_migration_no_overwrite_resume.py; do
+            cp "experiments/p07-target-data-preservation/$p" "$RUNNER_TEMP/p07-database-preservation/$p"
+          done
+          chmod +x "$RUNNER_TEMP/p07-database-preservation/bin/"*
+          echo P07_TARGET_RETRY_EXACT_SOURCES_PASS
+      - name: Run real migration rollback and target ownership protections
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-database-preservation"
+          python3 -m py_compile lib/server_migration.py lib/server_migration_pull.py tests/test_server_migration.py tests/test_migration_no_overwrite_resume.py
+          PYTHONPATH=lib python3 -m unittest -v \
+            tests.test_migration_no_overwrite_resume \
+            tests.test_server_migration \
+            tests.test_server_migration_pull \
+            tests.test_migration_conflict_recovery \
+            tests.test_sql_pk_conflict_evidence \
+            tests.test_sql_multiset_evidence \
+            tests.test_sql_readback_stability \
+            tests.test_verify
+          echo P07_TARGET_RETRY_REAL_REGRESSION_PASS
+      - name: Ensure no advisory shortcut into migration or importer
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root=dist/p07/0.1.0/overlay
+          cand="$RUNNER_TEMP/p07-database-preservation"
+          for path in lib/verify.py lib/cloudpanel.py lib/sql_diff_evidence.py lib/sql_pk_conflict_evidence.py lib/migration_conflict_recovery.py bin/vfops BUILD_ID; do
+            test "$(git hash-object "$root/$path")" = "$(git hash-object "$cand/$path")"
+          done
+          python3 - "$cand/lib/server_migration.py" "$cand/lib/server_migration_pull.py" <<'PY'
+          import ast,sys
+          a=ast.parse(open(sys.argv[1]).read())
+          b=ast.parse(open(sys.argv[2]).read())
+          for name,tree in [('target_create_database_local',a),('resume_prepare_migration',b)]:
+              fun=next(x for x in tree.body if isinstance(x,ast.FunctionDef) and x.name==name)
+              assert any('RECOVERY_REQUIRED' in ast.unparse(x) for x in ast.walk(fun) if isinstance(x,ast.Raise))
+          PY
+          echo P07_TARGET_RETRY_CANNOT_DELETE_ON_UNPROVEN_RECONCILIATION_PASS
