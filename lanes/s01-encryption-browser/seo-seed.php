@@ -15,4 +15,7 @@ foreach(['en','zh'] as $lang){
 pll_save_post_translations($pair);
 foreach($pair as $lang=>$id)update_post_meta($id,'rank_math_description',$lang==='zh'?'Synthetic Chinese encryption description for diagnostic.':'Synthetic English encryption description for diagnostic.');
 if(count($pair)!==2||$pair['en']===$pair['zh'])throw new RuntimeException('fixture pair invalid');
+$control=wp_insert_post(['post_type'=>'page','post_status'=>'publish','post_name'=>'seo-control-en','post_title'=>'SEO Control','post_content'=>'Control content'],true);
+if(is_wp_error($control))throw new RuntimeException('control creation');
+pll_set_post_language($control,'en');update_post_meta($control,'rank_math_description','Synthetic ordinary control page description.');
 echo wp_json_encode(['pair'=>$pair,'original_count'=>count($ids)]);
