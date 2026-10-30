@@ -1,0 +1,28 @@
+const {chromium}=require('playwright'),fs=require('fs');
+(async()=>{const b=await chromium.launch({headless:true}),checks=[];
+try{for(const lang of ['en','zh'])for(const width of [1024,1440]){
+ const ctx=await b.newContext({viewport:{width,height:900},acceptDownloads:true}),p=await ctx.newPage();
+ const res=await p.goto('http://127.0.0.1:18880'+(lang==='zh'?'/zh':'')+'/m3u8-backup-restore/',{waitUntil:'networkidle'});
+ if(!res.ok())throw Error('unexpected HTTP '+res.status());
+ const root=p.locator('.vf-bak-shell').first();await root.waitFor();
+ if(await p.locator('.vf-tool-breadcrumb').isVisible())throw Error('breadcrumb remains visible');
+ if(!await root.locator('[data-vf-backup-task-toggle="backup"]').isVisible()||!await root.locator('[data-vf-backup-task-toggle="restore"]').isVisible())throw Error('task selector missing');
+ if(!await p.locator('.vf-m3u8-launchbar__steps').isVisible())throw Error('safety steps missing');
+ const sizes=await p.evaluate(()=>({scroll:document.documentElement.scrollWidth,client:document.documentElement.clientWidth}));if(sizes.scroll>sizes.client+1)throw Error('horizontal overflow '+JSON.stringify(sizes));
+ await p.screenshot({path:'proof/backup-'+lang+'-'+width+'-initial.png',fullPage:true});
+ await root.locator('[data-vf-backup-action="preview-workspace"]').click();
+ await root.locator('[data-vf-backup-report]').waitFor({state:'visible',timeout:15000});
+ if(!await root.locator('[data-vf-backup-action="export-json"]').isEnabled())throw Error('export remains disabled');
+ const [download]=await Promise.all([p.waitForEvent('download'),root.locator('[data-vf-backup-action="export-json"]').click()]);
+ JSON.parse(fs.readFileSync(await download.path(),'utf8'));
+ await root.locator('[data-vf-backup-task-toggle="restore"]').click();
+ const panel=root.locator('[data-vf-backup-task-panel="restore"]');
+ if(!await panel.isVisible())throw Error('restore panel missing');
+ if(await panel.locator('[data-vf-backup-action="restore-backup"]').isEnabled())throw Error('restore enabled before preflight');
+ await panel.locator('[data-vf-backup-action="load-sample-backup"]').click();
+ await panel.locator('[data-vf-backup-action="preview-import"]').click();
+ await panel.locator('[data-vf-backup-diff]').waitFor({state:'visible',timeout:15000});
+ if(await panel.locator('[data-vf-backup-action="restore-backup"]').isEnabled())throw Error('restore enabled without explicit confirmation');
+ await p.screenshot({path:'proof/backup-'+lang+'-'+width+'-preview.png',fullPage:true});
+ checks.push({lang,width,workspace:'PASS',download:'PASS',preflight:'PASS',confirmationGuard:'PASS',overflow:'PASS'});await ctx.close();
+}}finally{await b.close()}fs.writeFileSync('proof/backup-layout-check.json',JSON.stringify({status:'PASS',checks},null,2));console.log(JSON.stringify(checks));})().catch(e=>{console.error(e);process.exitCode=1});
