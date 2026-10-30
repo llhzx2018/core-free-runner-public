@@ -175,11 +175,78 @@ class SqlDiffEvidenceTests(unittest.TestCase):
                 "CREATE TABLE \u0060private\u0060 (\u0060id\u0060 INT);\n",
                 "CREATE TABLE \u0060private\u0060 (\u0060id\u0060 INT);\n",
             )
-        self.assertEqual(result["data_content"], {"comparison": "UNAVAILABLE"})
+        self.assertEqual(result["data_content"], {
+            "comparison": "UNAVAILABLE",
+            "source_reason": "OTHER_VERIFIER_FAILURE",
+            "target_reason": "OTHER_VERIFIER_FAILURE",
+        })
         self.assertEqual(result["schema_difference"]["mismatched_tables"], 0)
         self.assertEqual(result["verification"], "NOT_A_PASS_GATE")
         self.assertNotIn("private", json.dumps(result))
 
+
+    def test_table_option_difference_has_redacted_reason_classes(self):
+        base = "CREATE TABLE `private_table` (`id` INT) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
+        engine = base.replace("InnoDB", "Aria")
+        result = self.probe(base, engine)
+        opts = result["schema_difference"]
+        self.assertEqual(opts["changed_options"], 1)
+        self.assertEqual(opts["changed_option_classes"]["ENGINE"], 1)
+        self.assertEqual(opts["changed_option_classes"]["OTHER_OR_UNPARSED"], 0)
+        self.assertEqual(result["verification"], "NOT_A_PASS_GATE")
+        other = self.probe(base, base.replace(" ENGINE=InnoDB", " ENGINE=InnoDB ROW_FORMAT=DYNAMIC"))
+        self.assertEqual(other["schema_difference"]["changed_option_classes"]["ROW_FORMAT"], 1)
+        unknown = self.probe(base, base.replace("utf8mb4;", "utf8mb4 COMMENT='private message';"))
+        self.assertEqual(unknown["schema_difference"]["changed_option_classes"]["OTHER_OR_UNPARSED"], 1)
+        self.assertNotIn("private_table", json.dumps(unknown))
+        self.assertNotIn("private message", json.dumps(unknown))
+
+    def test_unsafe_if_has_specific_redacted_reason_without_approval(self):
+        source = "CREATE TABLE `private_table` (`id` INT);\n"
+        source += "/*!50003 SET @a=IF(@flag, 'SET GLOBAL sql_notes=0', 'SELECT 1') */;\n"
+        source += "/*!50003 SET @b=IF(@flag, 'SET SESSION group_concat_max_len=8', 'SELECT 1') */;\n"
+        source += "/*!50003 SET @c=IF(@flag, 'SELECT secret FROM elsewhere', 'SELECT 1') */;\n"
+        result = self.probe(source, "CREATE TABLE `private_table` (`id` INT);\n")
+        guard = result["dynamic_guard"]
+        reasons = guard["unsafe_branch_reasons"]
+        self.assertEqual(guard["recognized_unsafe"], 3)
+        self.assertEqual(reasons["GLOBAL_OR_PERSIST"], 1)
+        self.assertEqual(reasons["SESSION_GRAMMAR_UNPROVEN"], 1)
+        self.assertEqual(reasons["READ_GRAMMAR_UNPROVEN"], 1)
+        self.assertEqual(sum(reasons.values()), 3)
+        self.assertEqual(result["verification"], "NOT_A_PASS_GATE")
+        self.assertNotIn("elsewhere", json.dumps(result))
+
+    def test_multi_statement_branch_stays_unsafe_and_redacted(self):
+        source = (
+            "CREATE TABLE `private_table` (`id` INT);\n"
+            "/*!50003 SET @a=IF(@flag, 'SET @x=1; DROP TABLE private_table', 'SELECT 1') */;\n"
+        )
+        result = self.probe(source, "CREATE TABLE `private_table` (`id` INT);\n")
+        self.assertEqual(result["dynamic_guard"]["unsafe_branch_reasons"]["CONTROL_OR_MULTISTATEMENT"], 1)
+        self.assertEqual(result["dynamic_guard"]["unsafe_control_or_multi"], 1)
+        self.assertEqual(result["verification"], "NOT_A_PASS_GATE")
+
+    def test_data_unavailable_reasons_are_source_target_specific_and_redacted(self):
+        errors = [
+            evidence.verify.RestoreVerifyError("multiline SQL data requires manual cross-engine verification"),
+            evidence.verify.RestoreVerifyError("unrecognized SQL data command in cross-engine verification"),
+        ]
+        with patch.object(evidence.verify, "sql_data_fingerprint", side_effect=errors):
+            result = evidence.data_content_evidence(Path("source.sql"), Path("target.sql"))
+        self.assertEqual(result, {
+            "comparison": "UNAVAILABLE",
+            "source_reason": "MULTILINE_DML_UNPROVEN",
+            "target_reason": "DML_COMMAND_UNRECOGNIZED",
+        })
+        with patch.object(evidence.verify, "sql_data_fingerprint", side_effect=[
+            evidence.verify.RestoreVerifyError("private token 12345"),
+            {"objects": [], "data_hash": "internal", "data_statements": 0},
+        ]):
+            unknown = evidence.data_content_evidence(Path("source.sql"), Path("target.sql"))
+        self.assertEqual(unknown["source_reason"], "OTHER_VERIFIER_FAILURE")
+        self.assertEqual(unknown["target_reason"], "NONE")
+        self.assertNotIn("private token", json.dumps(unknown))
 
     def test_source_export_sanity_rejects_empty_and_corrupt_gzip(self):
         with tempfile.TemporaryDirectory() as directory:

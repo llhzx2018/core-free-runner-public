@@ -76,6 +76,28 @@ def _unsafe_branch_category(literal: str) -> str:
     return "UNKNOWN_OR_ESCAPED"
 
 
+def _unsafe_branch_reason(literal: str) -> str:
+    """Return a fixed reason label, never a branch or any literal bytes."""
+    value = literal[1:-1].replace("''", "'").strip()
+    if len(value) > 4096 or any(
+        char in value for char in ("\\", ";", "/*", "*/", "--", "#", "\r", "\n")
+    ):
+        return "CONTROL_OR_MULTISTATEMENT"
+    if re.search(r"\b(?:GLOBAL|PERSIST|PERSIST_ONLY)\b", value, re.I):
+        return "GLOBAL_OR_PERSIST"
+    if re.search(
+        r"\b(?:CREATE|ALTER|DROP|TRUNCATE|RENAME|INSERT|UPDATE|DELETE|"
+        r"REPLACE|LOAD|OUTFILE|DUMPFILE|PREPARE|EXECUTE|CALL|DO|GRANT|"
+        r"REVOKE|SHUTDOWN)\b", value, re.I,
+    ):
+        return "SIDE_EFFECT_OR_CONTROL_KEYWORD"
+    if re.match(r"^SET\b", value, re.I):
+        return "SESSION_GRAMMAR_UNPROVEN"
+    if re.match(r"^(?:SELECT|SHOW|EXPLAIN)\b", value, re.I):
+        return "READ_GRAMMAR_UNPROVEN"
+    return "UNKNOWN_GRAMMAR"
+
+
 def dynamic_guard_syntax_counts(source: Path) -> dict[str, Any]:
     """Classify guarded IF branches; classification never makes them safe."""
     counts: dict[str, Any] = {
@@ -84,6 +106,13 @@ def dynamic_guard_syntax_counts(source: Path) -> dict[str, Any]:
         "unsafe_yes_branches": 0, "unsafe_no_branches": 0,
         "unsafe_control_or_multi": 0,
         "unsafe_branch_classes": {name: 0 for name in _UNSAFE_BRANCH_CLASSES},
+        "unsafe_branch_reasons": {
+            name: 0 for name in (
+                "CONTROL_OR_MULTISTATEMENT", "GLOBAL_OR_PERSIST",
+                "SIDE_EFFECT_OR_CONTROL_KEYWORD", "SESSION_GRAMMAR_UNPROVEN",
+                "READ_GRAMMAR_UNPROVEN", "UNKNOWN_GRAMMAR",
+            )
+        },
     }
     for raw in _read_lines(source):
         match = _GUARD_RE.fullmatch(raw.strip())
@@ -100,6 +129,7 @@ def dynamic_guard_syntax_counts(source: Path) -> dict[str, Any]:
                 rejected = True
                 counts[f"unsafe_{part}_branches"] += 1
                 counts["unsafe_branch_classes"][_unsafe_branch_category(literal)] += 1
+                counts["unsafe_branch_reasons"][_unsafe_branch_reason(literal)] += 1
                 value = literal[1:-1]
                 if len(value) > 4096 or any(
                     char in value for char in ("\\", ";", "/*", "*/", "--", "#", "\r", "\n")
@@ -183,7 +213,43 @@ def _split_create_table(statement: str) -> tuple[Counter[str], Counter[str], str
     return None
 
 
-def schema_difference_counts(source: Path, target: Path) -> dict[str, int]:
+_TABLE_OPTION_RE = re.compile(
+    r"\b(?P<key>ENGINE|DEFAULT\s+CHARSET|CHARSET|COLLATE|"
+    r"AUTO_INCREMENT|ROW_FORMAT)\s*=\s*(?P<value>[^\s;]+)", re.I,
+)
+_TABLE_OPTION_CLASSES = (
+    "ENGINE", "CHARSET", "COLLATION", "AUTO_INCREMENT", "ROW_FORMAT",
+    "OTHER_OR_UNPARSED",
+)
+
+
+def _table_option_change_classes(left: str, right: str) -> set[str]:
+    """Classify changed table suffixes without emitting names or values.
+
+    The classes are *not* compatibility approvals; any unparsed delta is
+    retained as OTHER_OR_UNPARSED, and the migration verifier is unchanged.
+    """
+    def parse(suffix: str) -> tuple[dict[str, list[str]], str]:
+        options: dict[str, list[str]] = {}
+        for match in _TABLE_OPTION_RE.finditer(suffix):
+            key = re.sub(r"\s+", " ", match.group("key").upper())
+            if key in ("DEFAULT CHARSET", "CHARSET"):
+                key = "CHARSET"
+            elif key == "COLLATE":
+                key = "COLLATION"
+            options.setdefault(key, []).append(match.group("value"))
+        residue = _TABLE_OPTION_RE.sub("", suffix).strip()
+        return options, residue
+
+    a, a_residue = parse(left)
+    b, b_residue = parse(right)
+    changed = {name for name in a.keys() | b.keys() if a.get(name) != b.get(name)}
+    if a_residue != b_residue or not changed:
+        changed.add("OTHER_OR_UNPARSED")
+    return changed
+
+
+def schema_difference_counts(source: Path, target: Path) -> dict[str, Any]:
     """Compare normalized CREATE TABLE statements by identity only in memory."""
     left, left_other = _schema_statements(source)
     right, right_other = _schema_statements(target)
@@ -196,6 +262,7 @@ def schema_difference_counts(source: Path, target: Path) -> dict[str, int]:
         "mismatched_tables": 0, "changed_columns": 0,
         "changed_indexes": 0, "changed_options": 0,
         "unclassified_tables": 0,
+        "changed_option_classes": {name: 0 for name in _TABLE_OPTION_CLASSES},
         "other_schema_source_only": sum((left_other - right_other).values()),
         "other_schema_target_only": sum((right_other - left_other).values()),
     }
@@ -214,6 +281,8 @@ def schema_difference_counts(source: Path, target: Path) -> dict[str, int]:
             result["changed_indexes"] += 1
         if a[2] != b[2]:
             result["changed_options"] += 1
+            for category in _table_option_change_classes(a[2], b[2]):
+                result["changed_option_classes"][category] += 1
         if a == b:
             result["unclassified_tables"] += 1
     return result
@@ -232,17 +301,41 @@ def require_nonempty_source_schema(path: Path) -> int:
     return len(tables)
 
 
+def _data_unavailable_reason(error: verify.RestoreVerifyError) -> str:
+    """Whitelist stable diagnostic labels; SQL text, paths and hashes are private."""
+    message = str(error)
+    if message.startswith("multiline SQL data requires manual cross-engine verification"):
+        return "MULTILINE_DML_UNPROVEN"
+    if message.startswith("unrecognized SQL data command in cross-engine verification"):
+        return "DML_COMMAND_UNRECOGNIZED"
+    if message.startswith("SQL dump has no comparable logical content"):
+        return "NO_COMPARABLE_LOGICAL_CONTENT"
+    if message.startswith("SQL dump cannot be content-fingerprinted"):
+        return "DUMP_UNREADABLE"
+    return "OTHER_VERIFIER_FAILURE"
+
+
 def data_content_evidence(source: Path, target: Path) -> dict[str, Any]:
     """Advisory DML/object fingerprint parity; no SQL or digest leaves memory.
 
     The current verifier ignores guarded SQL and its DML comparison is a
     presentation-sensitive fingerprint. This result is NEVER a migration PASS.
     """
-    try:
-        left = verify.sql_data_fingerprint(source)
-        right = verify.sql_data_fingerprint(target)
-    except verify.RestoreVerifyError:
-        return {"comparison": "UNAVAILABLE"}
+    fingerprints: dict[str, dict[str, Any]] = {}
+    unavailable: dict[str, str] = {}
+    for label, path in (("source", source), ("target", target)):
+        try:
+            fingerprints[label] = verify.sql_data_fingerprint(path)
+        except verify.RestoreVerifyError as exc:
+            unavailable[label] = _data_unavailable_reason(exc)
+    if unavailable:
+        return {
+            "comparison": "UNAVAILABLE",
+            "source_reason": unavailable.get("source", "NONE"),
+            "target_reason": unavailable.get("target", "NONE"),
+        }
+    left = fingerprints["source"]
+    right = fingerprints["target"]
     left_count = left["data_statements"]
     right_count = right["data_statements"]
     if not left_count and not right_count:
