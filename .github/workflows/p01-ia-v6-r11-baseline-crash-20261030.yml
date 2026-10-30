@@ -24,7 +24,7 @@ jobs:
     env:
       PRODUCT_REPO: llhzx2018/vf-start
       PRODUCT_BRANCH: feat/ia-v6-frontstage-admin-parity-system-jobs-r1
-      TARGET_SHA: 9dbe35a9be4716f333f58a2ac531092e47ab2fe5
+      TARGET_SHA: ce91a2188fd9d204d895a37bf6a5155e47120c76
       PRODUCT_VERSION: 2.47.485
     steps:
       - name: Checkout registered runner control
@@ -127,6 +127,19 @@ jobs:
             --data-urlencode "admin_password=P01R10!18960" \
             --data-urlencode "admin_password_confirm=P01R10!18960" -o /tmp/p01-r10-installed.html
           (cd "$root" && php cli/verify.php) | grep -Fx VERIFY_PASS=YES
+          VF_IA6_SYNTHETIC_ROOT="$root" php <<'PHP'
+          <?php
+          require getenv('VF_IA6_SYNTHETIC_ROOT').'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $category=$repo->createCategory(['name'=>'IA6 bulk synthetic','description'=>'','icon'=>'','is_private'=>0,'sort_order'=>0]);
+          foreach([1,2] as $index){
+            $repo->saveLink(null,['surface'=>'start','category_id'=>$category,
+              'title'=>'IA6 R12 bulk example '.$index,
+              'url'=>'https://example.org/ia6-bulk-'.$index,
+              'description'=>'synthetic-only','tags'=>[],'is_private'=>0,'is_pending'=>0]);
+          }
+          echo "P01_R12_NATIVE_BULK_TWO_SYNTHETIC_LINKS=PASS\n";
+          PHP
           npm install --prefix /tmp/p01-r10-browser --no-audit --no-fund playwright@1.56.1 >/tmp/p01-r10-npm.log
           PLAYWRIGHT_BROWSERS_PATH=/tmp/p01-r10-browser-bins /tmp/p01-r10-browser/node_modules/.bin/playwright install --with-deps chromium >/tmp/p01-r10-chromium.log
           export NODE_PATH=/tmp/p01-r10-browser/node_modules
@@ -172,6 +185,52 @@ jobs:
                 assert.equal(await modal.evaluate(e=>e.open),false);
                 console.log('P01_R10_OWNER_BACKUP_AUDIT_'+width+'=PASS');
               }
+              const guestAgain=await browser.newContext();
+              try{
+                const denied=await guestAgain.request.post(origin+'/api.php?action=resource_bulk_update',{data:{operation:'public',entries:[],confirmation:'BULK_PUBLIC_CONFIRMED'}});
+                assert.ok([401,403].includes(denied.status()),'Guest batch denied');
+              }finally{await guestAgain.close();}
+              const preview=await owner.request.get(origin+'/api.php?action=resource_inventory&surface=start&limit=30');
+              const current=await preview.json();
+              assert.equal(current.ok,true);
+              const two=current.rows.filter(x=>x.title.startsWith('IA6 R12 bulk example'));
+              assert.equal(two.length,2);
+              const stale=await owner.request.post(origin+'/api.php?action=resource_bulk_update',{
+                headers:{'X-CSRF-Token':'wrong'},
+                data:{operation:'private',entries:[{id:two[0].id,updated_at:two[0].updated_at}],confirmation:'BULK_PRIVATE_CONFIRMED'}
+              });
+              assert.ok([403,419].includes(stale.status()),'CSRF batch denied');
+              console.log('P01_R12_RESOURCE_BULK_GUEST_CSRF_DENY=PASS');
+              await page.goto(origin+'/home.php',{waitUntil:'domcontentloaded'});
+              await page.locator('[data-vf-global-manage-open]').click();
+              const batchDialog=page.locator('#vf-local-management');
+              await batchDialog.locator('[data-vf-global-group="resources"]').click();
+              const bulk=batchDialog.locator('[data-vf-global-bulk-root]');
+              await bulk.locator('summary').click();
+              async function applyBulk(op){
+                await bulk.locator('[data-vf-global-bulk-load]').click();
+                await page.waitForFunction(()=>document.querySelector('[data-vf-global-bulk-status]')?.textContent?.includes('已读取资源'),null,{timeout:16000});
+                assert.equal(await bulk.locator('input[data-vf-bulk-pick]').count(),2);
+                await bulk.locator('[data-vf-global-bulk-all]').check();
+                await bulk.locator('[data-vf-global-bulk-operation]').selectOption(op);
+                assert.equal(await bulk.locator('[data-vf-global-bulk-prepare]').isDisabled(),true);
+                await bulk.locator('[data-vf-global-bulk-phrase]').fill('确认批量操作');
+                await bulk.locator('[data-vf-global-bulk-prepare]').click();
+                assert.equal(await bulk.locator('[data-vf-global-bulk-confirm]').isVisible(),true);
+                await bulk.locator('[data-vf-global-bulk-commit]').click();
+                await page.waitForFunction(()=>document.querySelector('[data-vf-global-bulk-status]')?.textContent?.includes('服务器确认已处理'),null,{timeout:30000});
+                console.log('P01_R12_NATIVE_BULK_'+op.toUpperCase()+'=PASS');
+              }
+              await applyBulk('private');
+              const afterPrivate=await (await owner.request.get(origin+'/api.php?action=resource_inventory&surface=start&limit=30')).json();
+              assert.deepEqual(afterPrivate.rows.filter(x=>x.title.startsWith('IA6 R12')).map(x=>x.is_private),[1,1]);
+              await applyBulk('public');
+              const afterPublic=await (await owner.request.get(origin+'/api.php?action=resource_inventory&surface=start&limit=30')).json();
+              assert.deepEqual(afterPublic.rows.filter(x=>x.title.startsWith('IA6 R12')).map(x=>x.is_private),[0,0]);
+              await applyBulk('recycle');
+              const afterRecycle=await (await owner.request.get(origin+'/api.php?action=resource_inventory&surface=start&limit=30')).json();
+              assert.equal(afterRecycle.rows.filter(x=>x.title.startsWith('IA6 R12')).length,0);
+              console.log('P01_R12_NATIVE_BULK_RECYCLE_READBACK=PASS');
               await page.goto(origin+'/home.php',{waitUntil:'domcontentloaded'});
               await page.locator('[data-vf-global-manage-open]').click();
               const modal=page.locator('#vf-local-management');
