@@ -1,0 +1,138 @@
+name: P07 release112 integrated installer and migration candidate
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release112-integrated-candidate.yml'
+      - 'dist/p07/0.1.0/overlay/**'
+      - 'installers/p07.sh'
+      - 'installers/p07-final.sh'
+permissions:
+  contents: read
+jobs:
+  p07-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Validate every exact source blob and 55-file runtime manifest
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd dist/p07/0.1.0/overlay
+          test "$(cat BUILD_ID)" = 0.1.0-release112
+          test "$(wc -l < RUNTIME.gitblob)" -eq 55
+          test "$(git hash-object RUNTIME.gitblob)" = 1d4a0937486501b01148319a2aa9387242e2546a
+          while read -r expected path; do
+            test -f "$path"
+            test "$(git hash-object "$path")" = "$expected"
+          done < RUNTIME.gitblob
+          test "$(git hash-object lib/server_migration_pull.py)" = fd9a3cd7e366f0914e86a71a062fe16be6e46398
+          test "$(git hash-object lib/migration_conflict_recovery.py)" = dbed3ab7ce0c6594437d94c118ddb2048eea6697
+          test "$(git hash-object bin/vfops)" = f62c254354a19dbb9c928c66cb9f5ff76d92ef65
+          test "$(git hash-object lib/scratch_guard_quarantine.py)" = 776b7b979b35938ccbefb745f08674e3f760012d
+          test "$(git hash-object lib/native_scratch_restore.py)" = 679133d30387c4a7c35369a591139a8d508c3992
+          test "$(git hash-object lib/restore_sql_preflight.py)" = d8b976616842685a43338fcbb47d22fb47e0664d
+          test "$(git hash-object lib/isolated_db_restore.py)" = 5335e38db04e1653027076ce8399c946ea824465
+          test "$(git hash-object lib/migration_remainder.py)" = 36c4166d5b06c0ef2491d60ae9c5ed134352d351
+          test "$(git hash-object lib/private_recovery_gate.py)" = f28aedfba4caf1788d7e6266a809141601228025
+          python3 -m py_compile lib/*.py
+          bash -n bin/vfops
+          cd "$GITHUB_WORKSPACE"
+          bash -n installers/p07.sh installers/p07-final.sh
+          test "$(git hash-object installers/p07-final.sh)" = ac0173f51a82f4c96605c029e8e09ccf552bf1fe
+          test "$(git hash-object installers/p07.sh)" = d9c7ff6904cf88a5e8818e84f195273d31c7c862
+          echo P07_RELEASE112_EXACT_SOURCE_MANIFEST_PASS
+      - name: Serve old and candidate installer from isolated local HTTP origins
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git worktree add --detach "$RUNNER_TEMP/p07-release111" origin/main >/dev/null
+          python3 -m http.server 8873 --bind 127.0.0.1 -d "$RUNNER_TEMP/p07-release111" > "$RUNNER_TEMP/old.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/old.pid"
+          python3 -m http.server 8874 --bind 127.0.0.1 -d "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/new.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/new.pid"
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:8873/installers/p07.sh -o /dev/null && curl -fsS http://127.0.0.1:8874/installers/p07.sh -o /dev/null; then break; fi
+            sleep 1
+          done
+          echo P07_RELEASE112_LOCAL_MIRRORS_READY
+      - name: Real baseline release111 install and release112 upgrade
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          export P07_INSTALL_DIR="$RUNNER_TEMP/p07-live"
+          export P07_PREVIOUS_DIR="$RUNNER_TEMP/p07-live.previous"
+          export P07_BIN_LINK="$RUNNER_TEMP/vfops"
+          export P07_PUBLIC_ROOT="http://127.0.0.1:8873"
+          curl -fsS "$P07_PUBLIC_ROOT/installers/p07.sh" | bash
+          test "$("$P07_BIN_LINK" --build-id)" = 0.1.0-release111
+          test -e "$P07_INSTALL_DIR/.runtime-manifest.gitblob"
+          export P07_PUBLIC_ROOT="http://127.0.0.1:8874"
+          curl -fsS "$P07_PUBLIC_ROOT/installers/p07.sh" | bash
+          test "$("$P07_BIN_LINK" --build-id)" = 0.1.0-release112
+          test "$(cat "$P07_PREVIOUS_DIR/BUILD_ID")" = 0.1.0-release111
+          test "$(git hash-object "$P07_INSTALL_DIR/.runtime-manifest.gitblob")" = 1d4a0937486501b01148319a2aa9387242e2546a
+          "$P07_BIN_LINK" --help | grep -F 'scratch-restore-quarantined'
+          "$P07_BIN_LINK" --help | grep -F 'remainder-plan'
+          "$P07_BIN_LINK" --help | grep -F 'native-restore'
+          python3 -m py_compile "$P07_INSTALL_DIR"/lib/*.py
+          echo P07_RELEASE112_UPGRADE_AND_PRIOR_VERSION_PASS
+      - name: Idempotent reinstall and fail-closed invalid backup diagnosis
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          export P07_INSTALL_DIR="$RUNNER_TEMP/p07-live"
+          export P07_PREVIOUS_DIR="$RUNNER_TEMP/p07-live.previous"
+          export P07_BIN_LINK="$RUNNER_TEMP/vfops"
+          export P07_PUBLIC_ROOT="http://127.0.0.1:8874"
+          curl -fsS "$P07_PUBLIC_ROOT/installers/p07.sh" | bash
+          test "$("$P07_BIN_LINK" --build-id)" = 0.1.0-release112
+          test "$(cat "$P07_PREVIOUS_DIR/BUILD_ID")" = 0.1.0-release111
+          set +e
+          "$P07_BIN_LINK" server-migrate native-restore --source-package /does/not/exist --target-package /also/absent --site example.test --confirm INVALID > "$RUNNER_TEMP/negative.json" 2>"$RUNNER_TEMP/negative.err"
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          ! grep -E 'cutover_allowed.*true|migration_resume_allowed.*true' "$RUNNER_TEMP/negative.json"
+          test "$("$P07_BIN_LINK" --build-id)" = 0.1.0-release112
+          echo P07_RELEASE112_IDEMPOTENCY_AND_INVALID_INPUT_BLOCK_PASS
+      - name: Missing or tampered update must not replace installed release111
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          export P07_INSTALL_DIR="$RUNNER_TEMP/p07-fail"
+          export P07_PREVIOUS_DIR="$RUNNER_TEMP/p07-fail.previous"
+          export P07_BIN_LINK="$RUNNER_TEMP/vfops-fail"
+          export P07_PUBLIC_ROOT="http://127.0.0.1:8873"
+          curl -fsS "$P07_PUBLIC_ROOT/installers/p07.sh" | bash
+          test "$("$P07_BIN_LINK" --build-id)" = 0.1.0-release111
+          mkdir -p "$RUNNER_TEMP/fail-root/dist/p07/0.1.0/overlay"
+          cp -a "$GITHUB_WORKSPACE/installers" "$RUNNER_TEMP/fail-root/"
+          cp -a "$GITHUB_WORKSPACE/dist/p07/0.1.0-rc2" "$RUNNER_TEMP/fail-root/dist/p07/"
+          cp -a "$GITHUB_WORKSPACE/dist/p07/0.1.0/overlay/." "$RUNNER_TEMP/fail-root/dist/p07/0.1.0/overlay/"
+          printf '\nTAMPERED\n' >> "$RUNNER_TEMP/fail-root/dist/p07/0.1.0/overlay/lib/scratch_guard_quarantine.py"
+          python3 -m http.server 8875 --bind 127.0.0.1 -d "$RUNNER_TEMP/fail-root" > "$RUNNER_TEMP/fail.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/fail.pid"
+          export P07_PUBLIC_ROOT="http://127.0.0.1:8875"
+          set +e
+          curl -fsS "$P07_PUBLIC_ROOT/installers/p07.sh" | bash > "$RUNNER_TEMP/fail.out" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          test "$("$P07_BIN_LINK" --build-id)" = 0.1.0-release111
+          test -z "$(find "$RUNNER_TEMP" -maxdepth 1 -name 'p07-fail.new' -print -quit)"
+          echo P07_RELEASE112_TAMPER_REFUSAL_AND_OLD_VERSION_PRESERVED_PASS
+      - name: Prove no business hosts, SQL or DNS were accessed
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$("$RUNNER_TEMP/vfops" --build-id)" = 0.1.0-release112
+          test "$("$RUNNER_TEMP/vfops-fail" --build-id)" = 0.1.0-release111
+          echo P07_RELEASE112_SYNTHETIC_INSTALL_ONLY_NO_PRODUCTION_ACCESS_PASS
