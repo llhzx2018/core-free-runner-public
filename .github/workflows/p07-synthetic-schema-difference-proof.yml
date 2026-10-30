@@ -1,4 +1,4 @@
-name: P07 one-time synthetic cross-engine SQL schema difference proof
+name: P07 synthetic cross-engine SQL strict parity proof
 on:
   pull_request:
     branches: [main]
@@ -10,43 +10,71 @@ jobs:
   probe:
     if: ${{ github.repository == 'llhzx2018/core-free-runner-public' && github.head_ref == 'test/p07-sql-schema-cosmetic-proof-20261030' && github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 18
+    env:
+      PRODUCT_SHA: d166ebbe95803280443aa5dc0067331a216b3289
     steps:
-      - name: Generate synthetic MySQL and MariaDB CREATE TABLE metadata only
+      - name: Verify private source read
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo P07_PRIVATE_READ_UNAVAILABLE; exit 78; }
+      - name: Checkout exact product candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: d166ebbe95803280443aa5dc0067331a216b3289
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p07-private
+      - name: Affected SQL safety and identity tests
         shell: bash
         run: |
           set -Eeuo pipefail
-          scratch="$(mktemp -d -p "$RUNNER_TEMP" p07-schema-XXXXXX)"
-          trap 'docker rm -f p07-testmysql84 p07-testmaria118 >/dev/null 2>&1 || true; rm -rf -- "$scratch"' EXIT
-          docker run --rm -d --network none --name p07-testmysql84 -e MYSQL_ALLOW_EMPTY_PASSWORD=yes mysql:8.4 >/dev/null
-          docker run --rm -d --network none --name p07-testmaria118 -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=yes mariadb:11.8 >/dev/null
+          cd p07-private
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          python3 -B -m py_compile lib/verify.py lib/server_migration_pull.py lib/sql_diff_evidence.py
+          for pattern in test_cross_engine_sql_format.py test_sql_diff_evidence.py test_sql_diff_command.py test_bidirectional_engine_pins.py; do
+            PYTHONPATH="$PWD/lib:$PWD" python3 -B -m unittest discover -s tests -p "$pattern" -v
+          done
+          python3 -B scripts/secret_scan.py --root .
+          git diff --exit-code
+          echo P07_SQL_EXACT_SOURCE_GATES_PASS
+      - name: Actual isolated MySQL 8.4 and MariaDB 11.8 both directions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p07-private
+          scratch="$(mktemp -d -p "$RUNNER_TEMP" p07-real-sql-XXXXXX)"
+          trap 'docker rm -f p07-sqlmysql84 p07-sqlmaria118 >/dev/null 2>&1 || true; rm -rf -- "$scratch"' EXIT
+          docker run --rm -d --network none --name p07-sqlmysql84 -e MYSQL_ALLOW_EMPTY_PASSWORD=yes mysql:8.4 >/dev/null
+          docker run --rm -d --network none --name p07-sqlmaria118 -e MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=yes mariadb:11.8 >/dev/null
           for i in $(seq 1 90); do
-            if docker exec p07-testmysql84 mysql -uroot -N -e 'SELECT 1' >/dev/null 2>&1 && docker exec p07-testmaria118 mariadb -uroot -N -e 'SELECT 1' >/dev/null 2>&1; then break; fi
+            if docker exec p07-sqlmysql84 mysql -uroot -N -e 'SELECT 1' >/dev/null 2>&1 && docker exec p07-sqlmaria118 mariadb -uroot -N -e 'SELECT 1' >/dev/null 2>&1; then break; fi
             sleep 2
           done
           for engine in mysql84 mariadb118; do
-            if [[ "$engine" == mysql84 ]]; then server=p07-testmysql84; cli=mysql; else server=p07-testmaria118; cli=mariadb; fi
+            if [[ "$engine" == mysql84 ]]; then server=p07-sqlmysql84; cli=mysql; else server=p07-sqlmaria118; cli=mariadb; fi
             docker exec "$server" "$cli" -uroot -e "CREATE DATABASE vfops_fixture CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci; USE vfops_fixture; CREATE TABLE sample (id INT NOT NULL PRIMARY KEY, payload VARCHAR(64) NOT NULL); INSERT INTO sample VALUES (1, 'alpha'), (2, 'beta');"
           done
-          docker exec p07-testmysql84 mysqldump -uroot --single-transaction --skip-comments --skip-dump-date --set-gtid-purged=OFF vfops_fixture > "$scratch/mysql.sql"
-          docker exec p07-testmaria118 mariadb-dump -uroot --single-transaction --skip-comments --skip-dump-date vfops_fixture > "$scratch/maria.sql"
-          python3 - "$scratch/mysql.sql" "$scratch/maria.sql" <<'PY'
-          import difflib,re,sys
-          def get(path):
-              raw=open(path,encoding='utf8').read()
-              m=re.search(r'CREATE TABLE `sample`\s*\((.*?)\) ENGINE=.*?;',raw,re.S)
-              if not m: raise SystemExit("SYNTHETIC_SCHEMA_PARSE_FAILED")
-              # Only the two explicitly created synthetic columns and table options.
-              create=m.group()
-              guarded=re.findall(r'/\*!40000 ALTER TABLE .*? (?:ENABLE|DISABLE) KEYS \*/;',raw)
-              return create,guarded
-          mysql,mg=get(sys.argv[1]);maria,rg=get(sys.argv[2])
-          print('SYNTHETIC_MYSQL_CREATE='+mysql.replace(chr(10),' '))
-          print('SYNTHETIC_MARIA_CREATE='+maria.replace(chr(10),' '))
-          print('SYNTHETIC_GUARDED_DDL_COUNTS='+str((len(mg),len(rg))))
-          print('SYNTHETIC_COLUMNS_EQUAL='+str(mysql==maria))
-          print('SYNTHETIC_SCHEMA_DIFF_TOKENS=')
-          for line in difflib.ndiff(mysql.splitlines(),maria.splitlines()):
-              if line.startswith(('+ ','- ')): print(line)
-          PY
-          echo P07_SYNTHETIC_SQL_SCHEMA_DIFF_CAPTURED
+          docker exec p07-sqlmysql84 mysqldump -uroot --single-transaction --skip-comments --skip-dump-date --set-gtid-purged=OFF vfops_fixture > "$scratch/mysql-source.sql"
+          docker exec p07-sqlmaria118 mariadb -uroot -e 'DROP DATABASE vfops_fixture; CREATE DATABASE vfops_fixture CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci'
+          docker exec -i p07-sqlmaria118 mariadb -uroot vfops_fixture < "$scratch/mysql-source.sql" > "$scratch/import-out" 2> "$scratch/import-err"
+          docker exec p07-sqlmaria118 mariadb-dump -uroot --single-transaction --skip-comments --skip-dump-date vfops_fixture > "$scratch/maria-result.sql"
+          gzip -n -c "$scratch/mysql-source.sql" > "$scratch/mysql-source.sql.gz"
+          gzip -n -c "$scratch/maria-result.sql" > "$scratch/maria-result.sql.gz"
+          PYTHONPATH="$PWD/lib:$PWD" python3 -B -c 'import sys; from pathlib import Path; from server_migration_pull import compare_database_dumps; print("MYSQL_TO_MARIADB="+compare_database_dumps(Path(sys.argv[1]),Path(sys.argv[2])))' "$scratch/mysql-source.sql.gz" "$scratch/maria-result.sql.gz"
+          docker exec p07-sqlmysql84 mysql -uroot -e 'DROP DATABASE vfops_fixture; CREATE DATABASE vfops_fixture CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci'
+          docker exec -i p07-sqlmysql84 mysql -uroot vfops_fixture < "$scratch/maria-result.sql" > "$scratch/import-out" 2> "$scratch/import-err"
+          docker exec p07-sqlmysql84 mysqldump -uroot --single-transaction --skip-comments --skip-dump-date --set-gtid-purged=OFF vfops_fixture > "$scratch/mysql-result.sql"
+          gzip -n -c "$scratch/mysql-result.sql" > "$scratch/mysql-result.sql.gz"
+          PYTHONPATH="$PWD/lib:$PWD" python3 -B -c 'import sys; from pathlib import Path; from server_migration_pull import compare_database_dumps; print("MARIADB_TO_MYSQL="+compare_database_dumps(Path(sys.argv[1]),Path(sys.argv[2])))' "$scratch/maria-result.sql.gz" "$scratch/mysql-result.sql.gz"
+          test "$(docker exec p07-sqlmysql84 mysql -uroot -N -e 'SELECT COUNT(*), SUM(id) FROM vfops_fixture.sample')" = $'2\t3'
+          test "$(docker exec p07-sqlmaria118 mariadb -uroot -N -e 'SELECT COUNT(*), SUM(id) FROM vfops_fixture.sample')" = $'2\t3'
+          echo P07_REAL_ENGINE_BIDIRECTIONAL_SQL_SAFE_FIXTURE_PASS
+      - name: Cleanup private product code
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- p07-private
+          echo P07_PRIVATE_SOURCE_CLEANUP_PASS
