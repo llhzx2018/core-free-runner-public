@@ -1,0 +1,111 @@
+name: P07 R2 real MySQL MariaDB synthetic transaction recovery integration
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-r2-dual-engine.yml'
+      - 'experiments/p07-r2/**'
+permissions:
+  contents: read
+jobs:
+  r2-real-engines:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic-p07-ci-not-production
+          MYSQL_ROOT_HOST: "%"
+        ports: ["3307:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -psynthetic-p07-ci-not-production"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=18
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: synthetic-p07-ci-not-production
+          MARIADB_ROOT_HOST: "%"
+        ports: ["3308:3306"]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=18
+    env:
+      P07_SYNTHETIC_DB_RESTORE_ONLY: "1"
+      P07_SYNTHETIC_DB_HOST: "127.0.0.1"
+      P07_SYNTHETIC_MYSQL_PASSWORD: synthetic-p07-ci-not-production
+      P07_SYNTHETIC_MARIADB_PASSWORD: synthetic-p07-ci-not-production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify exact R2 code, unit and real-engine integration blobs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat dist/p07/0.1.0/overlay/BUILD_ID)" = "0.1.0-release111"
+          test "$(git hash-object experiments/p07-r2/lib/migration_recovery_rehearsal.py)" = 4726bdfb7ad4e2e2f9691f89a53c30c15acff138
+          test "$(git hash-object experiments/p07-r2/tests/test_migration_recovery_rehearsal.py)" = 0b8db46016b17d54919635577ab87eee9b4ff382
+          test "$(git hash-object experiments/p07-r2/tests/integration/test_recovery_r2_mysql_mariadb.py)" = d21fd68002da3115f519bfabe64e87b5704db328
+          cp -a dist/p07/0.1.0/overlay "$RUNNER_TEMP/p07-r2"
+          mkdir -p "$RUNNER_TEMP/p07-r2/tests/integration"
+          cp experiments/p07-r2/lib/migration_recovery_rehearsal.py "$RUNNER_TEMP/p07-r2/lib/"
+          cp experiments/p07-r2/tests/test_migration_recovery_rehearsal.py "$RUNNER_TEMP/p07-r2/tests/"
+          cp experiments/p07-r2/tests/integration/test_recovery_r2_mysql_mariadb.py "$RUNNER_TEMP/p07-r2/tests/integration/"
+          chmod +x "$RUNNER_TEMP/p07-r2/bin/"*
+          echo P07_R2_EXACT_SOURCE_PASS
+      - name: Install clients for ephemeral database containers only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get -qq update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -qq install -y mariadb-client >/dev/null
+          command -v mariadb
+          command -v mariadb-dump
+      - name: Two-sided real engine backup, restore and transactional reconciliation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-r2"
+          python3 -m py_compile lib/migration_recovery_rehearsal.py tests/integration/test_recovery_r2_mysql_mariadb.py
+          PYTHONPATH=lib python3 tests/integration/test_recovery_r2_mysql_mariadb.py -v
+          echo P07_R2_MYSQL_MARIADB_SYNTHETIC_INTEGRATION_PASS
+      - name: Full related reconciliation, SQL safety, restore and migration regressions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-r2"
+          PYTHONPATH=lib python3 -m unittest -v \
+            tests.test_migration_recovery_rehearsal \
+            tests.test_migration_conflict_recovery \
+            tests.test_sql_pk_conflict_evidence \
+            tests.test_migration_no_overwrite_resume \
+            tests.test_server_migration_pull \
+            tests.test_server_migration \
+            tests.test_restore_as_verified \
+            tests.test_verify
+          echo P07_R2_RELATED_REGRESSIONS_PASS
+      - name: Preserve published runtime and unsafe SQL blocking
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-r2"
+          python3 - <<'PY'
+          import ast
+          from pathlib import Path
+          tree=ast.parse(Path("lib/migration_recovery_rehearsal.py").read_text())
+          imports={a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n,ast.Import) for a in n.names}
+          imports|={n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n,ast.ImportFrom) and n.module}
+          assert imports <= {"__future__", "copy", "json", "re", "typing"}, imports
+          forbidden={"open","exec","eval","compile","__import__"}
+          calls={n.func.id for n in ast.walk(tree) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name)}
+          assert not forbidden.intersection(calls)
+          PY
+          for path in lib/server_migration.py lib/server_migration_pull.py lib/cloudpanel.py lib/verify.py lib/migration_conflict_recovery.py bin/vfops BUILD_ID; do
+            test "$(git hash-object "$GITHUB_WORKSPACE/dist/p07/0.1.0/overlay/$path")" = "$(git hash-object "$RUNNER_TEMP/p07-r2/$path")"
+          done
+          echo P07_R2_NO_PRODUCTION_RUNTIME_OR_SQL_GUARD_CHANGE_PASS
