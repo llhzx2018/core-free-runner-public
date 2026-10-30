@@ -47,6 +47,9 @@ assert all(not a['option_presence'][k]and b['option_presence'][k]for k in change
 PYBOOT
 cli eval-file /tmp/snapshot.php > proof/state-before.sha256
 node control/lanes/s01-converter-i18n-proof/check.cjs
+docker cp control/lanes/s01-converter-i18n-proof/seasonal-guard.php "$WP:/tmp/seasonal-guard.php"
+cli eval-file /tmp/seasonal-guard.php > proof/seasonal-guard.json
+cat proof/seasonal-guard.json
 cli eval-file /tmp/plugin-snapshot.php > proof/plugin-options-before.json
 cli eval-file /tmp/plugin-snapshot.php > proof/plugin-options-repeat-before-install.json
 tv(){ test "$(cli theme get vf-tools-theme --field=version)" = "$1"; }
