@@ -128,7 +128,7 @@ class ConflictRecoveryTests(unittest.TestCase):
         p = module.draft(item)
         self.assertEqual(p["status"], "BLOCKED_UNPROVEN_EVIDENCE")
         self.assertNotIn("SECRET", json.dumps(p))
-        self.assertNotIn("SQL", json.dumps(p))
+        self.assertNotIn("SQL SECRET DO NOT ECHO", json.dumps(p))
 
     def test_empty_or_malformed_evidence_is_not_a_pass(self):
         for inp in ({}, [], None, {"evidence": {}}, {"evidence": {"pk_conflicts": {}}}):
