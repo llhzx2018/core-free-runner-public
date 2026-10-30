@@ -76,7 +76,7 @@ class MySQLMariaDBRealEngineR2(unittest.TestCase):
         cls.orig = {}
         cls.backups = {}
         for engine, side in (("mysql", "source"), ("mariadb", "target")):
-            schema = PREFIX + "r2" + side
+            schema = PREFIX + "rtwo" + side
             base._create(engine, schema)
             base._run(engine, base._data_sql(side), database=schema)
             cls.orig[side] = base._rows(engine, schema)
@@ -84,7 +84,7 @@ class MySQLMariaDBRealEngineR2(unittest.TestCase):
 
         # Independently restore both backups before any candidate mutations.
         for engine, side in (("mysql", "source"), ("mariadb", "target")):
-            recovered = PREFIX + "r2" + side + "_recovered"
+            recovered = PREFIX + "rtwo" + side + "_recovered"
             base._create(engine, recovered)
             blob = cls.backups[side]
             base._restore(engine, recovered, blob, hashlib.sha256(blob).hexdigest())
@@ -95,7 +95,7 @@ class MySQLMariaDBRealEngineR2(unittest.TestCase):
         # to establish separate writable scratch copies.
         for engine in ("mysql", "mariadb"):
             for mode in ("commit", "rollback"):
-                scratch = PREFIX + "r2" + mode + "_" + engine
+                scratch = PREFIX + "rtwo" + mode + "_" + engine
                 base._create(engine, scratch)
                 blob = cls.backups["target"]
                 base._restore(engine, scratch, blob, hashlib.sha256(blob).hexdigest())
@@ -130,7 +130,7 @@ class MySQLMariaDBRealEngineR2(unittest.TestCase):
                        keep_target_ids=frozenset({197, 198}))
         for engine in VALID_MYSQL_ENGINES:
             with self.subTest(engine=engine):
-                scratch = PREFIX + "r2rollback_" + engine
+                scratch = PREFIX + "rtworollback_" + engine
                 before = base._rows(engine, scratch)
                 # No DDL in this transaction. The SELECT runs before ROLLBACK.
                 inside = base._run(engine,
@@ -140,15 +140,15 @@ class MySQLMariaDBRealEngineR2(unittest.TestCase):
                 self.assertEqual(inside.splitlines()[-1], "209")
                 self.assertEqual(base._rows(engine, scratch), before)
                 self.assertEqual(base._rows(engine, scratch), self.orig["target"])
-                self.assertEqual(base._rows("mysql", PREFIX + "r2source"), self.orig["source"])
-                self.assertEqual(base._rows("mariadb", PREFIX + "r2target"), self.orig["target"])
+                self.assertEqual(base._rows("mysql", PREFIX + "rtwosource"), self.orig["source"])
+                self.assertEqual(base._rows("mariadb", PREFIX + "rtwotarget"), self.orig["target"])
 
     def test_committed_isolated_reconciliation_preserves_source_and_target(self):
         sql = _changes(self.orig["source"], self.orig["target"],
                        keep_target_ids=frozenset({197, 198}))
         for engine in VALID_MYSQL_ENGINES:
             with self.subTest(engine=engine):
-                scratch = PREFIX + "r2commit_" + engine
+                scratch = PREFIX + "rtwocommit_" + engine
                 base._run(engine, "START TRANSACTION;\n" + sql + "COMMIT;", database=scratch)
                 merged = base._rows(engine, scratch)
                 self.assertEqual(len(merged), 209)
@@ -161,8 +161,8 @@ class MySQLMariaDBRealEngineR2(unittest.TestCase):
                     self.assertEqual(merged[pk], self.orig["target"][pk])
                 for pk in (199, 200, 201):
                     self.assertEqual(merged[pk], self.orig["source"][pk])
-                self.assertEqual(base._rows("mysql", PREFIX + "r2source"), self.orig["source"])
-                self.assertEqual(base._rows("mariadb", PREFIX + "r2target"), self.orig["target"])
+                self.assertEqual(base._rows("mysql", PREFIX + "rtwosource"), self.orig["source"])
+                self.assertEqual(base._rows("mariadb", PREFIX + "rtwotarget"), self.orig["target"])
 
     def test_failure_after_savepoint_can_revert_candidate_to_original(self):
         # A separate scratch candidate with target restored afresh. The failed
@@ -170,7 +170,7 @@ class MySQLMariaDBRealEngineR2(unittest.TestCase):
         # on any failure the whole candidate is discarded by disconnecting.
         for engine in VALID_MYSQL_ENGINES:
             with self.subTest(engine=engine):
-                scratch = PREFIX + "r2injected_" + engine
+                scratch = PREFIX + "rtwoinjected_" + engine
                 base._create(engine, scratch)
                 backup = self.backups["target"]
                 base._restore(engine, scratch, backup, hashlib.sha256(backup).hexdigest())
@@ -185,8 +185,8 @@ class MySQLMariaDBRealEngineR2(unittest.TestCase):
                 self.assertEqual(base._rows(engine, scratch), original)
 
     def test_originals_unchanged_and_three_dynamic_sql_guards_remain_blocked(self):
-        self.assertEqual(base._rows("mysql", PREFIX + "r2source"), self.orig["source"])
-        self.assertEqual(base._rows("mariadb", PREFIX + "r2target"), self.orig["target"])
+        self.assertEqual(base._rows("mysql", PREFIX + "rtwosource"), self.orig["source"])
+        self.assertEqual(base._rows("mariadb", PREFIX + "rtwotarget"), self.orig["target"])
         sample = _typed(self.orig["source"])
         # Three unknown guarded SQL statements cannot be approved by any
         # successful synthetic data exercise.
