@@ -17,7 +17,14 @@ import native_scratch_restore as native
 import scratch_guard_quarantine as quarantine
 import server_migration_pull as pull
 
-GUARD = b"/*!50003 SET @cmd = IF(@flag,'DROP TABLE alpha','SELECT 1') */;\n"
+GUARD = (
+    b"/*!50003 SELECT COUNT(*) INTO @flag FROM INFORMATION_SCHEMA.TABLES "
+    b"WHERE TABLE_SCHEMA='vfops_r5_scratch' AND TABLE_NAME='alpha' */;\n"
+    b"/*!50003 SET @cmd = IF(@flag,'DROP TABLE alpha','SELECT 1') */;\n"
+    b"/*!50003 PREPARE stmt FROM @cmd */;\n"
+    b"/*!50003 EXECUTE stmt */;\n"
+    b"/*!50003 DEALLOCATE PREPARE stmt */;\n"
+)
 BASE = b"CREATE TABLE alpha (id INT NOT NULL PRIMARY KEY, body TEXT);\n"
 INSERT = b"INSERT INTO alpha VALUES (1,'private synthetic');\n"
 SAFE = BASE + INSERT
@@ -42,6 +49,60 @@ class R7QuarantineTests(unittest.TestCase):
             self.assertEqual(out, SAFE)
             self.assertEqual(a.read_bytes(), data)
             self.assertNotIn("private", json.dumps({"removed": p["removed"]}))
+
+    def test_orphaned_guarded_assignment_cannot_be_imported(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = sql_file(Path(root), "orphan.sql.gz",
+                            BASE + b"/*!50003 SET @cmd = IF(@flag,'DROP TABLE alpha','SELECT 1') */;\n" + INSERT)
+            with self.assertRaisesRegex(quarantine.QuarantineBlocked, "DYNAMIC_STAGE_ORDER"):
+                quarantine.plan(path)
+
+    def test_unguarded_execute_and_prepare_cannot_follow_quarantined_group(self):
+        for command in (b"PREPARE extra FROM @cmd;\n", b"EXECUTE stmt;\n",
+                        b"DEALLOCATE PREPARE stmt;\n"):
+            with self.subTest(command=command[:14]):
+                with tempfile.TemporaryDirectory() as root:
+                    path = sql_file(Path(root), "unguarded.sql.gz",
+                                    BASE + GUARD + command + INSERT)
+                    with self.assertRaisesRegex(
+                            quarantine.QuarantineBlocked,
+                            "QUARANTINE_UNGUARDED_CONTROL_REFUSED"):
+                        quarantine.plan(path)
+
+    def test_two_complete_groups_may_be_omitted_without_dropping_business_rows(self):
+        group2 = GUARD.replace(b"@flag", b"@flag2").replace(
+            b"@cmd", b"@cmd2").replace(
+            b"stmt", b"stmt2")
+        with tempfile.TemporaryDirectory() as root:
+            path = sql_file(Path(root), "two.sql.gz",
+                            BASE + GUARD + group2 + INSERT)
+            plan = quarantine.plan(path)
+            self.assertEqual(plan["removed"], 2)
+            self.assertEqual(len(plan["_omit_lines"]), 10)
+            self.assertEqual(
+                b"".join(quarantine.filtered_bytes(path, plan)), SAFE)
+
+    def test_unbalanced_or_rebound_prepared_statement_is_blocked(self):
+        for payload in (
+            GUARD.replace(b"EXECUTE stmt", b"EXECUTE wrong"),
+            GUARD.replace(b"PREPARE stmt FROM @cmd", b"PREPARE stmt FROM @other"),
+            GUARD.replace(b"DEALLOCATE PREPARE stmt", b"DEALLOCATE PREPARE other"),
+            GUARD.replace(b"EXECUTE stmt */;\n", b""),
+        ):
+            with self.subTest(payload=payload[:25]):
+                with tempfile.TemporaryDirectory() as root:
+                    path = sql_file(Path(root), "bad.sql.gz", BASE + payload + INSERT)
+                    with self.assertRaises(quarantine.QuarantineBlocked):
+                        quarantine.plan(path)
+
+    def test_unrelated_executable_sql_between_control_steps_is_blocked(self):
+        payload = GUARD.replace(b"PREPARE stmt FROM @cmd */;\n",
+                                b"PREPARE stmt FROM @cmd */;\n"
+                                b"DROP TABLE alpha;\n")
+        with tempfile.TemporaryDirectory() as root:
+            path = sql_file(Path(root), "interleaved.sql.gz", BASE + payload + INSERT)
+            with self.assertRaisesRegex(quarantine.QuarantineBlocked, "INTERLEAVED_SQL"):
+                quarantine.plan(path)
 
     def test_no_unsafe_guards_produces_identical_stream(self):
         with tempfile.TemporaryDirectory() as root:
