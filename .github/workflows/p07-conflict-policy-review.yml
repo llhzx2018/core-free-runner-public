@@ -1,0 +1,67 @@
+name: P07 non-executable conflict policy review - exact product source
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-conflict-policy-review.yml'
+      - 'experiments/p07-policy-review/**'
+permissions:
+  contents: read
+jobs:
+  conflict-policy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Match two exact product candidate blobs and released base
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat dist/p07/0.1.0/overlay/BUILD_ID)" = "0.1.0-release111"
+          test "$(git hash-object experiments/p07-policy-review/lib/migration_conflict_recovery.py)" = dbed3ab7ce0c6594437d94c118ddb2048eea6697
+          test "$(git hash-object experiments/p07-policy-review/tests/test_migration_conflict_recovery.py)" = 3f57164fc980411a5c8bdcf5c14e99dee89d5060
+          cp -a dist/p07/0.1.0/overlay "$RUNNER_TEMP/p07-policy-validate"
+          cp experiments/p07-policy-review/lib/migration_conflict_recovery.py "$RUNNER_TEMP/p07-policy-validate/lib/"
+          cp experiments/p07-policy-review/tests/test_migration_conflict_recovery.py "$RUNNER_TEMP/p07-policy-validate/tests/"
+          echo P07_POLICY_EXACT_SOURCE_PASS
+      - name: Existing migration, restore and conflicting-row tests plus new policies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-policy-validate"
+          python3 -m py_compile lib/migration_conflict_recovery.py tests/test_migration_conflict_recovery.py
+          PYTHONPATH=lib python3 -m unittest -v \
+            tests.test_migration_conflict_recovery \
+            tests.test_migration_no_overwrite_resume \
+            tests.test_sql_pk_conflict_evidence \
+            tests.test_restore_as_verified \
+            tests.test_server_migration_pull \
+            tests.test_server_migration \
+            tests.test_verify
+          echo P07_POLICY_ALL_RELATED_REGRESSIONS_PASS
+      - name: Assert no SQL, file, secret, migration or production side effects
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-policy-validate"
+          python3 - <<'PY'
+          import ast
+          from pathlib import Path
+          tree=ast.parse(Path("lib/migration_conflict_recovery.py").read_text())
+          imports={n.names[0].name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import)}
+          imports|={n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n,ast.ImportFrom) and n.module}
+          assert imports <= {"__future__","typing"}, imports
+          unsafe={"open","exec","eval","compile","__import__"}
+          calls=[n.func.id for n in ast.walk(tree) if isinstance(n,ast.Call) and isinstance(n.func,ast.Name)]
+          assert not unsafe.intersection(calls)
+          for node in ast.walk(tree):
+              if isinstance(node,ast.FunctionDef) and node.name=="review_policy":
+                  names={n.id for n in ast.walk(node) if isinstance(n,ast.Name)}
+                  assert not {"subprocess","socket","sqlite3","pymysql","os","pathlib"}.intersection(names)
+          PY
+          for path in lib/server_migration.py lib/server_migration_pull.py lib/cloudpanel.py lib/verify.py bin/vfops BUILD_ID; do
+            test "$(git hash-object "$GITHUB_WORKSPACE/dist/p07/0.1.0/overlay/$path")" = "$(git hash-object "$RUNNER_TEMP/p07-policy-validate/$path")"
+          done
+          echo P07_POLICY_NON_EXECUTABLE_AND_PRODUCTION_ISOLATION_PASS
