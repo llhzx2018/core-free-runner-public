@@ -10,6 +10,7 @@ await root.locator('[data-vf-playlist-action="clear"]').click();
 const input=root.locator('[data-vf-playlist-input]');await input.fill('#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\none.ts\n#EXTINF:4,\ntwo.ts\n#EXT-X-ENDLIST\n');await root.locator('[data-vf-playlist-action="analyze"]').click();
 const media=await root.evaluate(r=>r._vfPlaylistResult&&({type:r._vfPlaylistResult.type,segments:r._vfPlaylistResult.summary.segmentCount,duration:r._vfPlaylistResult.summary.totalDuration}));assert.deepEqual(media,{type:'media',segments:2,duration:10});
 assert.equal(await page.locator('.vf-tool-steps-list>li>b').first().isVisible(),false);
+const box=await page.locator('.vf-tool-steps-list>li>div').first().boundingBox();assert.ok(box&&box.width>=120,'workflow text column must remain readable');
 if(width===1440){const pending=page.waitForEvent('download',{timeout:10000});await root.locator('[data-vf-playlist-action="export-json"]').click();const download=await pending;const data=JSON.parse(fs.readFileSync(await download.path(),'utf8'));assert.equal(data.summary.segmentCount,2);assert.equal(data.summary.totalDuration,10);}
 await page.screenshot({path:`proof/checker-${lang}-${width}.png`,fullPage:true});proof.push({language:lang,width,master,media});await page.close();}
 fs.writeFileSync('proof/checker.json',JSON.stringify({status:'PASS',cases:proof,production:'UNTOUCHED'},null,2));
