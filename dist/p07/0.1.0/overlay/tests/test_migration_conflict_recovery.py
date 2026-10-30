@@ -158,5 +158,124 @@ class ConflictRecoveryTests(unittest.TestCase):
         self.assertFalse(out["data_writes_allowed"])
 
 
+    def _selections(self):
+        return (
+            [{"table_ordinal": 4, "kind": "SOURCE_ONLY", "item_ordinal": i,
+              "decision": "RETAIN_SOURCE_COPY"} for i in range(1, 4)]
+            + [{"table_ordinal": 4, "kind": "TARGET_ONLY", "item_ordinal": i,
+                "decision": "RETAIN_TARGET_COPY"} for i in range(1, 6)]
+            + [{"table_ordinal": 4, "kind": "SAME_KEY_LITERAL_DIFFER",
+                "item_ordinal": i,
+                "decision": "PREFER_SOURCE_AFTER_SEMANTIC_PROOF"}
+               for i in range(1, 6)]
+        )
+
+    def test_policy_review_requires_thirteen_distinct_recorded_slots(self):
+        src = sample()
+        before = deepcopy(src)
+        selections = self._selections()
+        answer = module.review_policy(src, selections)
+        self.assertEqual(src, before)
+        self.assertEqual(answer["expected_review_slots"], 13)
+        self.assertEqual(answer["selected_review_slots"], 13)
+        self.assertEqual(answer["unresolved_review_slots"], 0)
+        self.assertEqual(answer["status"], "BLOCKED_EXTERNAL_RECOVERY_AND_ROW_PROOF")
+        self.assertFalse(answer["primary_keys_bound_to_review_slots"])
+        for field in (
+            "source_recovery_verified", "target_recovery_verified",
+            "live_row_semantics_verified", "operator_approval_verified",
+            "dynamic_sql_verified", "data_writes_allowed",
+            "migration_resume_allowed", "cutover_allowed",
+        ):
+            self.assertIs(answer[field], False, field)
+        self.assertEqual(answer["verification"], "NOT_A_PASS_GATE")
+        self.assertNotIn("SENSITIVE_VALUE_SHOULD_NOT_LEAK", json.dumps(answer))
+
+    def test_missing_selection_and_deferrals_cannot_complete_review(self):
+        for choices in (
+            self._selections()[:-1],
+            self._selections()[:-1] + [{
+                "table_ordinal": 4, "kind": "SAME_KEY_LITERAL_DIFFER",
+                "item_ordinal": 5, "decision": "DEFER_REVIEW",
+            }],
+            self._selections()[:-1] + [{
+                "table_ordinal": 4, "kind": "SAME_KEY_LITERAL_DIFFER",
+                "item_ordinal": 5, "decision": "FORMAT_EQUIVALENCE_REVIEW",
+            }],
+            self._selections()[:-1] + [{
+                "table_ordinal": 4, "kind": "SAME_KEY_LITERAL_DIFFER",
+                "item_ordinal": 5, "decision": "MANUAL_MERGE_REVIEW",
+            }],
+        ):
+            with self.subTest(last=len(choices)):
+                out = module.review_policy(sample(), choices)
+                self.assertEqual(out["status"], "BLOCKED_OPERATOR_REVIEW_INCOMPLETE")
+                self.assertEqual(out["unresolved_review_slots"], 1)
+                self.assertFalse(out["data_writes_allowed"])
+
+    def test_malicious_duplicate_wrong_or_extra_fields_all_fail_closed(self):
+        good = self._selections()
+        bad = [
+            good + [good[0]],
+            good[:-1] + [good[0]],
+            good[:-1] + [dict(good[-1], item_ordinal=6)],
+            good[:-1] + [dict(good[-1], item_ordinal=True)],
+            good[:-1] + [dict(good[-1], decision="DELETE_TARGET")],
+            good[:-1] + [dict(good[-1], kind="TARGET_ONLY")],
+            good[:-1] + [dict(good[-1], sql="DROP TABLE SECRET")],
+            good[:-1] + [dict(good[-1], table_ordinal="4")],
+            {"approve": True},
+            "confirmed",
+        ]
+        for selections in bad:
+            with self.subTest(case=str(type(selections))):
+                result = module.review_policy(sample(), selections)
+                self.assertEqual(result["status"], "BLOCKED_INVALID_SELECTION")
+                self.assertFalse(result["data_writes_allowed"])
+                self.assertNotIn("SECRET", json.dumps(result))
+
+    def test_forged_approval_or_backup_flags_do_not_grant_execution(self):
+        src = sample()
+        src.update({"operator_approved": True, "restores_verified": True})
+        src["evidence"]["private_sql"] = "DONOTPRINT"
+        output = module.review_policy(src, self._selections())
+        self.assertEqual(output["status"], "BLOCKED_EXTERNAL_RECOVERY_AND_ROW_PROOF")
+        self.assertFalse(output["operator_approval_verified"])
+        self.assertFalse(output["source_recovery_verified"])
+        self.assertFalse(output["target_recovery_verified"])
+        self.assertNotIn("DONOTPRINT", json.dumps(output))
+
+    def test_invalid_advisory_is_never_accepted_by_policy_review(self):
+        src = sample()
+        src["migration_state_modified"] = True
+        result = module.review_policy(src, self._selections())
+        self.assertEqual(result["status"], "BLOCKED_ADVISORY_UNPROVEN")
+        self.assertEqual(result["expected_review_slots"], 0)
+
+    def test_review_scope_limit_does_not_expand_unbounded_slots(self):
+        src = sample()
+        pk = src["evidence"]["pk_conflicts"]
+        pk["differing_table_ordinals"][0]["source_only_keys"] = 501
+        pk["source_only_keys"] = 501
+        src["evidence"]["row_tuples"]["differing_table_ordinals"][0]["source_rows"] = 702
+        out = module.review_policy(src, [])
+        self.assertEqual(out["status"], "BLOCKED_REVIEW_SCOPE_LIMIT")
+        self.assertFalse(out["migration_resume_allowed"])
+
+    def test_duplicate_table_ordinals_fail_closed(self):
+        src = sample()
+        pk = src["evidence"]["pk_conflicts"]
+        ts = src["evidence"]["row_tuples"]
+        pk["differing_table_ordinals"].append(deepcopy(pk["differing_table_ordinals"][0]))
+        ts["differing_table_ordinals"].append(deepcopy(ts["differing_table_ordinals"][0]))
+        pk["differing_pk_tables"] = 2
+        pk["source_only_keys"] = 6
+        pk["target_only_keys"] = 10
+        pk["same_key_changed_literals"] = 10
+        ts["differing_tables"] = 2
+        out = module.draft(src)
+        self.assertEqual(out["status"], "BLOCKED_UNPROVEN_EVIDENCE")
+
+
 if __name__ == "__main__":
     unittest.main()
