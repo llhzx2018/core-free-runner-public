@@ -1,4 +1,4 @@
-name: P07 PR244 isolated candidate package upgrade rollback gate
+name: P07 standalone diagnostic-only main RC104 package proof
 on:
   pull_request:
     branches: [main]
@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
-      PRODUCT_SHA: 19a5645e0b994f2310137e62ae4ad262ce7ad8e3
+      PRODUCT_SHA: 27758b4d257f27f0d6046126489a71440c2d786f
     steps:
       - name: Checkout published public baseline
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-server-ops
-          ref: 19a5645e0b994f2310137e62ae4ad262ce7ad8e3
+          ref: 27758b4d257f27f0d6046126489a71440c2d786f
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           path: p07-private
@@ -40,20 +40,30 @@ jobs:
           python3 -B -m py_compile p07-private/scripts/p07_candidate_bundle.py p07-private/lib/server_migration_pull.py p07-private/lib/verify.py
           (cd p07-private && python3 -B -m unittest discover -s tests -p 'test_p07_bundle_identity.py' -v)
           (cd p07-private && python3 -B scripts/secret_scan.py --root .)
+          # Assert this product main deliberately excludes unmerged PR #244.
+          python3 -B - <<'PY'
+          from pathlib import Path
+          text = Path("p07-private/lib/server_migration_pull.py").read_text()
+          assert "def diagnose_sql_difference(" in text
+          assert "expected_source_tables" in text
+          assert "def require_pinned_migration_engine_pair(" not in text
+          assert "def ensure_current_source_export_helper(" not in text
+          print("P07_DIAGNOSTIC_ONLY_SCOPE_PASS")
+          PY
           echo P07_PACKAGE_EXACT_SOURCE_PRECHECK_PASS
       - name: Build unpublished release104-rc1 and verify identity
         shell: bash
         run: |
           set -Eeuo pipefail
-          python3 -B p07-private/scripts/p07_candidate_bundle.py --product-root p07-private --public-root . --output "$RUNNER_TEMP/p07-pr244-candidate" --product-sha "$PRODUCT_SHA" --build 0.1.0-release104-rc1 --care 0.1.0-rc73
+          python3 -B p07-private/scripts/p07_candidate_bundle.py --product-root p07-private --public-root . --output "$RUNNER_TEMP/p07-diagnostic-only-candidate" --product-sha "$PRODUCT_SHA" --build 0.1.0-release104-rc2 --care 0.1.0-rc73
           python3 - <<'PY'
           import json,os,hashlib
           from pathlib import Path
-          root=Path(os.environ['RUNNER_TEMP'])/'p07-pr244-candidate'
+          root=Path(os.environ['RUNNER_TEMP'])/'p07-diagnostic-only-candidate'
           meta=json.loads((root/'candidate_attestation.json').read_text())
           assert meta['status']=='CANDIDATE_ONLY_NOT_PUBLISHED'
           assert meta['product_source_sha']==os.environ['PRODUCT_SHA']
-          assert meta['product_build']=='0.1.0-release104-rc1'
+          assert meta['product_build']=='0.1.0-release104-rc2'
           assert meta['system_care_build']=='0.1.0-rc73'
           assert meta['runtime_file_count']>=45
           assert not any(meta['negative'].values())
@@ -63,14 +73,14 @@ jobs:
           assert (root/'installers/p07-final.sh').exists()
           print('P07_RC104_MANIFEST_CLOSURE_PASS')
           PY
-          bash -n "$RUNNER_TEMP/p07-pr244-candidate/installers/p07-final.sh" "$RUNNER_TEMP/p07-pr244-candidate/installers/p07.sh" "$RUNNER_TEMP/p07-pr244-candidate/installers/p07-toolbox.sh"
+          bash -n "$RUNNER_TEMP/p07-diagnostic-only-candidate/installers/p07-final.sh" "$RUNNER_TEMP/p07-diagnostic-only-candidate/installers/p07.sh" "$RUNNER_TEMP/p07-diagnostic-only-candidate/installers/p07-toolbox.sh"
       - name: Test existing release103 to RC upgrade, abort rollback and fresh install
         shell: bash
         run: |
           set -Eeuo pipefail
           base="$PWD"
-          candidate="$RUNNER_TEMP/p07-pr244-candidate"
-          root="$RUNNER_TEMP/p07-pr244-install"
+          candidate="$RUNNER_TEMP/p07-diagnostic-only-candidate"
+          root="$RUNNER_TEMP/p07-diagnostic-only-install"
           mkdir -p "$root"
           export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1
           export P07_INSTALL_DIR="$root/installed" P07_PREVIOUS_DIR="$root/previous" P07_BIN_LINK="$root/vfops"
@@ -84,18 +94,18 @@ jobs:
           test "$("$root/vfops" --build-id)" = "0.1.0-release103"
           test ! -e "$root/previous"
           P07_PUBLIC_ROOT="file://$candidate" bash "$candidate/installers/p07-final.sh" > "$root/upgrade.log" 2>&1
-          test "$("$root/vfops" --build-id)" = "0.1.0-release104-rc1"
+          test "$("$root/vfops" --build-id)" = "0.1.0-release104-rc2"
           test "$(cat "$root/previous/BUILD_ID")" = "0.1.0-release103"
           for required in lib/verify.py lib/server_migration_pull.py lib/sql_diff_evidence.py lib/cloudpanel.py; do
             test -f "$root/installed/$required"
           done
           P07_PUBLIC_ROOT="file://$candidate" P07_INSTALL_DIR="$root/fresh" P07_PREVIOUS_DIR="$root/freshprev" P07_BIN_LINK="$root/freshvfops" bash "$candidate/installers/p07-final.sh" > "$root/fresh.log" 2>&1
-          test "$("$root/freshvfops" --build-id)" = "0.1.0-release104-rc1"
+          test "$("$root/freshvfops" --build-id)" = "0.1.0-release104-rc2"
           test ! -e "$root/freshprev"
           echo P07_RC104_ISOLATED_INSTALL_UPGRADE_ROLLBACK_PASS
       - name: Cleanup candidate and private source
         if: always()
         shell: bash
         run: |
-          rm -rf -- p07-private "$RUNNER_TEMP/p07-pr244-candidate" "$RUNNER_TEMP/p07-pr244-install"
+          rm -rf -- p07-private "$RUNNER_TEMP/p07-diagnostic-only-candidate" "$RUNNER_TEMP/p07-diagnostic-only-install"
           echo P07_PRIVATE_TEMP_CLEANUP_PASS
