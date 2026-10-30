@@ -1,0 +1,73 @@
+name: P07 R6 two-sided SQL restore guards exact-source proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-r6-guard-proof.yml'
+      - 'experiments/p07-r6/**'
+permissions:
+  contents: read
+jobs:
+  r6:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify exact product source and import boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat dist/p07/0.1.0/overlay/BUILD_ID)" = "0.1.0-release111"
+          test "$(git hash-object experiments/p07-r6/lib/native_scratch_restore.py)" = 5ec33e712e32195cdc4e29a3e6e806b3a043965b
+          test "$(git hash-object experiments/p07-r6/lib/isolated_db_restore.py)" = 5335e38db04e1653027076ce8399c946ea824465
+          test "$(git hash-object experiments/p07-r6/lib/restore_sql_preflight.py)" = d8b976616842685a43338fcbb47d22fb47e0664d
+          test "$(git hash-object experiments/p07-r6/lib/server_migration_pull.py)" = 125b69621c1cf7467ded820a54b06dd778f67f2b
+          test "$(git hash-object experiments/p07-r6/lib/private_recovery_gate.py)" = f28aedfba4caf1788d7e6266a809141601228025
+          test "$(git hash-object experiments/p07-r6/lib/migration_remainder.py)" = 36c4166d5b06c0ef2491d60ae9c5ed134352d351
+          test "$(git hash-object experiments/p07-r6/tests/test_native_scratch_restore.py)" = 781922e62dd7040de2a25f51480456c34ac91932
+          test "$(git hash-object experiments/p07-r6/tests/test_isolated_db_restore.py)" = f0a1f36421929e43657ee2497b769906f9d89f07
+          test "$(git hash-object experiments/p07-r6/tests/test_restore_sql_preflight.py)" = 268c8dbb435796cfc14f0e11d590bad2e299d89e
+          cp -a dist/p07/0.1.0/overlay "$RUNNER_TEMP/p07-r6"
+          for path in lib/native_scratch_restore.py lib/isolated_db_restore.py lib/restore_sql_preflight.py lib/server_migration_pull.py lib/private_recovery_gate.py lib/migration_remainder.py tests/test_native_scratch_restore.py tests/test_isolated_db_restore.py tests/test_restore_sql_preflight.py; do
+            cp "experiments/p07-r6/$path" "$RUNNER_TEMP/p07-r6/$path"
+          done
+          cd "$RUNNER_TEMP/p07-r6"
+          python3 -m py_compile lib/native_scratch_restore.py lib/isolated_db_restore.py lib/restore_sql_preflight.py tests/test_restore_sql_preflight.py
+          echo P07_R6_EXACT_SOURCE_PASS
+      - name: Test both-side dynamic guard before any database engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-r6"
+          PYTHONPATH=lib python3 -m unittest -v \
+            tests.test_restore_sql_preflight \
+            tests.test_native_scratch_restore.NativeRestoreContractTests \
+            tests.test_isolated_db_restore.R4IsolationContractTests \
+            tests.test_private_recovery_gate \
+            tests.test_migration_remainder
+          echo P07_R6_UNSAFE_SQL_PREIMPORT_FAIL_CLOSED_PASS
+      - name: Real synthetic native MariaDB scratch imports remain functional
+        shell: bash
+        env:
+          P07_R5_NATIVE_INTEGRATION: "1"
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get -qq update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -qq install -y mariadb-server mariadb-client >/dev/null
+          cd "$RUNNER_TEMP/p07-r6"
+          PYTHONPATH=lib python3 -m unittest -v tests.test_native_scratch_restore.NativeRestoreRealEngineTests
+          sudo env PYTHONPATH=lib P07_R5_NATIVE_INTEGRATION=1 python3 -m unittest -v tests.test_native_scratch_restore.NativeRestoreRealEngineTests
+          test -z "$(find /tmp -maxdepth 1 -type d -name 'vfops-r5-*' -print -quit)"
+          echo P07_R6_NATIVE_ENGINE_RESTORES_CLEANUP_PASS
+      - name: Original SQL guard and host DB writers unchanged
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-r6"
+          PYTHONPATH=lib python3 -m unittest -v tests.test_migration_no_overwrite_resume tests.test_sql_pk_conflict_evidence
+          for p in lib/cloudpanel.py lib/restore_apply_core.py lib/verify.py lib/package_core.py lib/server_migration.py BUILD_ID; do
+            test "$(git hash-object "$GITHUB_WORKSPACE/dist/p07/0.1.0/overlay/$p")" = "$(git hash-object "$p")"
+          done
+          echo P07_R6_NO_PRODUCTION_DB_WRITER_CHANGES_PASS
