@@ -1,0 +1,93 @@
+name: S01-C01 1.35.220 live WordPress native discovery
+on:
+  push:
+    branches: [task/s01-converter-i18n-proof-20261030]
+    paths: ['.github/workflows/s01-converter-theme-discovery-20261030.yml']
+permissions:
+  contents: read
+env:
+  TARGET_REPO: llhzx2018/vf-tools-theme
+  TARGET_VERSION: 1.35.220
+  TARGET_SHA: 696e32e0a368aeef5f1dd557cfd319d032619db7
+  SOURCE_VERSION: 1.35.216
+  EXPECTED_SHA256: 0e9dbe597a8dcf7e2748f23558a18b5660f535f986773f06f46bdad9a7ba7bde
+  EXPECTED_BYTES: '2027332'
+jobs:
+  discovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Read published channel and exact previous release
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh release download "v$SOURCE_VERSION" --repo "$TARGET_REPO" --pattern "vf-tools-theme_V$SOURCE_VERSION.zip"
+          echo "1aa03833d4c8f94741461c1d4611a35391c1116f4a6b2cfaf9c59e2e112c1f26  vf-tools-theme_V$SOURCE_VERSION.zip" | sha256sum -c
+          gh api 'repos/llhzx2018/core-updates/contents/projects/S01-C01.json?ref=main' --jq .content | base64 -d > manifest.json
+          python3 - <<'PY'
+          import json,os
+          m=json.load(open('manifest.json'));v=os.environ['TARGET_VERSION']
+          assert m['target_version']==v and m['release_tag']=='v'+v
+          assert os.environ['SOURCE_VERSION'] in m['from_versions']
+          assert m['asset_sha256']==os.environ['EXPECTED_SHA256']
+          assert m['asset_bytes']==int(os.environ['EXPECTED_BYTES'])
+          print('PUBLIC_MAIN_CHANNEL_READBACK=PASS')
+          PY
+      - name: Live native update discovery on isolated WordPress
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          docker run -d --name s01-220-db -e MARIADB_ROOT_PASSWORD=synthetic -e MARIADB_DATABASE=wordpress -e MARIADB_USER=wp -e MARIADB_PASSWORD=synthetic mariadb:11.8.8 >/dev/null
+          docker run -d --name s01-220-wp --link s01-220-db:db -e WORDPRESS_DB_HOST=db -e WORDPRESS_DB_USER=wp -e WORDPRESS_DB_PASSWORD=synthetic -e WORDPRESS_DB_NAME=wordpress wordpress:7.1.2-php8.3-apache >/dev/null
+          for i in $(seq 1 80); do docker exec s01-220-db mariadb-admin ping -uroot -psynthetic --silent >/dev/null 2>&1 && break; sleep 2; done
+          curl -fsSLo wp.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          docker cp wp.phar s01-220-wp:/usr/local/bin/wp
+          docker cp "vf-tools-theme_V$SOURCE_VERSION.zip" s01-220-wp:/tmp/old.zip
+          wp(){ docker exec --user www-data -e VF_PRIVATE_READ_TOKEN -e TARGET_VERSION -e SOURCE_VERSION s01-220-wp php /usr/local/bin/wp "$@" --path=/var/www/html; }
+          for i in $(seq 1 80); do docker exec s01-220-wp sh -c 'test -s /var/www/html/wp-config.php && grep -q "wp-settings.php" /var/www/html/wp-config.php' >/dev/null 2>&1 && break; sleep 2; done
+          wp core install --url=http://example.test --title=Synthetic --admin_user=admin --admin_password=synthetic-only --admin_email=test@example.invalid --skip-email >/dev/null
+          wp theme install /tmp/old.zip --activate >/dev/null
+          test "$(wp theme get vf-tools-theme --field=version)" = "$SOURCE_VERSION"
+          cat > native-discovery.php <<'PHP'
+          <?php
+          $v=getenv('TARGET_VERSION');$old=getenv('SOURCE_VERSION');
+          if(wp_get_theme('vf-tools-theme')->get('Version')!==$old){throw new RuntimeException('wrong installed source');}
+          if(defined('VF_WP_UPDATE_TEST_MODE') && VF_WP_UPDATE_TEST_MODE){throw new RuntimeException('test mode forbidden');}
+          if(!VF_WP_Update_Credential_V1::has_secret()){throw new RuntimeException('missing runtime credential');}
+          $seen=['manifest'=>false,'release'=>false];
+          add_action('http_api_debug',static function($response,$context,$class,$args,$url) use (&$seen,$v){
+            if($context!=='response'||is_wp_error($response)||wp_remote_retrieve_response_code($response)!==200){return;}
+            if(str_contains($url,'/contents/projects/S01-C01.json')){$seen['manifest']=true;}
+            if(str_contains($url,'/releases/tags/v'.$v)){$seen['release']=true;}
+          },10,5);
+          delete_site_transient('vf_s01_c01_update_manifest_v1');
+          delete_site_transient('update_themes');
+          wp_update_themes();
+          $offer=get_site_transient('update_themes')->response['vf-tools-theme']??null;
+          if(!is_array($offer)||($offer['new_version']??'')!==$v){throw new RuntimeException('native offer missing');}
+          $status=get_option('vf_s01_c01_update_status_v1',[]);
+          if(($status['state']??'')!=='UPDATE_AVAILABLE'){throw new RuntimeException('native status not update available');}
+          if(!$seen['manifest']||!$seen['release']){throw new RuntimeException('live GitHub HTTP evidence missing');}
+          if(wp_get_theme('vf-tools-theme')->get('Version')!==$old){throw new RuntimeException('discovery mutated installed version');}
+          echo 'LIVE_GITHUB_MANIFEST_RELEASE_HTTP=PASS'.PHP_EOL;
+          echo 'REAL_WORDPRESS_NATIVE_UPDATE_TRANSIENT=PASS source='.$old.' target='.$v.PHP_EOL;
+          PHP
+          docker cp native-discovery.php s01-220-wp:/tmp/native-discovery.php
+          wp eval-file /tmp/native-discovery.php
+          python3 - <<'PY'
+          import json,os
+          json.dump({'native_discovery':'PASS','live_github_http':'PASS','from':os.environ['SOURCE_VERSION'],'target':os.environ['TARGET_VERSION'],'production':'UNTOUCHED'},open('discovery-receipt.json','w'),indent=2)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s01-theme-live-discovery-${{ github.run_id }}
+          path: discovery-receipt.json
+          retention-days: 14
+      - name: Destroy synthetic instance and assets
+        if: always()
+        run: |
+          docker rm -f s01-220-wp s01-220-db >/dev/null 2>&1 || true
+          rm -f vf-tools-theme_V*.zip wp.phar native-discovery.php
