@@ -457,6 +457,46 @@ def source_python(
     return source_remote(source, rendered, timeout=timeout)
 
 
+# A migration is resumable across releases. The source-side helper staged at
+# original prepare time can therefore be older than this receiver's verifier.
+# Confirm exact bytes of the bounded export/verification dependency set before
+# any resumed SQL export, and stage a fresh migration-owned helper if needed.
+_SOURCE_EXPORT_HELPER_FILES = (
+    "BUILD_ID", "lib/server_migration_pull.py", "lib/sql_diff_evidence.py",
+    "lib/verify.py", "lib/cloudpanel.py",
+)
+_SOURCE_RUNTIME_PATH_RE = re.compile(
+    r"^/var/lib/vf-server-ops/pull-source/(?:pull-[A-Za-z0-9-]+|probe-[0-9a-f]{32})/runtime$"
+)
+
+
+def source_export_helper_matches_current(source: dict[str, Any], runtime: str) -> bool:
+    """Read-only exact source/receiver helper integrity, never SQL or credentials."""
+    if not _SOURCE_RUNTIME_PATH_RE.fullmatch(runtime):
+        raise PullMigrationError("SOURCE_EXPORT_HELPER_PATH_UNVERIFIED")
+    expected = []
+    for relative in _SOURCE_EXPORT_HELPER_FILES:
+        path = ROOT / relative
+        if not path.is_file():
+            raise PullMigrationError("CURRENT_SOURCE_EXPORT_HELPER_INCOMPLETE")
+        expected.append(hashlib.sha256(path.read_bytes()).hexdigest())
+    files = [f"{runtime}/{name}" for name in _SOURCE_EXPORT_HELPER_FILES]
+    command = "sha256sum -- " + " ".join(shlex.quote(item) for item in files)
+    response = source_remote(source, command, timeout=60, check=False)
+    if response.returncode != 0:
+        return False
+    actual = response.stdout.splitlines()
+    if len(actual) != len(expected):
+        return False
+    for line, hash_value, filename in zip(actual, expected, files):
+        if not re.fullmatch(r"[0-9a-f]{64}  .+", line):
+            return False
+        got_hash, got_file = line.split("  ", 1)
+        if got_hash != hash_value or got_file != filename:
+            return False
+    return True
+
+
 def cleanup_probe_runtime(source: dict[str, Any], runtime: str) -> None:
     root = str(Path(runtime).parent)
     # Cleanup is restricted to unpredictable, transaction-owned probe IDs.
@@ -1259,15 +1299,31 @@ def source_export_database(
         timeout=3600,
     )
     if proc.returncode != 0:
+        # Only this complete fixed marker can be attributed to the pinned
+        # source helper's no-schema sanity check. Never parse or echo raw
+        # remote SQL/CLI stderr or misclassify authentication/SSH failures.
+        if (proc.returncode == 13
+                and (proc.stderr or "").strip() == "ERROR: SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA"):
+            raise PullMigrationError("SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA")
         raise PullMigrationError(f"old-server MySQL export failed: {database}")
 
 
-def diagnose_sql_difference(mid: str, domain: str) -> dict[str, Any]:
+def diagnose_sql_difference(
+    mid: str, domain: str, *, expected_source_tables: int | None = None
+) -> dict[str, Any]:
     """One selected DB, advisory read/export only; never resumes migration.
 
     SQL is kept in private temporary files and removed even on failure.
     No database import, target-site creation, state mutation, or cutover occurs.
     """
+    # A caller-supplied observed inventory count (for example from the
+    # existing source-panel read-only query) is a diagnostic assertion,
+    # not independently established database truth or a migration PASS.
+    if expected_source_tables is not None and (
+        type(expected_source_tables) is not int
+        or not 1 <= expected_source_tables <= 100000
+    ):
+        raise PullMigrationError("SQL_DIAGNOSTIC_EXPECTED_TABLES_INVALID")
     state = load_state(mid)
     if state.get("status") != "PREPARE_FAILED":
         raise PullMigrationError("SQL_DIAGNOSTIC_REQUIRES_PREPARE_FAILED")
@@ -1286,36 +1342,113 @@ def diagnose_sql_difference(mid: str, domain: str) -> dict[str, Any]:
     if not state.get("source_runtime_path") or not state.get("source"):
         raise PullMigrationError("SQL_DIAGNOSTIC_SOURCE_RUNTIME_UNAVAILABLE")
 
-    # Independent random path prevents collision with any previous migration
-    # export; this procedure does not reuse import/target transaction paths.
-    token = os.urandom(16).hex()
-    remote_file = f"{remote_staging_root(state)}/advisory-{token}.sql.gz"
+    # The helper on the source VPS may be an older, already-staged runtime.
+    # Validate the received SQL locally before trusting its schema counters.
+    # A second independent export is allowed only when the first completed
+    # transfer has no verifiable CREATE TABLE; never retry authentication or
+    # transport failures. Both exports are read-only at the database layer.
+    remote_files: list[str] = []
+    diagnostic_state = state
+    temporary_helper = ""
     try:
+        # The stored helper can predate the receiver's SQL export sanity
+        # protection. Diagnose with verified current source bytes, but never
+        # change the migration's pinned runtime path or state on this command.
+        if not source_export_helper_matches_current(
+            state["source"], str(state["source_runtime_path"])
+        ):
+            temporary_helper = stage_source_runtime(
+                state["source"], "probe-" + os.urandom(16).hex()
+            )
+            if not source_export_helper_matches_current(
+                state["source"], temporary_helper
+            ):
+                raise PullMigrationError("SQL_DIAGNOSTIC_HELPER_UNVERIFIED")
+            diagnostic_state = dict(state)
+            diagnostic_state["source_runtime_path"] = temporary_helper
         with tempfile.TemporaryDirectory(prefix="vfops-sql-evidence-") as directory:
             root = Path(directory)
             os.chmod(root, 0o700)
-            source_dump = root / "source.sql.gz"
             target_dump = root / "target.sql.gz"
             try:
-                source_export_database(state, database, remote_file)
-                pull_path(state["source"], remote_file, source_dump)
-                cloudpanel.export_database(database, target_dump, clpctl="clpctl")
-                evidence = sql_diff_probe.diagnostic(source_dump, target_dump)
+                evidence = {
+                    "schema": "SQL_DIFF_EVIDENCE_V2",
+                    "verification": "SOURCE_EXPORT_UNUSABLE",
+                    "data_content": {"comparison": "UNAVAILABLE"},
+                    # A failed export is UNKNOWN, never evidence of an empty source DB.
+                    "source_export_readback": {"attempts": 2, "source_tables": None},
+                }
+                for attempt in range(2):
+                    evidence["source_export_readback"]["attempts"] = attempt + 1
+                    token = os.urandom(16).hex()
+                    remote_file = f"{remote_staging_root(state)}/advisory-{token}.sql.gz"
+                    remote_files.append(remote_file)
+                    source_dump = root / f"source-{attempt + 1}.sql.gz"
+                    try:
+                        source_export_database(diagnostic_state, database, remote_file)
+                    except PullMigrationError as exc:
+                        if str(exc) != "SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA":
+                            raise
+                        # The verified source helper rejected a completed
+                        # export without table DDL. Retry only once, never on
+                        # permission/transport/unknown failures.
+                        continue
+                    pull_path(state["source"], remote_file, source_dump)
+                    try:
+                        count = sql_diff_probe.require_nonempty_source_schema(source_dump)
+                    except sql_diff_probe.AdvisoryDiagnosticUnavailable:
+                        # Retry once; never interpret absent schema as zero
+                        # source tables or successful cross-engine parity.
+                        continue
+                    if expected_source_tables is not None and count != expected_source_tables:
+                        # An apparently valid but incomplete dump is not a
+                        # usable comparison. Retry the source read once and
+                        # never export/import/touch the target on mismatch.
+                        evidence = {
+                            "schema": "SQL_DIFF_EVIDENCE_V2",
+                            "verification": "SOURCE_TABLE_COUNT_MISMATCH",
+                            "data_content": {"comparison": "UNAVAILABLE"},
+                            "source_export_readback": {
+                                "attempts": attempt + 1,
+                                "source_tables": count,
+                                "expected_source_tables": expected_source_tables,
+                                "source_table_count_matches_expectation": False,
+                            },
+                        }
+                        continue
+                    cloudpanel.export_database(database, target_dump, clpctl="clpctl")
+                    evidence = sql_diff_probe.diagnostic(source_dump, target_dump)
+                    evidence["source_export_readback"] = {
+                        "attempts": attempt + 1, "source_tables": count,
+                    }
+                    if expected_source_tables is not None:
+                        evidence["source_export_readback"].update({
+                            "expected_source_tables": expected_source_tables,
+                            "source_table_count_matches_expectation": True,
+                        })
+                    break
             except (
                 PullMigrationError, cloudpanel.CloudPanelError,
                 transport.TransportError, OSError, ValueError,
             ) as exc:
                 raise PullMigrationError("SQL_DIAGNOSTIC_EXPORT_UNAVAILABLE") from exc
     finally:
-        # Delete only the unpredictable file created for this invocation.
-        source_remote(
-            state["source"],
-            f"rm -f -- {shlex.quote(remote_file)}",
-            timeout=60,
-            check=False,
-        )
+        try:
+            # Remove only the unpredictable export files created by this call.
+            for remote_file in remote_files:
+                source_remote(
+                    state["source"],
+                    f"rm -f -- {shlex.quote(remote_file)}",
+                    timeout=60,
+                    check=False,
+                )
+        finally:
+            if temporary_helper:
+                cleanup_probe_runtime(state["source"], temporary_helper)
     return {
         "status": "ADVISORY_DIAGNOSTIC_ONLY",
+        "source_temporary_helper_written": bool(temporary_helper),
+        "source_helper_cleanup_attempted": bool(temporary_helper),
         "database_writes_performed": False,
         "migration_state_modified": False,
         "dns_changed": False,
@@ -1439,6 +1572,16 @@ def sync_site_databases(state: dict[str, Any], site: dict[str, Any], *, phase: s
             source_export_database(state, database, remote_dump)
             progress_note(f"{phase_cn} MySQL · 正在传输 {database}")
             pull_path(state["source"], remote_dump, source_dump)
+            # Never send an empty/header-only or unparseable source SQL export
+            # into target_create_database_local, which can mutate the receiver.
+            # This check proves only a usable source schema; row parity and
+            # guarded DDL verification still run after import.
+            try:
+                sql_diff_probe.require_nonempty_source_schema(source_dump)
+            except sql_diff_probe.AdvisoryDiagnosticUnavailable as exc:
+                raise PullMigrationError(
+                    "old-server MySQL export has no verifiable table schema"
+                ) from exc
             shutil.copy2(source_dump, import_dump)
             progress_note(f"{phase_cn} MySQL · 正在导入 {database}")
             try:
@@ -3317,6 +3460,12 @@ def source_export_db(database: str, output: Path) -> dict[str, Any]:
     except (cloudpanel.CloudPanelError, ValueError) as exc:
         raise PullMigrationError("MySQL export failed") from exc
     os.chmod(output, 0o600)
+    try:
+        sql_diff_probe.require_nonempty_source_schema(output)
+    except sql_diff_probe.AdvisoryDiagnosticUnavailable:
+        # This helper may be staged on a remote VPS for later migrations.
+        # Never declare PASS for a nonempty gzip with no usable table DDL.
+        raise PullMigrationError("SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA") from None
     return {"status": "PASS", "secrets_emitted": False}
 
 
@@ -3448,6 +3597,7 @@ def main() -> int:
     diagnose = sub.add_parser("diagnose-sql")
     diagnose.add_argument("--migration-id", required=True)
     diagnose.add_argument("--domain", required=True)
+    diagnose.add_argument("--expected-source-tables", type=int, default=None)
 
     status = sub.add_parser("status")
     status.add_argument("--migration-id", required=True)
@@ -3547,7 +3697,10 @@ def main() -> int:
         elif args.command == "rollback":
             result = summary(rollback_migration(args.migration_id, args.confirm))
         elif args.command == "diagnose-sql":
-            result = diagnose_sql_difference(args.migration_id, args.domain)
+            result = diagnose_sql_difference(
+                args.migration_id, args.domain,
+                expected_source_tables=args.expected_source_tables,
+            )
         elif args.command == "status":
             result = summary(load_state(args.migration_id))
         elif args.command == "source-nginx-status":
