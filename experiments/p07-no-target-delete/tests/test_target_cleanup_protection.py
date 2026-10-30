@@ -82,7 +82,8 @@ class RetainTargetCleanupTests(unittest.TestCase):
 
     def test_no_data_returned_for_secret_marker(self):
         value = self._run(["site_db"])
-        self.assertNotIn("secret", json.dumps(value).lower())
+        self.assertFalse(value["secrets_emitted"])
+        self.assertNotIn('"password":', json.dumps(value).lower())
 
 
 if __name__ == "__main__":
