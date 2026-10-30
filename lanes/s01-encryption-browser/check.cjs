@@ -17,7 +17,6 @@ for(const lang of ['en','zh'])for(const width of [1024,1440]){
  assert.equal(encrypted.aes128,true);assert.equal(encrypted.encrypted,true);assert.ok(encrypted.keyCount>=1);
  await page.screenshot({path:`proof/encryption-${lang}-${width}.png`,fullPage:true});
  await root.locator('[data-vf-encryption-action="clear"]').click();
- await root.locator('[data-vf-encryption-mode-button="pro"]').click().catch(()=>{});
  await input.fill('#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nhttps://example.invalid/one.ts\n#EXT-X-ENDLIST\n');
  await root.locator('[data-vf-encryption-action="detect"]').click();await root.locator('[data-vf-encryption-result]').waitFor({state:'visible'});
  const clear=await root.evaluate(r=>({encrypted:r.__vfEncryption?.encrypted,keyCount:r.__vfEncryption?.keyCount}));
