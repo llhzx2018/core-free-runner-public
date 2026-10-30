@@ -71,6 +71,98 @@ def _scan(sql_path: Path) -> tuple[str, int, int]:
         raise QuarantineBlocked("QUARANTINE_SQL_UNREADABLE") from None
 
 
+
+# A scratch-only omission MUST cover the entire guarded dynamic statement flow:
+# probe -> unsafe SET assignment -> PREPARE -> EXECUTE -> DEALLOCATE.
+# Isolating only SET is unsafe: the remaining PREPARE/EXECUTE may run anyway.
+_STAGES = ("probe", "assign", "prepare", "execute", "deallocate")
+_COMMENT = re.compile(rb"^(?:--[ \t]|#|/\*(?!\!)(?!M\!)[^\r\n]*\*/)[^\r\n]*$")
+
+
+def _complete_dynamic_groups(sql_path: Path) -> tuple[set[int], int]:
+    """Strict whole-group grammar; all five control lines are omitted in scratch.
+
+    Groups must be contiguous except blank/non-executable comment lines.
+    Unknown version guards, malformed syntax, interleaving SQL, or unmatched
+    controls hard-block the scratch import. Returned line indices are PRIVATE.
+    """
+    omit: set[int] = set()
+    unsafe_assignments = 0
+    stage = 0
+    flag = stmt_variable = prepared_name = ""
+    try:
+        with gzip.open(sql_path, "rb") as stream:
+            for number, line in enumerate(stream, 1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if re.match(rb"^(?:PREPARE|EXECUTE|DEALLOCATE)\b", stripped, re.I):
+                    raise QuarantineBlocked("QUARANTINE_UNGUARDED_CONTROL_REFUSED")
+                kind = ""
+                variables: tuple[str, ...] = ()
+                if stripped.startswith((b"/*!", b"/*M!")):
+                    if len(stripped) > MAX_GUARD_LINE:
+                        raise QuarantineBlocked("QUARANTINE_GUARD_LINE_TOO_LARGE")
+                    try:
+                        raw = stripped.decode("utf-8", errors="strict")
+                    except UnicodeError:
+                        raise QuarantineBlocked("QUARANTINE_GUARD_ENCODING_UNPROVEN") from None
+                    m = evidence._GUARD_RE.fullmatch(raw)
+                    if m and 40000 <= int(m.group(1)) <= 89999:
+                        body = re.sub(r"\s+", " ", m.group(2).strip())
+                        if v := verify._CROSS_ENGINE_TABLE_COUNT_RE.fullmatch(body):
+                            kind, variables = "probe", (v.group("flag").upper(),)
+                        elif v := verify._CROSS_ENGINE_DYNAMIC_IF_RE.fullmatch(body):
+                            # Only genuinely rejected dynamic branches qualify.
+                            if not _classify(line):
+                                raise QuarantineBlocked("QUARANTINE_SAFE_GROUP_NOT_SUPPORTED")
+                            kind, variables = "assign", (
+                                v.group("stmt").upper(), v.group("flag").upper())
+                        elif v := verify._CROSS_ENGINE_PREPARE_RE.fullmatch(body):
+                            kind, variables = "prepare", (
+                                v.group(1).upper(), v.group(2).upper())
+                        elif v := verify._CROSS_ENGINE_EXECUTE_RE.fullmatch(body):
+                            kind, variables = "execute", (v.group(1).upper(),)
+                        elif v := verify._CROSS_ENGINE_DEALLOCATE_RE.fullmatch(body):
+                            kind, variables = "deallocate", (v.group(1).upper(),)
+                        elif _SET.match(body) and not verify._cross_engine_known_session(raw):
+                            raise QuarantineBlocked("QUARANTINE_UNSUPPORTED_ASSIGNMENT")
+                        elif re.match(r"^(?:PREPARE|EXECUTE|DEALLOCATE)\b", body, re.I):
+                            raise QuarantineBlocked("QUARANTINE_UNKNOWN_CONTROL")
+                        elif stage and not verify._cross_engine_known_session(raw):
+                            raise QuarantineBlocked("QUARANTINE_INTERLEAVED_GUARDED_SQL")
+                    elif stage or b"PREPARE" in stripped.upper() or b"EXECUTE" in stripped.upper():
+                        raise QuarantineBlocked("QUARANTINE_GUARDED_BOUNDARY_UNPROVEN")
+                if kind:
+                    if kind != _STAGES[stage]:
+                        raise QuarantineBlocked("QUARANTINE_DYNAMIC_STAGE_ORDER_UNPROVEN")
+                    if stage == 0:
+                        flag = variables[0]
+                    elif stage == 1:
+                        stmt_variable, linked_flag = variables
+                        if linked_flag != flag:
+                            raise QuarantineBlocked("QUARANTINE_PROBE_FLAG_MISMATCH")
+                        unsafe_assignments += 1
+                    elif stage == 2:
+                        prepared_name, linked_variable = variables
+                        if linked_variable != stmt_variable:
+                            raise QuarantineBlocked("QUARANTINE_PREPARE_VARIABLE_MISMATCH")
+                    elif stage in (3, 4) and variables[0] != prepared_name:
+                        raise QuarantineBlocked("QUARANTINE_EXECUTE_NAME_MISMATCH")
+                    omit.add(number)
+                    stage = (stage + 1) % len(_STAGES)
+                elif stage and not _COMMENT.fullmatch(stripped):
+                    raise QuarantineBlocked("QUARANTINE_INTERLEAVED_SQL_UNPROVEN")
+    except QuarantineBlocked:
+        raise
+    except (OSError, EOFError, UnicodeError, ValueError):
+        raise QuarantineBlocked("QUARANTINE_SQL_UNREADABLE") from None
+    if stage:
+        raise QuarantineBlocked("QUARANTINE_DYNAMIC_GROUP_INCOMPLETE")
+    if len(omit) != unsafe_assignments * len(_STAGES):
+        raise QuarantineBlocked("QUARANTINE_DYNAMIC_GROUP_CARDINALITY_UNPROVEN")
+    return omit, unsafe_assignments
+
 def plan(sql_path: Path) -> dict:
     """Build bounded, source-local private plan; no SQL fragments/PKs emitted."""
     digest, removed, size = _scan(sql_path)
@@ -82,9 +174,11 @@ def plan(sql_path: Path) -> dict:
     if any(type(ev.get(k)) is not int or not 0 <= ev[k] <= 10000 for k in keys):
         raise QuarantineBlocked("QUARANTINE_GUARD_COUNTS_UNPROVEN")
     expected = sum(ev[k] for k in keys)
-    if expected != removed:
+    omit, whole_groups = _complete_dynamic_groups(sql_path)
+    if expected != removed or whole_groups != removed:
         raise QuarantineBlocked("QUARANTINE_CLASSIFIER_DRIFT")
-    return {"_digest": digest, "removed": removed, "size": size}
+    return {"_digest": digest, "removed": removed, "size": size,
+            "_omit_lines": tuple(sorted(omit))}
 
 
 def filtered_bytes(sql_path: Path, private_plan: dict) -> Iterator[bytes]:
@@ -102,19 +196,30 @@ def filtered_bytes(sql_path: Path, private_plan: dict) -> Iterator[bytes]:
             or type(old_count) is not int or old_count < 0
             or type(old_size) is not int or not 0 <= old_size <= MAX_BYTES):
         raise QuarantineBlocked("QUARANTINE_PLAN_INVALID")
+    omit_lines = private_plan.get("_omit_lines")
+    if (not isinstance(omit_lines, tuple)
+            or len(omit_lines) != old_count * len(_STAGES)
+            or any(type(x) is not int or x < 1 for x in omit_lines)
+            or tuple(sorted(set(omit_lines))) != omit_lines):
+        raise QuarantineBlocked("QUARANTINE_PLAN_INVALID")
+    omit_set = set(omit_lines)
     sha = hashlib.sha256()
     count = 0
     total = 0
     try:
         with gzip.open(sql_path, "rb") as stream:
-            for line in stream:
+            for lineno, line in enumerate(stream, 1):
                 total += len(line)
                 if total > MAX_BYTES:
                     raise QuarantineBlocked("QUARANTINE_UNCOMPRESSED_SIZE_LIMIT")
                 sha.update(line)
-                if _classify(line):
-                    count += 1
+                if lineno in omit_set:
+                    if _classify(line):
+                        count += 1
+                    yield b""  # explicit no-op, never send the omitted directive
                     continue
+                if _classify(line):
+                    raise QuarantineBlocked("QUARANTINE_UNEXPECTED_UNSAFE_SET")
                 yield line
     except QuarantineBlocked:
         raise
