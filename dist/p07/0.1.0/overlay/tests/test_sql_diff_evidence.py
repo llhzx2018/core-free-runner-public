@@ -1,10 +1,12 @@
 """Advisory diagnostic must stay redacted and never approve SQL parity."""
 from __future__ import annotations
 
+import gzip
 import io
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -177,6 +179,45 @@ class SqlDiffEvidenceTests(unittest.TestCase):
         self.assertEqual(result["schema_difference"]["mismatched_tables"], 0)
         self.assertEqual(result["verification"], "NOT_A_PASS_GATE")
         self.assertNotIn("private", json.dumps(result))
+
+
+    def test_source_export_sanity_rejects_empty_and_corrupt_gzip(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            good = root / "source-good.sql.gz"
+            with gzip.open(good, "wt", encoding="utf-8") as handle:
+                handle.write(
+                    "CREATE TABLE `one` (`id` INT);\n"
+                    "INSERT INTO `one` VALUES (1);\n"
+                    "CREATE TABLE `two` (`id` INT);\n"
+                )
+            self.assertEqual(evidence.require_nonempty_source_schema(good), 2)
+
+            header_only = root / "source-header.sql.gz"
+            with gzip.open(header_only, "wt", encoding="utf-8") as handle:
+                handle.write("-- private header only\n")
+            with self.assertRaisesRegex(
+                evidence.AdvisoryDiagnosticUnavailable,
+                "SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA",
+            ):
+                evidence.require_nonempty_source_schema(header_only)
+
+            corrupt = root / "source-corrupt.sql.gz"
+            corrupt.write_bytes(b"not a compressed SQL dump")
+            with self.assertRaises(evidence.AdvisoryDiagnosticUnavailable):
+                evidence.require_nonempty_source_schema(corrupt)
+
+    def test_source_export_sanity_rejects_data_only_without_ddl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            dump = Path(directory) / "private.sql.gz"
+            with gzip.open(dump, "wt", encoding="utf-8") as handle:
+                handle.write("INSERT INTO `private_table` VALUES (1);\n")
+            with self.assertRaisesRegex(
+                evidence.AdvisoryDiagnosticUnavailable,
+                "SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA",
+            ) as caught:
+                evidence.require_nonempty_source_schema(dump)
+            self.assertNotIn("private_table", str(caught.exception))
 
 
 if __name__ == "__main__":

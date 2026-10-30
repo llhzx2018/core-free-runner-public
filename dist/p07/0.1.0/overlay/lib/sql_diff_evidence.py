@@ -219,6 +219,19 @@ def schema_difference_counts(source: Path, target: Path) -> dict[str, int]:
     return result
 
 
+def require_nonempty_source_schema(path: Path) -> int:
+    """Reject an empty/unrecognized source dump before any target DB import.
+
+    File existence and non-zero gzip byte size are not evidence that an
+    export contains the source database's table definitions. This is a
+    one-way safety prerequisite, never proof of data equivalence.
+    """
+    tables, _other = _schema_statements(path)
+    if not tables:
+        raise AdvisoryDiagnosticUnavailable("SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA")
+    return len(tables)
+
+
 def data_content_evidence(source: Path, target: Path) -> dict[str, Any]:
     """Advisory DML/object fingerprint parity; no SQL or digest leaves memory.
 
