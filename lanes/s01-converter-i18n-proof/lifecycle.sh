@@ -31,6 +31,7 @@ docker cp lane/mount-seed.php "$WP:/tmp/mount-seed.php";cli eval-file /tmp/mount
 docker cp lane/seed.php "$WP:/tmp/seed.php";cli eval-file /tmp/seed.php > proof/seed.json
 docker cp lane/extra-seed.php "$WP:/tmp/extra-seed.php";cli eval-file /tmp/extra-seed.php > proof/cases.json
 docker cp lane/snapshot.php "$WP:/tmp/snapshot.php"
+docker cp control/lanes/s01-converter-i18n-proof/plugin-snapshot.php "$WP:/tmp/plugin-snapshot.php"
 # Warm only public read-only boot paths before protected-state comparison.
 curl -fsS http://127.0.0.1:18880/ >/dev/null
 curl -fsS http://127.0.0.1:18880/m3u8-playlist-checker/ >/dev/null
@@ -46,7 +47,7 @@ assert all(not a['option_presence'][k]and b['option_presence'][k]for k in change
 PYBOOT
 cli eval-file /tmp/snapshot.php > proof/state-before.sha256
 node control/lanes/s01-converter-i18n-proof/check.cjs
-cli eval "global \$wpdb; echo hash('sha256',wp_json_encode(\$wpdb->get_results(\"SELECT option_name, option_value FROM {\$wpdb->options} WHERE option_name LIKE 'vf\\\\_tool\\\\_m3u8%' OR option_name LIKE 'vf\\\\_m3u8%' ORDER BY option_name\",ARRAY_A)));" > proof/plugin-options-before.sha256
+cli eval-file /tmp/plugin-snapshot.php > proof/plugin-options-before.json
 tv(){ test "$(cli theme get vf-tools-theme --field=version)" = "$1"; }
 pv(){ test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$1"; }
 tv 1.35.220; pv 1.25.96
@@ -60,8 +61,15 @@ for old in 1.25.95 1.25.94; do
   cli plugin install /tmp/vf-tools-m3u8_V1.25.96.zip --force >/dev/null; pv 1.25.96
 done
 cli plugin install /tmp/vf-tools-m3u8_V1.25.96.zip --force >/dev/null; pv 1.25.96
-cli eval "global \$wpdb; echo hash('sha256',wp_json_encode(\$wpdb->get_results(\"SELECT option_name, option_value FROM {\$wpdb->options} WHERE option_name LIKE 'vf\\\\_tool\\\\_m3u8%' OR option_name LIKE 'vf\\\\_m3u8%' ORDER BY option_name\",ARRAY_A)));" > proof/plugin-options-after.sha256
-cmp proof/plugin-options-before.sha256 proof/plugin-options-after.sha256
+cli eval-file /tmp/plugin-snapshot.php > proof/plugin-options-after.json
+python3 - <<'PYPLUGIN'
+import json,pathlib
+a=json.loads(pathlib.Path('proof/plugin-options-before.json').read_text())
+b=json.loads(pathlib.Path('proof/plugin-options-after.json').read_text())
+changed=[k for k in sorted(set(a)|set(b)) if a.get(k)!=b.get(k)]
+print('PLUGIN_CHANGED_OPTION_NAMES',changed)
+assert not changed
+PYPLUGIN
 echo NATIVE_INSTALL_UPGRADE_ROLLBACK_REINSTALL_PLUGIN_OPTIONS_PASS
 cli eval-file /tmp/snapshot.php > proof/state-after.sha256
 cmp proof/state-before.sha256 proof/state-after.sha256
