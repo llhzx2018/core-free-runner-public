@@ -53,4 +53,8 @@ cli eval-file /tmp/snapshot.php > proof/state-before.sha256
 node control/lanes/s01-encryption-browser/seo-check.cjs
 cli eval-file /tmp/snapshot.php > proof/state-after.sha256
 cmp proof/state-before.sha256 proof/state-after.sha256
-echo DOWNLOADER_DATA_PROTECTION_PASS
+echo ENCRYPTION_DATA_PROTECTION_PASS
+# Only modify the synthetic English fixture after protected-state proof.
+fixture_en_id=$(python3 -c 'import json; print(int(json.load(open("proof/seo-seed.json"))["pair"]["en"]))')
+cli post update "$fixture_en_id" --post_status=draft >/dev/null
+SEO_MISSING_EN=1 node control/lanes/s01-encryption-browser/seo-check.cjs
