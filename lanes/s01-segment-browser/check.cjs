@@ -11,6 +11,7 @@ const steps=await page.locator('.vf-tool-steps-list').innerText(),faq=await page
 assert.ok(steps.includes(lang==='zh'?'媒体播放清单':'media playlist'));
 assert.ok(faq.includes(lang==='zh'?'相对路径':'relative'));
 assert.ok(!faq.includes(lang==='zh'?'频道':'channel'));
+const related=await page.locator('.vf-tool-related-section').innerText();assert.ok(!related.includes('IPTV'));assert.ok(related.includes(lang==='zh'?'加密检测器':'Encryption Detector'));
 const size=await page.evaluate(()=>({w:document.documentElement.clientWidth,sw:document.documentElement.scrollWidth}));assert.ok(size.sw<=size.w+1,'horizontal overflow');
 await root.locator('[data-vf-segment-input]').fill('#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nhttps://example.invalid/one.ts\n#EXTINF:4,\nhttps://example.invalid/two.ts\n#EXT-X-ENDLIST\n');
 await root.locator('[data-vf-segment-action="analyze"]').click();
