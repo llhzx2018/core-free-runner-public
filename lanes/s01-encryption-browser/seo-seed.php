@@ -1,7 +1,18 @@
 <?php
+// Throwaway fixture only: ensure two distinct language members share the public slug.
 global $wpdb;
-$ids=$wpdb->get_col($wpdb->prepare("SELECT ID FROM {$wpdb->posts} WHERE post_type = %s AND post_status = %s AND post_name = %s",'page','publish','m3u8-encryption-detector'));
-$rows=array_filter(array_map('get_post', $ids));
-$found=[];
-foreach($rows as $p){$lang=pll_get_post_language($p->ID);if(!in_array($lang,['en','zh'],true))continue;update_post_meta($p->ID,'rank_math_description',$lang==='zh'?'Synthetic Chinese encryption description for diagnostic.':'Synthetic English encryption description for diagnostic.');$found[$lang]=$p->ID;}
-echo wp_json_encode(['found'=>$found,'candidate_count'=>count($rows),'ids'=>$ids]);
+$ids=$wpdb->get_col($wpdb->prepare("SELECT ID FROM {$wpdb->posts} WHERE post_type=%s AND post_status=%s AND post_name=%s",'page','publish','m3u8-encryption-detector'));
+$pair=[];
+foreach($ids as $id){$lang=pll_get_post_language((int)$id);if(in_array($lang,['en','zh'],true)&&!isset($pair[$lang]))$pair[$lang]=(int)$id;}
+foreach(['en','zh'] as $lang){
+ if(isset($pair[$lang]))continue;
+ $id=wp_insert_post(['post_type'=>'page','post_status'=>'draft','post_name'=>'seo-fixture-encryption-'.$lang,'post_title'=>'Fixture Encryption '.$lang,'post_content'=>'[vf_m3u8_encryption_detector]'],true);
+ if(is_wp_error($id))throw new RuntimeException('fixture insert');
+ pll_set_post_language($id,$lang);wp_update_post(['ID'=>$id,'post_status'=>'publish']);
+ $wpdb->update($wpdb->posts,['post_name'=>'m3u8-encryption-detector'],['ID'=>$id],['%s'],['%d']);clean_post_cache($id);
+ $pair[$lang]=(int)$id;
+}
+pll_save_post_translations($pair);
+foreach($pair as $lang=>$id)update_post_meta($id,'rank_math_description',$lang==='zh'?'Synthetic Chinese encryption description for diagnostic.':'Synthetic English encryption description for diagnostic.');
+if(count($pair)!==2||$pair['en']===$pair['zh'])throw new RuntimeException('fixture pair invalid');
+echo wp_json_encode(['pair'=>$pair,'original_count'=>count($ids)]);
