@@ -1,0 +1,133 @@
+name: P07 release104 one-shot prepare distribution PR
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release104-stage.yml'
+permissions:
+  contents: read
+jobs:
+  stage:
+    if: ${{ github.repository == 'llhzx2018/core-free-runner-public' && github.head_ref == 'test/p07-release104-one-shot-stage-20261030' && github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_SHA: f2239ccc3502c948d4955294378e275aea964385
+      PUBLIC_BASE: 3c6eaceb3b3348af8e5990896acea61fb8dff770
+      DIST_BRANCH: release/p07-release104-distribution-20261030
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout public released baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Require release-scoped write and private-read
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo P07_PRIVATE_READ_MISSING; exit 78; }
+          test -n "$GH_TOKEN" || { echo P07_RELEASE_WRITE_MISSING; exit 78; }
+      - name: Checkout exact P07 release104 product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: f2239ccc3502c948d4955294378e275aea964385
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p07-private
+      - name: Fail-closed release identity and collision checks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$PUBLIC_BASE"
+          test "$(git -C p07-private rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(cat p07-private/BUILD_ID)" = "0.1.0-release104"
+          grep -Fxq 'EXPECTED_BUILD_ID="0.1.0-release103"' installers/p07-final.sh
+          test "$(gh api repos/llhzx2018/core-free-runner-public/git/ref/heads/main --jq '.object.sha')" = "$PUBLIC_BASE"
+          if gh release view p07-v0.1.0-release104 -R llhzx2018/core-free-runner-public >/dev/null 2>&1; then
+            echo P07_RELEASE104_EXISTS_STOP; exit 81
+          fi
+          if git ls-remote --exit-code origin "refs/heads/$DIST_BRANCH" >/dev/null 2>&1; then
+            echo P07_RELEASE104_BRANCH_EXISTS_STOP; exit 82
+          fi
+          echo P07_RELEASE104_STAGING_INPUT_PASS
+      - name: Assemble formal-format source-pinned offline distribution
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -B p07-private/scripts/p07_candidate_bundle.py \
+            --product-root p07-private --public-root . \
+            --output "$RUNNER_TEMP/p07-release104" --product-sha "$PRODUCT_SHA" \
+            --build 0.1.0-release104 --care 0.1.0-rc73
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          out=Path(os.environ["RUNNER_TEMP"])/"p07-release104"
+          meta=json.loads((out/"candidate_attestation.json").read_text())
+          assert meta["status"]=="FORMAL_STAGING_NOT_PUBLISHED"
+          assert meta["product_source_sha"]==os.environ["PRODUCT_SHA"]
+          assert meta["product_build"]=="0.1.0-release104"
+          assert meta["system_care_build"]=="0.1.0-rc73"
+          assert not any(meta["negative"].values())
+          assert meta["runtime_file_count"]==45
+          print("P07_RELEASE104_STAGED_MANIFEST_PASS")
+          PY
+      - name: Construct one precise distribution PR with gated workflows
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git fetch --no-tags origin "$GITHUB_HEAD_REF"
+          git checkout -b "$DIST_BRANCH"
+          out="$RUNNER_TEMP/p07-release104"
+          cp -a "$out/installers/." installers/
+          cp -a "$out/dist/p07/0.1.0/overlay/." dist/p07/0.1.0/overlay/
+          cp -a "$out/packages/p07-system-care/0.1.0-rc73" packages/p07-system-care/
+          cp "$out/candidate_attestation.json" experiments/p07-release104-attestation.json
+          git show "FETCH_HEAD:.github/workflows/p07-release104-formal-publish.yml" > .github/workflows/p07-release104-formal-publish.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,hashlib
+          p=Path("experiments/p07-release104-attestation.json")
+          a=json.loads(p.read_text())
+          def blob(path):
+              raw=path.read_bytes()
+              return hashlib.sha1(b"blob "+str(len(raw)).encode()+b"\0"+raw).hexdigest()
+          gate=Path(".github/workflows/p07-distribution-gate.yml")
+          s=gate.read_text()
+          old={"c684b5125c45750164954c8a4169684e7dd5c77a":a["runtime_manifest_blob"],
+               "1affd8fbab1ac9b13deda67279a4b316f279ddd2":blob(Path("installers/p07-final.sh")),
+               "d205d8f2d03986ea91eb9d2da6588ebd4b47ec0d":a["system_care_manifest_blob"],
+               "66d2e47a395bdfb18331aca38ecce8331a0adf22":a["product_source_sha"]}
+          for before,after in old.items():
+              assert s.count(before)>0,("old identity missing",before)
+              s=s.replace(before,after)
+          s=s.replace("0.1.0-release103","0.1.0-release104").replace("0.1.0-rc72","0.1.0-rc73")
+          gate.write_text(s)
+          for file in (".github/workflows/p07-beginner-menu-gate.yml",
+                       ".github/workflows/p07-system-care-smoke.yml"):
+              p=Path(file)
+              s=p.read_text()
+              assert "0.1.0-release103" in s
+              p.write_text(s.replace("0.1.0-release103","0.1.0-release104"))
+          assert blob(Path("installers/p07-final.sh"))==a["final_installer_blob"]
+          print("P07_RELEASE104_DISTRIBUTION_GUARD_PINS_PASS")
+          PY
+          git add -- installers/p07.sh installers/p07-final.sh installers/p07-system-care.sh installers/p07-toolbox.sh dist/p07/0.1.0/overlay packages/p07-system-care/0.1.0-rc73 experiments/p07-release104-attestation.json .github/workflows/p07-release104-formal-publish.yml .github/workflows/p07-distribution-gate.yml .github/workflows/p07-beginner-menu-gate.yml .github/workflows/p07-system-care-smoke.yml
+          test "$(git diff --cached --name-only | wc -l)" -gt 50
+          test "$(git status --porcelain | grep -c '^A  p07-private' || true)" = "0"
+          git config user.name "vf-p07-release-gate"
+          git config user.email "vf-p07-release-gate@users.noreply.github.com"
+          git commit -m "P07 release104 exact gated formal publish candidate"
+          auth="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 -w0)"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth" push origin "HEAD:refs/heads/$DIST_BRANCH"
+          gh pr create -R llhzx2018/core-free-runner-public \
+            --base main --head "$DIST_BRANCH" \
+            --title "P07 release104 diagnostic-only public distribution (formal gated)" \
+            --body "Owner authorized release through upgrade. Exact private product f2239ccc3502c948d4955294378e275aea964385 (PR #245 diagnostic + PR #246 BUILD_ID; excludes Draft #244). This single PR contains generated exact-byte overlay, installers, System Care rc73, attestation, updated distribution checks, and gated formal publish with tag/release/remote readback. All required PR gates must pass before merge. No user VPS/DNS/DB writes." 
+          echo P07_RELEASE104_DISTRIBUTION_PR_CREATED
+      - name: Clean private source and staging
+        if: always()
+        run: |
+          rm -rf -- p07-private "$RUNNER_TEMP/p07-release104"
+          echo P07_PRIVATE_CLEANUP_PASS
