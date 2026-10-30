@@ -8,6 +8,7 @@ try{for(const lang of ['en','zh'])for(const width of [1024,1440]){
  if(await p.locator('.vf-tool-breadcrumb').isVisible())throw Error('breadcrumb remains visible');
  if(!await root.locator('[data-vf-backup-task-toggle="backup"]').isVisible()||!await root.locator('[data-vf-backup-task-toggle="restore"]').isVisible())throw Error('task selector missing');
  if(!await p.locator('.vf-m3u8-launchbar__steps').isVisible())throw Error('safety steps missing');
+ const widths=await p.locator('.vf-m3u8-launchbar__steps li').evaluateAll(nodes=>nodes.map(x=>x.getBoundingClientRect().width));if(widths.length!==3||widths.some(x=>x<110))throw Error('safety steps cramped '+JSON.stringify(widths));
  const sizes=await p.evaluate(()=>({scroll:document.documentElement.scrollWidth,client:document.documentElement.clientWidth}));if(sizes.scroll>sizes.client+1)throw Error('horizontal overflow '+JSON.stringify(sizes));
  await p.screenshot({path:'proof/backup-'+lang+'-'+width+'-initial.png',fullPage:true});
  await root.locator('[data-vf-backup-action="preview-workspace"]').click();
