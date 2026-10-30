@@ -29,6 +29,10 @@ cli rewrite structure '/%postname%/' --hard >/dev/null
 docker cp lane/mount-seed.php "$WP:/tmp/mount-seed.php";cli eval-file /tmp/mount-seed.php > proof/mounts.json
 docker cp lane/seed.php "$WP:/tmp/seed.php";cli eval-file /tmp/seed.php > proof/seed.json
 cli plugin install seo-by-rank-math --activate >/dev/null
+docker exec "$WP" sh -c 'cat > /var/www/html/wp-content/mu-plugins/seo-observe.php <<'\''PHP'\''
+<?php
+add_action("wp_head",static function(){global $wp_filter; $id=get_queried_object_id(); $d=["id"=>$id,"lang"=>function_exists("pll_get_post_language")?pll_get_post_language($id):"","singular"=>is_singular(),"is404"=>is_404(),"rank_math_defined"=>defined("RANK_MATH_VERSION"),"rank_math_class"=>class_exists("RankMath"),"meta"=>get_post_meta($id,"rank_math_description",true),"head_priorities"=>array_keys($wp_filter["wp_head"]->callbacks??[])]; echo "<meta name=\"fixture-observation\" content=\"".esc_attr(wp_json_encode($d))."\">";},1);
+PHP'
 docker cp control/lanes/s01-encryption-browser/seo-seed.php "$WP:/tmp/seo-seed.php";cli eval-file /tmp/seo-seed.php > proof/seo-seed.json
 docker cp lane/extra-seed.php "$WP:/tmp/extra-seed.php";cli eval-file /tmp/extra-seed.php > proof/cases.json
 docker cp lane/snapshot.php "$WP:/tmp/snapshot.php"
