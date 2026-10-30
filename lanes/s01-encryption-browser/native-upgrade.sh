@@ -19,6 +19,7 @@ docker exec "$WP" mkdir -p /var/www/html/wp-content/themes/vf-tools-theme /var/w
 docker exec "$WP" rmdir /var/www/html/wp-content/themes/vf-tools-theme
 docker cp "provider/vf-tools-theme_V$TARGET_VERSION.zip" "$WP:/tmp/theme-new.zip"
 docker cp "provider/vf-tools-theme_V$SOURCE_VERSION.zip" "$WP:/tmp/theme-old.zip"
+docker cp provider/vf-tools-theme_V1.35.216.zip "$WP:/tmp/theme-production-baseline.zip"
 cli theme install /tmp/theme-new.zip >/dev/null
 docker cp provider/vf-tools-m3u8_V1.25.94.zip "$WP:/tmp/provider.zip"
 cli plugin install /tmp/provider.zip --activate >/dev/null
@@ -60,7 +61,11 @@ cli theme install /tmp/theme-new.zip --force >/dev/null
 version_check "$TARGET_VERSION"
 cli theme install /tmp/theme-new.zip --force >/dev/null
 version_check "$TARGET_VERSION"
+cli theme install /tmp/theme-production-baseline.zip --force >/dev/null
+version_check "1.35.216"
+cli theme install /tmp/theme-new.zip --force >/dev/null
+version_check "$TARGET_VERSION"
 cli eval-file /tmp/snapshot.php > proof/state-after.sha256
 cmp proof/state-before.sha256 proof/state-after.sha256
-printf '{"status":"PASS","sequence":["%s","%s","%s","%s","%s","%s"],"protected":"BYTE_IDENTICAL","production":"UNTOUCHED"}' "$TARGET_VERSION" "$SOURCE_VERSION" "$TARGET_VERSION" "$SOURCE_VERSION" "$TARGET_VERSION" "$TARGET_VERSION" > proof/native-lifecycle.json
+printf '{"status":"PASS","sequence":["%s","%s","%s","%s","%s","%s"],"protected":"BYTE_IDENTICAL","production_baseline":"1.35.216","production_upgrade":"PASS","production":"UNTOUCHED"}' "$TARGET_VERSION" "$SOURCE_VERSION" "$TARGET_VERSION" "$SOURCE_VERSION" "$TARGET_VERSION" "$TARGET_VERSION" > proof/native-lifecycle.json
 echo ENCRYPTION_DATA_PROTECTION_PASS
