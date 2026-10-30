@@ -13,6 +13,7 @@ from typing import Any
 
 import verify
 import sql_row_evidence
+import sql_multiset_evidence
 
 _GUARD_RE = re.compile(r"/\*!([0-9]{5,6})\s+(.+?)\s*\*/;?", re.I)
 _DOUBLE_IF_RE = re.compile(
@@ -400,6 +401,11 @@ def diagnostic(source: Path, target: Path) -> dict[str, Any]:
             "schema_difference": schema_difference_counts(source, target),
             "data_content": data_content_evidence(source, target),
             "row_tuples": sql_row_evidence.diagnostic(
+                source, target,
+                set(_schema_statements(source)[0]),
+                set(_schema_statements(target)[0]),
+            ),
+            "row_multiset": sql_multiset_evidence.diagnostic(
                 source, target,
                 set(_schema_statements(source)[0]),
                 set(_schema_statements(target)[0]),
