@@ -1,0 +1,87 @@
+name: P07 MySQL 8.4 MariaDB 11.8 two-sided restore drill (synthetic)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-dual-engine-restore-gate.yml'
+      - 'experiments/p07-dual-engine/**'
+permissions:
+  contents: read
+jobs:
+  two-engine-drill:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic-p07-ci-not-production
+          MYSQL_ROOT_HOST: "%"
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -psynthetic-p07-ci-not-production"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=18
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: synthetic-p07-ci-not-production
+          MARIADB_ROOT_HOST: "%"
+        ports:
+          - 3308:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=18
+    env:
+      P07_SYNTHETIC_DB_RESTORE_ONLY: "1"
+      P07_SYNTHETIC_DB_HOST: "127.0.0.1"
+      P07_SYNTHETIC_MYSQL_PASSWORD: synthetic-p07-ci-not-production
+      P07_SYNTHETIC_MARIADB_PASSWORD: synthetic-p07-ci-not-production
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify exact synthetic test blob and unchanged published source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat dist/p07/0.1.0/overlay/BUILD_ID)" = 0.1.0-release110
+          test "$(git hash-object experiments/p07-dual-engine/test_dual_engine_restore_drill.py)" = 31667d3258b5beaad46e96fb61f09d2d7221169b
+          cp -a dist/p07/0.1.0/overlay "$RUNNER_TEMP/p07-db-real-drill"
+          mkdir -p "$RUNNER_TEMP/p07-db-real-drill/tests/integration"
+          cp experiments/p07-dual-engine/test_dual_engine_restore_drill.py "$RUNNER_TEMP/p07-db-real-drill/tests/integration/"
+          test "$(git hash-object "$RUNNER_TEMP/p07-db-real-drill/lib/migration_conflict_recovery.py")" = cc7856692ecf9ef5bb2852b181a78bfebd9ad226
+          echo P07_DUAL_DB_EXACT_SOURCES_PASS
+      - name: Install isolated SQL clients (no P07 deployment)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get -qq update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -qq install -y mariadb-client >/dev/null
+          command -v mariadb
+          command -v mariadb-dump
+          echo P07_SYNTHETIC_DB_CLIENTS_AVAILABLE
+      - name: Test independent restore both engines and cross-engine compatibility
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-db-real-drill"
+          python3 -m py_compile tests/integration/test_dual_engine_restore_drill.py
+          PYTHONPATH=lib python3 tests/integration/test_dual_engine_restore_drill.py -v
+          echo P07_MYSQL84_MARIADB118_BIDIRECTIONAL_RESTORE_DRILL_PASS
+      - name: Keep unsafe migration resumption and SQL guard blocked
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-db-real-drill"
+          chmod +x bin/*
+          PYTHONPATH=lib python3 -m unittest -v \
+            tests.test_migration_conflict_recovery \
+            tests.test_migration_no_overwrite_resume \
+            tests.test_sql_pk_conflict_evidence \
+            tests.test_sql_readback_stability
+          echo P07_NO_REAL_DB_RECOVERY_ADMISSION_PASS
