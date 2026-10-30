@@ -25,6 +25,10 @@ from typing import Any
 import cloudpanel
 import cutover
 import inventory
+import native_scratch_restore
+import isolated_db_restore
+import private_recovery_gate
+import migration_remainder
 import package as package_engine
 import server_migration as legacy
 import transport
@@ -2672,12 +2676,17 @@ def prepare_migration(
     source: dict[str, Any],
     domains: list[str],
     confirm: str,
+    *,
+    remainder_parent: str | None = None,
+    expected_source_identity: str | None = None,
 ) -> dict[str, Any]:
     if confirm != "PREPARE_PULL_MIGRATION":
         raise PullMigrationError("explicit confirmation required: PREPARE_PULL_MIGRATION")
     source_plan = source_probe(source, domains)
-    target = target_preflight_local(source_plan)
     source_identity = str(source_plan.get("source_server_identity", "UNKNOWN"))
+    if expected_source_identity is not None and source_identity != expected_source_identity:
+        raise PullMigrationError("REMAINDER_SOURCE_SERVER_CHANGED")
+    target = target_preflight_local(source_plan)
     mid = migration_id(source_identity, str(target["target_identity"]))
     root = state_dir(mid)
     root.mkdir(parents=True, mode=0o700, exist_ok=False)
@@ -2706,12 +2715,43 @@ def prepare_migration(
         "dns_changed_by_p07": False,
         "source_delete_allowed": False,
         "existing_target_overwrite_allowed": False,
+        "partial_parent_migration_id": remainder_parent,
+        "cutover_prohibited": bool(remainder_parent),
         "secrets_emitted": False,
     }
     for site in state["sites"]:
         site["stage_status"] = "PENDING"
     save_state(state)
     return resume_prepare_migration(mid)
+
+
+def remainder_scope(mid: str) -> dict[str, Any]:
+    """Read-only parent-state selector; no remote call or state update."""
+    try:
+        return migration_remainder.select(load_state(mid))
+    except migration_remainder.RemainderBlocked as exc:
+        raise PullMigrationError(str(exc)) from None
+
+
+def prepare_remainder(mid: str, confirm: str) -> dict[str, Any]:
+    """Stage only the untouched suffix in a new state, not the blocked site.
+
+    Normal target inventory preflight rejects already-existing destinations.
+    This never clears the parent SQL guard or authorizes a partial cutover.
+    """
+    if confirm != f"STAGE_REMAINDER:{mid}":
+        raise PullMigrationError("STAGE_REMAINDER_CONFIRMATION_REQUIRED")
+    parent = load_state(mid)
+    try:
+        scope = migration_remainder.select(parent)
+    except migration_remainder.RemainderBlocked as exc:
+        raise PullMigrationError(str(exc)) from None
+    state = prepare_migration(
+        parent["source"], scope["candidate_domains"], "PREPARE_PULL_MIGRATION",
+        remainder_parent=mid,
+        expected_source_identity=str(parent["source_server_identity"]),
+    )
+    return state
 
 
 def resume_prepare_migration(mid: str) -> dict[str, Any]:
@@ -2789,6 +2829,8 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
 
 def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
     state = load_state(mid)
+    if state.get("cutover_prohibited") or state.get("partial_parent_migration_id"):
+        raise PullMigrationError("PARTIAL_REMAINDER_CUTOVER_REQUIRES_CONSOLIDATED_RECOVERY")
     if state.get("status") not in {
         "PREPARED", "CUTOVER_RUNNING", "CUTOVER_FAILED_ROLLED_BACK"
     }:
@@ -3135,6 +3177,8 @@ def summary(state: dict[str, Any]) -> dict[str, Any]:
         "existing_target_overwrite_allowed": bool(
             state.get("existing_target_overwrite_allowed", False)
         ),
+        "partial_parent_migration_id": state.get("partial_parent_migration_id"),
+        "cutover_prohibited": bool(state.get("cutover_prohibited", False)),
         "secrets_emitted": bool(state.get("secrets_emitted", False)),
     }
 
@@ -3644,6 +3688,13 @@ def main() -> int:
     resume = sub.add_parser("resume")
     resume.add_argument("--migration-id", required=True)
 
+    remainder_plan = sub.add_parser("remainder-plan")
+    remainder_plan.add_argument("--migration-id", required=True)
+
+    remainder_prepare = sub.add_parser("remainder-prepare")
+    remainder_prepare.add_argument("--migration-id", required=True)
+    remainder_prepare.add_argument("--confirm", required=True)
+
     cut = sub.add_parser("cutover")
     cut.add_argument("--migration-id", required=True)
     cut.add_argument("--confirm", required=True)
@@ -3657,6 +3708,29 @@ def main() -> int:
     rollback = sub.add_parser("rollback")
     rollback.add_argument("--migration-id", required=True)
     rollback.add_argument("--confirm", required=True)
+
+    recover = sub.add_parser("recovery-evidence")
+    recover.add_argument("--source-package", type=Path, required=True)
+    recover.add_argument("--target-package", type=Path, required=True)
+    recover.add_argument("--site", required=True)
+
+    isolated = sub.add_parser("isolated-restore")
+    isolated.add_argument("--source-package", type=Path, required=True)
+    isolated.add_argument("--target-package", type=Path, required=True)
+    isolated.add_argument("--site", required=True)
+    isolated.add_argument("--confirm", required=True)
+
+    native = sub.add_parser("native-restore")
+    native.add_argument("--source-package", type=Path, required=True)
+    native.add_argument("--target-package", type=Path, required=True)
+    native.add_argument("--site", required=True)
+    native.add_argument("--confirm", required=True)
+
+    quarantined = sub.add_parser("scratch-restore-quarantined")
+    quarantined.add_argument("--source-package", type=Path, required=True)
+    quarantined.add_argument("--target-package", type=Path, required=True)
+    quarantined.add_argument("--site", required=True)
+    quarantined.add_argument("--confirm", required=True)
 
     diagnose = sub.add_parser("diagnose-sql")
     diagnose.add_argument("--migration-id", required=True)
@@ -3749,6 +3823,10 @@ def main() -> int:
             ))
         elif args.command == "resume":
             result = summary(resume_prepare_migration(args.migration_id))
+        elif args.command == "remainder-plan":
+            result = remainder_scope(args.migration_id)
+        elif args.command == "remainder-prepare":
+            result = summary(prepare_remainder(args.migration_id, args.confirm))
         elif args.command == "cutover":
             result = summary(cutover_migration(args.migration_id, args.confirm))
         elif args.command == "finalize":
@@ -3760,6 +3838,22 @@ def main() -> int:
             ))
         elif args.command == "rollback":
             result = summary(rollback_migration(args.migration_id, args.confirm))
+        elif args.command == "recovery-evidence":
+            result = private_recovery_gate.evaluate(
+                args.source_package, args.target_package, args.site
+            )
+        elif args.command == "isolated-restore":
+            result = isolated_db_restore.rehearse(
+                args.source_package, args.target_package, args.site, args.confirm
+            )
+        elif args.command == "native-restore":
+            result = native_scratch_restore.rehearse(
+                args.source_package, args.target_package, args.site, args.confirm
+            )
+        elif args.command == "scratch-restore-quarantined":
+            result = native_scratch_restore.rehearse_quarantined(
+                args.source_package, args.target_package, args.site, args.confirm
+            )
         elif args.command == "diagnose-sql":
             result = diagnose_sql_difference(
                 args.migration_id, args.domain,
@@ -3802,6 +3896,23 @@ def main() -> int:
         print(f"ERROR: {exc}", file=os.sys.stderr)
         return 13
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    if args.command == "scratch-restore-quarantined" and not (
+        result.get("scratch_imports_completed") is True
+        and result.get("cutover_allowed") is False
+        and result.get("actual_source_restore_verified") is False
+        and result.get("actual_target_restore_verified") is False
+    ):
+        return 13
+    if args.command == "native-restore" and not (
+        result.get("actual_source_restore_verified") is True
+        and result.get("actual_target_restore_verified") is True
+    ):
+        return 13
+    if args.command == "isolated-restore" and not (
+        result.get("actual_source_restore_verified") is True
+        and result.get("actual_target_restore_verified") is True
+    ):
+        return 13
     return 0
 
 
