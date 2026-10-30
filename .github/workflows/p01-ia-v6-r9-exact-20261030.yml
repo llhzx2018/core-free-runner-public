@@ -546,6 +546,82 @@ jobs:
           JS
           echo P01_IA5_R47_OWNER_DESKTOP_BROWSER=PASS
 
+      - name: Disposable real SQLite and whole-site disaster restore success path
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root=/tmp/p01-ia6-r9-restore
+          mkdir -p "$root"
+          cp -a candidate/src/. "$root/"
+          (cd "$root" && php -S 127.0.0.1:18925 -t . >/tmp/p01-ia6-r9-restore-server.log 2>&1) &
+          pid=$!
+          trap 'kill "$pid" >/dev/null 2>&1 || true; rm -rf /tmp/p01-ia6-r9-restore' EXIT
+          for _ in $(seq 1 50); do
+            if curl -fsS -c /tmp/p01-r9-restore-cookie -b /tmp/p01-r9-restore-cookie \
+              http://127.0.0.1:18925/setup.php -o /tmp/p01-r9-restore-setup.html; then break; fi
+            sleep 1
+          done
+          csrf="$(python3 - <<'PY'
+          import re
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',open('/tmp/p01-r9-restore-setup.html').read())
+          assert m,'missing setup csrf'
+          print(m.group(1))
+          PY
+          )"
+          curl -fsS -c /tmp/p01-r9-restore-cookie -b /tmp/p01-r9-restore-cookie \
+            -X POST http://127.0.0.1:18925/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode "site_title=IA V6 Restore isolated" \
+            --data-urlencode 'admin_password=P01R9IsolatedRestore!18925' \
+            --data-urlencode 'admin_password_confirm=P01R9IsolatedRestore!18925' \
+            -o /tmp/p01-r9-restore-installed.html
+          (cd "$root" && php cli/verify.php) | grep -Fx VERIFY_PASS=YES
+          VF_E2E_RUNTIME_ROOT="$root" php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=realpath((string)getenv('VF_E2E_RUNTIME_ROOT'));
+          if(!$root||$root!=='/tmp/p01-ia6-r9-restore')throw new RuntimeException('Refuse non-disposable runtime root');
+          require $root.'/app/bootstrap.php';
+          if(!vf_is_installed()||VF_VERSION!=='2.47.485')throw new RuntimeException('Incorrect installed test version');
+          if(!str_starts_with(realpath(VF_PRIVATE_ROOT)?:'',$root.'/'))throw new RuntimeException('Refuse private directory outside disposable root');
+          $assert=static function($ok,$message){if(!$ok)throw new RuntimeException($message);};
+          $db=vf_db();
+          $db->exec("INSERT OR REPLACE INTO settings(setting_key,setting_value,updated_at) VALUES ('ia6_r9_restore_sentinel','baseline',datetime('now'))");
+          $backups=new VfBackupManager($db);
+          $saved=$backups->create('IA V6 R9 disposable SQLite before mutation','manual',true);
+          $key=(string)($saved['backup_key']??'');
+          $assert(strlen($key)>8,'Backup key missing');
+          $view=$backups->previewRestore($key);
+          $assert(($view['backup']['backup_key']??'')===$key,'SQLite restore preview key mismatch');
+          $db->exec("UPDATE settings SET setting_value='mutated' WHERE setting_key='ia6_r9_restore_sentinel'");
+          vf_close_db();
+          $result=VfBackupManager::performRestore($key);
+          $assert(($result['restored']??false)===true,'SQLite restore returned failure');
+          $assert(($result['backup_key']??'')===$key,'SQLite restore ID mismatch');
+          $assert(($result['integrity']??'')==='ok','SQLite integrity not confirmed');
+          $assert((int)($result['foreign_key_errors']??-1)===0,'SQLite FK not confirmed');
+          $db=vf_db();
+          $assert($db->query("SELECT setting_value FROM settings WHERE setting_key='ia6_r9_restore_sentinel'")->fetchColumn()==='baseline','SQLite restore did not restore canonical user data');
+          echo "P01_IA6_R9_REAL_SQLITE_RESTORE_DATA_READBACK=PASS\n";
+          $disaster=new VfDisasterRecovery($db);
+          $package=$disaster->create('IA V6 R9 disposable whole-site restore',true);
+          $packageKey=(string)($package['package_key']??'');
+          $assert(strlen($packageKey)>8,'Disaster package missing');
+          $disaster->verify($packageKey);
+          $db->exec("UPDATE settings SET setting_value='post-disaster-mutation' WHERE setting_key='ia6_r9_restore_sentinel'");
+          vf_close_db();
+          $completed=VfDisasterRecovery::performRestore($packageKey);
+          $assert(($completed['restored']??false)===true,'Disaster restore failed');
+          $assert(($completed['package_key']??'')===$packageKey,'Disaster restore key mismatch');
+          $assert(($completed['integrity']??'')==='ok','Disaster restored integrity not ok');
+          $assert((int)($completed['foreign_key_errors']??-1)===0,'Disaster restore FK not ok');
+          $assert((bool)($completed['pre_restore_package']??$completed['pre_restore_backup']??false),'Missing pre-disaster protection');
+          $db=vf_db();
+          $assert($db->query("SELECT setting_value FROM settings WHERE setting_key='ia6_r9_restore_sentinel'")->fetchColumn()==='baseline','Disaster restore did not restore canonical user data');
+          echo "P01_IA6_R9_REAL_DISASTER_RESTORE_DATA_READBACK=PASS\n";
+          echo "P01_IA6_R9_MID_RESTORE_FAILURE_INJECTION=NOT_PROVEN\n";
+          PHP
+
       - name: Report exact bounded verification
         shell: bash
         run: |
