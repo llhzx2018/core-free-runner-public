@@ -1,0 +1,148 @@
+name: S01 synthetic recovery experiment
+on:
+  push:
+    branches: [task/s01-converter-i18n-proof-20261030]
+    paths: ['.github/workflows/s01-converter-recovery-experiment-20261030.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: control
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 02d4591eed025a3d3a67bc0a150b3ddc448c2ab8
+          persist-credentials: false
+          path: established
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: 246d97c9c3ccf0df3b517b5d7ee2c72cbc4ec147
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: dc5943201a1c1185ae9323396c48a339fd20ef51
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate_plugin
+      - name: Verify exact source and setup
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p proof provider
+          test "$(git -C target rev-parse HEAD)" = 246d97c9c3ccf0df3b517b5d7ee2c72cbc4ec147
+          test "$(git -C target rev-parse 'HEAD^{tree}')" = 99a1e730fa03f8095ab57409a23285c4f016916e
+          git -C target diff --name-only 391b891045885fb192cabd344c5e85872abb765a HEAD | sort > /tmp/changed
+          printf '%s\n' CHANGELOG.md VERSION src/style.css src/inc/runtime-constants.php src/inc/services/frontend-page-progress-service.php src/assets/css/public/pages/families/public-family-02-tool-directory-detail-operations-closure.css src/assets/css/public/vf-theme-public-runtime.css src/inc/bootstrap/public-runtime.php src/inc/frontend-seo-context.php src/inc/modules/module-faq.php src/inc/public-css-owner-registry.php | sort > /tmp/expected
+          diff -u /tmp/expected /tmp/changed
+          php -l target/src/inc/modules/module-faq.php
+          node --check control/lanes/s01-converter-i18n-proof/check.cjs
+          test "$(git -C candidate_plugin rev-parse HEAD)" = dc5943201a1c1185ae9323396c48a339fd20ef51
+          test "$(git -C candidate_plugin rev-parse 'HEAD^{tree}')" = d47cd08461221272d7ae9d32a468063a1af339c0
+          php -l candidate_plugin/src/includes/i18n.php
+          php candidate_plugin/tests/converter-i18n-markup-contract.php
+          php candidate_plugin/tests/browser-stream-i18n-markup-contract.php
+          gh release download v1.25.95 --repo llhzx2018/vf-tools-m3u8 --pattern vf-tools-m3u8_V1.25.95.zip --dir provider
+          echo '030f28066417802dc973cb17be05bd33d182da282dc459f98e096043ddd4fd92  provider/vf-tools-m3u8_V1.25.95.zip' | sha256sum -c
+          python3 - <<'PY'
+          from pathlib import Path,PurePosixPath
+          import hashlib,io,json,zipfile
+          records=[]
+          for checkout,root_name,version,pkg in [('target','vf-tools-theme','1.35.220','vf-tools-theme')]:
+              root=Path(checkout)/'src'
+              files=sorted(p for p in root.rglob('*') if p.is_file())
+              def build():
+                  data=io.BytesIO()
+                  with zipfile.ZipFile(data,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                      for p in files:
+                          assert not p.is_symlink()
+                          n=str(PurePosixPath(root_name)/p.relative_to(root))
+                          assert '..' not in PurePosixPath(n).parts
+                          info=zipfile.ZipInfo(n,date_time=(1980,1,1,0,0,0))
+                          info.compress_type=zipfile.ZIP_DEFLATED
+                          info.external_attr=(p.stat().st_mode & 0o777)<<16
+                          z.writestr(info,p.read_bytes(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+                  return data.getvalue()
+              data=build();assert data==build()
+              out=Path('provider')/(pkg+'_V'+version+'.zip');out.write_bytes(data)
+              with zipfile.ZipFile(out) as z: assert z.testzip() is None
+              records.append(dict(package=str(out),bytes=len(data),sha256=hashlib.sha256(data).hexdigest(),files=len(files)))
+          import subprocess
+          source=Path('candidate_plugin/src')
+          old=Path('provider/vf-tools-m3u8_V1.25.95.zip')
+          updates=['vf-tool-m3u8.php','plugin-manifest.json','includes/i18n.php','includes/skin-seasonal.php']
+          def plugin_bundle():
+              b=io.BytesIO(); seen=set()
+              with zipfile.ZipFile(old) as zin,zipfile.ZipFile(b,'w') as zout:
+                  for info in zin.infolist():
+                      assert info.filename.startswith('vf-tool-m3u8/') and '..' not in PurePosixPath(info.filename).parts
+                      rel=info.filename[len('vf-tool-m3u8/'):]; data=zin.read(info)
+                      if rel in updates:
+                          before=subprocess.check_output(['git','-C','candidate_plugin','show','a3e54d82817a557c62584976b803c6a2223d847c:src/'+rel])
+                          assert data==before,rel
+                          data=(source/rel).read_bytes();seen.add(rel)
+                      zout.writestr(info,data)
+              assert seen==set(updates)
+              return b.getvalue()
+          data=plugin_bundle(); assert data==plugin_bundle()
+          out=Path('provider/vf-tools-m3u8_V1.25.96.zip');out.write_bytes(data)
+          with zipfile.ZipFile(out) as z:
+              assert z.testzip() is None
+              assert b'Version: 1.25.96' in z.read('vf-tool-m3u8/vf-tool-m3u8.php')
+              files=sum(not i.is_dir() for i in z.infolist())
+          records.append(dict(package=str(out),bytes=len(data),sha256=hashlib.sha256(data).hexdigest(),files=files))
+          Path('proof/packages.json').write_text(json.dumps(records,indent=2))
+          print(json.dumps(records))
+          PY
+          gh release download v1.35.219 --repo llhzx2018/vf-tools-theme --pattern vf-tools-theme_V1.35.219.zip --dir provider
+          echo '63168488e5f91b845469847cc6eb2c69534532c816ed5087e653ceeeb5aed64c  provider/vf-tools-theme_V1.35.219.zip' | sha256sum -c
+          gh release download v1.35.216 --repo llhzx2018/vf-tools-theme --pattern vf-tools-theme_V1.35.216.zip --dir provider
+          echo '1aa03833d4c8f94741461c1d4611a35391c1116f4a6b2cfaf9c59e2e112c1f26  provider/vf-tools-theme_V1.35.216.zip' | sha256sum -c
+          gh release download v1.25.94 --repo llhzx2018/vf-tools-m3u8 --pattern vf-tools-m3u8_V1.25.94.zip --dir provider
+          echo '70b90d40da5d69fc7819bd7ada3f15fb0145e64822b788bd94956c7827b2df03  provider/vf-tools-m3u8_V1.25.94.zip' | sha256sum -c
+          npm install --no-audit --no-fund playwright@1.62.1
+          npx playwright install chromium
+          mkdir -p "$HOME/.local/share/fonts"
+          curl -fsSL https://github.com/googlefonts/noto-cjk/raw/main/Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf -o "$HOME/.local/share/fonts/NotoSansCJKsc-Regular.otf"
+          fc-cache -f
+          cp -a established/lanes/s01-frontend-design-20261017 lane
+      - name: Bilingual WordPress workflow
+        run: bash control/lanes/s01-converter-i18n-proof/synthetic-recovery.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s01-iptv-${{ github.run_id }}
+          path: proof/
+          retention-days: 14
+      - name: Remove private sources
+        if: always()
+        run: rm -rf target candidate_plugin provider lane
+
+# Check route fix does not regress the detector task flow.
+
+# Recheck the task flow after SEO timing adjustment.
+
+# Verify prepared 1.35.218 candidate.
+
+# Fix verification harness block closure.
+
+# Verify workspace after locale SEO change.
+
+# Validate empty and populated preview state.
+
+# Diagnose protected option lifecycle changes.
+
+# Capture migration metadata at each upgrade and rollback.
+
+# Distinguish bootstrap rewrites from upgrade effects.
