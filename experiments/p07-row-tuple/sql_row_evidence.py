@@ -24,7 +24,7 @@ _NAME = r"(?:\x60(?:\x60\x60|[^\x60])+\x60|[A-Za-z_][A-Za-z_0-9$.-]*)"
 _HEAD = re.compile(
     rf"^(?P<verb>INSERT|REPLACE)\s+INTO\s+(?P<table>{_NAME})"
     rf"\s*(?P<cols>\(\s*{_NAME}(?:\s*,\s*{_NAME})*\s*\))?"
-    r"\s+VALUES\s*", re.I | re.S,
+    r"(?(cols)\s*|\s+)VALUES\s*", re.I | re.S,
 )
 _COLUMN = re.compile(_NAME)
 _SCALAR = re.compile(
