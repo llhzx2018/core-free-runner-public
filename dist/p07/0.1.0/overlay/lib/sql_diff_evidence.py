@@ -393,6 +393,8 @@ def data_content_evidence(source: Path, target: Path) -> dict[str, Any]:
 
 def diagnostic(source: Path, target: Path) -> dict[str, Any]:
     """Advisory only. No value ever enables migration or changes a verifier."""
+    # Late import avoids a circular import with the shared DDL parser.
+    import sql_pk_conflict_evidence
     try:
         return {
             "schema": "SQL_DIFF_EVIDENCE_V2",
@@ -410,6 +412,7 @@ def diagnostic(source: Path, target: Path) -> dict[str, Any]:
                 set(_schema_statements(source)[0]),
                 set(_schema_statements(target)[0]),
             ),
+            "pk_conflicts": sql_pk_conflict_evidence.diagnostic(source, target),
         }
     except (AdvisoryDiagnosticUnavailable, verify.RestoreVerifyError):
         return {"schema": "SQL_DIFF_EVIDENCE_V2", "verification": "UNAVAILABLE"}
