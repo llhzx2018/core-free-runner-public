@@ -1426,6 +1426,59 @@ def diagnose_sql_difference(
                             "expected_source_tables": expected_source_tables,
                             "source_table_count_matches_expectation": True,
                         })
+                    # Only when the first read-only comparison *already*
+                    # detected a row discrepancy, take one independent source
+                    # readback. It can detect temporal drift, never prove an
+                    # atomic snapshot or authorize migration continuation.
+                    if evidence.get("row_tuples", {}).get("comparison") == "ROW_TUPLES_DIFFER":
+                        evidence["source_readback_stability"] = {
+                            "comparison": "UNAVAILABLE",
+                            "verification": "NOT_A_PASS_GATE",
+                        }
+                        repeat_token = os.urandom(16).hex()
+                        repeat_remote = (
+                            f"{remote_staging_root(state)}/advisory-{repeat_token}.sql.gz"
+                        )
+                        remote_files.append(repeat_remote)
+                        repeat_local = root / "source-readback.sql.gz"
+                        try:
+                            source_export_database(diagnostic_state, database, repeat_remote)
+                            pull_path(state["source"], repeat_remote, repeat_local)
+                            repeat_count = sql_diff_probe.require_nonempty_source_schema(
+                                repeat_local
+                            )
+                            if repeat_count != count:
+                                evidence["source_readback_stability"] = {
+                                    "comparison": "TABLE_COUNT_CHANGED",
+                                    "verification": "NOT_A_PASS_GATE",
+                                }
+                            else:
+                                # Table identity, not only table count, is
+                                # checked by the independent multiset parser.
+                                names_first = set(sql_diff_probe._schema_statements(source_dump)[0])
+                                names_second = set(sql_diff_probe._schema_statements(repeat_local)[0])
+                                stable = sql_diff_probe.sql_multiset_evidence.diagnostic(
+                                    source_dump, repeat_local,
+                                    names_first, names_second,
+                                )
+                                if stable.get("comparison") == "ROW_MULTISET_EQUAL_NOT_VERIFIED":
+                                    state_label = "SAME_DUMP_TUPLES_IN_READBACK_WINDOW"
+                                elif stable.get("comparison") == "ROW_MULTISET_DIFFER":
+                                    state_label = "SOURCE_TUPLES_CHANGED_BETWEEN_EXPORTS"
+                                else:
+                                    state_label = "UNAVAILABLE"
+                                evidence["source_readback_stability"] = {
+                                    "comparison": state_label,
+                                    "verification": "NOT_A_PASS_GATE",
+                                }
+                        except (
+                            PullMigrationError, cloudpanel.CloudPanelError,
+                            transport.TransportError, OSError, ValueError,
+                            sql_diff_probe.AdvisoryDiagnosticUnavailable,
+                        ):
+                            # A failed second read never masks the original
+                            # evidence or produces a migration acceptance.
+                            pass
                     break
             except (
                 PullMigrationError, cloudpanel.CloudPanelError,
