@@ -51,8 +51,8 @@ class MultilineDataIntegrityTests(unittest.TestCase):
                 self.assertNotEqual(self.fingerprint(source), self.fingerprint(target))
 
     def test_escaped_quotes_backslash_commas_and_semicolon(self):
-        source = SCHEMA + r"INSERT INTO \x60secret\x60 VALUES (1,'it\'s ; hello, world \\bye');" + "\n"
-        target = SCHEMA + r"INSERT INTO \x60secret\x60 VALUES" + "\n" + r"(1,'it\'s ; hello, world \\bye');" + "\n"
+        source = SCHEMA + r"INSERT INTO \x60secret\x60 VALUES (1,'it\'s ; hello, world \\bye');".replace(r"\x60", "\x60") + "\n"
+        target = SCHEMA + r"INSERT INTO \x60secret\x60 VALUES".replace(r"\x60", "\x60") + "\n" + r"(1,'it\'s ; hello, world \\bye');" + "\n"
         self.assertEqual(self.fingerprint(source), self.fingerprint(target))
         other = target.replace(r"\\bye", r"\\changed")
         self.assertNotEqual(self.fingerprint(source), self.fingerprint(other))
