@@ -52,8 +52,7 @@ class ResumeDataProtectionTests(unittest.TestCase):
             site.mkdir(parents=True)
             dump=basedir/"source.sql.gz"
             dump.write_bytes(b"synthetic-no-private-SQL")
-            marker=engine.target_db_marker("synthetic","synthetic.example","synthetic_db",1)
-            # The marker path is derived from STATE_ROOT, hence patch it.
+            # Derive marker only under isolated, patched state root.
             with mock.patch.object(engine,"STATE_ROOT",basedir/"state"):
                 marker=engine.target_db_marker(
                     "synthetic","synthetic.example","synthetic_db",1
@@ -103,7 +102,7 @@ class ResumeDataProtectionTests(unittest.TestCase):
                 ):
                     with self.assertRaisesRegex(
                         engine.ServerMigrationError,
-                        "TARGET_DATABASE_OWNERSHIP_UNVERIFIED",
+                        "ownership is unverified",
                     ):
                         engine.target_create_database_local(
                             "synthetic","synthetic.example",site,"synthetic_db",1,dump
