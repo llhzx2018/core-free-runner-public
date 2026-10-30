@@ -97,6 +97,102 @@ jobs:
           )
           echo P01_IA5_EXACT_SYNTAX_AND_CONTRACTS=PASS
 
+      - name: Exact baseline canonical, FULL, Atomic, sentinel and rollback gate
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          VERSION: 2.47.484
+          SOURCE: 2.47.483
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$GH_TOKEN"
+          git clone -q --depth 1 --branch "v$SOURCE" "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" stable
+          test "$(tr -d '\r\n ' < stable/VERSION)" = "$SOURCE"
+          TARGET_TREE="$(git -C candidate rev-parse HEAD^{tree})"
+          cat >/tmp/p01-r48-lane.json <<EOF
+          {"schema":"vf-ephemeral-lane-spec/v1","lane_id":"p01-r48-exact","project_id":"P01","repository":"$PRODUCT_REPO","target_version":"$VERSION","target_sha":"$TARGET_SHA","target_tree":"$TARGET_TREE","source_versions":["$SOURCE"],"schema_version":"","candidate_run":"${{ github.run_id }}","previous_lane":{},"extra":{}}
+          EOF
+          python3 scripts/ephemeral_lane_spec.py validate --spec /tmp/p01-r48-lane.json >/dev/null
+          python3 scripts/ephemeral_lane_worktree.py run-isolated --spec /tmp/p01-r48-lane.json --repo candidate --label r48-canonical -- bash tests/canonical_release_regression.sh . "$GITHUB_WORKSPACE/stable" --require-zero-debt | tee /tmp/p01-r48-canonical.txt
+          grep -Fx 'P01_CANONICAL_UNIT_REGRESSION=PASS' /tmp/p01-r48-canonical.txt
+          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-r48-canonical.txt
+          echo P01_R48_EXACT_CANONICAL=PASS
+          mkdir -p /tmp/p01-r48-base/full /tmp/p01-r48-base/update
+          gh release download "v$SOURCE" -R "$PRODUCT_REPO" -D /tmp/p01-r48-base \
+            -p "VF-Start-V${SOURCE}-FULL.zip" -p "VF_Start_V${SOURCE}_UPDATE.zip"
+          unzip -q "/tmp/p01-r48-base/VF-Start-V${SOURCE}-FULL.zip" -d /tmp/p01-r48-base/full
+          unzip -q "/tmp/p01-r48-base/VF_Start_V${SOURCE}_UPDATE.zip" -d /tmp/p01-r48-base/update
+          test -f "/tmp/p01-r48-base/update/repair-v${SOURCE}.php"
+          python3 scripts/p01-maintenance-release.py \
+            --candidate candidate/src --baseline-full /tmp/p01-r48-base/full \
+            --baseline-repair "/tmp/p01-r48-base/update/repair-v${SOURCE}.php" \
+            --out /tmp/p01-r48-art --version "$VERSION" --source-version "$SOURCE" \
+            --target-sha "$TARGET_SHA" --target-tree "$TARGET_TREE" >/tmp/p01-r48-build.txt
+          FULL="/tmp/p01-r48-art/VF-Start-V${VERSION}-FULL.zip"
+          UPDATE="/tmp/p01-r48-art/VF_Start_V${VERSION}_UPDATE.zip"
+          test -s "$FULL" && test -s "$UPDATE"
+          test "$(unzip -Z1 "$UPDATE")" = "repair-v${VERSION}.php"
+          unzip -t "$FULL" >/dev/null
+          unzip -t "$UPDATE" >/dev/null
+          if unzip -Z1 "$FULL" | grep -Ei '(^|/)(\.runtime\.php|.*\.sqlite3?$|.*\.db$|private/|backups?/|sessions?/|tokens?/|staging/)'; then
+            echo P01_PRIVATE_PAYLOAD_LEAK; exit 92
+          fi
+          if unzip -Z1 "$UPDATE" | grep -Ei '(^|/)(\.runtime\.php|.*\.sqlite3?$|.*\.db$|private/|backups?/|sessions?/|tokens?/|staging/)'; then
+            echo P01_PRIVATE_PAYLOAD_LEAK; exit 92
+          fi
+          mkdir -p /tmp/p01-r48-atomic
+          unzip -q "$UPDATE" -d /tmp/p01-r48-atomic
+          REPAIR="/tmp/p01-r48-atomic/repair-v${VERSION}.php"
+          php -l "$REPAIR"
+          php "$REPAIR" --self-test | tee /tmp/p01-r48-selftest.txt
+          grep -Fq '"ok":true' /tmp/p01-r48-selftest.txt
+          echo P01_R48_EXACT_FULL_ATOMIC_BUILD=PASS
+          install_site(){
+            local zip="$1" root="$2" port="$3"
+            rm -rf "$root"; mkdir -p "$root"; unzip -q "$zip" -d "$root"
+            (cd "$root" && php -S 127.0.0.1:"$port" -t . >/tmp/p01-r48-install-"$port".log 2>&1) &
+            local pid=$!
+            for _ in $(seq 1 45); do
+              if curl -fsS "http://127.0.0.1:$port/setup.php" -o /tmp/p01-r48-setup-"$port".html; then break; fi
+              sleep 1
+            done
+            local csrf="$(python3 -c 'import re,sys; print(re.search(r"name=\"setup_csrf\"\s+value=\"([^\"]+)\"",open(sys.argv[1]).read()).group(1))' /tmp/p01-r48-setup-"$port".html)"
+            curl -fsS -X POST "http://127.0.0.1:$port/setup.php" \
+              --data-urlencode "setup_csrf=$csrf" \
+              --data-urlencode "site_title=R48 Synthetic" \
+              --data-urlencode "admin_password=ReleaseR48!$port" \
+              --data-urlencode "admin_password_confirm=ReleaseR48!$port" \
+              -o /tmp/p01-r48-installed-"$port".html
+            (cd "$root" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+            kill "$pid"; wait "$pid" || true
+          }
+          install_site "$FULL" /tmp/p01-r48-clean 18850
+          test "$(tr -d '\r\n ' < /tmp/p01-r48-clean/VERSION.txt)" = "$VERSION"
+          echo P01_R48_CLEAN_FULL_INSTALL=PASS
+          install_site "/tmp/p01-r48-base/VF-Start-V${SOURCE}-FULL.zip" /tmp/p01-r48-upgrade 18851
+          php -r 'require $argv[1]."/app/bootstrap.php"; $db=vf_db(); $db->exec("CREATE TABLE IF NOT EXISTS r48_sentinel (name TEXT NOT NULL)"); $db->exec("INSERT INTO r48_sentinel VALUES (\"private-owned\")");' /tmp/p01-r48-upgrade
+          cp "$REPAIR" /tmp/p01-r48-upgrade/
+          php "$REPAIR" --verify-source=/tmp/p01-r48-upgrade | grep -F '"ok":true'
+          php "$REPAIR" --run=/tmp/p01-r48-upgrade | tee /tmp/p01-r48-upgrade.txt
+          grep -Fq '"ok":true' /tmp/p01-r48-upgrade.txt
+          test "$(tr -d '\r\n ' < /tmp/p01-r48-upgrade/VERSION.txt)" = "$VERSION"
+          (cd /tmp/p01-r48-upgrade && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          php -r 'require $argv[1]."/app/bootstrap.php"; if(vf_db()->query("SELECT name FROM r48_sentinel")->fetchColumn()!=="private-owned")exit(3);' /tmp/p01-r48-upgrade
+          php "$REPAIR" --run=/tmp/p01-r48-upgrade | grep -F '"already_current":true'
+          echo P01_R48_UPGRADE_DATA_PRESERVATION_AND_REPEAT=PASS
+          install_site "/tmp/p01-r48-base/VF-Start-V${SOURCE}-FULL.zip" /tmp/p01-r48-rollback 18852
+          cp "$REPAIR" /tmp/p01-r48-rollback/
+          set +e
+          VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$REPAIR" --run=/tmp/p01-r48-rollback >/tmp/p01-r48-rollback.txt 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          test "$(tr -d '\r\n ' < /tmp/p01-r48-rollback/VERSION.txt)" = "$SOURCE"
+          (cd /tmp/p01-r48-rollback && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_R48_ATOMIC_FAILURE_ROLLBACK=PASS
+
       - name: Isolated Owner desktop 11+1 management geometry and task rail
         shell: bash
         run: |
