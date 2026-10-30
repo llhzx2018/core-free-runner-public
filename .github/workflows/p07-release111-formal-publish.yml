@@ -1,0 +1,128 @@
+name: P07 release111 formal publication (exact gated)
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'experiments/p07-release111-attestation.json'
+      - 'installers/p07-final.sh'
+      - '.github/workflows/p07-release111-formal-publish.yml'
+permissions:
+  contents: read
+concurrency:
+  group: p07-release111-formal-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: >-
+      ${{ github.repository == 'llhzx2018/core-free-runner-public' && github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'P07 release111 exact gated formal publish') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RELEASE_REPO: llhzx2018/core-free-runner-public
+      RELEASE_TAG: p07-v0.1.0-release111
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout exact merged public distribution
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Exact source, manifest and installer trust-chain preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN" || { echo P07_RELEASE_WRITE_CAPABILITY_MISSING; exit 78; }
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(gh api "repos/$RELEASE_REPO/git/ref/heads/main" --jq '.object.sha')" = "$GITHUB_SHA" || { echo P07_RELEASE104_MAIN_CHANGED; exit 78; }
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json
+          a=json.loads(Path('experiments/p07-release111-attestation.json').read_text())
+          assert a['status']=='FORMAL_STAGING_NOT_PUBLISHED'
+          assert a['product_source_sha']=='b661e77a5a5e2ce072eab45cb242da992dc2c000'
+          assert a['product_build']=='0.1.0-release111'
+          assert a['system_care_build']=='0.1.0-rc80'
+          assert not any(a['negative'].values())
+          def blob(p):
+              raw=p.read_bytes()
+              return hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
+          def manifest(root,name):
+              names=set()
+              for row in (root/name).read_text().splitlines():
+                  digest,rel=row.split('  ',1)
+                  assert rel not in names and '..' not in Path(rel).parts,rel
+                  names.add(rel)
+                  assert blob(root/rel)==digest,rel
+              return names
+          root=Path('dist/p07/0.1.0/overlay')
+          care=Path('packages/p07-system-care/0.1.0-rc80')
+          runtime=manifest(root,'RUNTIME.gitblob')
+          full=manifest(root,'MANIFEST.gitblob')
+          manifest(care,'MANIFEST.gitblob')
+          assert len(runtime)==49 and len(full)==113
+          assert runtime <= full
+          assert 'lib/sql_diff_evidence.py' in runtime
+          assert 'lib/server_migration_pull.py' in runtime
+          assert 'SOURCE_EXPORT_HELPER_PATH_UNVERIFIED' in (root/'lib/server_migration_pull.py').read_text()
+          assert 'expected_source_tables' in (root/'lib/server_migration_pull.py').read_text()
+          assert 'def require_pinned_migration_engine_pair(' not in (root/'lib/server_migration_pull.py').read_text()
+          assert {'tests/test_sql_diff_command.py','tests/test_sql_diff_evidence.py'} <= full
+          assert (root/'BUILD_ID').read_text().strip()==a['product_build']
+          assert (care/'VERSION').read_text().strip()==a['system_care_build']
+          assert blob(root/'RUNTIME.gitblob')==a['runtime_manifest_blob']
+          assert blob(root/'MANIFEST.gitblob')==a['overlay_manifest_blob']
+          assert blob(care/'MANIFEST.gitblob')==a['system_care_manifest_blob']
+          assert blob(care/'vf-system-care.sh')==a['system_care_ui_blob']
+          assert blob(Path('installers/p07-final.sh'))==a['final_installer_blob']
+          assert a['final_installer_blob'] in Path('installers/p07.sh').read_text()
+          assert a['runtime_manifest_blob'] in Path('installers/p07-final.sh').read_text()
+          assert a['system_care_manifest_blob'] in Path('installers/p07-system-care.sh').read_text()
+          assert '0.1.0-release111' in Path('installers/p07-toolbox.sh').read_text()
+          assert '0.1.0-rc80' in Path('installers/p07-toolbox.sh').read_text()
+          final=Path('installers/p07-final.sh').read_text()
+          assert 'OLD_MOVED=0' in final and 'NEW_INSTALLED=0' in final
+          print('P07_RELEASE104_EXACT_MERGED_PREFLIGHT_PASS')
+          PY
+          bash -n installers/p07.sh installers/p07-final.sh installers/p07-toolbox.sh installers/p07-system-care.sh
+      - name: Publish exact GitHub Release with remote commit identity check
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$RELEASE_TAG" -R "$RELEASE_REPO" >/dev/null 2>&1; then
+            test "$(gh api "repos/$RELEASE_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')" = "$GITHUB_SHA" || { echo P07_RELEASE104_TAG_COLLISION; exit 81; }
+          else
+            gh release create "$RELEASE_TAG" -R "$RELEASE_REPO" --target "$GITHUB_SHA" \
+              --title 'P07 · release111 · 迁移失败后目标站点与数据库完整保留' \
+              --notes 'P07 release111 / System Care rc80. Exact product main b661e77a5a5e2ce072eab45cb242da992dc2c000. Critical safety fix PR #261: legacy failed-migration _target-cleanup-site no longer deletes site or DB solely because migration ownership markers exist. All target assets retained for individually restore-verified owner reconciliation; original release110 resume protection remains. Synthetic-only exact-source Runner #41022741381: 218 tests PASS. Real MySQL8.4/MariaDB11.8 isolated bidirectional restore drill #41021553206 PASS is only synthetic. Original 17-site migration site 8/17 remains PREPARE_FAILED, outstanding 3 unsafe dynamic SQL IF, 3 source-only/5 target-only/5 changed-PK dump-literal discrepancies, no real owner two-sided restore proofs. No auto resume/import, DNS or old-server change; Production owner-only manual upgrade.'
+          fi
+          test "$(gh api "repos/$RELEASE_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')" = "$GITHUB_SHA"
+          test "$(gh api "repos/$RELEASE_REPO/releases/tags/$RELEASE_TAG" --jq '.target_commitish')" = "$GITHUB_SHA"
+          test "$(gh api "repos/$RELEASE_REPO/releases/tags/$RELEASE_TAG" --jq '.draft')" = false
+          test "$(gh api "repos/$RELEASE_REPO/releases/tags/$RELEASE_TAG" --jq '.prerelease')" = false
+          echo P07_RELEASE104_FORMAL_RELEASE_PASS
+      - name: Upload and download exact verified release installers
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          gh release upload "$RELEASE_TAG" -R "$RELEASE_REPO" --clobber installers/p07.sh installers/p07-final.sh installers/p07-toolbox.sh installers/p07-system-care.sh
+          tmp="$(mktemp -d -t p07-release111-assets.XXXXXX)"
+          trap 'rm -rf "$tmp"' EXIT
+          gh release download "$RELEASE_TAG" -R "$RELEASE_REPO" --dir "$tmp"
+          for name in p07.sh p07-final.sh p07-toolbox.sh p07-system-care.sh; do
+            test -f "$tmp/$name"
+            test "$(git hash-object "$tmp/$name")" = "$(git hash-object "installers/$name")"
+          done
+          echo P07_RELEASE104_RELEASE_ASSETS_READBACK_PASS
+      - name: Public raw immutable revision and live main bytes readback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tmp="$(mktemp -t p07-release111-readback.XXXXXX)"
+          trap 'rm -f "$tmp"' EXIT
+          for path in installers/p07.sh installers/p07-final.sh installers/p07-toolbox.sh installers/p07-system-care.sh dist/p07/0.1.0/overlay/RUNTIME.gitblob dist/p07/0.1.0/overlay/MANIFEST.gitblob dist/p07/0.1.0/overlay/lib/sql_diff_evidence.py packages/p07-system-care/0.1.0-rc80/MANIFEST.gitblob; do
+            for ref in "$GITHUB_SHA" main; do
+              url="https://raw.githubusercontent.com/$RELEASE_REPO/$ref/$path"
+              curl -fsSL --retry 5 --retry-delay 2 --proto '=https' --tlsv1.2 "$url" -o "$tmp"
+              test "$(git hash-object "$tmp")" = "$(git hash-object "$path")" || { echo P07_RELEASE104_REMOTE_BYTES_MISMATCH >&2; exit 1; }
+            done
+          done
+          echo P07_RELEASE104_PUBLIC_DISTRIBUTION_READBACK_PASS

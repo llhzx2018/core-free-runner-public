@@ -595,7 +595,7 @@ class ServerMigrationAutomationTests(unittest.TestCase):
                 clpctl.assert_not_called()
                 cleanup.assert_not_called()
 
-    def test_target_cleanup_rejects_foreign_or_malformed_marker_before_any_delete(self) -> None:
+    def test_target_cleanup_retains_foreign_or_malformed_markers_without_deletion(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             mid = "test-mid"
@@ -609,17 +609,16 @@ class ServerMigrationAutomationTests(unittest.TestCase):
                     with mock.patch.object(engine, "STATE_ROOT", base / "state"):
                         site = engine.target_site_marker(mid, domain)
                         site.write_text(json.dumps(bad), encoding="utf-8")
+                        before = site.read_bytes()
                         with mock.patch.object(engine.site_lifecycle, "cleanup_site") as cleanup_site, \
                              mock.patch.object(engine.site_lifecycle, "cleanup_database") as cleanup_db:
-                            with self.assertRaisesRegex(
-                                engine.ServerMigrationError,
-                                "ownership is unverified",
-                            ):
-                                engine.target_cleanup_site_local(mid, domain, ["db1"])
+                            result = engine.target_cleanup_site_local(mid, domain, ["db1"])
+                            self.assertEqual(result["status"], "RETAINED_RECOVERY_REQUIRED")
                             cleanup_site.assert_not_called()
                             cleanup_db.assert_not_called()
+                        self.assertEqual(site.read_bytes(), before)
 
-    def test_target_cleanup_validates_all_database_markers_before_deleting_any(self) -> None:
+    def test_target_cleanup_retains_mixed_ownership_database_markers(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             mid = "test-mid"
@@ -629,26 +628,26 @@ class ServerMigrationAutomationTests(unittest.TestCase):
                     engine.target_site_marker(mid, domain),
                     {"domain": domain, "created_by_migration": mid}
                 )
-                engine.atomic_private_json(
-                    engine.target_db_marker(mid, domain, "db1", 1),
-                    {"domain": domain, "database": "db1",
-                     "created_by_migration": mid}
-                )
-                engine.atomic_private_json(
-                    engine.target_db_marker(mid, domain, "db2", 2),
-                    {"domain": domain, "database": "db2",
-                     "created_by_migration": "foreign"}
-                )
+                a = engine.target_db_marker(mid, domain, "db1", 1)
+                b = engine.target_db_marker(mid, domain, "db2", 2)
+                engine.atomic_private_json(a, {
+                    "domain": domain, "database": "db1",
+                    "created_by_migration": mid
+                })
+                engine.atomic_private_json(b, {
+                    "domain": domain, "database": "db2",
+                    "created_by_migration": "foreign"
+                })
                 with mock.patch.object(engine.site_lifecycle, "cleanup_site") as site_delete, \
                      mock.patch.object(engine.site_lifecycle, "cleanup_database") as db_delete:
-                    with self.assertRaisesRegex(
-                        engine.ServerMigrationError, "ownership is unverified"
-                    ):
-                        engine.target_cleanup_site_local(mid, domain, ["db1", "db2"])
+                    result = engine.target_cleanup_site_local(mid, domain, ["db1", "db2"])
+                    self.assertEqual(result["status"], "RETAINED_RECOVERY_REQUIRED")
                     db_delete.assert_not_called()
                     site_delete.assert_not_called()
+                self.assertTrue(a.exists())
+                self.assertTrue(b.exists())
 
-    def test_target_cleanup_with_owned_markers_cleans_only_transaction_assets(self) -> None:
+    def test_target_cleanup_even_owned_markers_requires_independent_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             mid = "test-mid"
@@ -664,11 +663,14 @@ class ServerMigrationAutomationTests(unittest.TestCase):
                 with mock.patch.object(engine.site_lifecycle, "cleanup_site", return_value=True) as site_delete, \
                      mock.patch.object(engine.site_lifecycle, "cleanup_database", return_value=True) as db_delete:
                     result = engine.target_cleanup_site_local(mid, domain, ["db1"])
-                self.assertEqual(result["status"], "CLEANED")
-                db_delete.assert_called_once_with("db1", clpctl="clpctl")
-                site_delete.assert_called_once_with(domain, clpctl="clpctl")
-                self.assertFalse(site_marker.exists())
-                self.assertFalse(db_marker.exists())
+                self.assertEqual(result["status"], "RETAINED_RECOVERY_REQUIRED")
+                self.assertFalse(result["database_cleanup"])
+                self.assertFalse(result["site_cleanup"])
+                self.assertFalse(result["data_writes_performed"])
+                db_delete.assert_not_called()
+                site_delete.assert_not_called()
+                self.assertTrue(site_marker.exists())
+                self.assertTrue(db_marker.exists())
 
     def test_target_database_marker_preserves_existing_rows_and_blocks_resume(self) -> None:
         with tempfile.TemporaryDirectory() as td:
