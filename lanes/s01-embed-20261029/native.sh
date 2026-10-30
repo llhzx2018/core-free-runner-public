@@ -17,8 +17,9 @@ cli config set DISABLE_WP_CRON true --raw >/dev/null
 cli core install --url=http://127.0.0.1:18880 --title='Synthetic Frontend Review' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
 docker exec "$WP" mkdir -p /var/www/html/wp-content/themes/vf-tools-theme /var/www/html/wp-content/mu-plugins
 docker cp target/src/. "$WP:/var/www/html/wp-content/themes/vf-tools-theme/"
-docker cp provider/vf-tools-m3u8_V1.25.94.zip "$WP:/tmp/provider.zip"
+docker cp provider/vf-tools-m3u8_V1.25.96.zip "$WP:/tmp/provider.zip"
 cli plugin install /tmp/provider.zip --activate >/dev/null
+docker cp provider-source/src/public/js/tool-runtime-i18n.js "$WP:/var/www/html/wp-content/plugins/vf-tool-m3u8/public/js/tool-runtime-i18n.js"
 docker cp lane/fixture.php "$WP:/var/www/html/wp-content/mu-plugins/progress-fixture.php"
 docker exec "$WP" chown -R www-data:www-data /var/www/html/wp-content/themes/vf-tools-theme
 cli theme activate vf-tools-theme >/dev/null
