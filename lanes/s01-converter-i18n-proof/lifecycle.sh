@@ -48,6 +48,7 @@ PYBOOT
 cli eval-file /tmp/snapshot.php > proof/state-before.sha256
 node control/lanes/s01-converter-i18n-proof/check.cjs
 cli eval-file /tmp/plugin-snapshot.php > proof/plugin-options-before.json
+cli eval-file /tmp/plugin-snapshot.php > proof/plugin-options-repeat-before-install.json
 tv(){ test "$(cli theme get vf-tools-theme --field=version)" = "$1"; }
 pv(){ test "$(cli plugin get vf-tool-m3u8 --field=version)" = "$1"; }
 tv 1.35.220; pv 1.25.96
