@@ -201,6 +201,31 @@ class SqlDiffEvidenceTests(unittest.TestCase):
         self.assertNotIn("private_table", json.dumps(unknown))
         self.assertNotIn("private message", json.dumps(unknown))
 
+    def test_auto_increment_counter_direction_is_metadata_not_parity(self):
+        table = "CREATE TABLE \x60private_table\x60 (\x60id\x60 INT) ENGINE=InnoDB "
+        suffix = " DEFAULT CHARSET=utf8mb4;\n"
+        cases = (
+            ("AUTO_INCREMENT=100", "AUTO_INCREMENT=90", "SOURCE_GREATER"),
+            ("AUTO_INCREMENT=90", "AUTO_INCREMENT=100", "TARGET_GREATER"),
+            ("AUTO_INCREMENT=100", "", "SOURCE_ONLY"),
+            ("", "AUTO_INCREMENT=100", "TARGET_ONLY"),
+        )
+        for source, target, relation in cases:
+            with self.subTest(relation=relation):
+                result = self.probe(table + source + suffix, table + target + suffix)
+                summary = result["schema_difference"]
+                self.assertEqual(summary["changed_options"], 1)
+                self.assertEqual(summary["changed_option_classes"]["AUTO_INCREMENT"], 1)
+                self.assertEqual(summary["auto_increment_counter_relation"][relation], 1)
+                self.assertEqual(result["verification"], "NOT_A_PASS_GATE")
+                self.assertNotIn("100", json.dumps(result))
+                self.assertNotIn("90", json.dumps(result))
+                self.assertNotIn("private_table", json.dumps(result))
+        unknown = evidence._auto_increment_counter_relation(
+            "AUTO_INCREMENT=1234567890123456789012345", "AUTO_INCREMENT=7",
+        )
+        self.assertEqual(unknown, "TARGET_ONLY")
+
     def test_unsafe_if_has_specific_redacted_reason_without_approval(self):
         source = "CREATE TABLE `private_table` (`id` INT);\n"
         source += "/*!50003 SET @a=IF(@flag, 'SET GLOBAL sql_notes=0', 'SELECT 1') */;\n"
