@@ -1803,40 +1803,36 @@ def target_cleanup_site_local(
     domain: str,
     databases: list[str],
 ) -> dict[str, Any]:
-    # Validate *all* ownership records before the first destructive call,
-    # so a forged, corrupt or foreign marker cannot cause partial deletion.
-    owned_databases: list[tuple[str, Path]] = []
-    for index, database in enumerate(databases, 1):
-        marker = target_db_marker(mid, domain, database, index)
-        if read_target_ownership_marker(
-            marker,
-            {"domain": domain, "database": database,
-             "created_by_migration": mid},
-        ) is not None:
-            owned_databases.append((database, marker))
-    site_marker = target_site_marker(mid, domain)
-    owned_site = read_target_ownership_marker(
-        site_marker, {"domain": domain, "created_by_migration": mid}
-    ) is not None
+    """Fail-closed target retention after failed source-push preparation.
 
-    db_ok = True
-    for database, marker in owned_databases:
-        cleaned = site_lifecycle.cleanup_database(database, clpctl="clpctl")
-        db_ok = cleaned and db_ok
-        if cleaned:
-            marker.unlink(missing_ok=True)
-    site_ok = True
-    if owned_site:
-        site_ok = site_lifecycle.cleanup_site(domain, clpctl="clpctl")
-        if site_ok:
-            site_marker.unlink(missing_ok=True)
+    The legacy _target-cleanup-site entrypoint once deleted every marked
+    target database and then its site. A private ownership marker establishes
+    *creation provenance*, never that the database/site has no subsequent
+    business changes. Especially after a failed cross-engine import, cleanup
+    can destroy target-only rows. It is not a restoration or a rollback.
+
+    Retain ALL target assets without probing or trusting any marker; do not
+    silently replace ownership uncertainty with permission to delete.
+    A separately verified restore/owner-controlled recovery path is required.
+    """
+    if not SAFE_ID_RE.fullmatch(mid):
+        raise ServerMigrationError("invalid target migration id")
+    try:
+        cloudpanel.validate_domain(domain)
+        for db in databases:
+            cloudpanel.validate_name(db, "database")
+    except (cloudpanel.CloudPanelError, ValueError) as exc:
+        raise ServerMigrationError("TARGET_RECOVERY_SCOPE_INVALID") from exc
     return {
-        "status": "CLEANED" if db_ok and site_ok else "PARTIAL",
-        "database_cleanup": db_ok,
-        "site_cleanup": site_ok,
+        "status": "RETAINED_RECOVERY_REQUIRED",
+        "database_cleanup": False,
+        "site_cleanup": False,
+        "data_writes_performed": False,
+        "source_deleted": False,
+        "dns_changed": False,
+        "recovery_proof": "NOT_ESTABLISHED",
         "secrets_emitted": False,
     }
-
 
 def freeze_source_runtime(state: dict[str, Any]) -> None:
     recovery = state_dir(state["migration_id"]) / "source-runtime"
