@@ -206,13 +206,27 @@ INSERT INTO `wp_posts` VALUES (1),(2);
             with self.assertRaisesRegex(verify_engine.RestoreVerifyError, "conditional SQL DDL"):
                 verify_engine.sql_structure_fingerprint(a)
 
-    def test_cross_engine_multiline_dml_does_not_claim_parity(self) -> None:
+    def test_cross_engine_multiline_dml_needs_exact_statement_content(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            a = Path(td) / "dml.sql.gz"
-            with gzip.open(a, "wt", encoding="utf-8") as f:
-                f.write("CREATE TABLE `t` (`id` int);\nINSERT INTO `t` VALUES\n (1), (2);\n")
-            with self.assertRaisesRegex(verify_engine.RestoreVerifyError, "multiline SQL data"):
-                verify_engine.sql_data_fingerprint(a)
+            a = Path(td) / "multiline.sql.gz"
+            b = Path(td) / "singleline.sql.gz"
+            c = Path(td) / "modified.sql.gz"
+            schema = "CREATE TABLE \x60t\x60 (\x60id\x60 int);\n"
+            for path, data in (
+                (a, "INSERT INTO \x60t\x60 VALUES\n (1), (2);\n"),
+                (b, "INSERT INTO \x60t\x60 VALUES (1),(2);\n"),
+                (c, "INSERT INTO \x60t\x60 VALUES (1),(3);\n"),
+            ):
+                with gzip.open(path, "wt", encoding="utf-8") as f:
+                    f.write(schema + data)
+            self.assertEqual(
+                verify_engine.sql_data_fingerprint(a),
+                verify_engine.sql_data_fingerprint(b),
+            )
+            self.assertNotEqual(
+                verify_engine.sql_data_fingerprint(a),
+                verify_engine.sql_data_fingerprint(c),
+            )
 
     def test_mysql_fingerprint_keeps_real_collation_changes_visible(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

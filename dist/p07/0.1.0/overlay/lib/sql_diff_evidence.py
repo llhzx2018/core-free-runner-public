@@ -249,6 +249,29 @@ def _table_option_change_classes(left: str, right: str) -> set[str]:
     return changed
 
 
+_AUTO_INCREMENT_COUNTER_RE = re.compile(
+    r"(?:^|\s)AUTO_INCREMENT\s*=\s*([0-9]{1,20})(?=\s|;|$)", re.I,
+)
+
+
+def _auto_increment_counter_relation(source_options: str, target_options: str) -> str:
+    """Compare only counter direction; never expose values or approve parity."""
+    source = _AUTO_INCREMENT_COUNTER_RE.search(source_options)
+    target = _AUTO_INCREMENT_COUNTER_RE.search(target_options)
+    if source and not target:
+        return "SOURCE_ONLY"
+    if target and not source:
+        return "TARGET_ONLY"
+    if not source and not target:
+        return "UNKNOWN_OR_UNPARSED"
+    left, right = int(source.group(1)), int(target.group(1))
+    if left > right:
+        return "SOURCE_GREATER"
+    if left < right:
+        return "TARGET_GREATER"
+    return "EQUAL"
+
+
 def schema_difference_counts(source: Path, target: Path) -> dict[str, Any]:
     """Compare normalized CREATE TABLE statements by identity only in memory."""
     left, left_other = _schema_statements(source)
@@ -263,6 +286,12 @@ def schema_difference_counts(source: Path, target: Path) -> dict[str, Any]:
         "changed_indexes": 0, "changed_options": 0,
         "unclassified_tables": 0,
         "changed_option_classes": {name: 0 for name in _TABLE_OPTION_CLASSES},
+        "auto_increment_counter_relation": {
+            name: 0 for name in (
+                "SOURCE_GREATER", "TARGET_GREATER", "SOURCE_ONLY",
+                "TARGET_ONLY", "EQUAL", "UNKNOWN_OR_UNPARSED",
+            )
+        },
         "other_schema_source_only": sum((left_other - right_other).values()),
         "other_schema_target_only": sum((right_other - left_other).values()),
     }
@@ -283,6 +312,9 @@ def schema_difference_counts(source: Path, target: Path) -> dict[str, Any]:
             result["changed_options"] += 1
             for category in _table_option_change_classes(a[2], b[2]):
                 result["changed_option_classes"][category] += 1
+            if "AUTO_INCREMENT" in _table_option_change_classes(a[2], b[2]):
+                relation = _auto_increment_counter_relation(a[2], b[2])
+                result["auto_increment_counter_relation"][relation] += 1
         if a == b:
             result["unclassified_tables"] += 1
     return result

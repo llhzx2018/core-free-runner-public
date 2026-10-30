@@ -926,52 +926,104 @@ _CREATE_OBJECT_RE = re.compile(
     re.IGNORECASE,
 )
 _DATA_STATEMENT_RE = re.compile(r"^(?:INSERT|REPLACE)\s+INTO\s+", re.IGNORECASE)
+# Only a bounded, single-statement, VALUES-only grammar may be fingerprinted.
+_DATA_NAME = r"(?:\x60(?:\x60\x60|[^\x60])+\x60|[A-Za-z_][A-Za-z_0-9$.-]*)"
+_DATA_VALUES_HEAD_RE = re.compile(
+    rf"^(?:INSERT|REPLACE)\s+INTO\s+{_DATA_NAME}"
+    rf"(?:\s*\(\s*{_DATA_NAME}(?:\s*,\s*{_DATA_NAME})*\s*\))?"
+    r"\s+VALUES\s*\(", re.I | re.S,
+)
+_DATA_FINGERPRINT_MAX_STATEMENT = 128 * 1024 * 1024
 
 
-def sql_data_fingerprint(path: Path) -> dict[str, Any]:
-    """Cross-engine content fingerprint for logical MariaDB/MySQL migrations.
+def _sql_data_statement_terminator(line: str, quote: str, escaped: bool) -> tuple[bool, str, bool]:
+    """Find an unquoted semicolon; reject trailing statements and SQL comments."""
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if quote:
+            if escaped:
+                escaped = False
+            elif c == "\\":
+                escaped = True
+            elif c == quote:
+                if i + 1 < len(line) and line[i + 1] == quote:
+                    i += 1
+                else:
+                    quote = ""
+        elif c in ("'", '"', "\x60"):
+            quote = c
+        elif c == ";" and line[i + 1:].strip():
+            raise RestoreVerifyError("SQL data contains multiple statements on one line")
+        elif c == ";":
+            return True, quote, escaped
+        elif c == "#" or line.startswith("/*", i) or line.startswith("--", i):
+            raise RestoreVerifyError("SQL data contains unproven inline comment")
+        i += 1
+    return False, quote, escaped
 
-    DDL emitted by MariaDB and MySQL can differ while representing the same
-    imported data. This fingerprint deliberately compares logical object names
-    plus DML content and ignores engine-specific dump/session metadata.
-    """
+
+def _sql_data_fingerprint_statements(path: Path) -> dict[str, Any]:
     opener = gzip.open if path.name.endswith(".gz") else open
     objects: set[str] = set()
     data_line_hashes: list[str] = []
+    parts: list[str] = []
+    pending_size = 0
+    quote = ""
+    escaped = False
     try:
         with opener(path, "rt", encoding="utf-8", errors="strict") as handle:
             for raw in handle:
                 line = raw.strip()
-                if not line or line.startswith("--") or line.startswith("#"):
+                if not parts:
+                    if not line or line.startswith(("--", "#")):
+                        continue
+                    if line.startswith(("/*!", "/*M!")):
+                        continue
+                    normalized = canonical_sql_line(line)
+                    object_match = _CREATE_OBJECT_RE.match(normalized)
+                    if object_match:
+                        objects.add(object_match.group(1))
+                    if re.match(r"^(?:INSERT|REPLACE|UPDATE|DELETE|LOAD|COPY)\s+", normalized, re.I):
+                        if not _DATA_STATEMENT_RE.match(normalized):
+                            raise RestoreVerifyError("unrecognized SQL data command in cross-engine verification")
+                        parts = [line]
+                        pending_size = len(line)
+                    else:
+                        continue
+                else:
+                    if not quote and line.startswith(("--", "#", "/*")):
+                        raise RestoreVerifyError("SQL data contains unproven inline comment")
+                    parts.append(line)
+                    pending_size += len(line) + 1
+                if pending_size > _DATA_FINGERPRINT_MAX_STATEMENT:
+                    raise RestoreVerifyError("SQL data statement exceeds safe limit")
+                complete, quote, escaped = _sql_data_statement_terminator(line, quote, escaped)
+                if not complete:
+                    # Splitting inside an SQL literal is not proven safe to
+                    # normalize: stripping per physical line could change its
+                    # stored bytes. Refuse such input, never assume parity.
+                    if quote or escaped:
+                        raise RestoreVerifyError("SQL multiline quoted literal is unproven")
                     continue
-                # Version-gated/session directives differ legitimately across
-                # MariaDB/MySQL exports and are not row-content evidence.
-                if line.startswith("/*!") or line.startswith("/*M!"):
-                    continue
-                normalized = canonical_sql_line(line)
-                object_match = _CREATE_OBJECT_RE.match(normalized)
-                if object_match:
-                    objects.add(object_match.group(1))
-                if re.match(r"^(?:INSERT|REPLACE|UPDATE|DELETE|LOAD|COPY)[ ]+", normalized, re.I) and not _DATA_STATEMENT_RE.match(normalized):
-                    raise RestoreVerifyError("unrecognized SQL data command in cross-engine verification")
-                if _DATA_STATEMENT_RE.match(normalized):
-                    if not normalized.endswith(";"):
-                        raise RestoreVerifyError(
-                            "multiline SQL data requires manual cross-engine verification"
-                        )
-                    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-                    data_line_hashes.append(digest)
+                statement = _cross_engine_space("\n".join(parts))
+                if not _DATA_VALUES_HEAD_RE.match(statement):
+                    raise RestoreVerifyError("SQL INSERT grammar is unproven")
+                data_line_hashes.append(hashlib.sha256(statement.encode("utf-8")).hexdigest())
+                parts.clear()
+                pending_size = 0
+                quote = ""
+                escaped = False
     except (OSError, EOFError, UnicodeError) as exc:
         raise RestoreVerifyError(
             f"SQL dump cannot be content-fingerprinted: {path.name}"
         ) from exc
-
+    if parts or quote or escaped:
+        raise RestoreVerifyError("SQL data statement is unterminated")
     if not objects and not data_line_hashes:
         raise RestoreVerifyError(
             f"SQL dump has no comparable logical content: {path.name}"
         )
-    # Sorting makes table/export ordering differences non-semantic while every
-    # DML statement remains represented.
     digest = hashlib.sha256()
     for item in sorted(data_line_hashes):
         digest.update(item.encode("ascii"))
@@ -982,6 +1034,16 @@ def sql_data_fingerprint(path: Path) -> dict[str, Any]:
         "data_statements": len(data_line_hashes),
     }
 
+
+def sql_data_fingerprint(path: Path) -> dict[str, Any]:
+    """Conservative cross-engine fingerprint for multiline INSERT values.
+
+    Physical newlines outside quoted literals are presentation-only. Every
+    literal byte remains significant. Unknown data, comments, excess size,
+    and incomplete statements fail closed. This is not a stand-alone
+    migration acceptance gate; schema and SQL guards remain independent.
+    """
+    return _sql_data_fingerprint_statements(path)
 
 def sql_structure_fingerprint(path: Path) -> tuple[str, int]:
     """Conservative DDL parity gate for cross-engine SQL restore.
