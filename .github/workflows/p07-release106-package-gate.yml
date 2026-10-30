@@ -1,0 +1,113 @@
+name: P07 release106 isolated install upgrade rollback
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release106-package-gate.yml'
+      - 'dist/p07/0.1.0/overlay/**'
+      - 'installers/p07-final.sh'
+      - 'installers/p07.sh'
+permissions:
+  contents: read
+jobs:
+  safe-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact previously published release105 for upgrade fixture
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: e4bcfa61479d5f9f8341828c79a09f0491ce3f78
+          path: release105
+          persist-credentials: false
+      - name: Release105 staged SHA and SQL diagnostic safety
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat dist/p07/0.1.0/overlay/BUILD_ID)" = "0.1.0-release106"
+          test "$(cat release105/dist/p07/0.1.0/overlay/BUILD_ID)" = "0.1.0-release105"
+          test "$(git hash-object dist/p07/0.1.0/overlay/RUNTIME.gitblob)" = f7488ddcb08de6c518c69e6ff4be373497759a59
+          test "$(git hash-object dist/p07/0.1.0/overlay/MANIFEST.gitblob)" = cf1f0b7ae2373660de7d8aef0c32294bbd67b29c
+          test "$(git hash-object installers/p07-final.sh)" = c437f30ea81d5ad0108de7369a42b980f4fc30d9
+          test "$(git hash-object installers/p07.sh)" = 4c1cc2cf699983fe9cfab2944df77b49fe6b25a2
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root=Path('dist/p07/0.1.0/overlay')
+          def blob(b): return hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest()
+          for manifest in ('RUNTIME.gitblob','MANIFEST.gitblob'):
+              seen=set()
+              for line in (root/manifest).read_text().splitlines():
+                  h,path=line.split('  ',1)
+                  assert path not in seen and not path.startswith('/') and '..' not in Path(path).parts
+                  seen.add(path)
+                  assert blob((root/path).read_bytes())==h,path
+          assert blob((root/'lib/sql_diff_evidence.py').read_bytes())=='1e31ea0d67a9689fbe4f317f8db2e866274807b8'
+          assert blob((root/'tests/test_sql_diff_evidence.py').read_bytes())=='4106a972fe40341ea126434606284f676408b342'
+          assert blob((root/'lib/verify.py').read_bytes())=='f3f4ff63d4cfbeb27ab5c971d07ea72c9bf20bf8'
+          assert blob((root/'tests/test_multiline_dml_integrity.py').read_bytes())=='b693e7660b1578425bdc6ce86e6010095104c8ea'
+          print('P07_RELEASE106_EXACT_MANIFEST_PASS')
+          PY
+          (cd dist/p07/0.1.0/overlay && PYTHONPATH=lib python3 -m unittest -q tests.test_sql_diff_evidence tests.test_sql_diff_command tests.test_multiline_dml_integrity)
+      - name: Clean installation and idempotent repeat in isolated runner
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          t="$RUNNER_TEMP/p07-fresh"
+          mkdir -p "$t"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          export P07_PUBLIC_ROOT="file://$GITHUB_WORKSPACE"
+          export P07_INSTALL_DIR="$t/installed" P07_PREVIOUS_DIR="$t/previous" P07_BIN_LINK="$t/bin/vfops"
+          bash installers/p07-final.sh
+          test "$("$P07_BIN_LINK" --build-id)" = 0.1.0-release106
+          bash installers/p07-final.sh
+          test ! -e "$P07_PREVIOUS_DIR"
+          test "$("$P07_BIN_LINK" --build-id)" = 0.1.0-release106
+          echo P07_RELEASE106_FRESH_AND_REPEAT_PASS
+      - name: Exact released release105 to release106 upgrade and data-safe rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          t="$RUNNER_TEMP/p07-upgrade"
+          mkdir -p "$t"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          export P07_INSTALL_DIR="$t/installed" P07_PREVIOUS_DIR="$t/previous" P07_BIN_LINK="$t/bin/vfops"
+          export P07_PUBLIC_ROOT="file://$GITHUB_WORKSPACE/release105"
+          bash release105/installers/p07-final.sh
+          test "$("$P07_BIN_LINK" --build-id)" = 0.1.0-release105
+          mkdir -p "$t/private"
+          printf 'DO_NOT_CHANGE\n' > "$t/private/sentinel"
+          before="$(sha256sum "$t/private/sentinel")"
+          export P07_PUBLIC_ROOT="file://$GITHUB_WORKSPACE"
+          bash installers/p07-final.sh
+          test "$("$P07_BIN_LINK" --build-id)" = 0.1.0-release106
+          test "$(cat "$P07_PREVIOUS_DIR/BUILD_ID")" = 0.1.0-release105
+          test "$(sha256sum "$t/private/sentinel")" = "$before"
+          echo P07_RELEASE106_104_UPGRADE_AND_EXTERNAL_DATA_PASS
+      - name: Inject post-swap failure and prove release105 restoration
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          t="$RUNNER_TEMP/p07-rollback"
+          mkdir -p "$t"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          export P07_INSTALL_DIR="$t/installed" P07_PREVIOUS_DIR="$t/previous" P07_BIN_LINK="$t/bin/vfops"
+          export P07_PUBLIC_ROOT="file://$GITHUB_WORKSPACE/release105"
+          bash release105/installers/p07-final.sh
+          test "$("$P07_BIN_LINK" --build-id)" = 0.1.0-release105
+          echo retained > "$P07_INSTALL_DIR/rollback-marker"
+          mkdir -p "$t/fail"
+          : > "$t/fail/not-a-directory"
+          export P07_BIN_LINK="$t/fail/not-a-directory/vfops"
+          export P07_PUBLIC_ROOT="file://$GITHUB_WORKSPACE"
+          if bash installers/p07-final.sh; then
+             echo P07_INJECTED_FAILURE_DID_NOT_FAIL >&2
+             exit 1
+          fi
+          test "$(cat "$P07_INSTALL_DIR/BUILD_ID")" = 0.1.0-release105
+          test "$(cat "$P07_INSTALL_DIR/rollback-marker")" = retained
+          test ! -e "$P07_PREVIOUS_DIR"
+          echo P07_RELEASE106_INJECTED_POST_SWAP_ROLLBACK_PASS
