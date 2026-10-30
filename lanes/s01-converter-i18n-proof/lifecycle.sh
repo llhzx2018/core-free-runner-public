@@ -57,8 +57,8 @@ for old in 1.35.219 1.35.216; do
 done
 cli theme install /tmp/vf-tools-theme_V1.35.220.zip --force >/dev/null; tv 1.35.220
 for old in 1.25.95 1.25.94; do
-  cli plugin install "/tmp/vf-tools-m3u8_V$old.zip" --force >/dev/null; pv "$old"
-  cli plugin install /tmp/vf-tools-m3u8_V1.25.96.zip --force >/dev/null; pv 1.25.96
+  cli plugin install "/tmp/vf-tools-m3u8_V$old.zip" --force >/dev/null; pv "$old"; cli eval-file /tmp/plugin-snapshot.php > "proof/plugin-after-old-$old.json"
+  cli plugin install /tmp/vf-tools-m3u8_V1.25.96.zip --force >/dev/null; pv 1.25.96; cli eval-file /tmp/plugin-snapshot.php > "proof/plugin-after-new-$old.json"
 done
 cli plugin install /tmp/vf-tools-m3u8_V1.25.96.zip --force >/dev/null; pv 1.25.96
 cli eval-file /tmp/plugin-snapshot.php > proof/plugin-options-after.json
