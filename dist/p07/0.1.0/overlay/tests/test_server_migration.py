@@ -670,7 +670,7 @@ class ServerMigrationAutomationTests(unittest.TestCase):
                 self.assertFalse(site_marker.exists())
                 self.assertFalse(db_marker.exists())
 
-    def test_target_database_transaction_marker_is_private_and_resumable(self) -> None:
+    def test_target_database_marker_preserves_existing_rows_and_blocks_resume(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)
             state_root = base / "state"
@@ -697,17 +697,21 @@ class ServerMigrationAutomationTests(unittest.TestCase):
                 first = engine.target_create_database_local(
                     "server-test", "a.example.com", site_root, "adb", 1, first_dump
                 )
-                second = engine.target_create_database_local(
-                    "server-test", "a.example.com", site_root, "adb", 1, second_dump
-                )
+                with self.assertRaisesRegex(
+                    engine.ServerMigrationError,
+                    "TARGET_DATABASE_HAS_PRIOR_MIGRATION_MARKER_RECOVERY_REQUIRED",
+                ):
+                    engine.target_create_database_local(
+                        "server-test", "a.example.com", site_root, "adb", 1, second_dump
+                    )
 
             self.assertEqual(first["status"], "DATABASE_IMPORTED")
             self.assertFalse(first["resumed"])
-            self.assertTrue(second["resumed"])
             self.assertNotIn("password", json.dumps(first).lower())
-            self.assertEqual(add_db.call_count, 2)
-            self.assertEqual(import_db.call_count, 2)
-            cleanup_db.assert_called_once_with("adb", clpctl="clpctl")
+            self.assertEqual(add_db.call_count, 1)
+            self.assertEqual(import_db.call_count, 1)
+            cleanup_db.assert_not_called()
+            self.assertTrue(second_dump.is_file())
 
             with mock.patch.object(engine, "STATE_ROOT", state_root):
                 marker = engine.target_db_marker(

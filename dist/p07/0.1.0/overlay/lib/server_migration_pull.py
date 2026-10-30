@@ -2718,6 +2718,17 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
     state = load_state(mid)
     if state.get("status") not in {"PREPARING", "PREPARE_FAILED"}:
         raise PullMigrationError("migration is not resumable from prepare stage")
+    # Prior conditional DDL verification failure is an independent hard
+    # block: resume must not clear this evidence or re-import an already
+    # populated target merely because a retry was requested. This check
+    # intentionally runs before any status transition, save or remote call.
+    previous_guard = state.get("last_sql_guard_failure")
+    if (state.get("status") == "PREPARE_FAILED"
+            and isinstance(previous_guard, dict)
+            and previous_guard.get("reason") == "CONDITIONAL_DDL"):
+        raise PullMigrationError(
+            "PREPARE_RESUME_SQL_GUARD_AND_RECOVERY_PROOF_REQUIRED"
+        )
     if not cloudpanel_database_server_ready_local():
         raise PullMigrationError(
             "new-server CloudPanel database server metadata is missing; migration cannot resume safely"

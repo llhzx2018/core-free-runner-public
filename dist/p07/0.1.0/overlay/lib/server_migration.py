@@ -1726,27 +1726,22 @@ def target_create_database_local(
         {"domain": domain, "database": database,
          "created_by_migration": migration_id_value},
     )
+    if private is None and (marker.exists() or marker.is_symlink()):
+        # An invalid, foreign or dangling ownership marker cannot be
+        # treated as proof that a target DB is absent. No creation/import.
+        raise ServerMigrationError("TARGET_DATABASE_OWNERSHIP_UNVERIFIED")
     if private is not None:
-        username = private.get("username")
-        password = private.get("password")
-        if not isinstance(username, str) or not username or not isinstance(password, str) or not password:
-            raise ServerMigrationError("target database transaction credentials are invalid")
-
-        # A previous import may have been interrupted after partially writing rows.
-        # Because the private marker proves this database is owned by this migration,
-        # reset it to a known-empty state before a resumable re-import.
-        if not site_lifecycle.cleanup_database(database, clpctl="clpctl"):
-            raise ServerMigrationError(
-                "target transaction-owned database cannot be reset for resume"
-            )
-        try:
-            cloudpanel.add_database(
-                domain, database, username, password, clpctl="clpctl"
-            )
-        except (cloudpanel.CloudPanelError, ValueError) as exc:
-            raise ServerMigrationError(
-                "target database recreation failed during resume"
-            ) from exc
+        # A migration ownership marker proves *who created* a database,
+        # not that it has remained untouched or that its data is disposable.
+        # In particular, a previously failed import can coexist with owner-
+        # authored rows. Never reset, recreate or re-import such a database
+        # during an ordinary resume, even if its marker is valid.
+        #
+        # Restoring into a newly verified empty isolated database belongs to
+        # a separate restore-tested, explicitly owner-operated recovery flow.
+        raise ServerMigrationError(
+            "TARGET_DATABASE_HAS_PRIOR_MIGRATION_MARKER_RECOVERY_REQUIRED"
+        )
     else:
         _, username, password = site_lifecycle.derive_database_identity(
             domain, migration_id_value, index
