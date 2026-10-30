@@ -1,0 +1,73 @@
+name: P07 R4 native SQL import in isolated ephemeral MariaDB
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-r4-isolated-restore.yml'
+      - 'experiments/p07-r4/**'
+permissions:
+  contents: read
+jobs:
+  r4-isolated:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify exact R4 candidate blob SHA and standalone CLI
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat dist/p07/0.1.0/overlay/BUILD_ID)" = "0.1.0-release111"
+          test "$(git hash-object experiments/p07-r4/lib/server_migration_pull.py)" = bde53de107037fd881040373e93a757287d03efc
+          test "$(git hash-object experiments/p07-r4/lib/isolated_db_restore.py)" = c3a65c561dee2b76298b24b47fcb5876614045ec
+          test "$(git hash-object experiments/p07-r4/bin/vfops)" = 7e2fd330a03cd22edf9c9bac57c1d23e05991a36
+          test "$(git hash-object experiments/p07-r4/tests/test_isolated_db_restore.py)" = 4746afcb4bbae15889f1811b757d551c0de01643
+          cp -a dist/p07/0.1.0/overlay "$RUNNER_TEMP/p07-r4"
+          for p in lib/server_migration_pull.py lib/isolated_db_restore.py bin/vfops tests/test_isolated_db_restore.py; do
+            cp "experiments/p07-r4/$p" "$RUNNER_TEMP/p07-r4/$p"
+          done
+          chmod +x "$RUNNER_TEMP/p07-r4/bin/"*
+          cd "$RUNNER_TEMP/p07-r4"
+          python3 -m py_compile lib/isolated_db_restore.py lib/server_migration_pull.py tests/test_isolated_db_restore.py
+          bash -n bin/vfops
+          echo P07_R4_EXACT_SOURCE_AND_SYNTAX_PASS
+      - name: Unit safety/blocked-backend tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-r4"
+          PYTHONPATH=lib python3 -m unittest -v tests.test_isolated_db_restore.R4IsolationContractTests
+          echo P07_R4_UNIT_SAFETY_PASS
+      - name: Pull fixed public synthetic-only MariaDB engine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker pull mariadb:11.8
+          docker image inspect mariadb:11.8 --format '{{.Id}}'
+          echo P07_R4_SYNTHETIC_ENGINE_READY
+      - name: Two independent real SQL imports and failure cleanup
+        shell: bash
+        env:
+          P07_R4_DOCKER_INTEGRATION: "1"
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-r4"
+          PYTHONPATH=lib python3 -m unittest -v tests.test_isolated_db_restore.DockerRealMariaDBIntegrationTests
+          test -z "$(docker ps -aq --filter 'name=^vfops-r4-')"
+          echo P07_R4_REAL_EPHEMERAL_RESTORE_AND_FAILURE_CLEANUP_PASS
+      - name: Retain original SQL-guard/recovery safety contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-r4"
+          PYTHONPATH=lib python3 -m unittest -v \
+            tests.test_migration_no_overwrite_resume \
+            tests.test_private_recovery_gate \
+            tests.test_migration_remainder \
+            tests.test_sql_pk_conflict_evidence
+          for p in lib/cloudpanel.py lib/restore_apply_core.py lib/verify.py lib/package_core.py BUILD_ID; do
+            test "$(git hash-object "$GITHUB_WORKSPACE/dist/p07/0.1.0/overlay/$p")" = "$(git hash-object "$p")"
+          done
+          echo P07_R4_SQL_GUARD_NO_PRODUCTION_WRITER_CHANGE_PASS
