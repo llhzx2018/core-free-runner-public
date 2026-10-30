@@ -97,6 +97,109 @@ jobs:
           )
           echo P01_IA5_EXACT_SYNTAX_AND_CONTRACTS=PASS
 
+      - name: Isolated Owner desktop 11+1 management geometry and task rail
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root=/tmp/p01-ia5-r47-runtime
+          rm -rf "$root" /tmp/p01-ia5-r47-browser
+          mkdir -p "$root"
+          cp -a candidate/src/. "$root/"
+          (
+            cd "$root"
+            php -S 127.0.0.1:18760 -t . >/tmp/p01-ia5-r47-server.log 2>&1
+          ) &
+          server_pid=$!
+          trap 'kill "$server_pid" >/dev/null 2>&1 || true; rm -rf "$root" /tmp/p01-ia5-r47-browser /tmp/p01-ia5-r47-browsers' EXIT
+          for _ in $(seq 1 50); do
+            if curl -fsS -c /tmp/p01-r47-cookie -b /tmp/p01-r47-cookie http://127.0.0.1:18760/setup.php -o /tmp/p01-r47-setup.html; then break; fi
+            sleep 1
+          done
+          csrf="$(python3 - <<'PY'
+          import re
+          html=open('/tmp/p01-r47-setup.html',encoding='utf-8').read()
+          hit=re.search(r'name="setup_csrf"\s+value="([^"]+)"',html)
+          assert hit,'missing fresh setup csrf'
+          print(hit.group(1))
+          PY
+          )"
+          pass="IA5R47!18760"
+          curl -fsS -c /tmp/p01-r47-cookie -b /tmp/p01-r47-cookie -X POST http://127.0.0.1:18760/setup.php \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode "site_title=IA V5 Isolated Synthetic" \
+            --data-urlencode "admin_password=$pass" \
+            --data-urlencode "admin_password_confirm=$pass" \
+            -o /tmp/p01-r47-setup-post.html
+          (cd "$root" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          npm install --prefix /tmp/p01-ia5-r47-browser --no-audit --no-fund playwright@1.56.1 >/tmp/p01-r47-npm.log
+          PLAYWRIGHT_BROWSERS_PATH=/tmp/p01-ia5-r47-browsers /tmp/p01-ia5-r47-browser/node_modules/.bin/playwright install --with-deps chromium >/tmp/p01-r47-chromium.log
+          export NODE_PATH=/tmp/p01-ia5-r47-browser/node_modules
+          export PLAYWRIGHT_BROWSERS_PATH=/tmp/p01-ia5-r47-browsers
+          node <<'JS'
+          'use strict';
+          const assert=require('node:assert/strict');
+          const {chromium}=require('playwright');
+          const origin='http://127.0.0.1:18760';
+          (async()=>{
+            const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+            try{
+              const context=await browser.newContext({viewport:{width:1440,height:900}});
+              await context.route(/https?:\/\/(?!127\.0\.0\.1)/,route=>route.abort());
+              const login=await context.request.post(origin+'/api.php?action=login',{data:{password:'IA5R47!18760'}});
+              assert.equal(login.status(),200);
+              assert.match(await login.text(),/"ok":true/);
+              const page=await context.newPage();
+              for (const width of [1440,768]){
+                await page.setViewportSize({width,height:900});
+                for(const route of ['index.php','channels.php','music-home.php']){
+                  const res=await page.goto(origin+'/'+route,{waitUntil:'domcontentloaded'});
+                  assert.ok(res&&res.status()===200,route+' Owner page 200');
+                  const sourceUrl=page.url();
+                  const local=page.locator('[data-vf-local-manage-open]');
+                  const global=page.locator('[data-vf-global-manage-open]');
+                  assert.equal(await local.count(),1,route+' local trigger');
+                  assert.equal(await global.count(),1,route+' global trigger');
+                  await local.click();
+                  const hub=page.locator('#vf-local-management');
+                  assert.equal(await hub.evaluate(e=>e.open),true,route+' local dialog');
+                  assert.equal(await hub.locator('[data-vf-management-tab]').count(),12,'11+1 domain tabs');
+                  const localRail=hub.locator('.vf-local-management-sidebar');
+                  assert.ok(await localRail.isVisible(),route+' local task rail visible');
+                  const localGeometry=await hub.boundingBox();
+                  assert.ok(localGeometry&&localGeometry.height>500,route+' local fixed tall geometry');
+                  await hub.locator('[data-vf-local-manage-close]').first().click();
+                  assert.equal(await hub.evaluate(e=>e.open),false);
+                  await global.click();
+                  assert.equal(await hub.evaluate(e=>e.open),true);
+                  const initial=await hub.boundingBox();
+                  assert.ok(initial&&initial.height>500,route+' global fixed tall geometry');
+                  for(const domain of ['home','start','inbox','channels','watch','music','topics','courses','projects','tools','software']){
+                    await hub.locator('[data-vf-management-tab="'+domain+'"]').click();
+                    assert.equal(await hub.locator('[data-vf-management-tab="'+domain+'"]').getAttribute('aria-selected'),'true');
+                    const rail=hub.locator('[data-vf-remote-task-choices]');
+                    assert.ok(await rail.isVisible(),domain+' remote task rail visible');
+                    assert.equal(await rail.locator('button[aria-pressed="true"]').count(),1,domain+' single selected task');
+                    assert.ok(await hub.locator('.vf-unified-global-groups').isVisible(),domain+' left groups visible');
+                    const box=await hub.boundingBox();
+                    assert.ok(Math.abs(box.width-initial.width)<=2 && Math.abs(box.height-initial.height)<=2,
+                      route+'/'+width+'/'+domain+' fixed dialog geometry');
+                    assert.equal(page.url(),sourceUrl,domain+' no page navigation');
+                  }
+                  await hub.locator('[data-vf-management-tab="global"]').click();
+                  assert.equal(await hub.locator('[data-vf-management-tab="global"]').getAttribute('aria-selected'),'true');
+                  assert.equal(await page.locator('dialog[open]').count(),1,'one native dialog');
+                  assert.equal(await hub.locator('iframe').count(),0,'no iframe');
+                  await hub.locator('[data-vf-local-manage-close]').last().click();
+                  assert.equal(await hub.evaluate(e=>e.open),false);
+                }
+                console.log('P01_IA5_R47_OWNER_11PLUS1_'+width+'=PASS');
+              }
+              await context.close();
+            }finally{await browser.close();}
+          })().catch(e=>{console.error('P01_IA5_BROWSER_FAILURE='+String(e.message).slice(0,300));process.exit(1)});
+          JS
+          echo P01_IA5_R47_OWNER_DESKTOP_BROWSER=PASS
+
       - name: Report exact bounded verification
         shell: bash
         run: |
