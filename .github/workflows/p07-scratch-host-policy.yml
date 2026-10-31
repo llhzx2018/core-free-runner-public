@@ -1,0 +1,81 @@
+name: P07 R10 scratch host SQL policy exact-source proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-scratch-host-policy.yml'
+      - 'experiments/p07-scratch-host-policy/**'
+permissions:
+  contents: read
+jobs:
+  host-sql:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify candidate source SHA and stage isolated bundle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat dist/p07/0.1.0/overlay/BUILD_ID)" = 0.1.0-release112
+          test "$(git hash-object experiments/p07-scratch-host-policy/lib/scratch_sql_host_policy.py)" = 60616d50f5413b1700bc6fefdce4df8d9a6c721f
+          test "$(git hash-object experiments/p07-scratch-host-policy/lib/native_scratch_restore.py)" = 6818cf1ec01c17f96c63ccfc6165303760252dda
+          test "$(git hash-object experiments/p07-scratch-host-policy/lib/isolated_db_restore.py)" = 25317dfae356bfec0b6183dd9064eb519cbc2129
+          test "$(git hash-object experiments/p07-scratch-host-policy/tests/test_scratch_sql_host_policy.py)" = 16d9ae0b181323811c9badc6ec3cf84ae154a671
+          cp -a dist/p07/0.1.0/overlay "$RUNNER_TEMP/p07-r10"
+          for file in lib/scratch_sql_host_policy.py lib/native_scratch_restore.py lib/isolated_db_restore.py tests/test_scratch_sql_host_policy.py; do
+            cp "experiments/p07-scratch-host-policy/$file" "$RUNNER_TEMP/p07-r10/$file"
+          done
+          chmod +x "$RUNNER_TEMP/p07-r10/bin/vfops"
+          cd "$RUNNER_TEMP/p07-r10"
+          python3 -m py_compile lib/scratch_sql_host_policy.py lib/native_scratch_restore.py lib/isolated_db_restore.py tests/test_scratch_sql_host_policy.py
+          echo P07_R10_EXACT_SOURCE_PASS
+      - name: Prove native and Docker fail closed before process start
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-r10"
+          PYTHONPATH=lib python3 -m unittest -v \
+            tests.test_scratch_sql_host_policy \
+            tests.test_native_scratch_restore.NativeRestoreContractTests \
+            tests.test_isolated_db_restore.R4IsolationContractTests \
+            tests.test_scratch_guard_quarantine.R7QuarantineTests \
+            tests.test_restore_sql_preflight
+          echo P07_R10_HOST_SQL_PREIMPORT_FAIL_CLOSED_PASS
+      - name: Actual disposable native MariaDB imports with synthetic SQL
+        shell: bash
+        env:
+          P07_R5_NATIVE_INTEGRATION: '1'
+          P07_R7_NATIVE_QUARANTINE_ENGINE: '1'
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get -qq update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -qq install -y mariadb-server mariadb-client >/dev/null
+          cd "$RUNNER_TEMP/p07-r10"
+          PYTHONPATH=lib python3 -m unittest -v \
+            tests.test_native_scratch_restore.NativeRestoreRealEngineTests \
+            tests.test_scratch_guard_quarantine.R7ScratchNativeIntegration
+          sudo env PYTHONPATH=lib P07_R5_NATIVE_INTEGRATION=1 P07_R7_NATIVE_QUARANTINE_ENGINE=1 \
+            python3 -m unittest -v \
+            tests.test_native_scratch_restore.NativeRestoreRealEngineTests \
+            tests.test_scratch_guard_quarantine.R7ScratchNativeIntegration
+          test -z "$(find /tmp -maxdepth 1 -type d -name 'vfops-r5-*' -print -quit)"
+          echo P07_R10_REAL_NATIVE_ENGINE_CLEANUP_PASS
+      - name: Original release112 database writers and SQL/migration regression proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-r10"
+          PYTHONPATH=lib python3 -m unittest -q \
+            tests.test_migration_no_overwrite_resume \
+            tests.test_migration_remainder \
+            tests.test_private_recovery_gate \
+            tests.test_sql_diff_evidence \
+            tests.test_sql_row_evidence \
+            tests.test_sql_pk_conflict_evidence
+          for p in lib/cloudpanel.py lib/restore_apply_core.py lib/server_migration.py lib/verify.py lib/package_core.py BUILD_ID; do
+            test "$(git hash-object "$GITHUB_WORKSPACE/dist/p07/0.1.0/overlay/$p")" = "$(git hash-object "$p")"
+          done
+          echo P07_R10_EXISTING_DB_WRITERS_IMMUTABLE_PASS
