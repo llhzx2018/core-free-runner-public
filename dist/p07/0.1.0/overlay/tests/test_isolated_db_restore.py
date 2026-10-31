@@ -90,7 +90,7 @@ class R4IsolationContractTests(unittest.TestCase):
              mock.patch.object(iso, "_wait_ready"), \
              mock.patch.object(iso, "_query_count", side_effect=[1, 2]), \
              mock.patch.object(iso, "_stream_sql"):
-            self.assertEqual(iso._restore_one(Path("/not-read"), 2), 2)
+            self.assertEqual(iso._restore_one_sealed(Path("/not-read"), 2), 2)
         args = docker.call_args_list[0].args
         self.assertIn("--network", args)
         self.assertIn("none", args)
@@ -115,7 +115,7 @@ class R4IsolationContractTests(unittest.TestCase):
              mock.patch.object(iso, "_query_count", side_effect=[1, 1]), \
              mock.patch.object(iso, "_stream_sql"):
             with self.assertRaisesRegex(iso.Blocked, "TABLE_COUNT"):
-                iso._restore_one(Path("/synthetic"), 2)
+                iso._restore_one_sealed(Path("/synthetic"), 2)
         self.assertEqual(docker.call_args_list[-1].args[0], "rm")
 
     def test_cli_denied_restore_is_exit_13_and_no_migration_state(self):
