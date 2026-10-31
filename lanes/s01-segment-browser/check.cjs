@@ -1,8 +1,10 @@
 const {chromium}=require('playwright'),fs=require('fs'),assert=require('assert/strict');
 (async()=>{const browser=await chromium.launch({headless:true}),results=[];try{
+const control=await browser.newPage();await control.goto('http://127.0.0.1:18880/seo-control-en/',{waitUntil:'networkidle'});assert.equal(await control.locator('meta[name="description"]').getAttribute('content'),'Synthetic ordinary control page description.');await control.close();
 for(const lang of ['en','zh'])for(const width of [1024,1440]){
 const page=await browser.newPage({viewport:{width,height:1000},acceptDownloads:true});
 await page.goto('http://127.0.0.1:18880'+(lang==='zh'?'/zh/m3u8-segment-viewer/':'/m3u8-segment-viewer/'),{waitUntil:'networkidle'});
+const meta=await page.locator('meta[name="description"]').getAttribute('content');assert.equal(meta,lang==='zh'?'自定义中文检测页面描述。':'Custom English checker page description.');
 const root=page.locator('.vf-segment-viewer[data-vf-tool-id]').first();await root.waitFor();
 assert.equal(await page.locator('h1').count(),1);
 assert.equal(await root.locator('[data-vf-segment-result]').isVisible(),false,'result starts hidden');

@@ -17,17 +17,20 @@ cli config set DISABLE_WP_CRON true --raw >/dev/null
 cli core install --url=http://127.0.0.1:18880 --title='Synthetic Frontend Review' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
 docker exec "$WP" mkdir -p /var/www/html/wp-content/themes/vf-tools-theme /var/www/html/wp-content/mu-plugins
 docker cp target/src/. "$WP:/var/www/html/wp-content/themes/vf-tools-theme/"
-docker cp provider/vf-tools-m3u8_V1.25.94.zip "$WP:/tmp/provider.zip"
+docker cp provider/vf-tools-m3u8_V1.25.97.zip "$WP:/tmp/provider.zip"
 cli plugin install /tmp/provider.zip --activate >/dev/null
 docker cp lane/fixture.php "$WP:/var/www/html/wp-content/mu-plugins/progress-fixture.php"
 docker exec "$WP" chown -R www-data:www-data /var/www/html/wp-content/themes/vf-tools-theme
 cli theme activate vf-tools-theme >/dev/null
 cli plugin install polylang --version=3.8.10 --activate >/dev/null
+cli plugin install seo-by-rank-math --activate >/dev/null
+cli option update rank_math_registration_skip 1 >/dev/null
 docker cp lane/languages.php "$WP:/tmp/languages.php";cli eval-file /tmp/languages.php >/dev/null
 docker cp lane/wp-check.php "$WP:/tmp/wp-check.php";cli eval-file /tmp/wp-check.php > proof/wordpress.json
 cli rewrite structure '/%postname%/' --hard >/dev/null
 docker cp lane/mount-seed.php "$WP:/tmp/mount-seed.php";cli eval-file /tmp/mount-seed.php > proof/mounts.json
 docker cp lane/seed.php "$WP:/tmp/seed.php";cli eval-file /tmp/seed.php > proof/seed.json
+docker cp control/lanes/s01-segment-browser/seo-seed.php "$WP:/tmp/seo-seed.php";cli eval-file /tmp/seo-seed.php > proof/seo-seed.json
 docker cp lane/extra-seed.php "$WP:/tmp/extra-seed.php";cli eval-file /tmp/extra-seed.php > proof/cases.json
 docker cp lane/snapshot.php "$WP:/tmp/snapshot.php"
 # Warm only public read-only boot paths before protected-state comparison.
@@ -47,4 +50,4 @@ cli eval-file /tmp/snapshot.php > proof/state-before.sha256
 node control/lanes/s01-segment-browser/check.cjs
 cli eval-file /tmp/snapshot.php > proof/state-after.sha256
 cmp proof/state-before.sha256 proof/state-after.sha256
-echo DOWNLOADER_DATA_PROTECTION_PASS
+echo SEGMENT_DATA_PROTECTION_PASS
