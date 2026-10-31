@@ -5,7 +5,7 @@ const page=await browser.newPage({viewport:{width,height:1000}});await page.addI
 await page.goto('http://127.0.0.1:18880'+(lang==='zh'?'/zh/embed/':'/embed/'),{waitUntil:'networkidle'});
 const root=page.locator('[data-vf-embed-generator]').first();await root.waitFor();
 assert.equal(await page.locator('h1').count(),1);assert.equal(before.length,0,'initial render must not load a stream');
-assert.equal(await page.locator('.vf-tool-breadcrumb').isVisible(),false);assert.ok(await root.locator('[data-vf-embed-url]').isVisible());assert.ok(await root.locator('[data-vf-embed-generate]').isVisible());
+assert.equal(await page.locator('.vf-tool-breadcrumb').isVisible(),false);const steps=await page.locator('.vf-tool-steps-list li h3').evaluateAll(ns=>ns.map(n=>({width:n.getBoundingClientRect().width,height:n.getBoundingClientRect().height})));assert.ok(steps.length>0 && steps.every(x=>x.width>=120 && x.height<90),'workflow headings must be readable: '+JSON.stringify(steps));assert.ok(await root.locator('[data-vf-embed-url]').isVisible());assert.ok(await root.locator('[data-vf-embed-generate]').isVisible());
 const geometry=await page.evaluate(()=>({w:document.documentElement.clientWidth,sw:document.documentElement.scrollWidth}));assert.ok(geometry.sw<=geometry.w+1);
 await root.locator('[data-vf-embed-url]').fill('https://example.invalid/stream.m3u8');await root.locator('[data-vf-embed-generate]').click();await root.locator('[data-vf-embed-recommended-code]').waitFor({state:'visible',timeout:10000});
 const code=await root.locator('[data-vf-embed-recommended-code]').inputValue();assert.ok(code.includes('<iframe'),'actual iframe code');
