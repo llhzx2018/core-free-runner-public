@@ -19,7 +19,16 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
 
+ORIGINAL_LSTAT = Path.lstat
+
+
 class TestOperator(unittest.TestCase):
+    def root_lstat(self, path):
+        meta = ORIGINAL_LSTAT(path)
+        if str(path).startswith(str(self.work)):
+            return types.SimpleNamespace(st_uid=0, st_mode=meta.st_mode)
+        return meta
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -183,6 +192,7 @@ class TestOperator(unittest.TestCase):
         before=len(self.created)
         with mock.patch.object(mod,"state_preflight",
                                return_value=(self.state,"source_db")), \
+             mock.patch.object(mod.Path,"lstat",new=self.root_lstat), \
              mock.patch.object(mod,"_recover_absent"), \
              mock.patch.object(mod,"_cloudpanel_metadata_counts",
                                return_value=("1","1")), \
@@ -209,6 +219,7 @@ class TestOperator(unittest.TestCase):
         self.cloudpanel.add_database=refuse
         with mock.patch.object(mod,"state_preflight",
                                return_value=(self.state,"source_db")), \
+             mock.patch.object(mod.Path,"lstat",new=self.root_lstat), \
              mock.patch.object(mod,"_recover_absent"), \
              mock.patch.object(sys,"argv",[str(SCRIPT),"--resume-existing-with-cloudpanel-safe-names"]):
             self.assertEqual(mod.run(),13)
