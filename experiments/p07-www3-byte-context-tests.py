@@ -1,6 +1,7 @@
 """Synthetic byte-preserving advisory tests; no real SQL or server access."""
 import ast
 import gzip
+import re
 import tempfile
 from pathlib import Path
 import unittest
@@ -12,7 +13,7 @@ remote=next(n.value.value for n in ast.walk(raw) if isinstance(n,ast.Assign)
 tree=ast.parse(remote)
 fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef)
         and n.name=="classify_invalid_utf8_context")
-namespace={}
+namespace={"gzip":gzip,"re":re}
 exec(compile(ast.Module(body=[fn],type_ignores=[]),"<synthetic_advisory>","exec"),namespace)
 scan=namespace["classify_invalid_utf8_context"]
 
