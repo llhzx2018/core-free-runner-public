@@ -66,6 +66,16 @@ class Tests(unittest.TestCase):
         self.assertFalse(x["dml_content_verified"])
         self.assertFalse(y["dml_content_verified"])
 
+    def test_multiline_dml_fake_ddl_rejected_not_counted(self):
+        data=(b"CREATE TABLE t(id INT);\n"
+              b"INSERT INTO t VALUES('line one\n"
+              b"CREATE TABLE forged(id INT);\n"
+              b"line three');\n")
+        self.write(data)
+        with self.assertRaises(m.UnsafeOrUnverifiedExport) as ex:
+            m.inspect_source_schema_candidates(self.p)
+        self.assertEqual(str(ex.exception),"MULTILINE_DML_CONTEXT_UNPROVEN")
+
     def test_corrupt_gzip_rejected(self):
         self.write(b"CREATE TABLE t(x INT);\n")
         self.p.write_bytes(self.p.read_bytes()[:-5])
