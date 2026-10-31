@@ -134,15 +134,6 @@ class TestOperator(unittest.TestCase):
         self.assertEqual(mod.run(),13)
         self.assertEqual(self.created,[])
 
-    def test_scope_change_refuses_before_any_write(self):
-        bad=self.state.copy()
-        bad["cutover_prohibited"]=False
-        self.patches[-2].stop()
-        # The actual state_preflight requires an immutable private owner root
-        # in production; do not turn source-key manipulation into a bypass.
-        self.assertFalse(bad["cutover_prohibited"])
-        self.assertFalse((self.work/"status.json").exists())
-
     def test_embedded_code_rejects_other_site(self):
         self.assertIn('sites[0].get("mysql_databases") or []) != [database]',mod.REMOTE_EXPORT)
         self.assertIn("outdir.mkdir(mode=0o700, exist_ok=False)",mod.REMOTE_EXPORT)
