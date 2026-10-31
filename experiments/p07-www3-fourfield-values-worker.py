@@ -6,6 +6,7 @@ The two independent read-only transactions occur at different times: MATCH is
 not proof that source-export snapshot and current source are identical.
 """
 import base64
+import binascii
 from collections import Counter
 import hashlib
 import json
@@ -276,7 +277,7 @@ def requested_columns(encoded, all_tables, all_cols):
             block("FOUR_FIELD_SELECTOR_UNVERIFIED")
         decoded=base64.b64decode(encoded,validate=True)
         value=json.loads(decoded)
-    except (ValueError,TypeError,UnicodeError):
+    except (ValueError,TypeError,UnicodeError,binascii.Error):
         block("FOUR_FIELD_SELECTOR_UNVERIFIED")
     tables=select_previous_mismatch_ordinals(all_tables)
     byname={}
