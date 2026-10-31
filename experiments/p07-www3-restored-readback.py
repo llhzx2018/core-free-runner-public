@@ -11,6 +11,9 @@ import subprocess
 import sys
 import tempfile
 
+# Do not leave __pycache__ in one-time verification bundles.
+sys.dont_write_bytecode = True
+
 # Readback is a two-file, version-locked operator bundle. Never import an
 # unrelated file or silently fall back to a different installed runtime.
 companion = Path(__file__).with_name("p07-www3-isolated-restore.py")
