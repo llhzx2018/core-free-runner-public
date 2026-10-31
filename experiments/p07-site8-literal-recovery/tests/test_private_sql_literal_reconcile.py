@@ -18,7 +18,7 @@ import private_conflict_preservation as original
 import private_recovery_gate as gate
 
 SITE = "synthetic.test"
-DDL = "CREATE TABLE \`{table}\` (\`id\` INT NOT NULL, \`payload\` TEXT, PRIMARY KEY (\`id\`)) ENGINE=InnoDB;\n"
+DDL = "CREATE TABLE `{table}` (`id` INT NOT NULL, `payload` TEXT, PRIMARY KEY (`id`)) ENGINE=InnoDB;\n"
 
 
 def pack(root, label, dump):
@@ -39,16 +39,16 @@ def pack(root, label, dump):
 
 def dump(source=True, *, replace=False, unsafe=False, mutate=False):
     out = "".join(DDL.format(table=t) for t in ("a", "b", "c", "delta"))
-    out += "INSERT INTO \`a\` VALUES (1,'a');\n"
-    out += "INSERT INTO \`b\` VALUES (1,'b');\n"
-    out += "INSERT INTO \`c\` VALUES (1,'c');\n"
+    out += "INSERT INTO `a` VALUES (1,'a');\n"
+    out += "INSERT INTO `b` VALUES (1,'b');\n"
+    out += "INSERT INTO `c` VALUES (1,'c');\n"
     kind = "REPLACE" if replace else "INSERT"
     changed = "first" if source else "second"
     unique = 4 if source else 5
-    out += (f"{kind} INTO \`delta\` VALUES "
+    out += (f"{kind} INTO `delta` VALUES "
             f"(1,'same'),(2,'same'),(3,'{changed}'),({unique},'unique');\n")
     if mutate:
-        out += "UPDATE \`delta\` SET \`payload\`='evil';\n"
+        out += "UPDATE `delta` SET `payload`='evil';\n"
     if unsafe:
         out += "/*!50003 SET @cmd=IF(@flag,'DROP TABLE delta','SELECT 1') */;\n"
     return out
