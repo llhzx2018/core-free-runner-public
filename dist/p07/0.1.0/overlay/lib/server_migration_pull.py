@@ -28,6 +28,7 @@ import inventory
 import native_scratch_restore
 import isolated_db_restore
 import private_recovery_gate
+import private_sql_literal_reconcile
 import migration_remainder
 import package as package_engine
 import server_migration as legacy
@@ -2672,6 +2673,36 @@ def plan_payload(
     }
 
 
+def require_remainder_exact_source_scope(
+    expected: list[dict[str, Any]] | None,
+    fresh: Any,
+    domains: list[str],
+) -> None:
+    """Refuse a fresh source inventory drift before target preflight or writes.
+
+    A failed parent may have already populated target DBs. A new sibling staging
+    job must not silently change site user, database ownership, document root,
+    runtime or the candidate list while claiming to stage untouched suffix.
+    Never echo any private source values in error messages.
+    """
+    if (not isinstance(expected, list) or not expected
+            or not isinstance(fresh, list)
+            or len(expected) != len(domains) or len(fresh) != len(domains)
+            or not isinstance(domains, list) or not domains):
+        raise PullMigrationError("REMAINDER_SOURCE_SCOPE_UNPROVEN")
+    unique: set[str] = set()
+    for prior, current, name in zip(expected, fresh, domains):
+        if not isinstance(prior, dict) or not isinstance(current, dict):
+            raise PullMigrationError("REMAINDER_SOURCE_SCOPE_UNPROVEN")
+        if (type(name) is not str or not name or name.lower() in unique
+                or prior.get("domain") != name or current.get("domain") != name):
+            raise PullMigrationError("REMAINDER_SOURCE_SCOPE_CHANGED")
+        unique.add(name.lower())
+        if (_site_structure_fingerprint(prior)
+                != _site_structure_fingerprint(current)):
+            raise PullMigrationError("REMAINDER_SOURCE_SITE_STRUCTURE_CHANGED")
+
+
 def prepare_migration(
     source: dict[str, Any],
     domains: list[str],
@@ -2679,6 +2710,7 @@ def prepare_migration(
     *,
     remainder_parent: str | None = None,
     expected_source_identity: str | None = None,
+    expected_remainder_sites: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if confirm != "PREPARE_PULL_MIGRATION":
         raise PullMigrationError("explicit confirmation required: PREPARE_PULL_MIGRATION")
@@ -2686,6 +2718,12 @@ def prepare_migration(
     source_identity = str(source_plan.get("source_server_identity", "UNKNOWN"))
     if expected_source_identity is not None and source_identity != expected_source_identity:
         raise PullMigrationError("REMAINDER_SOURCE_SERVER_CHANGED")
+    if remainder_parent is not None:
+        require_remainder_exact_source_scope(
+            expected_remainder_sites, source_plan.get("sites"), domains
+        )
+    elif expected_remainder_sites is not None:
+        raise PullMigrationError("REMAINDER_SCOPE_WITHOUT_PARENT_REFUSED")
     target = target_preflight_local(source_plan)
     mid = migration_id(source_identity, str(target["target_identity"]))
     root = state_dir(mid)
@@ -2750,6 +2788,9 @@ def prepare_remainder(mid: str, confirm: str) -> dict[str, Any]:
         parent["source"], scope["candidate_domains"], "PREPARE_PULL_MIGRATION",
         remainder_parent=mid,
         expected_source_identity=str(parent["source_server_identity"]),
+        expected_remainder_sites=[
+            dict(row) for row in parent["sites"][scope["already_staged_sites"] + 1:]
+        ],
     )
     return state
 
@@ -2769,6 +2810,19 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
         raise PullMigrationError(
             "PREPARE_RESUME_SQL_GUARD_AND_RECOVERY_PROOF_REQUIRED"
         )
+    # Older migrations can have no persisted SQL-guard evidence although
+    # some sites were already staged. Never infer a safe retry merely from
+    # a missing field: target DBs may already hold source/target mixed data.
+    # This must execute before a status change, network call or DB write.
+    if state.get("status") == "PREPARE_FAILED":
+        sites = state.get("sites")
+        if (not isinstance(sites, list) or not sites
+                or any(not isinstance(site, dict) for site in sites)
+                or any(site.get("stage_status") == "PULLED_STAGED"
+                       for site in sites)):
+            raise PullMigrationError(
+                "PREPARE_RESUME_PARTIAL_STATE_RECOVERY_PROOF_REQUIRED"
+            )
     if not cloudpanel_database_server_ready_local():
         raise PullMigrationError(
             "new-server CloudPanel database server metadata is missing; migration cannot resume safely"
@@ -3178,7 +3232,24 @@ def summary(state: dict[str, Any]) -> dict[str, Any]:
             state.get("existing_target_overwrite_allowed", False)
         ),
         "partial_parent_migration_id": state.get("partial_parent_migration_id"),
-        "cutover_prohibited": bool(state.get("cutover_prohibited", False)),
+        # Report runtime readiness rather than simply echoing the
+        # partial-child flag. A PREPARE_FAILED parent can otherwise print
+        # cutover_prohibited=false even though cutover_migration rejects it.
+        "cutover_prohibited": bool(
+            state.get("cutover_prohibited", False)
+            or state.get("partial_parent_migration_id")
+            or state.get("status") not in {
+                "PREPARED", "CUTOVER_RUNNING", "CUTOVER_FAILED_ROLLED_BACK"
+            }
+        ),
+        "prepare_failure_provenance": (
+            "MISSING_PARTIAL_STATE_RECOVERY_REQUIRED"
+            if state.get("status") == "PREPARE_FAILED"
+            and not isinstance(state.get("last_sql_guard_failure"), dict)
+            else "RECORDED" if isinstance(
+                state.get("last_sql_guard_failure"), dict
+            ) else "NOT_APPLICABLE"
+        ),
         "secrets_emitted": bool(state.get("secrets_emitted", False)),
     }
 
@@ -3714,6 +3785,14 @@ def main() -> int:
     recover.add_argument("--target-package", type=Path, required=True)
     recover.add_argument("--site", required=True)
 
+    offline = sub.add_parser("recovery-literal-review")
+    offline.add_argument("--source-package", type=Path, required=True)
+    offline.add_argument("--target-package", type=Path, required=True)
+    offline.add_argument("--site", required=True)
+    offline.add_argument("--table-ordinal", required=True, type=int)
+    offline.add_argument("--private-output", type=Path)
+    offline.add_argument("--confirm")
+
     isolated = sub.add_parser("isolated-restore")
     isolated.add_argument("--source-package", type=Path, required=True)
     isolated.add_argument("--target-package", type=Path, required=True)
@@ -3842,6 +3921,15 @@ def main() -> int:
             result = private_recovery_gate.evaluate(
                 args.source_package, args.target_package, args.site
             )
+        elif args.command == "recovery-literal-review":
+            # No SSH, database connections, SQL execution or migration state.
+            # Private artifact output must be explicitly opted into and is
+            # exclusive local plaintext only. stdout is always redacted.
+            result = private_sql_literal_reconcile.evaluate(
+                args.source_package, args.target_package, args.site,
+                args.table_ordinal, private_output=args.private_output,
+                confirm=args.confirm,
+            )
         elif args.command == "isolated-restore":
             result = isolated_db_restore.rehearse(
                 args.source_package, args.target_package, args.site, args.confirm
@@ -3896,6 +3984,13 @@ def main() -> int:
         print(f"ERROR: {exc}", file=os.sys.stderr)
         return 13
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    if args.command == "recovery-literal-review" and (
+        result.get("status") != "PRIVATE_SQL_LITERALS_CAPTURED_NOT_RESTORED"
+        or result.get("data_writes_allowed") is not False
+        or result.get("migration_resume_allowed") is not False
+        or result.get("cutover_allowed") is not False
+    ):
+        return 13
     if args.command == "scratch-restore-quarantined" and not (
         result.get("scratch_imports_completed") is True
         and result.get("cutover_allowed") is False
