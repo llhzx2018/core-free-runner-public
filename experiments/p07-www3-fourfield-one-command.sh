@@ -11,7 +11,7 @@ if ! command -v curl >/dev/null || ! command -v python3 >/dev/null; then
   echo "BLOCKED=REQUIRED_LOCAL_TOOLS_MISSING"
   exit 13
 fi
-REF=fe7fcfd904b6c90f179c901e81e0a4c20d7ae6b0
+REF=a128236a201439b183ba054c71e2f48e5334858a
 BASE="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/$REF/experiments"
 DIR=$(mktemp -d /root/p07-www3-fourfield.XXXXXX)
 cleanup() {
@@ -41,8 +41,8 @@ import hashlib
 from pathlib import Path
 import sys
 expected = {
-  "p07-www3-three-table-field-diagnosis.py":"009c063a35805ccca703e3b57a7a3839bc42da4d",
-  "p07-www3-three-table-type-worker.py":"5d05b05526ea7028b84b12c6918499def0b7a1f0",
+  "p07-www3-three-table-field-diagnosis.py":"ea931b318a11a1785f24cbfda1c4811bba36880b",
+  "p07-www3-three-table-type-worker.py":"4cb12c1fcd7c7d03c6b5fe6c95ffc72e946671ac",
   "p07-www3-restored-readback.py":"a1ac6e2c6771ca8f2e8a55bcd7064ccc1f9cf47f",
   "p07-www3-isolated-restore.py":"1b3b9285853cc99e467f70d92c7d2b0222874018",
 }
