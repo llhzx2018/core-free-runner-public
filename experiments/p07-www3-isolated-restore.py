@@ -493,7 +493,71 @@ def _recover_preflight(engine, inventory):
     return status_path, record, archive, password, new_db, new_user
 
 
+def resume_existing_with_safe_names():
+    if os.geteuid() != 0:
+        raise Stop("ROOT_CP2_REQUIRED")
+    sys.path.insert(0, "/opt/vf-server-ops/lib")
+    import cloudpanel, inventory, server_migration_pull as engine
+    status_path, record, archive, password, database, username = (
+        _recover_preflight(engine, inventory))
+    record["resume_attempted"] = True
+    record["resume_scratch_database"] = database
+    record["resume_scratch_user"] = username
+    record["status"] = "SAFE_NAME_DB_CREATION_STARTED"
+    record["blocker"] = None
+    _recover_save(status_path, record)
+    output("SOURCE_ARCHIVE_REUSED", "SHA256_PASS")
+    output("CLOUDPANEL_DB_NAME", "HYPHEN_SAFE")
+    output("SITE_CONFIG_MODIFIED", "NO")
+    output("OLD_SERVER_FROZEN", "NO")
+    try:
+        try:
+            cloudpanel.add_database(DOMAIN, database, username, password, clpctl="clpctl")
+        except cloudpanel.CloudPanelError as exc:
+            record["create_error_category"] = "CLOUDPANEL_CLI"
+            if type(exc.returncode) is int and 0 <= exc.returncode <= 255:
+                record["create_exit_code"] = exc.returncode
+            raise Stop("SAFE_NAME_DATABASE_CREATE_FAILED") from None
+        except ValueError:
+            record["create_error_category"] = "LOCAL_VALIDATION"
+            raise Stop("SAFE_NAME_DATABASE_CREATE_FAILED") from None
+        cpdb, cpsite = _cloudpanel_metadata_counts(database)
+        sqldb, sqluser = _master_sql_presence(database, username)
+        if (cpdb, cpsite, sqldb, sqluser) != ("1", "1", "1", "1"):
+            raise Stop("SAFE_NAME_DATABASE_REGISTRATION_UNVERIFIED")
+        record["status"] = "SAFE_NAME_DATABASE_CREATED"
+        _recover_save(status_path, record)
+        output("SCRATCH_DATABASE_CREATED", "YES")
+        record["status"] = "ISOLATED_IMPORT_STARTED"
+        _recover_save(status_path, record)
+        if not isolated_import(username, password, database, archive, SCRATCH_ROOT):
+            raise Stop("ISOLATED_IMPORT_FAILED_NO_RETRY")
+        record["status"] = "ISOLATED_IMPORT_COMPLETED_NOT_VERIFIED"
+        _recover_save(status_path, record)
+        output("ISOLATED_RESTORE", "IMPORTED_NOT_VERIFIED")
+        output("NEXT_GATE", "INDEPENDENT_SCHEMA_ROW_AND_RAW_BYTE_PARITY")
+        return 0
+    except Stop as exc:
+        record["status"] = "BLOCKED"
+        record["blocker"] = str(exc)
+        _recover_save(status_path, record)
+        output("BLOCKED", str(exc))
+        return 13
+    except Exception:
+        record["status"] = "BLOCKED"
+        record["blocker"] = "UNCLASSIFIED_CONTINUATION_FAILURE"
+        _recover_save(status_path, record)
+        output("BLOCKED", "UNCLASSIFIED_CONTINUATION_FAILURE")
+        return 13
+    finally:
+        output("CP2_STATE_FILE", str(status_path))
+        output("AUTOMATIC_RETRY", "NO")
+        output("CUTOVER_ALLOWED", "NO")
+
+
 def run():
+    if sys.argv[1:] == ["--resume-existing-with-cloudpanel-safe-names"]:
+        return resume_existing_with_safe_names()
     if sys.argv[1:] == ["--inspect-existing-attempt"]:
         return inspect_existing_attempt()
     if sys.argv[1:] != ["--restore-www3-to-new-isolated-db"]:
