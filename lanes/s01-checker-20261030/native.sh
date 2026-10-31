@@ -24,6 +24,7 @@ docker exec "$WP" chown -R www-data:www-data /var/www/html/wp-content/themes/vf-
 cli theme activate vf-tools-theme >/dev/null
 cli plugin install polylang --version=3.8.10 --activate >/dev/null
 cli plugin install seo-by-rank-math --activate >/dev/null
+cli option update rank_math_registration_skip 1 >/dev/null
 docker cp lane/languages.php "$WP:/tmp/languages.php";cli eval-file /tmp/languages.php >/dev/null
 docker cp lane/wp-check.php "$WP:/tmp/wp-check.php";cli eval-file /tmp/wp-check.php > proof/wordpress.json
 cli rewrite structure '/%postname%/' --hard >/dev/null
