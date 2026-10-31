@@ -161,12 +161,13 @@ def audit(root=ROOT,inventory_fn=None):
               " PANEL_INVENTORY="+outcome[4])
     for name in sorted(EXPECTED_PENDING):
         print("PENDING_SITE="+name+" STATE=PENDING_NO_AUTOMATIC_RETRY")
-    print("STAGED_DATABASES_IN_INVENTORY="+str(staged_dbs))
+    print("STAGED_DATABASE_COUNT_IN_MIGRATION_STATE="+str(staged_dbs))
     print("STAGED_SITE_LOCAL_EVIDENCE="+("PASS" if failures==0 else "GAPS_FOUND"))
     print("STAGED_SITE_GAP_COUNT="+str(failures))
     print("EXTERNAL_ASSETS_SQLITE_CRON_PHP_SMOKE=NOT_YET_VERIFIED")
     print("SOURCE_TARGET_CONTENT_PARITY=NOT_VERIFIED")
-    print("CURRENT_SOURCE_AND_DNS_CHANGED=NO")
+    print("OLD_SERVER_CONTACTED=NO")
+    print("DNS_WRITES=NONE")
     print("DATABASE_WRITES=NONE")
     print("CUTOVER_ALLOWED=NO")
     return 0
