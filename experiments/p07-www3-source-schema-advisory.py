@@ -16,6 +16,60 @@ REMOTE=r'''
 import gzip,re,shutil,subprocess,sys,tempfile
 from pathlib import Path
 import cloudpanel,inventory,sql_diff_evidence
+def classify_invalid_utf8_context(path):
+    # Byte-preserving, bounded advisory. Statement labels are HINTS ONLY,
+    # never used by the actual SQL verification or import.
+    import codecs
+    decoder=codecs.getincrementaldecoder("utf-8")("surrogateescape")
+    bad=re.compile("[\udc80-\udcff]")
+    categories={"DML":0,"DDL":0,"SESSION":0,"OTHER":0}
+    context="OTHER"
+    boundary=True
+    charset=set()
+    limit=1024*1024*1024
+    total=0
+    completed=False
+    with gzip.open(path,"rb") as handle:
+        while total<limit:
+            piece=handle.readline(min(1024*1024,limit-total))
+            if not piece:
+                completed=True
+                last=decoder.decode(b"",final=True)
+                if bad.search(last):
+                    categories[context]+=1
+                break
+            if boundary:
+                prefix=piece.lstrip()[:256]
+                if re.match(rb"^(INSERT|REPLACE|UPDATE|DELETE|LOAD)\b",prefix,re.I):
+                    context="DML"
+                elif re.match(rb"^(CREATE|ALTER|DROP|TRUNCATE|RENAME)\b",prefix,re.I):
+                    context="DDL"
+                elif re.match(rb"^(SET|LOCK|UNLOCK|USE|DELIMITER|START|COMMIT|/\*!)\b",prefix,re.I):
+                    context="SESSION"
+                elif not prefix or prefix.startswith((b"--",b"#")):
+                    context="OTHER"
+                if total<5*1024*1024:
+                    match=re.search(rb"\bSET\s+NAMES\s+([A-Za-z0-9_]{1,32})",prefix,re.I)
+                    if match:
+                        charset.add(match.group(1).lower())
+            text=decoder.decode(piece,final=False)
+            if bad.search(text):
+                categories[context]+=1
+            total+=len(piece)
+            boundary=piece.endswith(b"\n")
+            if boundary and piece.rstrip().endswith(b";"):
+                context="OTHER"
+    allow={b"utf8mb4",b"utf8",b"latin1",b"gbk",b"gb18030",
+           b"binary",b"ascii",b"utf16",b"ucs2",b"sjis"}
+    valid=charset & allow
+    if len(charset)==1 and len(valid)==1:
+        label=next(iter(valid)).decode("ascii").upper()
+    elif charset:
+        label="UNRECOGNIZED_OR_MIXED"
+    else:
+        label="NOT_FOUND"
+    return categories,completed,label
+
 domain,database,mid=sys.argv[1:]
 rows=[s for s in inventory.build_manifest(Path("/")).get("sites",[])
       if isinstance(s,dict) and s.get("domain")==domain]
@@ -119,70 +173,16 @@ with tempfile.TemporaryDirectory(prefix="schema-only-",dir=root) as tmp:
             (dump.stat().st_size + (1024*1024) - 1) // (1024*1024)
         ),flush=True)
 
-def classify_invalid_utf8_context(path):
-    # Byte-preserving, bounded advisory. Statement labels are HINTS ONLY,
-    # never used by the actual SQL verification or import.
-    import codecs
-    decoder=codecs.getincrementaldecoder("utf-8")("surrogateescape")
-    bad=re.compile("[\udc80-\udcff]")
-    categories={"DML":0,"DDL":0,"SESSION":0,"OTHER":0}
-    context="OTHER"
-    boundary=True
-    charset=set()
-    limit=1024*1024*1024
-    total=0
-    completed=False
-    with gzip.open(path,"rb") as handle:
-        while total<limit:
-            piece=handle.readline(min(1024*1024,limit-total))
-            if not piece:
-                completed=True
-                last=decoder.decode(b"",final=True)
-                if bad.search(last):
-                    categories[context]+=1
-                break
-            if boundary:
-                prefix=piece.lstrip()[:256]
-                if re.match(rb"^(INSERT|REPLACE|UPDATE|DELETE|LOAD)\b",prefix,re.I):
-                    context="DML"
-                elif re.match(rb"^(CREATE|ALTER|DROP|TRUNCATE|RENAME)\b",prefix,re.I):
-                    context="DDL"
-                elif re.match(rb"^(SET|LOCK|UNLOCK|USE|DELIMITER|START|COMMIT|/\*!)\b",prefix,re.I):
-                    context="SESSION"
-                elif not prefix or prefix.startswith((b"--",b"#")):
-                    context="OTHER"
-                if total<5*1024*1024:
-                    match=re.search(rb"\bSET\s+NAMES\s+([A-Za-z0-9_]{1,32})",prefix,re.I)
-                    if match:
-                        charset.add(match.group(1).lower())
-            text=decoder.decode(piece,final=False)
-            if bad.search(text):
-                categories[context]+=1
-            total+=len(piece)
-            boundary=piece.endswith(b"\n")
-            if boundary and piece.rstrip().endswith(b";"):
-                context="OTHER"
-    allow={b"utf8mb4",b"utf8",b"latin1",b"gbk",b"gb18030",
-           b"binary",b"ascii",b"utf16",b"ucs2",b"sjis"}
-    valid=charset & allow
-    if len(charset)==1 and len(valid)==1:
-        label=next(iter(valid)).decode("ascii").upper()
-    elif charset:
-        label="UNRECOGNIZED_OR_MIXED"
-    else:
-        label="NOT_FOUND"
-    return categories,completed,label
-
-if gz:
-    try:
-        categories,complete,charset=classify_invalid_utf8_context(dump)
-        print("UTF8_CONTEXT_SCAN_COMPLETE="+str(complete).upper(),flush=True)
-        print("SQL_SET_NAMES_HINT="+charset,flush=True)
-        for key in ("DML","DDL","SESSION","OTHER"):
-            print("INVALID_UTF8_CHUNKS_"+key+"="+str(categories[key]),flush=True)
-        print("CONTEXT_CLASSIFICATION=ADVISORY_NOT_A_PASS_GATE",flush=True)
-    except (OSError,EOFError):
-        print("UTF8_CONTEXT_SCAN_COMPLETE=FALSE",flush=True)
+    if gz:
+        try:
+            categories,complete,charset=classify_invalid_utf8_context(dump)
+            print("UTF8_CONTEXT_SCAN_COMPLETE="+str(complete).upper(),flush=True)
+            print("SQL_SET_NAMES_HINT="+charset,flush=True)
+            for key in ("DML","DDL","SESSION","OTHER"):
+                print("INVALID_UTF8_CHUNKS_"+key+"="+str(categories[key]),flush=True)
+            print("CONTEXT_CLASSIFICATION=ADVISORY_NOT_A_PASS_GATE",flush=True)
+        except (OSError,EOFError):
+            print("UTF8_CONTEXT_SCAN_COMPLETE=FALSE",flush=True)
 print("SOURCE_BUSINESS_DB_WRITES=NO",flush=True)
 '''
 
