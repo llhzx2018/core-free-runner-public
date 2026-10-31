@@ -22,6 +22,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 
 MID = "pull-20261031T095604Z-edae3c44"
 PARENT = "pull-20261031T094144Z-d045fa5a"
@@ -219,6 +220,97 @@ def _read_only_mysql_count(sql: str) -> str:
     return answer.decode("ascii") if answer in (b"0", b"1") else "UNKNOWN"
 
 
+def _cloudpanel_master_connect_args(stdout: str) -> tuple[str, int, str, str] | None:
+    """Parse only an official CLI Connect Command; never expose its contents."""
+    clean = re.sub(r"\\x1b\\[[0-9;]*[A-Za-z]", "", stdout)
+    for line in clean.splitlines():
+        match = re.search(r"(?:^|\\s)(?:/usr/bin/)?(?:mysql|mariadb)\\s+", line)
+        if not match:
+            continue
+        # In box tables, trailing vertical bar is the decorative border.
+        raw = line[match.start():].strip().rstrip("|").strip()
+        try:
+            argv = shlex.split(raw, posix=True)
+        except ValueError:
+            continue
+        host, port, user, password = None, None, None, None
+        for i, arg in enumerate(argv[1:], 1):
+            for flag, assign in (("-h", "host"), ("-P", "port"), ("-u", "user"), ("-p", "password")):
+                if arg == flag:
+                    value = argv[i + 1] if i + 1 < len(argv) else ""
+                    if flag == "-p":
+                        value = ""  # Interactive password prompts are not supported.
+                elif arg.startswith(flag) and len(arg) > len(flag):
+                    value = arg[len(flag):]
+                else:
+                    continue
+                if assign == "host": host = value
+                if assign == "port": port = value
+                if assign == "user": user = value
+                if assign == "password": password = value
+            for prefix, assign in (("--host=", "host"), ("--port=", "port"),
+                                   ("--user=", "user"), ("--password=", "password")):
+                if arg.startswith(prefix):
+                    value = arg[len(prefix):]
+                    if assign == "host": host = value
+                    if assign == "port": port = value
+                    if assign == "user": user = value
+                    if assign == "password": password = value
+        if (host in ("127.0.0.1", "localhost")
+                and port is not None and str(port).isdigit() and 1 <= int(port) <= 65535
+                and user and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", user)
+                and password and len(password) <= 256
+                and not any(ch in password for ch in ("\\n", "\\r", "\\0"))):
+            return host, int(port), user, password
+    return None
+
+
+def _master_sql_presence(db: str, user: str) -> tuple[str, str]:
+    """Official CloudPanel CLI -> local TCP read-only SQL; secrets never logged."""
+    try:
+        master = subprocess.run(
+            ["clpctl", "db:show:master-credentials"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, timeout=15, check=False)
+        if master.returncode != 0:
+            return "UNKNOWN", "UNKNOWN"
+        values = _cloudpanel_master_connect_args(master.stdout)
+        if values is None:
+            return "UNKNOWN", "UNKNOWN"
+        host, port, master_user, master_password = values
+        if not shutil.which("mariadb"):
+            return "UNKNOWN", "UNKNOWN"
+        with tempfile.TemporaryDirectory(prefix="p07-meta-", dir="/root") as directory:
+            config = Path(directory) / "client.cnf"
+            fd = os.open(config, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            escaped = master_password.replace("\\\\", "\\\\\\\\").replace('"', '\\"')
+            with os.fdopen(fd, "w") as handle:
+                handle.write('[client]\\nuser="' + master_user +
+                             '"\\npassword="' + escaped + '"\\n')
+            queries = [
+                ("information_schema.SCHEMATA", "SCHEMA_NAME", db),
+                ("mysql.user", "User", user),
+            ]
+            results = []
+            for table, column, value in queries:
+                if not re.fullmatch(r"[a-zA-Z0-9_]+", value):
+                    return "UNKNOWN", "UNKNOWN"
+                statement = ("SELECT CASE WHEN COUNT(*)=0 THEN 0 ELSE 1 END FROM "
+                             + table + " WHERE " + column + "='" + value + "'")
+                proc = subprocess.run(
+                    ["mariadb", "--defaults-extra-file=" + str(config),
+                     "--protocol=tcp", "--host=" + host, "--port=" + str(port),
+                     "--batch", "--skip-column-names", "--execute", statement],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, timeout=12, check=False)
+                result = proc.stdout.strip()
+                results.append(result.decode("ascii") if
+                               proc.returncode == 0 and result in (b"0", b"1") else "UNKNOWN")
+            return results[0], results[1]
+    except (OSError, ValueError, subprocess.SubprocessError, UnicodeError):
+        return "UNKNOWN", "UNKNOWN"
+
+
 def _cloudpanel_metadata_counts(db: str, sqlpath: Path = Path(
         "/home/clp/htdocs/app/data/db.sq3")) -> tuple[str, str]:
     """Read-only CloudPanel database/site registration counts."""
@@ -292,6 +384,17 @@ def inspect_existing_attempt() -> int:
     sql_user = _read_only_mysql_count(
         "SELECT CASE WHEN COUNT(*)=0 THEN 0 ELSE 1 END FROM "
         "mysql.user WHERE User='" + user + "'")
+    method = "ROOT_SOCKET"
+    if sql_db == "UNKNOWN" or sql_user == "UNKNOWN":
+        meta_db, meta_user = _master_sql_presence(db, user)
+        if meta_db in ("0", "1"):
+            sql_db = meta_db
+        if meta_user in ("0", "1"):
+            sql_user = meta_user
+        method = "CLOUDPANEL_MASTER_LOCAL" if (
+            sql_db in ("0", "1") and sql_user in ("0", "1")
+        ) else "AUTHENTICATED_QUERY_UNAVAILABLE"
+    output("SQL_METADATA_METHOD", method)
     output("MARIADB_DATABASE_EXISTS", sql_db)
     output("MARIADB_USER_EXISTS", sql_user)
     if "1" in (cp_db, cp_site, sql_db, sql_user):
