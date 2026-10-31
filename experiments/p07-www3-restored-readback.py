@@ -11,7 +11,21 @@ import subprocess
 import sys
 import tempfile
 
-spec=importlib.util.spec_from_file_location("p07_existing",Path(__file__).with_name("p07-www3-isolated-restore.py"))
+# Readback is a two-file, version-locked operator bundle. Never import an
+# unrelated file or silently fall back to a different installed runtime.
+companion = Path(__file__).with_name("p07-www3-isolated-restore.py")
+try:
+    if companion.is_symlink() or not companion.is_file():
+        raise OSError("missing companion")
+    raw = companion.read_bytes()
+except OSError:
+    print("BLOCKED=READBACK_COMPANION_MISSING_OR_UNSAFE")
+    raise SystemExit(13) from None
+blob = hashlib.sha1(b"blob " + str(len(raw)).encode() + bytes([0]) + raw).hexdigest()
+if blob != "1b3b9285853cc99e467f70d92c7d2b0222874018":
+    print("BLOCKED=READBACK_COMPANION_IDENTITY_MISMATCH")
+    raise SystemExit(13)
+spec=importlib.util.spec_from_file_location("p07_existing",companion)
 base=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(base)
 
