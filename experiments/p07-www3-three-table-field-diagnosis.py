@@ -20,7 +20,7 @@ sys.dont_write_bytecode=True
 ROOT=Path(__file__).resolve().parent
 FILES=(
     ("p07-www3-restored-readback.py","a1ac6e2c6771ca8f2e8a55bcd7064ccc1f9cf47f"),
-    ("p07-www3-three-table-type-worker.py","69103c8cefaaf9ad342f248423a15f6226863f04"),
+    ("p07-www3-three-table-type-worker.py","5d05b05526ea7028b84b12c6918499def0b7a1f0"),
 )
 def stop(code):
     raise Blocked(code)
@@ -57,7 +57,7 @@ def parsed(raw,mode):
         stop("CONTENT_WORKER_OUTPUT_UNVERIFIED")
     lines={}
     allowed={"MODE","SCANNED_TABLES","SCANNED_COLUMNS","SCANNED_ROWS",
-             "FULL_BASE_TABLES","TARGETED_ORDINALS","COLUMN_TYPES",
+             "FULL_BASE_TABLES","TARGETED_ORDINALS","ORDINAL_TABLE_IDS","COLUMN_TYPES",
              "ROW_FINGERPRINTS","READ_ONLY_TRANSACTION",
              "CONTENT_FINGERPRINT_NOT_SNAPSHOT_PARITY"}
     for line in raw.splitlines():
@@ -100,6 +100,11 @@ def parsed(raw,mode):
         stop("CONTENT_WORKER_ROW_TOTAL_INVALID")
     try: metadata=json.loads(lines["COLUMN_TYPES"])
     except (ValueError,TypeError):stop("COLUMN_TYPES_MAP_INVALID")
+    try: ordinal_ids=json.loads(lines["ORDINAL_TABLE_IDS"])
+    except (ValueError,TypeError):stop("TARGETED_ORDINAL_MAP_INVALID")
+    if (type(ordinal_ids) is not dict or set(ordinal_ids)!={"39","60","69"}
+            or set(ordinal_ids.values())!=set(m)):
+        stop("TARGETED_ORDINAL_MAP_UNVERIFIED")
     if type(metadata) is not dict or set(metadata)!=set(m):
         stop("COLUMN_TYPES_IDENTITY_INVALID")
     for tid,columns in metadata.items():
@@ -112,7 +117,7 @@ def parsed(raw,mode):
                 if (type(v) is not str or
                     not re.fullmatch("[A-Za-z0-9_]{1,50}|-|YES|NO",v)):
                     stop("COLUMN_TYPES_PROFILE_UNSAFE")
-    return values,m,metadata
+    return values,m,metadata,ordinal_ids
 
 def compare():
     if sys.argv[1:]!=["--diagnose-three-table-field-types-read-only"]:
@@ -144,7 +149,7 @@ def compare():
         stop("CP2_READ_ONLY_CONTENT_WORKER_UNAVAILABLE")
     if target.returncode:
         stop("CP2_READ_ONLY_CONTENT_WORKER_FAILED")
-    local,local_map,local_meta=parsed(target.stdout,"TARGET")
+    local,local_map,local_meta,local_ord=parsed(target.stdout,"TARGET")
     if expected_ddl!=157 or local["SCANNED_TABLES"]!=3:
         stop("TARGET_TABLE_SCOPE_CHANGED")
     try:
@@ -160,7 +165,8 @@ def compare():
         stop("OLD_VPS_READ_ONLY_CONTENT_WORKER_UNAVAILABLE")
     if response.returncode:
         stop("OLD_VPS_READ_ONLY_CONTENT_WORKER_FAILED")
-    old,old_map,old_meta=parsed(response.stdout,"SOURCE")
+    old,old_map,old_meta,old_ord=parsed(response.stdout,"SOURCE")
+    if old_ord!=local_ord:stop("THREE_TABLE_IDENTITIES_DIFFER")
     ids=set(old_map)&set(local_map)
     missing_old=len(set(local_map)-set(old_map))
     missing_target=len(set(old_map)-set(local_map))
@@ -195,6 +201,7 @@ def compare():
         stop("THREE_TABLE_DIFFERENCE_SCOPE_CHANGED")
     # Identifiers are hashed in the workers and never printed.
     profiles=[]
+    reverse_ord={v:k for k,v in old_ord.items()}
     differences=0
     type_mismatch=charset_mismatch=collation_mismatch=0
     for tid in sorted(ids):
@@ -210,7 +217,7 @@ def compare():
             type_mismatch+=int(sp[0]!=tp[0])
             charset_mismatch+=int(sp[1]!=tp[1])
             collation_mismatch+=int(sp[2]!=tp[2])
-            profiles.append({"type_source":sp[0],"type_target":tp[0],
+            profiles.append({"table_ordinal":reverse_ord[tid],"type_source":sp[0],"type_target":tp[0],
                              "charset_source":sp[1],"charset_target":tp[1],
                              "collation_source":sp[2],"collation_target":tp[2],
                              "nullability_source":sp[3],"nullability_target":tp[3],
@@ -222,6 +229,7 @@ def compare():
     print("CHARSET_CHANGED_FIELD_COUNT="+str(charset_mismatch))
     print("COLLATION_CHANGED_FIELD_COUNT="+str(collation_mismatch))
     for i,item in enumerate(profiles,1):
+        print("DIFFERING_FIELD_"+str(i)+"_TABLE_ORDINAL="+item["table_ordinal"])
         print("DIFFERING_FIELD_"+str(i)+"_TYPE="+
               item["type_source"]+"/"+item["type_target"])
         print("DIFFERING_FIELD_"+str(i)+"_CHARSET="+
