@@ -222,9 +222,9 @@ def _read_only_mysql_count(sql: str) -> str:
 
 def _cloudpanel_master_connect_args(stdout: str) -> tuple[str, int, str, str] | None:
     """Parse only an official CLI Connect Command; never expose its contents."""
-    clean = re.sub(r"\\x1b\\[[0-9;]*[A-Za-z]", "", stdout)
+    clean = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", stdout)
     for line in clean.splitlines():
-        match = re.search(r"(?:^|\\s)(?:/usr/bin/)?(?:mysql|mariadb)\\s+", line)
+        match = re.search(r"(?:^|\s)(?:/usr/bin/)?(?:mysql|mariadb)\s+", line)
         if not match:
             continue
         # In box tables, trailing vertical bar is the decorative border.
@@ -260,7 +260,7 @@ def _cloudpanel_master_connect_args(stdout: str) -> tuple[str, int, str, str] | 
                 and port is not None and str(port).isdigit() and 1 <= int(port) <= 65535
                 and user and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", user)
                 and password and len(password) <= 256
-                and not any(ch in password for ch in ("\\n", "\\r", "\\0"))):
+                and not any(ch in password for ch in ("\n", "\r", "\0"))):
             return host, int(port), user, password
     return None
 
@@ -283,10 +283,10 @@ def _master_sql_presence(db: str, user: str) -> tuple[str, str]:
         with tempfile.TemporaryDirectory(prefix="p07-meta-", dir="/root") as directory:
             config = Path(directory) / "client.cnf"
             fd = os.open(config, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            escaped = master_password.replace("\\\\", "\\\\\\\\").replace('"', '\\"')
+            escaped = master_password.replace("\\", "\\\\").replace('"', '\\"')
             with os.fdopen(fd, "w") as handle:
-                handle.write('[client]\\nuser="' + master_user +
-                             '"\\npassword="' + escaped + '"\\n')
+                handle.write('[client]\nuser="' + master_user +
+                             '"\npassword="' + escaped + '"\n')
             queries = [
                 ("information_schema.SCHEMATA", "SCHEMA_NAME", db),
                 ("mysql.user", "User", user),
