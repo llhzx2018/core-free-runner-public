@@ -436,8 +436,8 @@ class TargetPullContractTests(unittest.TestCase):
             conn.close()
             self.assertEqual(pull.cloudpanel_user_count_local(db), 1)
 
-    def test_resume_fails_before_more_writes_when_cloudpanel_database_server_missing(self) -> None:
-        state = {"migration_id": "pull-20261005T000000Z-deadbeef", "status": "PREPARE_FAILED"}
+    def test_preparing_fails_before_more_writes_when_cloudpanel_database_server_missing(self) -> None:
+        state = {"migration_id": "pull-20261005T000000Z-deadbeef", "status": "PREPARING"}
         with mock.patch.object(pull, "load_state", return_value=state), mock.patch.object(
             pull, "cloudpanel_database_server_ready_local", return_value=False
         ), mock.patch.object(pull, "save_state") as save:
