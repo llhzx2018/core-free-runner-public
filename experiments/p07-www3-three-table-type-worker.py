@@ -287,6 +287,8 @@ def main():
         rows,total=fingerprint(args[1:],db,tables,cols)
     print("FULL_BASE_TABLES=157",flush=True)
     print("TARGETED_ORDINALS=39,60,69",flush=True)
+    ordered_ids={str(n+1):hashlib.sha256(all_tables[n].encode("ascii")).hexdigest() for n in indices}
+    print("ORDINAL_TABLE_IDS="+json.dumps(ordered_ids,sort_keys=True,separators=(",",":")),flush=True)
     print("COLUMN_TYPES="+json.dumps(types,sort_keys=True,separators=(",",":")),flush=True)
     print("MODE="+mode.upper(),flush=True)
     print("SCANNED_TABLES="+str(len(tables)),flush=True)
