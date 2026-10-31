@@ -105,7 +105,7 @@ def number(raw):
     need(value<=10**15,"SQL_COUNT_TOO_LARGE")
     return value
 
-def database_readback(db,user,password):
+def database_readback(db,user,password,*,include_count_map=False):
     need(base._cloudpanel_metadata_counts(db)==("1","1")
          and base._master_sql_presence(db,user)==("1","1"),
          "CLOUDPANEL_AND_MARIADB_BINDING_UNVERIFIED")
@@ -121,20 +121,29 @@ def database_readback(db,user,password):
         qdb="'"+db+"'"
         output=query(argv,"SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA="
               +qdb+" AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME",60)
-        tables=output.splitlines() if output else []
+        # MySQL and MariaDB may sort metadata differently under their collations.
+        # Python codepoint ordering is stable across both database engines.
+        tables=sorted(output.splitlines()) if output else []
         need(0<len(tables)<=1000 and len(tables)==len(set(tables)),"BASE_TABLES_UNPROVEN")
         need(all(re.fullmatch("[A-Za-z0-9_]{1,64}",s) for s in tables),
              "TABLE_NAMES_REQUIRE_EXPLICIT_SAFE_PARSER")
         cols=number(query(argv,"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA="+qdb,60))
         need(cols>=len(tables),"COLUMN_COUNT_UNPROVEN")
         counts=[]
+        table_counts={}
         for table in tables:
             escaped_name=chr(96)+db+chr(96)+"."+chr(96)+table+chr(96)
-            counts.append(number(query(argv,"SELECT COUNT(*) FROM "+escaped_name,180)))
+            n=number(query(argv,"SELECT COUNT(*) FROM "+escaped_name,180))
+            counts.append(n)
+            # Table identities stay in RAM; never expose actual names in logs.
+            ident=hashlib.sha256(table.encode("ascii")).hexdigest()
+            need(ident not in table_counts,"DUPLICATE_TABLE_IDENTITY")
+            table_counts[ident]=n
         hashed=hashlib.sha256()
         for name,count in zip(tables,counts):
             hashed.update(name.encode("ascii")+bytes([0])+str(count).encode()+bytes([10]))
-        return len(tables),cols,sum(counts),sum(n>0 for n in counts),hashed.hexdigest()
+        result=(len(tables),cols,sum(counts),sum(n>0 for n in counts),hashed.hexdigest())
+        return result+(table_counts,) if include_count_map else result
 
 def main():
     need(sys.argv[1:]==["--verify-restored-read-only"],"EXPLICIT_READ_ONLY_ARG_REQUIRED")
