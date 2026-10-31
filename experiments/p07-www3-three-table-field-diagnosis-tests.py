@@ -57,6 +57,20 @@ def payload(mode,mutate=True):
     ])+"\n"
 
 class Tests(unittest.TestCase):
+    def test_hash_sorted_ordinals_match_original_full_probe(self):
+        # Previous DIFFERING_TABLE_ORDINAL_COLUMN_COUNTS used sorted opaque
+        # SHA256 identity, not alphabetically sorted SQL names. Reproduce it.
+        nameset=["wp_probe_"+str(i).zfill(3) for i in range(157)]
+        from_probe=sorted(nameset,key=lambda name:sha(name))
+        selection=worker.select_previous_mismatch_ordinals(sorted(nameset))
+        self.assertEqual(selection,[from_probe[i] for i in (38,59,68)])
+        # The regression must genuinely distinguish the two sort orders.
+        self.assertNotEqual(selection,[sorted(nameset)[i] for i in (38,59,68)])
+        for ordinal,name in zip((39,60,69),selection):
+            self.assertEqual(from_probe.index(name)+1,ordinal)
+        with self.assertRaises(SystemExit):
+            worker.select_previous_mismatch_ordinals(nameset[:156])
+
     def test_worker_type_metadata_with_strict_whitelist(self):
         tablecols={"wp_39":["a","b"],"wp_60":["c"],"wp_69":["d"]}
         rows=[
@@ -151,7 +165,8 @@ class Tests(unittest.TestCase):
         workertext=W.read_text()
         self.assertIn("START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY",workertext)
         self.assertIn("ROLLBACK",workertext)
-        self.assertIn("indices=(38,59,68)",workertext)
+        self.assertIn("select_previous_mismatch_ordinals(all_tables)",workertext)
+        self.assertIn("for i in (38,59,68)",workertext)
         self.assertNotIn("DROP DATABASE",workertext)
         self.assertNotIn("CREATE DATABASE",workertext)
         self.assertNotIn("INSERT INTO",workertext)
