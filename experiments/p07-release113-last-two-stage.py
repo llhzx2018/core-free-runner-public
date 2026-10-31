@@ -248,6 +248,18 @@ def main() -> int:
             print("BLOCKER_CLASS=" + type(exc).__name__, flush=True)
             if isinstance(exc, engine.PullMigrationError):
                 print("BLOCKER=" + str(exc)[:400], flush=True)
+            found=[]
+            for candidate in STATES.iterdir():
+                if not candidate.is_dir() or candidate.is_symlink():
+                    continue
+                child_file=candidate / "state.json"
+                if not child_file.is_file() or child_file.is_symlink():
+                    continue
+                entry=json.loads(child_file.read_text())
+                if (type(entry) is dict and
+                        entry.get("partial_parent_migration_id")==NINE_CHILD):
+                    found.append(str(entry.get("migration_id") or candidate.name))
+            print("NEW_CHILD_IDS=" + (",".join(found) if found else "NONE"), flush=True)
             print("INSPECT_NEW_CHILD_BEFORE_ANY_RETRY=YES", flush=True)
             raise Stop("STAGING_LAST_TWO_INCOMPLETE") from None
         require(private_bytes(ORIGINAL_FILE) == parent_bytes
