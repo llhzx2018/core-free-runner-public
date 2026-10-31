@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import secrets
+import sqlite3
 import shlex
 import shutil
 import stat
@@ -203,7 +204,108 @@ def isolated_import(user, password, database, dump, work):
         config.unlink(missing_ok=True)
 
 
+def _read_only_mysql_count(sql: str) -> str:
+    # Root Unix-socket metadata queries only. Never run an SQL import here.
+    try:
+        proc = subprocess.run(
+            ["mariadb", "--no-defaults", "--protocol=socket", "--user=root",
+             "--batch", "--skip-column-names", "--execute", sql],
+            capture_output=True, timeout=12, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return "UNKNOWN"
+    if proc.returncode != 0:
+        return "UNKNOWN"
+    answer = proc.stdout.strip()
+    return answer.decode("ascii") if answer in (b"0", b"1") else "UNKNOWN"
+
+
+def inspect_existing_attempt() -> int:
+    """Read-only local post-failure inventory. NEVER create, retry or import."""
+    if os.geteuid() != 0:
+        raise Stop("ROOT_CP2_REQUIRED")
+    if not SCRATCH_ROOT.is_dir() or SCRATCH_ROOT.is_symlink():
+        raise Stop("EXISTING_SCRATCH_DIRECTORY_REQUIRED")
+    d = SCRATCH_ROOT.lstat()
+    if d.st_uid != 0 or d.st_mode & 0o077:
+        raise Stop("SCRATCH_DIRECTORY_NOT_PRIVATE")
+    record = SCRATCH_ROOT / "status.json"
+    st = record.lstat()
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o077:
+        raise Stop("RECOVERY_STATUS_NOT_PRIVATE")
+    s = json.loads(record.read_text(encoding="utf-8"))
+    if s.get("migration_id") != MID or s.get("original_site") != DOMAIN:
+        raise Stop("RECOVERY_IDENTITY_MISMATCH")
+    db = s.get("scratch_database")
+    user = s.get("scratch_user")
+    if (type(db) is not str or not re.fullmatch(r"p07scratch_[a-f0-9]{12}", db)
+            or type(user) is not str or not re.fullmatch(r"p07stage_[a-f0-9]{12}", user)):
+        raise Stop("SCRATCH_NAMES_INVALID")
+    # Do not output raw JSON: it may accumulate private details later.
+    status = s.get("status")
+    blocker = s.get("blocker")
+    output("RECOVERY_STATUS", status if status in {
+        "BLOCKED", "ISOLATED_DATABASE_CREATED",
+        "ISOLATED_IMPORT_STARTED", "ISOLATED_IMPORT_COMPLETED_NOT_VERIFIED"
+    } else "OTHER")
+    output("RECOVERY_BLOCKER", blocker if blocker in {
+        "ISOLATED_DATABASE_CREATE_FAILED", "ISOLATED_IMPORT_FAILED_NO_RETRY",
+        "UNCLASSIFIED_FAILURE"
+    } else "OTHER_OR_ABSENT")
+    code = s.get("database_create_exit_code")
+    output("DATABASE_CREATE_EXIT_CODE",
+           code if type(code) is int and 0 <= code <= 255 else "NOT_RECORDED")
+    output("SOURCE_ARCHIVE_PRESENT",
+           "YES" if (SCRATCH_ROOT / "source.sql.gz").is_file() else "NO")
+    output("PRIVATE_CREDENTIAL_FILE_PRESENT",
+           "YES" if (SCRATCH_ROOT / "scratch-credentials.json").is_file() else "NO")
+    sqlpath = Path("/home/clp/htdocs/app/data/db.sq3")
+    cp_db = "UNKNOWN"
+    cp_site = "UNKNOWN"
+    if sqlpath.is_file():
+        try:
+            con = sqlite3.connect(f"file:{sqlpath}?mode=ro", uri=True, timeout=3)
+            try:
+                # Only existence/ownership counts, never credentials or rows.
+                cp_db = str(con.execute(
+                    'SELECT COUNT(*) FROM "database" WHERE name=?', (db,)
+                ).fetchone()[0])
+                cp_site = str(con.execute(
+                    'SELECT COUNT(*) FROM "database" AS d JOIN "site" AS s '
+                    'ON d.site_id=s.id WHERE d.name=? AND s.domain_name=?',
+                    (db, DOMAIN)
+                ).fetchone()[0])
+            finally:
+                con.close()
+        except (OSError, sqlite3.Error):
+            pass
+    cp_db = cp_db if cp_db in ("0", "1") else "UNKNOWN"
+    cp_site = cp_site if cp_site in ("0", "1") else "UNKNOWN"
+    output("CLOUDPANEL_DB_ROWS", cp_db)
+    output("CLOUDPANEL_SITE_DB_LINK", cp_site)
+    sql_db = _read_only_mysql_count(
+        "SELECT CASE WHEN COUNT(*)=0 THEN 0 ELSE 1 END FROM "
+        "information_schema.SCHEMATA WHERE SCHEMA_NAME='" + db + "'")
+    sql_user = _read_only_mysql_count(
+        "SELECT CASE WHEN COUNT(*)=0 THEN 0 ELSE 1 END FROM "
+        "mysql.user WHERE User='" + user + "'")
+    output("MARIADB_DATABASE_EXISTS", sql_db)
+    output("MARIADB_USER_EXISTS", sql_user)
+    if "1" in (cp_db, cp_site, sql_db, sql_user):
+        decision = "PARTIAL_OR_COMPLETE_CREATE_PRESERVE"
+    elif "UNKNOWN" in (cp_db, cp_site, sql_db, sql_user):
+        decision = "INVENTORY_INCOMPLETE_PRESERVE"
+    else:
+        decision = "ABSENT_ON_BOTH_LAYERS_NO_AUTOMATIC_RETRY"
+    output("SAFE_DECISION", decision)
+    output("SITE_CONFIG_MODIFIED_BY_THIS_PROBE", "NO")
+    output("CUTOVER_ALLOWED", "NO")
+    output("DATABASE_WRITES", "NONE")
+    return 0
+
+
 def run():
+    if sys.argv[1:] == ["--inspect-existing-attempt"]:
+        return inspect_existing_attempt()
     if sys.argv[1:] != ["--restore-www3-to-new-isolated-db"]:
         raise Stop("EXPLICIT_ISOLATED_RESTORE_ARGUMENT_REQUIRED")
     if os.geteuid() != 0:
@@ -276,8 +378,19 @@ def run():
         try:
             cloudpanel.add_database(DOMAIN, scratch_db, scratch_user,
                                     scratch_pass, clpctl="clpctl")
-        except (cloudpanel.CloudPanelError, ValueError):
-            raise Stop("ISOLATED_DATABASE_CREATE_FAILED")
+        except cloudpanel.CloudPanelError as exc:
+            # Safe primitive metadata only. Never persist argv, stderr, stdout
+            # or exception context: db:add argv includes the private password.
+            code = exc.returncode
+            if type(code) is int and 0 <= code <= 255:
+                result_state["database_create_exit_code"] = code
+            result_state["database_create_failure_kind"] = "CLOUDPANEL_CLI"
+            save()
+            raise Stop("ISOLATED_DATABASE_CREATE_FAILED") from None
+        except ValueError:
+            result_state["database_create_failure_kind"] = "LOCAL_VALIDATION"
+            save()
+            raise Stop("ISOLATED_DATABASE_CREATE_FAILED") from None
         result_state["status"] = "ISOLATED_DATABASE_CREATED"
         save()
         output("ISOLATED_DATABASE_CREATED", "YES")
