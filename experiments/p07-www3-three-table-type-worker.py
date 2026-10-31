@@ -257,6 +257,16 @@ def targeted_types(args, db, tables, columns):
     if observed!=expected:block("COLUMN_TYPES_MISSING")
     return result
 
+def select_previous_mismatch_ordinals(all_tables):
+    """Ordinals in the full content probe enumerate SHA256(table-name) order."""
+    if len(all_tables)!=157 or len(set(all_tables))!=157:
+        block("FULL_TABLE_SCOPE_CHANGED")
+    if not all(re.fullmatch(r"[A-Za-z0-9_]{1,64}",name) for name in all_tables):
+        block("TABLE_IDENTIFIER_UNSUPPORTED")
+    ordered=sorted(all_tables,key=lambda name:hashlib.sha256(name.encode("ascii")).hexdigest())
+    return [ordered[i] for i in (38,59,68)]
+
+
 def main():
     if (os.geteuid()!=0 or len(sys.argv)!=5 or
             sys.argv[1] not in ("source","target") or
@@ -280,18 +290,14 @@ def main():
               "--batch","--skip-column-names"]
         all_tables,all_cols=schema(args,db)
         if len(all_tables)!=157:block("FULL_TABLE_SCOPE_CHANGED")
-        # The source mismatch ordinals were computed over sorted *hashed*
-        # table identities, not sorted SQL table names. Use that exact order.
-        ordered_by_opaque_identity=sorted(
-            all_tables,key=lambda name:hashlib.sha256(name.encode("ascii")).hexdigest())
-        indices=(38,59,68)
-        tables=[ordered_by_opaque_identity[i] for i in indices]
+        # Exactly the same enumeration as the full content mismatch report.
+        tables=select_previous_mismatch_ordinals(all_tables)
         cols={t:all_cols[t] for t in tables}
         types=targeted_types(args,db,tables,cols)
         rows,total=fingerprint(args[1:],db,tables,cols)
     print("FULL_BASE_TABLES=157",flush=True)
     print("TARGETED_ORDINALS=39,60,69",flush=True)
-    ordered_ids={str(n+1):hashlib.sha256(ordered_by_opaque_identity[n].encode("ascii")).hexdigest() for n in indices}
+    ordered_ids={str(n):hashlib.sha256(t.encode("ascii")).hexdigest() for n,t in zip((39,60,69),tables)}
     print("ORDINAL_TABLE_IDS="+json.dumps(ordered_ids,sort_keys=True,separators=(",",":")),flush=True)
     print("COLUMN_TYPES="+json.dumps(types,sort_keys=True,separators=(",",":")),flush=True)
     print("MODE="+mode.upper(),flush=True)
