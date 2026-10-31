@@ -16,16 +16,17 @@ spec=importlib.util.spec_from_file_location("p07_row_check",MAIN)
 m=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
-def result(mode,rows=7,hash_val=None):
+def result(mode,rows=7,hash_val=None,cell_sig=None):
     table=hashlib.sha256(b"wp_posts").hexdigest()
     col="a"*64
     val=hash_val or "b"*64
+    colmap={hashlib.sha256(b"id").hexdigest():cell_sig or "c"*64}
     lines=[
       "MODE="+mode,
       "SCANNED_TABLES=1",
       "SCANNED_COLUMNS=3",
       "SCANNED_ROWS="+str(rows),
-      "ROW_FINGERPRINTS="+json.dumps({table:[rows,val,col]}),
+      "ROW_FINGERPRINTS="+json.dumps({table:[rows,val,col,colmap]}),
       "READ_ONLY_TRANSACTION=YES",
       "CONTENT_FINGERPRINT_NOT_SNAPSHOT_PARITY=YES",
     ]
@@ -68,12 +69,12 @@ class Tests(unittest.TestCase):
         self.assertNotIn("CREATE DATABASE",worker)
         self.assertNotIn("INSERT INTO",worker)
 
-    def run_compare(self,old_rows,old_hash):
+    def run_compare(self,old_rows,old_hash,old_cell_sig=None):
         state={"migration_id":m.base.MID,"sites":[{},{
             "domain":m.base.DOMAIN,"mysql_databases":["www3data"]}],
             "source":{"mock_source":True},"target_server_identity":"same-target"}
         raw_target=result("TARGET",7,"b"*64)
-        raw_source=result("SOURCE",old_rows,old_hash)
+        raw_source=result("SOURCE",old_rows,old_hash,old_cell_sig)
         remote_mod=types.ModuleType("server_migration_pull")
         remote_mod.target_identity=lambda:"same-target"
         calls=[]
@@ -107,6 +108,7 @@ class Tests(unittest.TestCase):
     def test_advisory_match_never_promotes_cutover(self):
         out=self.run_compare(7,"b"*64)
         self.assertIn("ROW_VALUE_MULTISETS_DIFFERING_TABLES=0",out)
+        self.assertIn("COLUMN_VALUE_DISTRIBUTION_DIFFERING_TABLES=0",out)
         self.assertIn("LIVE_SOURCE_TARGET_ROW_VALUE_FINGERPRINT=MATCH_ADVISORY_ONLY",out)
         self.assertIn("SNAPSHOTS_SIMULTANEOUS=NO",out)
 
@@ -114,7 +116,17 @@ class Tests(unittest.TestCase):
         out=self.run_compare(7,"c"*64)
         self.assertIn("ROW_COUNT_DIFFERING_TABLES=0",out)
         self.assertIn("ROW_VALUE_MULTISETS_DIFFERING_TABLES=1",out)
+        self.assertIn("ROW_COMBINATION_ONLY_DIFFERING_TABLES=1",out)
         self.assertIn("LIVE_SOURCE_TARGET_ROW_VALUE_FINGERPRINT=DIFFER_ADVISORY",out)
+
+    def test_cell_distribution_changes_in_one_column(self):
+        out=self.run_compare(7,"d"*64,"e"*64)
+        self.assertIn("ROW_VALUE_MULTISETS_DIFFERING_TABLES=1",out)
+        self.assertIn("COLUMN_VALUE_DISTRIBUTION_DIFFERING_TABLES=1",out)
+        self.assertIn("COLUMN_VALUE_DISTRIBUTION_DIFFERING_COLUMNS=1",out)
+        self.assertIn("ROW_COMBINATION_ONLY_DIFFERING_TABLES=0",out)
+        self.assertIn("DIFFERING_TABLE_ORDINAL_COLUMN_COUNTS=1:1",out)
+        self.assertNotIn("wp_posts",out)
 
     def test_source_time_drift_remains_advisory(self):
         out=self.run_compare(8,"b"*64)
