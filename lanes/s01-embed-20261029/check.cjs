@@ -17,6 +17,14 @@ await root.locator('[data-vf-embed-mode-button="pro"]').click();await root.locat
 await root.locator('[data-vf-embed-mode-button="simple"]').click();await root.locator('[data-vf-embed-mode-button="simple"][aria-selected="true"]').waitFor({timeout:5000});
 await page.screenshot({path:`proof/embed-${lang}-${width}.png`,fullPage:true});
 await root.locator('[data-vf-embed-clear]').click();assert.equal(await root.locator('[data-vf-embed-url]').inputValue(),'');
-proof.push({language:lang,width,initialMedia:'NONE',generatedIframe:'PASS',mode:'PASS',clear:'PASS',previewPlayback:'NOT_RUN'});await page.close();}
+await root.locator('[data-vf-embed-url]').fill('http://127.0.0.1:18880/wp-content/plugins/vf-tool-m3u8/public/media/player-demo/demo.m3u8');
+await root.locator('[data-vf-embed-generate]').click();
+await root.locator('[data-vf-embed-preview-frame]').waitFor({state:'visible',timeout:10000});
+await page.waitForFunction(()=>document.querySelector('[data-vf-embed-generator]')?.getAttribute('data-vf-embed-preview-state')==='success',null,{timeout:30000});
+const video=root.locator('[data-vf-embed-preview-frame]').contentFrame().locator('video');
+await video.waitFor({state:'attached',timeout:10000});
+await video.evaluate(v=>{v.muted=true;return v.play()});
+await page.waitForFunction(()=>{let f=document.querySelector('[data-vf-embed-preview-frame]');let v=f?.contentDocument?.querySelector('video');return v && v.currentTime>0.1},null,{timeout:15000});
+proof.push({language:lang,width,initialMedia:'NONE',generatedIframe:'PASS',copy:'PASS',mode:'PASS',clear:'PASS',previewPlayback:'PASS'});await page.close();}
 fs.writeFileSync('proof/embed.json',JSON.stringify({status:'PASS',cases:proof,production:'UNTOUCHED'},null,2));
 }finally{await browser.close();}})().catch(e=>{console.error(e);process.exitCode=1});
