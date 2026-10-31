@@ -219,6 +219,31 @@ def _read_only_mysql_count(sql: str) -> str:
     return answer.decode("ascii") if answer in (b"0", b"1") else "UNKNOWN"
 
 
+def _cloudpanel_metadata_counts(db: str, sqlpath: Path = Path(
+        "/home/clp/htdocs/app/data/db.sq3")) -> tuple[str, str]:
+    """Read-only CloudPanel database/site registration counts."""
+    cp_db = "UNKNOWN"
+    cp_site = "UNKNOWN"
+    if sqlpath.is_file():
+        try:
+            con = sqlite3.connect(f"file:{sqlpath}?mode=ro", uri=True, timeout=3)
+            try:
+                cp_db = str(con.execute(
+                    'SELECT COUNT(*) FROM "database" WHERE name=?', (db,)
+                ).fetchone()[0])
+                cp_site = str(con.execute(
+                    'SELECT COUNT(*) FROM "database" AS d JOIN "site" AS s '
+                    'ON d.site_id=s.id WHERE d.name=? AND s.domain_name=?',
+                    (db, DOMAIN)
+                ).fetchone()[0])
+            finally:
+                con.close()
+        except (OSError, sqlite3.Error):
+            pass
+    return (cp_db if cp_db in ("0", "1") else "UNKNOWN",
+            cp_site if cp_site in ("0", "1") else "UNKNOWN")
+
+
 def inspect_existing_attempt() -> int:
     """Read-only local post-failure inventory. NEVER create, retry or import."""
     if os.geteuid() != 0:
@@ -258,28 +283,7 @@ def inspect_existing_attempt() -> int:
            "YES" if (SCRATCH_ROOT / "source.sql.gz").is_file() else "NO")
     output("PRIVATE_CREDENTIAL_FILE_PRESENT",
            "YES" if (SCRATCH_ROOT / "scratch-credentials.json").is_file() else "NO")
-    sqlpath = Path("/home/clp/htdocs/app/data/db.sq3")
-    cp_db = "UNKNOWN"
-    cp_site = "UNKNOWN"
-    if sqlpath.is_file():
-        try:
-            con = sqlite3.connect(f"file:{sqlpath}?mode=ro", uri=True, timeout=3)
-            try:
-                # Only existence/ownership counts, never credentials or rows.
-                cp_db = str(con.execute(
-                    'SELECT COUNT(*) FROM "database" WHERE name=?', (db,)
-                ).fetchone()[0])
-                cp_site = str(con.execute(
-                    'SELECT COUNT(*) FROM "database" AS d JOIN "site" AS s '
-                    'ON d.site_id=s.id WHERE d.name=? AND s.domain_name=?',
-                    (db, DOMAIN)
-                ).fetchone()[0])
-            finally:
-                con.close()
-        except (OSError, sqlite3.Error):
-            pass
-    cp_db = cp_db if cp_db in ("0", "1") else "UNKNOWN"
-    cp_site = cp_site if cp_site in ("0", "1") else "UNKNOWN"
+    cp_db, cp_site = _cloudpanel_metadata_counts(db)
     output("CLOUDPANEL_DB_ROWS", cp_db)
     output("CLOUDPANEL_SITE_DB_LINK", cp_site)
     sql_db = _read_only_mysql_count(
