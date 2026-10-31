@@ -139,6 +139,7 @@ def compare():
     t_tables,t_cols,t_rows,t_nonempty,t_finger=readback.database_readback(db,user,password)
     if t_tables!=source_ddl:
         raise Blocked("TARGET_SOURCE_DDL_COUNT_CHANGED")
+    sys.path.insert(0,"/opt/vf-server-ops/lib")
     import server_migration_pull as migration
     state=readback.read_private(base.STATE)
     site=state["sites"][1]
