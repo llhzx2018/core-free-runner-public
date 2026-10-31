@@ -116,6 +116,63 @@ class Tests(unittest.TestCase):
         self.assertIn("SOURCE_TEMP_SQLITE_SNAPSHOTS_CLEANED=REQUESTED",code)
         self.assertIn("STAGED_ASSET_COUNTS=",code)
 
+    def test_synthetic_full_35_item_private_recovery_without_site_writes(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)
+            records=[]
+            state={"migration_id":m.base.JOBS[0][1],"source":{"ssh_user":"root"},
+                   "source_runtime_path":"/var/lib/vf-server-ops/pull-source/fixture/runtime"}
+            for i in range(17):
+                records.append(("external","ORIGINAL17",state,
+                    Path("/home/site/external"+str(i)),"site",
+                    {"kind":"FILE"}))
+            for i in range(13):
+                records.append(("sqlite","ORIGINAL17",state,
+                    Path("/home/site/data"+str(i)+".sqlite"),"site",{}))
+            for i in range(5):
+                records.append(("cron","ORIGINAL17",state,
+                    Path("/etc/cron.d/job"+str(i)),"root",{}))
+            for _,mid,_ in m.base.JOBS:
+                s=root/mid
+                s.mkdir()
+                (s/"state.json").write_text('{"synthetic":true}')
+            evidence=root/"recovery"
+            evidence.mkdir()
+            remote_calls=[]
+            fake=types.SimpleNamespace(
+                source_path_kind=lambda *a,**k:"FILE",
+                source_python=lambda *a,**k:subprocess.CompletedProcess([],0,"",""),
+                source_remote=lambda *a,**k:(remote_calls.append((a,k)) or
+                    subprocess.CompletedProcess([],0,"","")),
+            )
+            copied=[]
+            def copier(migration,cat,from_state,source,out,kind,user):
+                out.parent.mkdir(parents=True,exist_ok=True)
+                out.write_bytes(b"synthetic private sample")
+                copied.append((cat,str(out)))
+                return "FILE_TRANSFERRED_HASHED"
+            result=io.StringIO()
+            with mock.patch.object(sys,"argv",["p07-asset","--stage-exact-missing-assets-private-only"]), \
+                 mock.patch.object(m,"stage_rows",return_value=([],records)), \
+                 mock.patch.object(m,"prepare_engine",return_value=fake), \
+                 mock.patch.object(m,"source_space_preflight"), \
+                 mock.patch.object(m,"create_evidence_folder",return_value=evidence), \
+                 mock.patch.object(m,"copy_to_private",side_effect=copier), \
+                 mock.patch.object(m,"local_sqlite_ok",return_value=True), \
+                 mock.patch.object(m.base,"ROOT",root), \
+                 contextlib.redirect_stdout(result):
+                self.assertEqual(m.stage(),0)
+            manifest=json.loads((evidence/"private-manifest.json").read_text())
+            self.assertEqual(manifest["counts"],{"external":17,"sqlite":13,"cron":5})
+            self.assertFalse(manifest["site_files_materialized"])
+            self.assertFalse(manifest["cutover_allowed"])
+            self.assertEqual(len(manifest["records"]),35)
+            self.assertEqual(len(copied),35)
+            self.assertEqual(len(remote_calls),18)
+            self.assertIn("SITE_PATHS_MODIFIED=NO",result.getvalue())
+            self.assertIn("CUTOVER_ALLOWED=NO",result.getvalue())
+            self.assertNotIn("password",result.getvalue().lower())
+
     def test_exact_argument_required_before_preflight(self):
         with mock.patch.object(sys,"argv",["asset-stage","--unsafe"]), \
              mock.patch.object(m,"stage_rows") as check:
