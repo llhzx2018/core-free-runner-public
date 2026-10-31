@@ -70,6 +70,14 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(m.Block,"STAGED_SCOPE_DRIFT"):
             self.get_rows(states)
 
+    def test_identical_cron_path_across_jobs_is_safe_private_duplicate(self):
+        states=seed_states()
+        first=states[m.base.JOBS[0][1]]["runtime_assets"]["system_cron"][0]["path"]
+        states[m.base.JOBS[1][1]]["runtime_assets"]["system_cron"][0]["path"]=first
+        _,rows=self.get_rows(states)
+        self.assertEqual(sum(r[0]=="cron" for r in rows),5)
+        self.assertEqual(sum(str(r[3])==first for r in rows),2)
+
     def test_unsafe_path_and_protected_existing_file(self):
         with self.assertRaisesRegex(m.Block,"ASSET_OUTSIDE_SITE_USER_ROOT"):
             m.validate_asset_path({"path":"/etc/shadow"},"site")
