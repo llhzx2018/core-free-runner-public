@@ -143,7 +143,8 @@ def _private_parent(path: Path) -> None:
         value = parent.lstat()
         if (not stat.S_ISDIR(value.st_mode) or value.st_uid != os.geteuid()
                 or stat.S_IMODE(value.st_mode) != 0o700
-                or parent.resolve(strict=True) != parent.absolute()\n                or path.is_symlink() or path.exists()):
+                or parent.resolve(strict=True) != parent.absolute()
+                or path.is_symlink() or path.exists()):
             raise PreservationBlocked("PRESERVATION_PRIVATE_DESTINATION_REQUIRED")
     except PreservationBlocked:
         raise
