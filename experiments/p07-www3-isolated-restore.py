@@ -423,8 +423,8 @@ def run():
 
     s, origin_db = state_preflight(engine, inventory)
     token = secrets.token_hex(12)
-    scratch_db = "p07scratch_" + token[:12]
-    scratch_user = "p07stage_" + token[:12]
+    scratch_db = "p07scratch-" + token[:12]
+    scratch_user = "p07stage-" + token[:12]
     scratch_pass = secrets.token_urlsafe(32)
     SCRATCH_ROOT.mkdir(mode=0o700, parents=False, exist_ok=False)
     SCRATCH_ROOT.chmod(0o700)
