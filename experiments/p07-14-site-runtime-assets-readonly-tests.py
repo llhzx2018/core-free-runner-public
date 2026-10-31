@@ -31,7 +31,7 @@ class Tests(unittest.TestCase):
         with mock.patch.object(m.Path,"is_file",return_value=False):
             self.assertEqual(m.runtime_status(s,t)[0],"PHP_BINARY_MISSING")
         self.assertEqual(m.runtime_status({"runtime":{"type":"static"}},
-            {"runtime":{"type":"static"}})[0],"DECLARED_RUNTIME_MATCH_NEEDS_FUNCTIONAL_SMOKE")
+            {"runtime":{"type":"static"}})[0],"STATIC_OR_UNKNOWN_REQUIRES_SMOKE")
 
     def test_local_asset_paths_prevent_traversal_and_symlinks(self):
         with tempfile.TemporaryDirectory() as d:
