@@ -34,7 +34,12 @@ class TestOperator(unittest.TestCase):
         self.fake = types.ModuleType("server_migration_pull")
         self.inventory = types.ModuleType("inventory")
         self.cloudpanel = types.ModuleType("cloudpanel")
-        self.cloudpanel.CloudPanelError = type("CloudPanelError", (Exception,), {})
+        class CloudPanelError(Exception):
+            def __init__(self, operation, returncode=None):
+                self.operation=operation
+                self.returncode=returncode
+                super().__init__(operation)
+        self.cloudpanel.CloudPanelError=CloudPanelError
         self.created = []
         self.calls = []
         self.source = {"host": "192.0.2.2","ssh_user":"root","ssh_port":22}
@@ -171,7 +176,7 @@ class TestOperator(unittest.TestCase):
         calls=[]
         def fake_run(args,**kwargs):
             calls.append((args,kwargs))
-            return subprocess.CompletedProcess(args,0,b"1\\n",b"")
+            return subprocess.CompletedProcess(args,0,bytes([49,10]),b"")
         with mock.patch.object(mod.subprocess,"run",side_effect=fake_run):
             self.assertEqual(mod._read_only_mysql_count("SELECT 1"),"1")
         argv,kwargs=calls[0]
