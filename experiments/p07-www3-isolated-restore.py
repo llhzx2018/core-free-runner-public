@@ -179,7 +179,7 @@ def isolated_import(user, password, database, dump, work):
     config = work / "mysql-client.cnf"
     # Password comes from token_urlsafe; no shell injection/escaping needed.
     config.write_text("[client]\nuser=" + user + "\npassword=" + password +
-                      "\nhost=localhost\n", encoding="utf-8")
+                      "\nhost=127.0.0.1\nprotocol=tcp\n", encoding="utf-8")
     config.chmod(0o600)
     error_log = work / "import.stderr"
     args = ["mariadb", "--defaults-extra-file=" + str(config),
