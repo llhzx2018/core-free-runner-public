@@ -201,16 +201,21 @@ def main():
     mode,domain,db=sys.argv[1:]
     if mode=="source":host,port,user,pw=source_auth(domain,db)
     else:host,port,user,pw=target_auth(domain,db)
-    env=os.environ.copy()
-    env["MYSQL_PWD"]=pw
     cli=shutil.which("mariadb") or shutil.which("mysql")
     if not cli:block("SQL_CLIENT_UNAVAILABLE")
-    # Credentials never enter argv, files, stdout or the GitHub runner.
-    # SQL client may use MYSQL_PWD from the inherited process environment.
-    args=[cli,"--no-defaults","--protocol=tcp","--host="+host,
-          "--port="+str(port),"--user="+user,"--batch","--skip-column-names"]
-    tables,cols=schema(args,db)
-    rows,total=fingerprint(args[1:],db,tables,cols)
+    with tempfile.TemporaryDirectory(prefix="p07-content-",dir="/root") as directory:
+        cfg=Path(directory)/"client.cnf"
+        fd=os.open(cfg,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+        escaped=lambda v:v.replace(chr(92),chr(92)+chr(92)).replace('"',chr(92)+'"')
+        with os.fdopen(fd,"w") as handle:
+            handle.write('[client]'+chr(10)+'user="'+escaped(user)+'"'+chr(10)+
+                         'password="'+escaped(pw)+'"'+chr(10))
+        # Scoped local secret file never leaves this host and is unlinked on exit.
+        args=[cli,"--defaults-extra-file="+str(cfg),"--protocol=tcp",
+              "--host="+host,"--port="+str(port),
+              "--batch","--skip-column-names"]
+        tables,cols=schema(args,db)
+        rows,total=fingerprint(args[1:],db,tables,cols)
     print("MODE="+mode.upper(),flush=True)
     print("SCANNED_TABLES="+str(len(tables)),flush=True)
     print("SCANNED_COLUMNS="+str(sum(len(v) for v in cols.values())),flush=True)
