@@ -292,6 +292,33 @@ class TestOperator(unittest.TestCase):
         self.assertNotIn("synthetic-secret",str(calls))
         self.assertEqual(list(self.path.glob("p07-meta-*")),[])
 
+    def test_master_metadata_hyphen_names_checked_not_marked_unknown(self):
+        original = tempfile.TemporaryDirectory
+        statements = []
+        def fake_run(argv, **kwargs):
+            if argv[:2] == ["clpctl", "db:show:master-credentials"]:
+                return subprocess.CompletedProcess(argv, 0,
+                    "| Connect Command | mysql -h'127.0.0.1' -P'3306' -u'root' -p'synthetic-secret' |", "")
+            self.assertEqual(argv[0], "mariadb")
+            statements.append(argv[-1])
+            self.assertIn("SELECT CASE WHEN COUNT", argv[-1])
+            return subprocess.CompletedProcess(argv, 0, b"0\n", b"")
+        with mock.patch.object(mod.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(mod.tempfile, "TemporaryDirectory",
+                side_effect=lambda **kw: original(prefix=kw["prefix"], dir=self.path)), \
+             mock.patch.object(mod.shutil, "which", return_value="/usr/bin/mariadb"):
+            self.assertEqual(mod._master_sql_presence(
+                "p07scratch-abcdef123456", "p07stage-abcdef123456"), ("0", "0"))
+            self.assertEqual(len(statements), 2)
+            self.assertIn("'p07scratch-abcdef123456'", statements[0])
+            self.assertIn("'p07stage-abcdef123456'", statements[1])
+            # Injection and whitespace must still be treated as UNKNOWN without SQL.
+            self.assertEqual(mod._master_sql_presence(
+                "p07scratch-abcdef123456';DROP", "p07stage-abcdef123456"),
+                ("UNKNOWN", "UNKNOWN"))
+            self.assertEqual(len(statements), 2)
+        self.assertEqual(list(self.path.glob("p07-meta-*")),[])
+
     def test_root_socket_metadata_query_never_passes_credentials(self):
         calls=[]
         def fake_run(args,**kwargs):
