@@ -296,7 +296,7 @@ def _master_sql_presence(db: str, user: str) -> tuple[str, str]:
             ]
             results = []
             for table, column, value in queries:
-                if not re.fullmatch(r"[a-zA-Z0-9_]+", value):
+                if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value):
                     return "UNKNOWN", "UNKNOWN"
                 statement = ("SELECT CASE WHEN COUNT(*)=0 THEN 0 ELSE 1 END FROM "
                              + table + " WHERE " + column + "='" + value + "'")
