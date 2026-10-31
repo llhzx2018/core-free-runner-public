@@ -142,6 +142,10 @@ class RemainderIntegrationTests(unittest.TestCase):
         self.assertEqual(prep.call_args.kwargs["remainder_parent"], parent["migration_id"])
         self.assertEqual(prep.call_args.kwargs["expected_source_identity"],
                          parent["source_server_identity"])
+        self.assertEqual(
+            [s["domain"] for s in prep.call_args.kwargs["expected_remainder_sites"]],
+            [f"site{i}.example.test" for i in range(9, 18)],
+        )
 
     def test_wrong_confirmation_does_not_read_or_mutate_parent(self):
         with mock.patch.object(pull, "load_state") as read, \
@@ -175,6 +179,7 @@ class RemainderIntegrationTests(unittest.TestCase):
                     {}, ["site9.example.test"], "PREPARE_PULL_MIGRATION",
                     remainder_parent=parent_id,
                     expected_source_identity="source-id",
+                    expected_remainder_sites=plan["sites"],
                 )
         child = save.call_args.args[0]
         self.assertEqual(child["partial_parent_migration_id"], parent_id)
