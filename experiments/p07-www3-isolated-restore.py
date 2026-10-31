@@ -66,6 +66,20 @@ def output(k: str, v: object) -> None:
 
 
 def state_preflight(engine, inventory):
+    runtime = subprocess.run(["vfops", "--build-id"], capture_output=True,
+                             text=True, timeout=20, check=False)
+    if runtime.returncode != 0 or runtime.stdout.strip() != "0.1.0-release113":
+        raise Stop("RELEASE113_RUNTIME_REQUIRED")
+    source_engine = Path("/opt/vf-server-ops/lib/server_migration_pull.py")
+    try:
+        data = source_engine.read_bytes()
+    except OSError:
+        raise Stop("ENGINE_SOURCE_UNAVAILABLE") from None
+    blob_hash = hashlib.sha1(
+        b"blob " + str(len(data)).encode() + b"\0" + data
+    ).hexdigest()
+    if blob_hash != "71fb59ad7d005b88e39cbeed4b3302c7f313bd06":
+        raise Stop("RELEASE113_ENGINE_CHANGED")
     x = STATE.lstat()
     if (not stat.S_ISREG(x.st_mode) or x.st_uid != 0
             or x.st_mode & 0o077):
