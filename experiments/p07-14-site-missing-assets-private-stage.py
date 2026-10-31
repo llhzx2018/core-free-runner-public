@@ -112,7 +112,9 @@ def stage_rows():
     counts={k:sum(row[0]==k for row in rows) for k in EXPECTED}
     need(counts==EXPECTED,"ACTUAL_MISSING_ASSET_SCOPE_CHANGED")
     # Never use automatic or incremental resume to reinterpret a failed state.
-    keys=[(typ,str(path)) for typ,_,_,path,_,_ in rows]
+    # Cron paths can legitimately recur in several migration child snapshots.
+    # Each reference is staged privately per job; only site-file collisions block.
+    keys=[(typ,str(path)) for typ,_,_,path,_,_ in rows if typ!="cron"]
     need(len(keys)==len(set(keys)),"DUPLICATE_ASSET_DESTINATION")
     exts=[path for typ,_,_,path,_,_ in rows if typ=="external"]
     for i,path in enumerate(exts):
@@ -260,8 +262,9 @@ def stage():
                 result=copy_to_private(migrate,category,state,Path(remote),out,"FILE",user)
                 need(local_sqlite_ok(out),"COPIED_SQLITE_QUICK_CHECK_FAILED")
             finally:
-                migrate.source_remote(state["source"],
+                cleanup=migrate.source_remote(state["source"],
                    "rm -f -- "+sh_quote(remote),timeout=60,check=False)
+                need(cleanup.returncode==0,"SOURCE_TEMP_SNAPSHOT_CLEANUP_UNVERIFIED")
             result="SQLITE_SNAPSHOT_PRIVATE_VERIFIED"
         elif category=="cron":
             result=copy_to_private(migrate,category,state,src,out,"FILE",user)
