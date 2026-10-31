@@ -252,6 +252,12 @@ def run():
         # Only now create a unique unbound scratch DB. The site app remains
         # pointed at the old/unchanged configuration.
         result_state["status"] = "SCRATCH_DB_CREATION_STARTED"
+        result_state["credential_file"] = "scratch-credentials.json"
+        creds = SCRATCH_ROOT / "scratch-credentials.json"
+        fd = os.open(creds, os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump({"database": scratch_db, "user": scratch_user,
+                       "password": scratch_pass}, f)
         save()
         try:
             cloudpanel.add_database(DOMAIN, scratch_db, scratch_user,
@@ -259,12 +265,6 @@ def run():
         except (cloudpanel.CloudPanelError, ValueError):
             raise Stop("ISOLATED_DATABASE_CREATE_FAILED")
         result_state["status"] = "ISOLATED_DATABASE_CREATED"
-        result_state["credential_file"] = "scratch-credentials.json"
-        creds = SCRATCH_ROOT / "scratch-credentials.json"
-        fd = os.open(creds, os.O_WRONLY|os.O_CREAT|os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump({"database": scratch_db, "user": scratch_user,
-                       "password": scratch_pass}, f)
         save()
         output("ISOLATED_DATABASE_CREATED", "YES")
         result_state["status"] = "ISOLATED_IMPORT_STARTED"
