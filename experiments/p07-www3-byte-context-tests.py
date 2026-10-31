@@ -54,4 +54,53 @@ class ByteContext(unittest.TestCase):
         self.assertTrue(complete)
         self.assertEqual(sum(result.values()),0)
 
+
+class TempExportLifecycle(unittest.TestCase):
+    def test_classifier_runs_inside_temporary_export_scope(self):
+        calls = [n for n in ast.walk(tree) if isinstance(n,ast.Call)
+                 and isinstance(n.func,ast.Name)
+                 and n.func.id=="classify_invalid_utf8_context"]
+        scopes = [n for n in ast.walk(tree) if isinstance(n,ast.With)
+                  and any(isinstance(c.context_expr,ast.Call)
+                          and isinstance(c.context_expr.func,ast.Attribute)
+                          and c.context_expr.func.attr=="TemporaryDirectory"
+                          for c in n.items)]
+        self.assertEqual(len(calls),1)
+        self.assertEqual(len(scopes),1)
+        self.assertTrue(any(n is calls[0] for n in ast.walk(scopes[0])))
+
+    def test_synthetic_export_cleanup_and_invalid_dml(self):
+        import contextlib,io,shutil,sys,types
+        from unittest import mock
+        fixture=b"SET NAMES utf8mb4;\nCREATE TABLE t(id INT);\nINSERT INTO t VALUES('"+bytes([255])+b"');\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            anchor='root=Path("/var/lib/vf-server-ops/pull-source")/mid/"data"'
+            self.assertIn(anchor,remote)
+            script=remote.replace(anchor, "root=Path("+repr(tmp)+")")
+            cloud=types.ModuleType("cloudpanel")
+            cloud.CloudPanelError=RuntimeError
+            def export(name,output,*,clpctl):
+                self.assertEqual(name,"fixture")
+                with gzip.open(output,"wb") as h:h.write(fixture)
+            cloud.export_database=export
+            inventory=types.ModuleType("inventory")
+            inventory.build_manifest=lambda _:{"sites":[{"domain":"www3.m3u8.one","mysql_databases":["fixture"]}]}
+            evidence=types.ModuleType("sql_diff_evidence")
+            class Failure(RuntimeError):pass
+            evidence.AdvisoryDiagnosticUnavailable=Failure
+            def schema(_):raise Failure("SQL_DIAGNOSTIC_INPUT_UNAVAILABLE")
+            evidence.require_nonempty_source_schema=schema
+            buf=io.StringIO()
+            with mock.patch.dict(sys.modules,{"cloudpanel":cloud,"inventory":inventory,
+                                              "sql_diff_evidence":evidence}),\
+                 mock.patch.object(sys,"argv",["-c","www3.m3u8.one","fixture","fake"]),\
+                 mock.patch.object(shutil,"which",return_value=None),\
+                 contextlib.redirect_stdout(buf):
+                exec(compile(script,"<synthetic>","exec"),{"__name__":"__main__"})
+            self.assertIn("UTF8_CONTEXT_SCAN_COMPLETE=TRUE",buf.getvalue())
+            self.assertIn("INVALID_UTF8_CHUNKS_DML=1",buf.getvalue())
+            self.assertIn("SOURCE_BUSINESS_DB_WRITES=NO",buf.getvalue())
+            self.assertEqual(list(Path(tmp).iterdir()),[])
+
+
 if __name__=="__main__":unittest.main()
