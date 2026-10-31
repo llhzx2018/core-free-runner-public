@@ -1,0 +1,181 @@
+name: P07 release113 integrated candidate install-upgrade-rollback (synthetic)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release113-integrated-candidate.yml'
+      - 'dist/p07/0.1.0/overlay/**'
+      - 'installers/p07.sh'
+      - 'installers/p07-final.sh'
+      - 'installers/p07-toolbox.sh'
+      - 'experiments/p07-release113-attestation.json'
+permissions:
+  contents: read
+jobs:
+  release113-candidate:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify complete exact runtime/full manifests and installer chain
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,json
+          a=json.loads(Path('experiments/p07-release113-attestation.json').read_text())
+          assert a['status']=='FORMAL_STAGING_NOT_PUBLISHED'
+          assert a['product_build']=='0.1.0-release113'
+          assert a['runtime_file_count']==58 and a['overlay_file_count']==136
+          assert a['verified_private_original_sql_restore'] is False
+          assert a['verified_site8_conflicts_resolved'] is False
+          assert a['migration_resume_allowed'] is False
+          assert a['cutover_allowed'] is False
+          assert not any(a['negative'].values())
+          def blob(p):
+              data=p.read_bytes()
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          def manifest(root,name):
+              seen=set()
+              for row in (root/name).read_text().splitlines():
+                  sha,path=row.split('  ',1)
+                  q=Path(path)
+                  assert not q.is_absolute() and '..' not in q.parts and path not in seen
+                  seen.add(path)
+                  f=root/q
+                  assert f.is_file() and not f.is_symlink(),path
+                  assert blob(f)==sha,path
+              return seen
+          root=Path('dist/p07/0.1.0/overlay')
+          runtime=manifest(root,'RUNTIME.gitblob')
+          complete=manifest(root,'MANIFEST.gitblob')
+          assert len(runtime)==58 and len(complete)==136 and runtime<=complete
+          assert (root/'BUILD_ID').read_text().strip()==a['product_build']
+          assert blob(root/'RUNTIME.gitblob')==a['runtime_manifest_blob']
+          assert blob(root/'MANIFEST.gitblob')==a['overlay_manifest_blob']
+          assert blob(Path('installers/p07-final.sh'))==a['final_installer_blob']
+          assert blob(Path('installers/p07.sh'))==a['loader_blob']
+          assert blob(Path('installers/p07-toolbox.sh'))==a['toolbox_blob']
+          assert a['final_installer_blob'] in Path('installers/p07.sh').read_text()
+          assert a['runtime_manifest_blob'] in Path('installers/p07-final.sh').read_text()
+          assert '0.1.0-release113' in Path('installers/p07-toolbox.sh').read_text()
+          for mod in ('private_sql_literal_reconcile','private_conflict_preservation','scratch_sql_host_policy','migration_remainder','private_recovery_gate','native_scratch_restore','isolated_db_restore'):
+              assert 'lib/'+mod+'.py' in runtime
+          print('P07_113_COMPLETE_EXACT_CANDIDATE_MANIFEST_PASS')
+          PY
+          bash -n installers/p07.sh installers/p07-final.sh installers/p07-toolbox.sh
+          python3 -m py_compile dist/p07/0.1.0/overlay/lib/*.py
+      - name: Regression suite exact candidate without private data
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd dist/p07/0.1.0/overlay
+          PYTHONPATH=lib python3 -m unittest -q \
+            tests.test_server_migration_pull \
+            tests.test_migration_remainder \
+            tests.test_migration_remainder_exact_scope \
+            tests.test_migration_no_overwrite_resume \
+            tests.test_private_recovery_gate \
+            tests.test_private_sql_literal_reconcile \
+            tests.test_private_verified_sql_snapshot \
+            tests.test_private_conflict_preservation \
+            tests.test_scratch_sql_host_policy \
+            tests.test_scratch_multiline_host_gate \
+            tests.test_scratch_sealed_input \
+            tests.test_restore_sql_preflight \
+            tests.test_scratch_guard_quarantine \
+            tests.test_isolated_db_restore \
+            tests.test_native_scratch_restore \
+            tests.test_target_cleanup_protection
+          echo P07_113_EXACT_CANDIDATE_SAFETY_SUITE_PASS
+      - name: Set up local-only immutable release112 and candidate HTTP roots
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git worktree add --detach "$RUNNER_TEMP/p07-old-source" origin/main
+          python3 -m http.server 8873 --bind 127.0.0.1 -d "$RUNNER_TEMP/p07-old-source" > "$RUNNER_TEMP/p07-old.log" 2>&1 &
+          python3 -m http.server 8874 --bind 127.0.0.1 -d "$GITHUB_WORKSPACE" > "$RUNNER_TEMP/p07-new.log" 2>&1 &
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:8873/installers/p07.sh -o /dev/null && curl -fsS http://127.0.0.1:8874/installers/p07.sh -o /dev/null; then break; fi
+            sleep 1
+          done
+          echo P07_113_LOCAL_ONLY_MIRRORS_READY
+      - name: Install release112 then upgrade 112 to 113 with private sentinel unchanged
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          export P07_INSTALL_DIR="$RUNNER_TEMP/p07-site8"
+          export P07_PREVIOUS_DIR="$RUNNER_TEMP/p07-site8.previous"
+          export P07_BIN_LINK="$RUNNER_TEMP/vfops-site8"
+          mkdir -p "$RUNNER_TEMP/private-business"
+          printf 'UNCHANGED_PRIVATE_BUSINESS_DATA\n' > "$RUNNER_TEMP/private-business/sentinel"
+          before="$(sha256sum "$RUNNER_TEMP/private-business/sentinel")"
+          export P07_PUBLIC_ROOT=http://127.0.0.1:8873
+          curl -fsS "$P07_PUBLIC_ROOT/installers/p07.sh" | bash
+          test "$("$P07_BIN_LINK" --build-id)" = 0.1.0-release112
+          export P07_PUBLIC_ROOT=http://127.0.0.1:8874
+          curl -fsS "$P07_PUBLIC_ROOT/installers/p07.sh" | bash
+          test "$("$P07_BIN_LINK" --build-id)" = 0.1.0-release113
+          test "$(cat "$P07_PREVIOUS_DIR/BUILD_ID")" = 0.1.0-release112
+          test "$(sha256sum "$RUNNER_TEMP/private-business/sentinel")" = "$before"
+          test "$(git hash-object "$P07_INSTALL_DIR/.runtime-manifest.gitblob")" = 4e7206e432ed05a9a084edd5279ec339aee01f65
+          "$P07_BIN_LINK" server-migrate --help | grep -F 'recovery-literal-review'
+          "$P07_BIN_LINK" server-migrate --help | grep -F 'remainder-prepare'
+          echo P07_113_RELEASE112_UPGRADE_WITH_PRIVATE_SENTINEL_PASS
+      - name: Reinstall idempotently and fail closed on nonexistent backup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          export P07_INSTALL_DIR="$RUNNER_TEMP/p07-site8"
+          export P07_PREVIOUS_DIR="$RUNNER_TEMP/p07-site8.previous"
+          export P07_BIN_LINK="$RUNNER_TEMP/vfops-site8"
+          export P07_PUBLIC_ROOT=http://127.0.0.1:8874
+          curl -fsS "$P07_PUBLIC_ROOT/installers/p07.sh" | bash
+          test "$("$P07_BIN_LINK" --build-id)" = 0.1.0-release113
+          set +e
+          "$P07_BIN_LINK" server-migrate recovery-literal-review --source-package /no/backup --target-package /no/target --site synthetic.example.test --table-ordinal 4 > "$RUNNER_TEMP/negative.json" 2> "$RUNNER_TEMP/negative.err"
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          ! grep -Eq '"(cutover_allowed|migration_resume_allowed)": true' "$RUNNER_TEMP/negative.json"
+          echo P07_113_INVALID_BACKUP_REMAINS_BLOCKED_PASS
+      - name: Inject post-swap failure and preserve release112 plus external data
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          export P07_INSTALL_DIR="$RUNNER_TEMP/p07-postswap"
+          export P07_PREVIOUS_DIR="$RUNNER_TEMP/p07-postswap.previous"
+          export P07_BIN_LINK="$RUNNER_TEMP/vfops-postswap"
+          export P07_PUBLIC_ROOT=http://127.0.0.1:8873
+          curl -fsS "$P07_PUBLIC_ROOT/installers/p07.sh" | bash
+          test "$("$P07_BIN_LINK" --build-id)" = 0.1.0-release112
+          printf 'PRESERVE_PRIVATE_DATA\n' > "$P07_INSTALL_DIR/rollback-marker"
+          before="$(sha256sum "$RUNNER_TEMP/private-business/sentinel")"
+          mkdir -p "$RUNNER_TEMP/broken-link"
+          : > "$RUNNER_TEMP/broken-link/not-dir"
+          export P07_BIN_LINK="$RUNNER_TEMP/broken-link/not-dir/vfops"
+          export P07_PUBLIC_ROOT=http://127.0.0.1:8874
+          set +e
+          curl -fsS "$P07_PUBLIC_ROOT/installers/p07.sh" | bash > "$RUNNER_TEMP/rollback.log" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          test "$(cat "$P07_INSTALL_DIR/BUILD_ID")" = 0.1.0-release112
+          test "$(cat "$P07_INSTALL_DIR/rollback-marker")" = PRESERVE_PRIVATE_DATA
+          test "$(sha256sum "$RUNNER_TEMP/private-business/sentinel")" = "$before"
+          test ! -e "$P07_PREVIOUS_DIR"
+          echo P07_113_POSTSWAP_ROLLBACK_DATA_UNCHANGED_PASS
+      - name: No production or actual site8 SQL touched by this candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat "$RUNNER_TEMP/p07-site8/BUILD_ID")" = 0.1.0-release113
+          echo P07_113_SYNTHETIC_ONLY_NO_REAL_MIGRATION_PASS
