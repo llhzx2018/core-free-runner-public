@@ -413,6 +413,41 @@ def inspect_existing_attempt() -> int:
     return 0
 
 
+def _recover_read_private(path):
+    meta = path.lstat()
+    if not stat.S_ISREG(meta.st_mode) or meta.st_uid != 0 or meta.st_mode & 0o077:
+        raise Stop("PRIVATE_RECOVERY_FILE_UNSAFE")
+    result = json.loads(path.read_text(encoding="utf-8"))
+    if type(result) is not dict:
+        raise Stop("PRIVATE_RECOVERY_FILE_INVALID")
+    return result
+
+
+def _recover_save(path, data):
+    tmp = path.with_name(path.name + ".resume-tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as dest:
+        json.dump(data, dest, sort_keys=True)
+        dest.flush()
+        os.fsync(dest.fileno())
+    os.replace(tmp, path)
+
+
+def _recover_safe_names(database, username):
+    mdb = re.fullmatch(r"p07scratch_([0-9a-f]{12})", database or "")
+    musr = re.fullmatch(r"p07stage_([0-9a-f]{12})", username or "")
+    if not mdb or not musr or mdb.group(1) != musr.group(1):
+        raise Stop("ORIGINAL_SCRATCH_NAME_UNPROVEN")
+    return ("p07scratch-" + mdb.group(1), "p07stage-" + musr.group(1))
+
+
+def _recover_absent(database, username):
+    cpdb, cp_site = _cloudpanel_metadata_counts(database)
+    sqldb, sqlusr = _master_sql_presence(database, username)
+    if (cpdb, cp_site, sqldb, sqlusr) != ("0", "0", "0", "0"):
+        raise Stop("EXISTING_OR_UNKNOWN_DATABASE_PRESERVE")
+
+
 def run():
     if sys.argv[1:] == ["--inspect-existing-attempt"]:
         return inspect_existing_attempt()
