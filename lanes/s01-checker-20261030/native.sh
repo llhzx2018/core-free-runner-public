@@ -29,8 +29,8 @@ docker cp lane/languages.php "$WP:/tmp/languages.php";cli eval-file /tmp/languag
 docker cp lane/wp-check.php "$WP:/tmp/wp-check.php";cli eval-file /tmp/wp-check.php > proof/wordpress.json
 cli rewrite structure '/%postname%/' --hard >/dev/null
 docker cp lane/mount-seed.php "$WP:/tmp/mount-seed.php";cli eval-file /tmp/mount-seed.php > proof/mounts.json
-docker cp control/lanes/s01-checker-20261030/seo-seed.php "$WP:/tmp/seo-seed.php";cli eval-file /tmp/seo-seed.php > proof/seo-seed.json
 docker cp lane/seed.php "$WP:/tmp/seed.php";cli eval-file /tmp/seed.php > proof/seed.json
+docker cp control/lanes/s01-checker-20261030/seo-seed.php "$WP:/tmp/seo-seed.php";cli eval-file /tmp/seo-seed.php > proof/seo-seed.json
 docker cp lane/extra-seed.php "$WP:/tmp/extra-seed.php";cli eval-file /tmp/extra-seed.php > proof/cases.json
 docker cp lane/snapshot.php "$WP:/tmp/snapshot.php"
 # Warm only public read-only boot paths before protected-state comparison.
