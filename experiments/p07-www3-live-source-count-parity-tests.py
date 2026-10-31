@@ -65,7 +65,7 @@ class Tests(unittest.TestCase):
             with self.assertRaises(m.Blocked):
                 m.parse_remote(bad)
 
-    def run_case(self,source_rows,source_hash):
+    def run_case(self,source_rows,source_hash,source_map=None):
         from types import SimpleNamespace
         state={"sites":[{},{"mysql_databases":["www3_source"]}],
                "target_server_identity":"target","source":{"stub":True}}
@@ -75,7 +75,7 @@ class Tests(unittest.TestCase):
             "LIVE_SOURCE_TOTAL_ROWS="+str(source_rows),
             "LIVE_SOURCE_NONEMPTY_TABLES=74",
             "LIVE_SOURCE_ROWCOUNT_FINGERPRINT="+source_hash,
-            "LIVE_SOURCE_COUNT_MAP_B64="+encoded_counts(sample_counts(source_rows)),
+            "LIVE_SOURCE_COUNT_MAP_B64="+encoded_counts(source_map if source_map is not None else sample_counts(source_rows)),
         ]
         transport=types.ModuleType("server_migration_pull")
         transport.target_identity=lambda:"target"
@@ -115,6 +115,22 @@ class Tests(unittest.TestCase):
         self.assertIn("MISMATCHED_TABLE_COUNTS=1",out)
         self.assertIn("SOURCE_EXCESS_ROWS_IN_SHARED_TABLES=8",out)
         self.assertIn("TARGET_EXCESS_ROWS_IN_SHARED_TABLES=0",out)
+        self.assertIn("SOURCE_TARGET_ROW_CONTENT_PARITY=NOT_VERIFIED",out)
+
+    def test_equal_global_total_but_two_offsetting_table_differences(self):
+        source=sample_counts()
+        keys=[k for k,v in source.items() if v>0]
+        source[keys[0]]+=1
+        source[keys[-1]]-=1
+        self.assertEqual(sum(source.values()),198642)
+        self.assertEqual(sum(v>0 for v in source.values()),74)
+        out=self.run_case(198642,"b"*64,source)
+        self.assertIn("CURRENT_SOURCE_ROWS=198642",out)
+        self.assertIn("RESTORED_TARGET_ROWS=198642",out)
+        self.assertIn("LIVE_SOURCE_VS_RESTORED_COUNT_PARITY=DIFFER",out)
+        self.assertIn("MISMATCHED_TABLE_COUNTS=2",out)
+        self.assertIn("SOURCE_EXCESS_ROWS_IN_SHARED_TABLES=1",out)
+        self.assertIn("TARGET_EXCESS_ROWS_IN_SHARED_TABLES=1",out)
         self.assertIn("SOURCE_TARGET_ROW_CONTENT_PARITY=NOT_VERIFIED",out)
 
     def test_unexpected_argument_never_opens_database(self):
