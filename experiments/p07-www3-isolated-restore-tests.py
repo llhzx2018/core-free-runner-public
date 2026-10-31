@@ -192,7 +192,7 @@ class TestOperator(unittest.TestCase):
         before=len(self.created)
         with mock.patch.object(mod,"state_preflight",
                                return_value=(self.state,"source_db")), \
-             mock.patch.object(mod.Path,"lstat",new=self.root_lstat), \
+             mock.patch.object(mod.Path,"lstat",new=lambda path:self.root_lstat(path)), \
              mock.patch.object(mod,"_recover_absent"), \
              mock.patch.object(mod,"_cloudpanel_metadata_counts",
                                return_value=("1","1")), \
@@ -219,7 +219,7 @@ class TestOperator(unittest.TestCase):
         self.cloudpanel.add_database=refuse
         with mock.patch.object(mod,"state_preflight",
                                return_value=(self.state,"source_db")), \
-             mock.patch.object(mod.Path,"lstat",new=self.root_lstat), \
+             mock.patch.object(mod.Path,"lstat",new=lambda path:self.root_lstat(path)), \
              mock.patch.object(mod,"_recover_absent"), \
              mock.patch.object(sys,"argv",[str(SCRIPT),"--resume-existing-with-cloudpanel-safe-names"]):
             self.assertEqual(mod.run(),13)
