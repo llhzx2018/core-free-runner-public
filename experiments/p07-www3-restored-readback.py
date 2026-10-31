@@ -21,10 +21,13 @@ class Blocked(Exception):
 def need(ok,code):
     if not ok: raise Blocked(code)
 
-def read_private(path):
+def safe_file(path):
     s=path.lstat()
     need(stat.S_ISREG(s.st_mode) and s.st_uid==0 and not s.st_mode&0o077,"PRIVATE_RECORD_UNSAFE")
-    return json.loads(path.read_text(encoding="utf8"))
+    return path
+
+def read_private(path):
+    return json.loads(safe_file(path).read_text(encoding="utf8"))
 
 def preflight():
     need(os.geteuid()==0,"CP2_ROOT_REQUIRED")
@@ -51,7 +54,7 @@ def preflight():
     need(type(password) is str and 30<=len(password)<=96 and "\n" not in password
          and "\r" not in password,"SCRATCH_PASSWORD_UNVERIFIED")
     archive=root/"source.sql.gz"
-    read_private(archive)
+    safe_file(archive)
     need(re.fullmatch("[0-9a-f]{64}",str(record.get("source_dump_sha256","")))
          and base.sha256_file(archive)==record["source_dump_sha256"],"SOURCE_SHA256_MISMATCH")
     decompressed,ddl=base.inspect_archive(archive)
