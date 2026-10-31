@@ -67,7 +67,7 @@ def output(k: str, v: object) -> None:
     print(f"{k}={v}", flush=True)
 
 
-def state_preflight(engine, inventory):
+def state_preflight(engine, inventory, *, resume=False):
     runtime = subprocess.run(["vfops", "--build-id"], capture_output=True,
                              text=True, timeout=20, check=False)
     if runtime.returncode != 0 or runtime.stdout.strip() != "0.1.0-release113":
@@ -132,7 +132,10 @@ def state_preflight(engine, inventory):
         raise Stop("TARGET_WEBSITE_ROOT_MISSING")
     if shutil.disk_usage("/").free < 2 * 1024 * 1024 * 1024:
         raise Stop("SCRATCH_DISK_SPACE_LOW")
-    if SCRATCH_ROOT.exists() or SCRATCH_ROOT.is_symlink():
+    if resume:
+        if not SCRATCH_ROOT.is_dir() or SCRATCH_ROOT.is_symlink():
+            raise Stop("ORIGINAL_SCRATCH_MISSING_OR_UNSAFE")
+    elif SCRATCH_ROOT.exists() or SCRATCH_ROOT.is_symlink():
         raise Stop("SCRATCH_ALREADY_ATTEMPTED_DO_NOT_RETRY")
     return s, dbs[0]
 
