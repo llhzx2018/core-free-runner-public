@@ -106,7 +106,7 @@ class TestOperator(unittest.TestCase):
         self.assertEqual(mod.run(),0)
         self.assertEqual(len(self.created),1)
         self.assertEqual(self.created[0][0],"www3.m3u8.one")
-        self.assertTrue(self.created[0][1].startswith("p07scratch_"))
+        self.assertTrue(self.created[0][1].startswith("p07scratch-"))
         record=json.loads((self.work/"status.json").read_text())
         self.assertEqual(record["status"],"ISOLATED_IMPORT_COMPLETED_NOT_VERIFIED")
         self.assertFalse(record["existing_target_database_modified"])
@@ -140,6 +140,26 @@ class TestOperator(unittest.TestCase):
         self.dump.write_bytes(b"garbage")
         self.assertEqual(mod.run(),13)
         self.assertEqual(self.created,[])
+
+    def test_cloudpanel_safe_name_mapping_is_deterministic(self):
+        db,user=mod._recover_safe_names("p07scratch_abcdef123456",
+                                        "p07stage_abcdef123456")
+        self.assertEqual(db,"p07scratch-abcdef123456")
+        self.assertEqual(user,"p07stage-abcdef123456")
+        self.assertNotIn("_",db)
+        with self.assertRaises(mod.Stop):
+            mod._recover_safe_names("p07scratch_abcdef123456",
+                                    "p07stage_111111111111")
+
+    def test_resume_absence_gate_fails_closed(self):
+        with mock.patch.object(mod,"_cloudpanel_metadata_counts",return_value=("0","0")), \
+             mock.patch.object(mod,"_master_sql_presence",return_value=("0","0")):
+            mod._recover_absent("p07scratch-abcdef123456","p07stage-abcdef123456")
+        for outcome in (("1","0"),("UNKNOWN","0"),("0","UNKNOWN")):
+            with mock.patch.object(mod,"_cloudpanel_metadata_counts",return_value=("0","0")), \
+                 mock.patch.object(mod,"_master_sql_presence",return_value=outcome):
+                with self.assertRaises(mod.Stop):
+                    mod._recover_absent("p07scratch-abcdef123456","p07stage-abcdef123456")
 
     def test_embedded_code_rejects_other_site(self):
         self.assertIn('sites[0].get("mysql_databases") or []) != [database]',mod.REMOTE_EXPORT)
