@@ -80,7 +80,7 @@ class Tests(unittest.TestCase):
         self.assertIn("PENDING_SITES=3",output)
         self.assertIn("STAGED_SITE_LOCAL_EVIDENCE=PASS",output)
         self.assertIn("STAGED_SITE_GAP_COUNT=0",output)
-        self.assertEqual(output.count("SITE="),14)
+        self.assertEqual(len([v for v in output.splitlines() if v.startswith("SITE=")]),14)
         self.assertEqual(output.count("PENDING_SITE="),3)
         self.assertIn("CUTOVER_ALLOWED=NO",output)
         self.assertIn("EXTERNAL_ASSETS_SQLITE_CRON_PHP_SMOKE=NOT_YET_VERIFIED",output)
