@@ -90,7 +90,7 @@ def stage_rows():
             user=entry.get("user")
             if user not in user_to_domain:continue
             path=validate_asset_path(entry,user)
-            if path.lexists() if hasattr(path,"lexists") else os.path.lexists(path):
+            if os.path.lexists(path):
                 continue
             rows.append(("external",label,state,path,user,entry))
         for entry in state.get("sqlite_assets",[]):
@@ -178,6 +178,25 @@ def sh_quote(value):
     import shlex
     return shlex.quote(value)
 
+def source_space_preflight(migrate,records):
+    # Old VPS: read-only du; do not transfer until disk capacity is known.
+    total_kib=0
+    for category,label,state,src,user,entry in records:
+        proc=migrate.source_remote(state["source"],
+            "du -sk -- "+sh_quote(str(src)),timeout=120,check=False)
+        if proc.returncode!=0:
+            raise Block("SOURCE_ASSET_SIZE_UNAVAILABLE")
+        match=re.fullmatch(r"([0-9]{1,15})\t.+\n?",proc.stdout)
+        if not match:
+            raise Block("SOURCE_ASSET_SIZE_FORMAT_UNVERIFIED")
+        total_kib+=int(match.group(1))
+    free=shutil.disk_usage(SCOPE).free
+    # Conservative reserve: 2x estimated input plus 1GiB spare.
+    need(free>total_kib*2048+1024**3,"INSUFFICIENT_CP2_PRIVATE_STAGE_SPACE")
+    print("CP2_PRIVATE_STAGE_CAPACITY=PASS",flush=True)
+    print("SOURCE_ASSET_ESTIMATED_MIB="+str((total_kib+1023)//1024),flush=True)
+
+
 def create_evidence_folder():
     need(SCOPE.is_dir() and not SCOPE.is_symlink(),"RECOVERY_ROOT_MISSING_OR_UNSAFE")
     check=SCOPE.stat()
@@ -220,6 +239,8 @@ def stage():
             need(kind==entry["kind"],"EXTERNAL_SOURCE_TYPE_CHANGED")
         if category=="cron":need(kind=="FILE","CRON_SOURCE_TYPE_CHANGED")
         observed.append(kind)
+    source_space_preflight(migrate,records)
+    original_state_hashes={mid:hashfile(base.ROOT/mid/"state.json") for _,mid,_ in base.JOBS}
     evidence=create_evidence_folder()
     entries=[]
     counts={"external":0,"sqlite":0,"cron":0}
@@ -257,6 +278,8 @@ def stage():
         print("STAGED_ITEM="+str(num)+" CATEGORY="+category.upper()+
               " RESULT="+result,flush=True)
     need(counts==EXPECTED,"RECOVERY_ASSET_COUNT_INCOMPLETE")
+    need(all(hashfile(base.ROOT/mid/"state.json")==original_state_hashes[mid]
+             for _,mid,_ in base.JOBS),"ORIGINAL_MIGRATION_STATE_MUTATED_OR_RACED")
     # Before claiming a completed private batch, verify states remain byte-identical
     # to their original snapshots? Source/target cannot have been touched by us.
     manifest=evidence/"private-manifest.json"
