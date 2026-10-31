@@ -24,6 +24,7 @@ from typing import Any
 import private_recovery_gate
 import sql_diff_evidence
 import restore_sql_preflight
+import scratch_sql_host_policy
 
 SCHEMA = "P07_ISOLATED_SQL_RESTORE_PROOF_V1"
 IMAGE = "mariadb:11.8"
@@ -135,7 +136,7 @@ def _stream_sql(name: str, password: str, sql_path: Path) -> None:
         assert proc.stdin is not None
         deadline = time.monotonic() + _TIMEOUT
         total = 0
-        with gzip.open(sql_path, "rb") as src:
+        with sql_path.open("rb") as src:
             while True:
                 data = src.read(1024 * 1024)
                 if not data:
@@ -166,6 +167,13 @@ def _stream_sql(name: str, password: str, sql_path: Path) -> None:
 
 
 def _restore_one(sql_path: Path, expected_tables: int) -> int:
+    # No container or SQL client can start until the exact input is sealed.
+    with scratch_sql_host_policy.sealed_sql_stream(sql_path) as approved_path:
+        return _restore_one_sealed(approved_path, expected_tables)
+
+
+def _restore_one_sealed(sql_path: Path, expected_tables: int) -> int:
+    # Never re-open the mutable original gzip after passing the host gate.
     name, password = _credentials_and_name()
     # no volume mounts, host paths, published ports, or Docker socket.
     args = (
@@ -230,7 +238,7 @@ def rehearse(source_package: Path, target_package: Path, site: str,
         return _report("BOTH_INDEPENDENT_RESTORE_IMPORTS_COMPLETED",
                        source_tables=source_count, target_tables=target_count,
                        verified_source=True, verified_target=True)
-    except Blocked as exc:
+    except (Blocked, scratch_sql_host_policy.HostPolicyBlocked) as exc:
         return _report(str(exc))
     except Exception:
         # No private stack trace or exception content (possibly SQL) to stdout.

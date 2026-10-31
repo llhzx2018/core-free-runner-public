@@ -45,6 +45,87 @@ class ResumeDataProtectionTests(unittest.TestCase):
             refresh.assert_not_called()
         self.assertEqual(before,json.dumps(state,sort_keys=True))
 
+    def test_legacy_missing_sql_guard_does_not_resume_partial_staged_migration(self):
+        state = {
+            "schema": pull.SCHEMA,
+            "status": "PREPARE_FAILED",
+            "migration_id": "synthetic-old-migration",
+            "last_sql_guard_failure": None,
+            "cutover_prohibited": False,
+            "sites": [
+                {"domain": f"site{i}.example.test",
+                 "stage_status": "PULLED_STAGED" if i <= 7 else "PENDING"}
+                for i in range(1, 18)
+            ],
+        }
+        before = json.dumps(state, sort_keys=True)
+        with (
+            mock.patch.object(pull, "load_state", return_value=state),
+            mock.patch.object(pull, "save_state") as save,
+            mock.patch.object(pull, "cloudpanel_database_server_ready_local") as server,
+            mock.patch.object(pull, "require_mariadb_target") as guard,
+            mock.patch.object(pull, "refresh_migration_assets_from_source") as refresh,
+            mock.patch.object(pull, "source_probe") as remote,
+            mock.patch.object(pull, "create_target_site") as create,
+            mock.patch.object(pull, "sync_site_databases") as import_db,
+        ):
+            with self.assertRaisesRegex(
+                pull.PullMigrationError,
+                "PREPARE_RESUME_PARTIAL_STATE_RECOVERY_PROOF_REQUIRED",
+            ):
+                pull.resume_prepare_migration("synthetic-old-migration")
+            for action in (save, server, guard, refresh, remote, create, import_db):
+                action.assert_not_called()
+        self.assertEqual(before, json.dumps(state, sort_keys=True))
+
+    def test_failed_parent_status_does_not_misreport_cutover_unblocked(self):
+        state = {
+            "schema": pull.SCHEMA,
+            "status": "PREPARE_FAILED",
+            "migration_id": "synthetic-old-migration",
+            "cutover_prohibited": False,
+            "last_sql_guard_failure": None,
+            "sites": [
+                {"domain": "example.test", "stage_status": "PULLED_STAGED"},
+                {"domain": "later.example.test", "stage_status": "PENDING"},
+            ],
+        }
+        before = json.dumps(state, sort_keys=True)
+        result = pull.summary(state)
+        self.assertIs(result["cutover_prohibited"], True)
+        self.assertEqual(
+            result["prepare_failure_provenance"],
+            "MISSING_PARTIAL_STATE_RECOVERY_REQUIRED",
+        )
+        self.assertFalse(result["existing_target_overwrite_allowed"])
+        self.assertFalse(result["source_delete_allowed"])
+        self.assertEqual(before, json.dumps(state, sort_keys=True))
+
+    def test_cutover_is_blocked_by_failed_stage_without_production_calls(self):
+        state = {
+            "schema": pull.SCHEMA,
+            "status": "PREPARE_FAILED",
+            "migration_id": "synthetic-old-migration",
+            "cutover_prohibited": False,
+            "sites": [{"domain": "example.test", "stage_status": "PENDING"}],
+        }
+        with (
+            mock.patch.object(pull, "load_state", return_value=state),
+            mock.patch.object(pull, "require_mariadb_target") as engine,
+            mock.patch.object(pull, "save_state") as save,
+            mock.patch.object(pull, "freeze_old_server") as freeze,
+        ):
+            with self.assertRaisesRegex(
+                pull.PullMigrationError,
+                "not ready for final synchronization",
+            ):
+                pull.cutover_migration(
+                    "synthetic-old-migration", "CUTOVER_PULL:synthetic-old-migration"
+                )
+            engine.assert_not_called()
+            save.assert_not_called()
+            freeze.assert_not_called()
+
     def test_owned_database_marker_never_allows_cleanup_or_import(self):
         with tempfile.TemporaryDirectory() as root:
             basedir=Path(root)
