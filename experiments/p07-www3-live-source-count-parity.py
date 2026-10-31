@@ -6,8 +6,11 @@ and differing counts may reflect legitimate live writes after source export.
 No SQL/table names, credentials, row contents, or business data are printed.
 """
 from __future__ import annotations
+import base64
+import binascii
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import re
 import shlex
@@ -21,7 +24,7 @@ except OSError:
     print("BLOCKED=VERIFIED_READBACK_BUNDLE_MISSING")
     raise SystemExit(13)
 blob = hashlib.sha1(b"blob " + str(len(data)).encode() + bytes([0]) + data).hexdigest()
-if blob != "2f0630b76b16d0e6dec64cbcb32f4cbaeabb7de3":
+if blob != "a1ac6e2c6771ca8f2e8a55bcd7064ccc1f9cf47f":
     print("BLOCKED=READBACK_BUNDLE_VERSION_CHANGED")
     raise SystemExit(13)
 spec = importlib.util.spec_from_file_location("p07_www3_readback", READBACK)
@@ -30,7 +33,7 @@ spec.loader.exec_module(readback)
 base = readback.base
 
 REMOTE = r'''
-import hashlib,os,re,shlex,shutil,subprocess,sys
+import base64,hashlib,json,os,re,shlex,shutil,subprocess,sys
 from pathlib import Path
 import inventory
 domain,db=sys.argv[1:]
@@ -88,17 +91,21 @@ def number(s):
 qdb="'"+db+"'"
 names=query("SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA="+qdb+
             " AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME",90)
-tables=names.splitlines() if names else []
+tables=sorted(names.splitlines()) if names else []
 if not 0<len(tables)<=1000 or len(set(tables))!=len(tables):sys.exit(21)
 if not all(re.fullmatch(r"[A-Za-z0-9_]{1,64}",x) for x in tables):sys.exit(22)
 cols=number(query("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA="+qdb,90))
 if cols<len(tables):sys.exit(23)
 count=0;nonempty=0
 finger=hashlib.sha256()
+counts={}
 for table in tables:
     quoted=chr(96)+db+chr(96)+"."+chr(96)+table+chr(96)
     n=number(query("SELECT COUNT(*) FROM "+quoted,120))
     count+=n;nonempty+=int(n>0)
+    ident=hashlib.sha256(table.encode("ascii")).hexdigest()
+    if ident in counts:sys.exit(24)
+    counts[ident]=n
     finger.update(table.encode("ascii")+bytes([0])+str(n).encode()+bytes([10]))
 print("LIVE_SOURCE_SITE_BINDING=PASS")
 print("LIVE_SOURCE_TABLES="+str(len(tables)))
@@ -106,6 +113,10 @@ print("LIVE_SOURCE_COLUMNS="+str(cols))
 print("LIVE_SOURCE_TOTAL_ROWS="+str(count))
 print("LIVE_SOURCE_NONEMPTY_TABLES="+str(nonempty))
 print("LIVE_SOURCE_ROWCOUNT_FINGERPRINT="+finger.hexdigest())
+packed=base64.b64encode(json.dumps(counts,sort_keys=True,
+    separators=(",",":")).encode("ascii")).decode("ascii")
+if len(packed)>131072:sys.exit(25)
+print("LIVE_SOURCE_COUNT_MAP_B64="+packed)
 '''
 
 class Blocked(Exception):
@@ -119,6 +130,7 @@ def parse_remote(output):
         "LIVE_SOURCE_TOTAL_ROWS":r"[0-9]{1,16}",
         "LIVE_SOURCE_NONEMPTY_TABLES":r"[0-9]{1,4}",
         "LIVE_SOURCE_ROWCOUNT_FINGERPRINT":r"[0-9a-f]{64}",
+        "LIVE_SOURCE_COUNT_MAP_B64":r"[A-Za-z0-9+/=]{1,131072}",
     }
     found={}
     for line in output.splitlines():
@@ -132,11 +144,31 @@ def parse_remote(output):
         raise Blocked("SOURCE_DIAGNOSTIC_OUTPUT_INCOMPLETE")
     return found
 
+def source_count_map(output, table_count, row_count, nonempty):
+    try:
+        raw=base64.b64decode(output,validate=True)
+        if not raw or len(raw)>98304:
+            raise ValueError("invalid size")
+        counts=json.loads(raw)
+    except (ValueError,UnicodeError,binascii.Error):
+        raise Blocked("SOURCE_COUNT_MAP_UNVERIFIED") from None
+    if type(counts) is not dict or len(counts)!=table_count or not 0<table_count<=1000:
+        raise Blocked("SOURCE_COUNT_MAP_CARDINALITY_UNVERIFIED")
+    for k,v in counts.items():
+        if not isinstance(k,str) or not re.fullmatch("[0-9a-f]{64}",k):
+            raise Blocked("SOURCE_COUNT_MAP_ID_UNVERIFIED")
+        if type(v) is not int or not 0<=v<=10**15:
+            raise Blocked("SOURCE_COUNT_MAP_VALUE_UNVERIFIED")
+    if sum(counts.values())!=row_count or sum(v>0 for v in counts.values())!=nonempty:
+        raise Blocked("SOURCE_COUNT_MAP_TOTALS_UNVERIFIED")
+    return counts
+
+
 def compare():
     if sys.argv[1:]!=["--compare-current-source-counts-read-only"]:
         raise Blocked("EXPLICIT_COMPARISON_ARG_REQUIRED")
     db,user,password,source_ddl=readback.preflight()
-    t_tables,t_cols,t_rows,t_nonempty,t_finger=readback.database_readback(db,user,password)
+    t_tables,t_cols,t_rows,t_nonempty,t_finger,t_map=readback.database_readback(db,user,password,include_count_map=True)
     if t_tables!=source_ddl:
         raise Blocked("TARGET_SOURCE_DDL_COUNT_CHANGED")
     sys.path.insert(0,"/opt/vf-server-ops/lib")
@@ -158,7 +190,12 @@ def compare():
     if proc.returncode!=0:
         raise Blocked("OLD_SERVER_READ_ONLY_QUERY_FAILED")
     source=parse_remote(proc.stdout)
-    matched=(int(source["LIVE_SOURCE_TABLES"])==t_tables
+    s_map=source_count_map(source["LIVE_SOURCE_COUNT_MAP_B64"],
+        int(source["LIVE_SOURCE_TABLES"]),
+        int(source["LIVE_SOURCE_TOTAL_ROWS"]),
+        int(source["LIVE_SOURCE_NONEMPTY_TABLES"]))
+    matched=(s_map==t_map
+             and int(source["LIVE_SOURCE_TABLES"])==t_tables
              and int(source["LIVE_SOURCE_COLUMNS"])==t_cols
              and int(source["LIVE_SOURCE_TOTAL_ROWS"])==t_rows
              and int(source["LIVE_SOURCE_NONEMPTY_TABLES"])==t_nonempty
@@ -170,7 +207,20 @@ def compare():
     print("RESTORED_TARGET_TABLES="+str(t_tables))
     print("RESTORED_TARGET_COLUMNS="+str(t_cols))
     print("RESTORED_TARGET_ROWS="+str(t_rows))
+    # Compare opaque table identities, never disclose table names or raw rows.
+    ids=set(s_map)&set(t_map)
+    mismatched=sum(s_map[k]!=t_map[k] for k in ids)
+    source_only=len(set(s_map)-set(t_map))
+    target_only=len(set(t_map)-set(s_map))
+    source_excess=sum(max(0,s_map[k]-t_map[k]) for k in ids)
+    target_excess=sum(max(0,t_map[k]-s_map[k]) for k in ids)
     print("LIVE_SOURCE_VS_RESTORED_COUNT_PARITY="+("MATCH" if matched else "DIFFER"))
+    print("MISMATCHED_TABLE_COUNTS="+str(mismatched))
+    print("TABLES_ONLY_ON_SOURCE="+str(source_only))
+    print("TABLES_ONLY_ON_TARGET="+str(target_only))
+    print("SOURCE_EXCESS_ROWS_IN_SHARED_TABLES="+str(source_excess))
+    print("TARGET_EXCESS_ROWS_IN_SHARED_TABLES="+str(target_excess))
+    print("DIFFERENCE_IS_LIVE_SOURCE_SNAPSHOT_DRIFT=UNPROVEN")
     print("LIVE_SOURCE_EQUALS_ORIGINAL_EXPORT_SNAPSHOT=NOT_VERIFIED")
     print("SOURCE_TARGET_ROW_CONTENT_PARITY=NOT_VERIFIED")
     print("OLD_SERVER_DATABASE_WRITES=NONE")
