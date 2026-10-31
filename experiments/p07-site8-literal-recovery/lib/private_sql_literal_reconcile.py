@@ -19,6 +19,7 @@ import private_conflict_preservation as preserve
 import sql_pk_conflict_evidence as pk
 import sql_row_evidence as rows
 import sql_diff_evidence as schema
+import verify
 
 SCHEMA = "P07_PRIVATE_SQL_LITERAL_SNAPSHOT_V1"
 MAX_ROWS = 300_000
@@ -138,7 +139,8 @@ def extract_verified(source_package: Path, target_package: Path,
     except LiteralBlocked:
         raise
     except (gate.RecoveryBlocked, pk.PKUnproven, rows.SQLRowUnproven,
-            schema.AdvisoryDiagnosticUnavailable, preserve.PreservationBlocked,
+            schema.AdvisoryDiagnosticUnavailable, verify.RestoreVerifyError,
+            preserve.PreservationBlocked,
             OSError, UnicodeError, TypeError, KeyError, ValueError, AttributeError):
         raise LiteralBlocked("LITERAL_PRIVATE_EVIDENCE_NOT_PROVEN") from None
 
