@@ -3,6 +3,8 @@ import gzip
 import hashlib
 import importlib.util
 import json
+import sqlite3
+import subprocess
 import os
 from pathlib import Path
 import sys
@@ -137,6 +139,66 @@ class TestOperator(unittest.TestCase):
     def test_embedded_code_rejects_other_site(self):
         self.assertIn('sites[0].get("mysql_databases") or []) != [database]',mod.REMOTE_EXPORT)
         self.assertIn("outdir.mkdir(mode=0o700, exist_ok=False)",mod.REMOTE_EXPORT)
+
+    def test_cloudpanel_registration_query_is_read_only_and_site_scoped(self):
+        dbpath = self.path / "panel.sq3"
+        con = sqlite3.connect(dbpath)
+        try:
+            con.executescript(
+                'CREATE TABLE site(id INTEGER,domain_name TEXT);'
+                'CREATE TABLE "database"(id INTEGER,site_id INTEGER,name TEXT);'
+                "INSERT INTO site VALUES (1,'www3.m3u8.one');"
+                "INSERT INTO site VALUES (2,'unrelated.example');"
+                "INSERT INTO \"database\" VALUES (1,2,'p07scratch_aaaaaaaaaaaa');"
+            )
+            con.commit()
+        finally:
+            con.close()
+        self.assertEqual(mod._cloudpanel_metadata_counts(
+            "p07scratch_aaaaaaaaaaaa",dbpath),("1","0"))
+        self.assertEqual(mod._cloudpanel_metadata_counts(
+            "p07scratch_bbbbbbbbbbbb",dbpath),("0","0"))
+        con=sqlite3.connect(dbpath)
+        try:
+            con.execute("UPDATE \"database\" SET site_id=1")
+            con.commit()
+        finally:
+            con.close()
+        self.assertEqual(mod._cloudpanel_metadata_counts(
+            "p07scratch_aaaaaaaaaaaa",dbpath),("1","1"))
+
+    def test_root_socket_metadata_query_never_passes_credentials(self):
+        calls=[]
+        def fake_run(args,**kwargs):
+            calls.append((args,kwargs))
+            return subprocess.CompletedProcess(args,0,b"1\\n",b"")
+        with mock.patch.object(mod.subprocess,"run",side_effect=fake_run):
+            self.assertEqual(mod._read_only_mysql_count("SELECT 1"),"1")
+        argv,kwargs=calls[0]
+        self.assertIn("--no-defaults",argv)
+        self.assertIn("--protocol=socket",argv)
+        self.assertNotIn("password",str(argv).lower())
+        self.assertNotIn("input",kwargs)
+        self.assertEqual(argv[-1],"SELECT 1")
+
+    def test_cli_failure_preserves_bounded_code_not_secret(self):
+        def fail(*args,**kwargs):
+            raise self.cloudpanel.CloudPanelError("db_add",17)
+        self.cloudpanel.add_database=fail
+        self.assertEqual(mod.run(),13)
+        info=json.loads((self.work/"status.json").read_text())
+        self.assertEqual(info["database_create_failure_kind"],"CLOUDPANEL_CLI")
+        self.assertEqual(info["database_create_exit_code"],17)
+        self.assertEqual(info["blocker"],"ISOLATED_DATABASE_CREATE_FAILED")
+        secrets=json.loads((self.work/"scratch-credentials.json").read_text())
+        self.assertNotIn(secrets["password"],(self.work/"status.json").read_text())
+
+    def test_local_validation_failure_is_distinguished(self):
+        self.cloudpanel.add_database=lambda *a,**k:(_ for _ in ()).throw(ValueError("private"))
+        self.assertEqual(mod.run(),13)
+        info=json.loads((self.work/"status.json").read_text())
+        self.assertEqual(info["database_create_failure_kind"],"LOCAL_VALIDATION")
+        self.assertNotIn("private",(self.work/"status.json").read_text())
 
     def test_does_not_call_cutover_or_delete_database(self):
         code=SCRIPT.read_text()
