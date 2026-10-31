@@ -25,7 +25,7 @@ def sha(x):
     return hashlib.sha256(x.encode("ascii")).hexdigest()
 names={39:"wp_39",60:"wp_60",69:"wp_69"}
 colnames={39:["k","v"],60:["m"],69:["n"]}
-types={39:["varchar","datetime"],60:["decimal"],69:["longtext"]}
+table_data_types={39:["varchar","datetime"],60:["decimal"],69:["longtext"]}
 ordids={str(k):sha(n) for k,n in names.items()}
 
 def payload(mode,mutate=True):
@@ -38,7 +38,7 @@ def payload(mode,mutate=True):
             ident=sha(name)
             sig=("f"*64 if mutate else "a"*64)
             cols[ident]=sig
-            dtype=types[t][j]
+            dtype=table_data_types[t][j]
             cmeta[ident]=[dtype,"utf8mb4" if dtype in ("varchar","longtext") else "-",
                          "utf8mb4_bin" if dtype in ("varchar","longtext") else "-",
                          "YES","-","-","-" if dtype not in ("datetime",) else "6",
