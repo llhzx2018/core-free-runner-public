@@ -172,6 +172,36 @@ class TestOperator(unittest.TestCase):
         self.assertEqual(mod._cloudpanel_metadata_counts(
             "p07scratch_aaaaaaaaaaaa",dbpath),("1","1"))
 
+    def test_official_master_connect_command_parser_is_local_only(self):
+        command = "| Connect Command | mysql -h'127.0.0.1' -P'3306' -u'root' -p'synthetic-test-123' |"
+        parsed = mod._cloudpanel_master_connect_args(command)
+        self.assertEqual(parsed, ("127.0.0.1",3306,"root","synthetic-test-123"))
+        self.assertIsNone(mod._cloudpanel_master_connect_args(
+            "| Connect Command | mysql -h'203.0.113.3' -P3306 -uroot -psecret |"))
+        self.assertIsNone(mod._cloudpanel_master_connect_args("mysql -h127.0.0.1 -uroot -p"))
+
+    def test_master_metadata_queries_read_only_and_credentials_not_logged(self):
+        original = tempfile.TemporaryDirectory
+        calls = []
+        def fake_run(argv,**kwargs):
+            calls.append(argv)
+            if argv[:2] == ["clpctl","db:show:master-credentials"]:
+                return subprocess.CompletedProcess(argv,0,
+                    "| Connect Command | mysql -h'127.0.0.1' -P'3306' -u'root' -p'synthetic-secret' |","")
+            self.assertTrue(argv[0]=="mariadb" and "--protocol=tcp" in argv)
+            self.assertTrue("--defaults-extra-file=" in argv[1])
+            self.assertTrue(argv[-1].startswith("SELECT CASE WHEN COUNT"))
+            return subprocess.CompletedProcess(argv,0,b"0\n",b"")
+        with mock.patch.object(mod.subprocess,"run",side_effect=fake_run), \
+             mock.patch.object(mod.tempfile,"TemporaryDirectory",
+                side_effect=lambda **kw: original(prefix=kw["prefix"],dir=self.path)), \
+             mock.patch.object(mod.shutil,"which",return_value="/usr/bin/mariadb"):
+            self.assertEqual(mod._master_sql_presence("p07scratch_aaaaaaaaaaaa","p07stage_aaaaaaaaaaaa"),
+                             ("0","0"))
+        self.assertEqual(len(calls),3)
+        self.assertNotIn("synthetic-secret",str(calls))
+        self.assertEqual(list(self.path.glob("p07-meta-*")),[])
+
     def test_root_socket_metadata_query_never_passes_credentials(self):
         calls=[]
         def fake_run(args,**kwargs):
