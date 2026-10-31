@@ -448,6 +448,51 @@ def _recover_absent(database, username):
         raise Stop("EXISTING_OR_UNKNOWN_DATABASE_PRESERVE")
 
 
+def _recover_preflight(engine, inventory):
+    state_preflight(engine, inventory, resume=True)
+    directory = SCRATCH_ROOT.lstat()
+    if not stat.S_ISDIR(directory.st_mode) or directory.st_uid != 0 or directory.st_mode & 0o077:
+        raise Stop("ORIGINAL_SCRATCH_NOT_PRIVATE")
+    status_path = SCRATCH_ROOT / "status.json"
+    creds_path = SCRATCH_ROOT / "scratch-credentials.json"
+    archive = SCRATCH_ROOT / "source.sql.gz"
+    record = _recover_read_private(status_path)
+    creds = _recover_read_private(creds_path)
+    if not (record.get("original_site") == DOMAIN and
+            record.get("migration_id") == MID and
+            record.get("status") == "BLOCKED" and
+            record.get("blocker") == "ISOLATED_DATABASE_CREATE_FAILED" and
+            record.get("resume_attempted") is None and
+            record.get("site_config_modified") is False and
+            record.get("dns_changed") is False and
+            record.get("source_frozen") is False and
+            record.get("existing_target_database_modified") is False and
+            record.get("cutover_allowed") is False):
+        raise Stop("ORIGINAL_RECOVERY_STATUS_CHANGED")
+    old_db, old_user = record.get("scratch_database"), record.get("scratch_user")
+    if creds.get("database") != old_db or creds.get("user") != old_user:
+        raise Stop("ORIGINAL_SCRATCH_CREDENTIAL_IDENTITY_CHANGED")
+    password = creds.get("password")
+    if type(password) is not str or not 30 <= len(password) <= 96:
+        raise Stop("ORIGINAL_SCRATCH_CREDENTIAL_INVALID")
+    new_db, new_user = _recover_safe_names(old_db, old_user)
+    arch_stat = archive.lstat()
+    if not stat.S_ISREG(arch_stat.st_mode) or arch_stat.st_uid != 0 or arch_stat.st_mode & 0o077:
+        raise Stop("ORIGINAL_ARCHIVE_NOT_PRIVATE")
+    expected_sha = record.get("source_dump_sha256")
+    if type(expected_sha) is not str or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+        raise Stop("ORIGINAL_SOURCE_SHA_MISSING")
+    if sha256_file(archive) != expected_sha:
+        raise Stop("ORIGINAL_SOURCE_SHA_CHANGED")
+    byte_count, table_count = inspect_archive(archive)
+    if (record.get("source_uncompressed_bytes") != byte_count or
+            record.get("source_create_table_lines") != table_count or table_count < 1):
+        raise Stop("ORIGINAL_ARCHIVE_STRUCTURE_CHANGED")
+    _recover_absent(old_db, old_user)
+    _recover_absent(new_db, new_user)
+    return status_path, record, archive, password, new_db, new_user
+
+
 def run():
     if sys.argv[1:] == ["--inspect-existing-attempt"]:
         return inspect_existing_attempt()
