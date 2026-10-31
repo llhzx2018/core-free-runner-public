@@ -20,7 +20,7 @@ sys.dont_write_bytecode=True
 ROOT=Path(__file__).resolve().parent
 FILES=(
     ("p07-www3-restored-readback.py","a1ac6e2c6771ca8f2e8a55bcd7064ccc1f9cf47f"),
-    ("p07-www3-content-worker.py","85d52f93fddd6be1867752b251534f17a6036752"),
+    ("p07-www3-content-worker.py","6dd44a43357694ac39f203f33296206daf918187"),
 )
 def stop(code):
     raise Blocked(code)
@@ -53,7 +53,7 @@ mod.loader.exec_module(readback)
 base=readback.base
 
 def parsed(raw,mode):
-    if type(raw) is not str or len(raw)>131072:
+    if type(raw) is not str or len(raw)>900000:
         stop("CONTENT_WORKER_OUTPUT_UNVERIFIED")
     lines={}
     allowed={"MODE","SCANNED_TABLES","SCANNED_COLUMNS","SCANNED_ROWS",
@@ -84,10 +84,14 @@ def parsed(raw,mode):
     for name,row in m.items():
         if not isinstance(name,str) or not re.fullmatch("[0-9a-f]{64}",name):
             stop("CONTENT_WORKER_TABLE_ID_INVALID")
-        if (type(row) is not list or len(row)!=3
+        if (type(row) is not list or len(row)!=4
                 or type(row[0]) is not int or not 0<=row[0]<=1000000
                 or any(not isinstance(x,str) or not re.fullmatch("[0-9a-f]{64}",x)
-                       for x in row[1:])):
+                       for x in row[1:3])
+                or type(row[3]) is not dict or not 0<len(row[3])<=200
+                or any(not isinstance(col,str) or not re.fullmatch("[0-9a-f]{64}",col)
+                       or not isinstance(sig,str) or not re.fullmatch("[0-9a-f]{64}",sig)
+                       for col,sig in row[3].items())):
             stop("CONTENT_WORKER_ROW_HASH_INVALID")
     if sum(row[0] for row in m.values())!=values["SCANNED_ROWS"]:
         stop("CONTENT_WORKER_ROW_TOTAL_INVALID")
@@ -146,6 +150,25 @@ def compare():
     metadata_diff=sum(old_map[k][2]!=local_map[k][2] for k in ids)
     count_diff=sum(old_map[k][0]!=local_map[k][0] for k in ids)
     value_diff=sum(old_map[k][1]!=local_map[k][1] for k in ids)
+    cell_diff=0
+    changed_columns=0
+    combinations_only=0
+    details=[]
+    # Keep identities private; only deterministic ordinal and count are shown.
+    for ordinal,k in enumerate(sorted(set(old_map)|set(local_map)),1):
+        if k not in old_map or k not in local_map:continue
+        if old_map[k][1]==local_map[k][1]:continue
+        s_cols=old_map[k][3]
+        t_cols=local_map[k][3]
+        if set(s_cols)!=set(t_cols):
+            stop("COLUMN_IDENTITY_CHANGED_DURING_CONTENT_COMPARE")
+        n=sum(s_cols[col]!=t_cols[col] for col in s_cols)
+        if n:
+            cell_diff+=1
+            changed_columns+=n
+        else:
+            combinations_only+=1
+        details.append(str(ordinal)+":"+str(n))
     same=(not missing_old and not missing_target and not metadata_diff
         and not count_diff and not value_diff
         and old["SCANNED_TABLES"]==local["SCANNED_TABLES"]
@@ -160,6 +183,10 @@ def compare():
     print("COLUMN_NAME_IDENTITY_DIFFERING_TABLES="+str(metadata_diff))
     print("ROW_COUNT_DIFFERING_TABLES="+str(count_diff))
     print("ROW_VALUE_MULTISETS_DIFFERING_TABLES="+str(value_diff))
+    print("COLUMN_VALUE_DISTRIBUTION_DIFFERING_TABLES="+str(cell_diff))
+    print("COLUMN_VALUE_DISTRIBUTION_DIFFERING_COLUMNS="+str(changed_columns))
+    print("ROW_COMBINATION_ONLY_DIFFERING_TABLES="+str(combinations_only))
+    print("DIFFERING_TABLE_ORDINAL_COLUMN_COUNTS="+(",".join(details) if details else "NONE"))
     print("LIVE_SOURCE_TARGET_ROW_VALUE_FINGERPRINT="+
           ("MATCH_ADVISORY_ONLY" if same else "DIFFER_ADVISORY"))
     print("BOTH_SIDES_CONSISTENT_READ_ONLY_TRANSACTIONS=YES")
