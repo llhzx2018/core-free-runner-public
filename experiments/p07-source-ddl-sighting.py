@@ -51,6 +51,11 @@ def inspect_source_schema_candidates(path: Path, *, max_bytes: int = MAX_UNCOMPR
                     raise UnsafeOrUnverifiedExport("DECOMPRESSED_LIMIT_EXCEEDED")
                 stripped = line.lstrip()
                 if ddl_buffer is None:
+                    # Multiline DML may contain a line that looks like DDL
+                    # inside a quoted literal. Refuse to classify that dump
+                    # rather than reporting a fabricated table candidate.
+                    if re.match(rb"^(?:INSERT|REPLACE|UPDATE|DELETE|LOAD)\b", stripped, re.I) and not stripped.rstrip().endswith(b";"):
+                        raise UnsafeOrUnverifiedExport("MULTILINE_DML_CONTEXT_UNPROVEN")
                     if not CREATE_LINE.match(stripped):
                         continue
                     schema_lines += 1
