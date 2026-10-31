@@ -63,6 +63,25 @@ class Tests(unittest.TestCase):
         self.assertNotEqual(evaluate(b"0\tN\n"),evaluate(b"0\tV\n"))
         self.assertNotEqual(evaluate(b"0\tV00\n"),evaluate(b"0\tV0000\n"))
 
+    def test_single_cell_change_changes_only_that_column_digest(self):
+        def examine(payload):
+            with mock.patch.object(m.shutil,"which",
+                side_effect=lambda name:{"mariadb":"/usr/bin/mariadb",
+                                        "timeout":"/usr/bin/timeout"}.get(name)), \
+                 mock.patch.object(m.subprocess,"Popen",
+                    return_value=FakeProc(payload)):
+                data,count=m.fingerprint(["--defaults-extra-file=/root/notused"],
+                    "p07scratch-abcdef123456",["wp_a"],{"wp_a":["c1","c2"]})
+                self.assertEqual(count,1)
+                return next(iter(data.values()))
+        before=examine(b"0\tV41\tV42\n")
+        after=examine(b"0\tV41\tV43\n")
+        self.assertNotEqual(before[1],after[1])
+        self.assertEqual(before[2],after[2])
+        self.assertEqual(len(before[3]),2)
+        differing=sum(before[3][k]!=after[3][k] for k in before[3])
+        self.assertEqual(differing,1)
+
     def test_nonhex_payload_fails_closed_without_printing_value(self):
         with mock.patch.object(m.shutil,"which",
             side_effect=lambda n:{"mariadb":"/usr/bin/mariadb","timeout":"/usr/bin/timeout"}.get(n)), \
