@@ -85,11 +85,9 @@ class TempExportLifecycle(unittest.TestCase):
             cloud.export_database=export
             inventory=types.ModuleType("inventory")
             inventory.build_manifest=lambda _:{"sites":[{"domain":"www3.m3u8.one","mysql_databases":["fixture"]}]}
-            evidence=types.ModuleType("sql_diff_evidence")
-            class Failure(RuntimeError):pass
-            evidence.AdvisoryDiagnosticUnavailable=Failure
-            def schema(_):raise Failure("SQL_DIAGNOSTIC_INPUT_UNAVAILABLE")
-            evidence.require_nonempty_source_schema=schema
+            lib=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay/lib"
+            if str(lib) not in sys.path:sys.path.insert(0,str(lib))
+            import sql_diff_evidence as evidence
             buf=io.StringIO()
             with mock.patch.dict(sys.modules,{"cloudpanel":cloud,"inventory":inventory,
                                               "sql_diff_evidence":evidence}),\
@@ -97,6 +95,7 @@ class TempExportLifecycle(unittest.TestCase):
                  mock.patch.object(shutil,"which",return_value=None),\
                  contextlib.redirect_stdout(buf):
                 exec(compile(script,"<synthetic>","exec"),{"__name__":"__main__"})
+            self.assertIn("PARSER_RESULT=SQL_DIAGNOSTIC_INPUT_UNAVAILABLE",buf.getvalue())
             self.assertIn("UTF8_CONTEXT_SCAN_COMPLETE=TRUE",buf.getvalue())
             self.assertIn("INVALID_UTF8_CHUNKS_DML=1",buf.getvalue())
             self.assertIn("SOURCE_BUSINESS_DB_WRITES=NO",buf.getvalue())
