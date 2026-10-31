@@ -1,0 +1,78 @@
+name: P07 legacy failed-state fail-closed exact-source proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-legacy-failed-state.yml'
+      - 'experiments/p07-failed-state-guard/**'
+permissions:
+  contents: read
+jobs:
+  safe-resume:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Bind exact product source and synthetic-only tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          source_commit=20e228b4e2a4b64169b7fc946d6ff017d319d24d
+          expected_source_blob=7d276b14586719c960cb4f609697502beaf96b3a
+          expected_test_blob=b8477422097f60e1fc5eca579ec27f7bdf1ad1ec
+          test "$(git hash-object experiments/p07-failed-state-guard/tests/test_migration_no_overwrite_resume.py)" = "$expected_test_blob"
+          test "$(cat dist/p07/0.1.0/overlay/BUILD_ID)" = "0.1.0-release112"
+          test "$(git hash-object dist/p07/0.1.0/overlay/lib/server_migration_pull.py)" = fd9a3cd7e366f0914e86a71a062fe16be6e46398
+          cp -a dist/p07/0.1.0/overlay "$RUNNER_TEMP/p07-legacy"
+          curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --max-time 60 \
+            "https://raw.githubusercontent.com/llhzx2018/vf-server-ops/$source_commit/lib/server_migration_pull.py" \
+            -o "$RUNNER_TEMP/p07-legacy/lib/server_migration_pull.py"
+          test "$(git hash-object "$RUNNER_TEMP/p07-legacy/lib/server_migration_pull.py")" = "$expected_source_blob"
+          cp experiments/p07-failed-state-guard/tests/test_migration_no_overwrite_resume.py \
+             "$RUNNER_TEMP/p07-legacy/tests/test_migration_no_overwrite_resume.py"
+          chmod +x "$RUNNER_TEMP/p07-legacy/bin/vfops"
+          cd "$RUNNER_TEMP/p07-legacy"
+          python3 -m py_compile lib/server_migration_pull.py tests/test_migration_no_overwrite_resume.py
+          echo P07_FAILED_STATE_EXACT_SOURCE_PASS
+      - name: Prove missing provenance blocks before any DB or state access
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-legacy"
+          PYTHONPATH=lib python3 -m unittest -v tests.test_migration_no_overwrite_resume
+          echo P07_FAILED_STATE_RESUME_CUTOVER_MUTATION_DENIED_PASS
+      - name: Full released migration safety regression coverage
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p07-legacy"
+          PYTHONPATH=lib python3 -m unittest -q \
+            tests.test_server_migration \
+            tests.test_server_migration_pull \
+            tests.test_migration_no_overwrite_resume \
+            tests.test_migration_remainder \
+            tests.test_migration_conflict_recovery \
+            tests.test_target_cleanup_protection \
+            tests.test_private_recovery_gate \
+            tests.test_restore_sql_preflight \
+            tests.test_scratch_guard_quarantine.R7QuarantineTests \
+            tests.test_isolated_db_restore.R4IsolationContractTests \
+            tests.test_native_scratch_restore.NativeRestoreContractTests \
+            tests.test_sql_diff_evidence \
+            tests.test_sql_row_evidence \
+            tests.test_sql_multiset_evidence \
+            tests.test_sql_pk_conflict_evidence \
+            tests.test_sql_readback_stability \
+            tests.test_verify
+          echo P07_FAILED_STATE_ALL_SQL_MIGRATION_REGRESSIONS_PASS
+      - name: Released production database writers are byte-for-byte unchanged
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for p in lib/cloudpanel.py lib/server_migration.py lib/restore_apply_core.py lib/package_core.py lib/verify.py BUILD_ID; do
+            test "$(git hash-object "$RUNNER_TEMP/p07-legacy/$p")" = \
+                 "$(git hash-object "dist/p07/0.1.0/overlay/$p")"
+          done
+          echo P07_FAILED_STATE_PRODUCTION_WRITERS_UNCHANGED_PASS
