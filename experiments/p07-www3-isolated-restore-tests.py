@@ -161,6 +161,65 @@ class TestOperator(unittest.TestCase):
                 with self.assertRaises(mod.Stop):
                     mod._recover_absent("p07scratch-abcdef123456","p07stage-abcdef123456")
 
+    def prepare_failed_creation(self):
+        self.assertEqual(mod.run(),0)
+        status_path=self.work/"status.json"
+        credential_path=self.work/"scratch-credentials.json"
+        status=json.loads(status_path.read_text())
+        creds=json.loads(credential_path.read_text())
+        status.update({"status":"BLOCKED",
+                       "blocker":"ISOLATED_DATABASE_CREATE_FAILED",
+                       "scratch_database":"p07scratch_abcdef123456",
+                       "scratch_user":"p07stage_abcdef123456"})
+        creds.update({"database":"p07scratch_abcdef123456",
+                      "user":"p07stage_abcdef123456"})
+        status_path.write_text(json.dumps(status))
+        credential_path.write_text(json.dumps(creds))
+        return status_path
+
+    def test_resume_reuses_original_archive_and_never_calls_source_again(self):
+        status_path=self.prepare_failed_creation()
+        remote_count=len(self.calls)
+        before=len(self.created)
+        with mock.patch.object(mod,"state_preflight",
+                               return_value=(self.state,"source_db")), \
+             mock.patch.object(mod,"_recover_absent"), \
+             mock.patch.object(mod,"_cloudpanel_metadata_counts",
+                               return_value=("1","1")), \
+             mock.patch.object(mod,"_master_sql_presence",
+                               return_value=("1","1")), \
+             mock.patch.object(sys,"argv",[str(SCRIPT),"--resume-existing-with-cloudpanel-safe-names"]):
+            self.assertEqual(mod.run(),0)
+            self.assertEqual(len(self.created),before+1)
+            self.assertEqual(self.created[-1][1],"p07scratch-abcdef123456")
+            self.assertEqual(self.created[-1][2],"p07stage-abcdef123456")
+            self.assertEqual(len(self.calls),remote_count)
+            status=json.loads(status_path.read_text())
+            self.assertTrue(status["resume_attempted"])
+            self.assertEqual(status["status"],
+                             "ISOLATED_IMPORT_COMPLETED_NOT_VERIFIED")
+            with self.assertRaises(mod.Stop):
+                mod.run()
+            self.assertEqual(len(self.created),before+1)
+
+    def test_failed_safe_name_creation_is_one_shot(self):
+        path=self.prepare_failed_creation()
+        def refuse(*args,**kwargs):
+            raise self.cloudpanel.CloudPanelError("db_add",3)
+        self.cloudpanel.add_database=refuse
+        with mock.patch.object(mod,"state_preflight",
+                               return_value=(self.state,"source_db")), \
+             mock.patch.object(mod,"_recover_absent"), \
+             mock.patch.object(sys,"argv",[str(SCRIPT),"--resume-existing-with-cloudpanel-safe-names"]):
+            self.assertEqual(mod.run(),13)
+            result=json.loads(path.read_text())
+            self.assertEqual(result["status"],"BLOCKED")
+            self.assertTrue(result["resume_attempted"])
+            self.assertEqual(result["create_exit_code"],3)
+            self.assertEqual(result["blocker"],"SAFE_NAME_DATABASE_CREATE_FAILED")
+            with self.assertRaises(mod.Stop):
+                mod.run()
+
     def test_embedded_code_rejects_other_site(self):
         self.assertIn('sites[0].get("mysql_databases") or []) != [database]',mod.REMOTE_EXPORT)
         self.assertIn("outdir.mkdir(mode=0o700, exist_ok=False)",mod.REMOTE_EXPORT)
