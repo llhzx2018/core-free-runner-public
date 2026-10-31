@@ -155,6 +155,10 @@ def fingerprint(args,db,tables,cols):
         except OSError:
             block("TRANSACTION_QUERY_UNAVAILABLE")
         rows=[[] for _ in tables]
+        # Add bounded, order-independent per-column value distribution checks.
+        # This local diagnostic hashes cells and never emits their raw values.
+        cell_sums=[[[0,0] for _ in cols[t]] for t in tables]
+        modulus=(1<<256)-1
         total=0
         scanned=0
         try:
@@ -178,6 +182,11 @@ def fingerprint(args,db,tables,cols):
                 total+=1
                 if total>ROW_CAP:block("ROW_COUNT_CAP")
                 rows[ordinal].append(hashlib.sha256(b"\t".join(bits[1:])).digest())
+                for j,value in enumerate(bits[1:]):
+                    digest=int.from_bytes(hashlib.sha256(value).digest(),"big")
+                    aggregate=cell_sums[ordinal][j]
+                    aggregate[0]=(aggregate[0]+digest)&modulus
+                    aggregate[1]^=digest
             code=process.wait(timeout=20)
             if code!=0:block("READ_ONLY_TRANSACTION_FAILED")
         finally:
@@ -187,12 +196,21 @@ def fingerprint(args,db,tables,cols):
             if process.stdout:
                 process.stdout.close()
     answers={}
-    for table,columns,row_hashes in zip(tables,(cols[t] for t in tables),rows):
+    for table,columns,row_hashes,aggregates in zip(
+            tables,(cols[t] for t in tables),rows,cell_sums):
         identity=hashlib.sha256(table.encode("ascii")).hexdigest()
         head=hashlib.sha256(b"\x00".join(v.encode("ascii") for v in columns)).digest()
         digest=hashlib.sha256(head+b"".join(sorted(row_hashes))).hexdigest()
+        cell_signatures={}
+        for name,(total_hash,xor_hash) in zip(columns,aggregates):
+            col_id=hashlib.sha256(name.encode("ascii")).hexdigest()
+            if col_id in cell_signatures:block("COLUMN_HASH_COLLISION")
+            sig=hashlib.sha256(total_hash.to_bytes(32,"big")+
+                               xor_hash.to_bytes(32,"big")+
+                               len(row_hashes).to_bytes(8,"big")).hexdigest()
+            cell_signatures[col_id]=sig
         answers[identity]=[len(row_hashes),digest,
-                           hashlib.sha256(head).hexdigest()]
+                           hashlib.sha256(head).hexdigest(),cell_signatures]
     return answers,total
 
 def main():
