@@ -1,0 +1,96 @@
+name: S01 embed exact candidate package verification
+on:
+  push:
+    branches: [task/s01-embed-recheck-20261031]
+    paths: ['.github/workflows/s01-embed-exact-package-20261031.yml']
+permissions:
+  contents: read
+jobs:
+  packages:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: 7a57972416ab0f6185f97c61117c8de4c21e70d2
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: theme
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: 6f2dad28ca7de403ae9f597aea4f49a6388d3a5f
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: plugin
+      - name: Build and check candidate packages
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p proof
+          test "$(cat theme/VERSION)" = 1.35.221
+          test "$(cat plugin/VERSION | tr -d '\n')" = 1.25.97
+          php -l theme/src/inc/modules/module-faq.php
+          php -l theme/src/inc/services/frontend-page-progress-service.php
+          php -l plugin/src/vf-tool-m3u8.php
+          node --check plugin/src/public/js/tool-runtime-i18n.js
+          node --check plugin/src/public/dist/embed.js
+          gh release download v1.25.96 --repo llhzx2018/vf-tools-m3u8 --pattern vf-tools-m3u8_V1.25.96.zip --dir proof
+          echo 'c49b51b8d4f92acb88fe5b1f1f6a2dc9ce523a49a394425f2123d1e9bed24723  proof/vf-tools-m3u8_V1.25.96.zip' | sha256sum -c
+          python3 - <<'PY'
+          from pathlib import Path,PurePosixPath
+          import hashlib,zipfile,io,json,subprocess
+          theme=Path('theme/src')
+          bundle=(theme/'assets/css/public/vf-theme-public-runtime.css').read_bytes()
+          family=(theme/'assets/css/public/pages/families/public-family-02-tool-directory-detail-operations-closure.css').read_bytes()
+          assert bundle.count(family)==1
+          assert hashlib.sha256(bundle).hexdigest() in (theme/'inc/public-css-owner-registry.php').read_text()
+          js=(Path('plugin/src/public/js/tool-runtime-i18n.js')).read_bytes()
+          assert js in Path('plugin/src/public/dist/embed.js').read_bytes()
+          def info(n):
+              q=zipfile.ZipInfo(n,date_time=(1980,1,1,0,0,0))
+              q.compress_type=zipfile.ZIP_DEFLATED;q.external_attr=0o100644<<16
+              return q
+          def build_theme():
+              b=io.BytesIO()
+              with zipfile.ZipFile(b,'w',compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:
+                  for p in sorted(x for x in theme.rglob('*') if x.is_file()):
+                      assert not p.is_symlink()
+                      z.writestr(info('vf-tools-theme/'+p.relative_to(theme).as_posix()),p.read_bytes())
+              return b.getvalue()
+          def build_plugin():
+              b=io.BytesIO(); observed=[]
+              with zipfile.ZipFile('proof/vf-tools-m3u8_V1.25.96.zip') as old,zipfile.ZipFile(b,'w') as z:
+                  for zi in old.infolist():
+                      n=zi.filename
+                      assert n.startswith('vf-tool-m3u8/') and '..' not in PurePosixPath(n).parts
+                      if zi.is_dir(): z.writestr(zi,b'');continue
+                      rel=n[len('vf-tool-m3u8/'):]
+                      p=Path('plugin/src')/rel
+                      assert p.is_file() and not p.is_symlink(),rel
+                      data=p.read_bytes()
+                      if data!=old.read(zi): observed.append(rel)
+                      z.writestr(zi,data)
+              expected={'vf-tool-m3u8.php','plugin-manifest.json','public/js/tool-runtime-i18n.js','public/dist/embed.js'}
+              assert set(observed)==expected,observed
+              return b.getvalue()
+          records=[]
+          for name,fn in [('vf-tools-theme_V1.35.221.zip',build_theme),('vf-tools-m3u8_V1.25.97.zip',build_plugin)]:
+              data=fn();assert data==fn()
+              out=Path('proof')/name;out.write_bytes(data)
+              with zipfile.ZipFile(out) as z:
+                  assert z.testzip() is None
+                  files=sum(not x.is_dir() for x in z.infolist())
+              records.append({'name':name,'bytes':len(data),'files':files,'sha256':hashlib.sha256(data).hexdigest()})
+          Path('proof/candidate-package-proof.json').write_text(json.dumps({'status':'PASS','packages':records,'production':'unchanged'},indent=2))
+          print(json.dumps(records))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: embed-exact-candidates-${{ github.run_id }}
+          path: proof/
+          retention-days: 7
