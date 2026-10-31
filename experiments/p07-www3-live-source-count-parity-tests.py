@@ -1,6 +1,9 @@
 """Synthetic current-source count parity: no real database or server access."""
 import ast
+import base64
 import contextlib
+import hashlib
+import json
 import importlib.util
 import io
 from pathlib import Path
@@ -15,6 +18,20 @@ spec=importlib.util.spec_from_file_location("p07_counts",FILE)
 m=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
+def sample_counts(rows=198642):
+    ids=[hashlib.sha256(("wp_"+str(i).zfill(3)).encode()).hexdigest() for i in range(157)]
+    data=dict.fromkeys(ids,0)
+    for key in ids[:73]:
+        data[key]=1
+    data[ids[73]]=rows-73
+    return data
+
+
+def encoded_counts(data):
+    return base64.b64encode(json.dumps(data,sort_keys=True,
+        separators=(",",":")).encode("ascii")).decode("ascii")
+
+
 class Tests(unittest.TestCase):
     def test_remote_has_valid_syntax_and_no_write_sql(self):
         ast.parse(m.REMOTE)
@@ -24,6 +41,8 @@ class Tests(unittest.TestCase):
         self.assertIn('env["MYSQL_PWD"]',m.REMOTE)
         self.assertIn('SELECT COUNT(*)',m.REMOTE)
         self.assertIn("inventory.build_manifest",m.REMOTE)
+        self.assertIn('tables=sorted(names.splitlines())',m.REMOTE)
+        self.assertIn('LIVE_SOURCE_COUNT_MAP_B64',m.REMOTE)
 
     def test_source_output_strict_sanitization(self):
         msg="\n".join([
@@ -33,8 +52,14 @@ class Tests(unittest.TestCase):
             "LIVE_SOURCE_TOTAL_ROWS=198642",
             "LIVE_SOURCE_NONEMPTY_TABLES=74",
             "LIVE_SOURCE_ROWCOUNT_FINGERPRINT="+"a"*64,
+            "LIVE_SOURCE_COUNT_MAP_B64="+encoded_counts(sample_counts()),
         ])
         self.assertEqual(m.parse_remote(msg)["LIVE_SOURCE_TOTAL_ROWS"],"198642")
+        self.assertEqual(len(m.source_count_map(encoded_counts(sample_counts()),157,198642,74)),157)
+        with self.assertRaises(m.Blocked):
+            m.source_count_map(encoded_counts(sample_counts()),157,198643,74)
+        with self.assertRaises(m.Blocked):
+            m.source_count_map("!!!",157,198642,74)
         for bad in (msg+"\npassword=secret",msg.replace("LIVE_SOURCE_TABLES=157","LIVE_SOURCE_TABLES=157\nLIVE_SOURCE_TABLES=157"),
                     msg.replace("LIVE_SOURCE_SITE_BINDING=PASS","LIVE_SOURCE_SITE_BINDING=FAIL")):
             with self.assertRaises(m.Blocked):
@@ -50,6 +75,7 @@ class Tests(unittest.TestCase):
             "LIVE_SOURCE_TOTAL_ROWS="+str(source_rows),
             "LIVE_SOURCE_NONEMPTY_TABLES=74",
             "LIVE_SOURCE_ROWCOUNT_FINGERPRINT="+source_hash,
+            "LIVE_SOURCE_COUNT_MAP_B64="+encoded_counts(sample_counts(source_rows)),
         ]
         transport=types.ModuleType("server_migration_pull")
         transport.target_identity=lambda:"target"
@@ -63,7 +89,7 @@ class Tests(unittest.TestCase):
              mock.patch.object(m.readback,"preflight",
                  return_value=("p07scratch-abcdef123456","p07stage-abcdef123456","synthetic",157)), \
              mock.patch.object(m.readback,"database_readback",
-                 return_value=(157,1848,198642,74,"a"*64)), \
+                 return_value=(157,1848,198642,74,"a"*64,sample_counts())), \
              mock.patch.object(m.readback,"read_private",return_value=state), \
              mock.patch.object(sys,"argv",[str(FILE),"--compare-current-source-counts-read-only"]), \
              contextlib.redirect_stdout(output):
@@ -81,10 +107,14 @@ class Tests(unittest.TestCase):
         out=self.run_case(198642,"a"*64)
         self.assertIn("LIVE_SOURCE_VS_RESTORED_COUNT_PARITY=MATCH",out)
         self.assertIn("LIVE_SOURCE_EQUALS_ORIGINAL_EXPORT_SNAPSHOT=NOT_VERIFIED",out)
+        self.assertIn("MISMATCHED_TABLE_COUNTS=0",out)
 
     def test_live_source_drift_is_not_called_corruption(self):
         out=self.run_case(198650,"b"*64)
         self.assertIn("LIVE_SOURCE_VS_RESTORED_COUNT_PARITY=DIFFER",out)
+        self.assertIn("MISMATCHED_TABLE_COUNTS=1",out)
+        self.assertIn("SOURCE_EXCESS_ROWS_IN_SHARED_TABLES=8",out)
+        self.assertIn("TARGET_EXCESS_ROWS_IN_SHARED_TABLES=0",out)
         self.assertIn("SOURCE_TARGET_ROW_CONTENT_PARITY=NOT_VERIFIED",out)
 
     def test_unexpected_argument_never_opens_database(self):
