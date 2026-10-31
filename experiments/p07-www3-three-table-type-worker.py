@@ -280,14 +280,18 @@ def main():
               "--batch","--skip-column-names"]
         all_tables,all_cols=schema(args,db)
         if len(all_tables)!=157:block("FULL_TABLE_SCOPE_CHANGED")
+        # The source mismatch ordinals were computed over sorted *hashed*
+        # table identities, not sorted SQL table names. Use that exact order.
+        ordered_by_opaque_identity=sorted(
+            all_tables,key=lambda name:hashlib.sha256(name.encode("ascii")).hexdigest())
         indices=(38,59,68)
-        tables=[all_tables[i] for i in indices]
+        tables=[ordered_by_opaque_identity[i] for i in indices]
         cols={t:all_cols[t] for t in tables}
         types=targeted_types(args,db,tables,cols)
         rows,total=fingerprint(args[1:],db,tables,cols)
     print("FULL_BASE_TABLES=157",flush=True)
     print("TARGETED_ORDINALS=39,60,69",flush=True)
-    ordered_ids={str(n+1):hashlib.sha256(all_tables[n].encode("ascii")).hexdigest() for n in indices}
+    ordered_ids={str(n+1):hashlib.sha256(ordered_by_opaque_identity[n].encode("ascii")).hexdigest() for n in indices}
     print("ORDINAL_TABLE_IDS="+json.dumps(ordered_ids,sort_keys=True,separators=(",",":")),flush=True)
     print("COLUMN_TYPES="+json.dumps(types,sort_keys=True,separators=(",",":")),flush=True)
     print("MODE="+mode.upper(),flush=True)
