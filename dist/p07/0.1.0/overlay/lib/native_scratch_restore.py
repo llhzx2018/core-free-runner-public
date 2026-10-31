@@ -27,6 +27,7 @@ import private_recovery_gate
 import sql_diff_evidence
 import restore_sql_preflight
 import scratch_guard_quarantine
+import scratch_sql_host_policy
 
 SCHEMA = "P07_NATIVE_SCRATCH_RESTORE_V1"
 DATABASE = "vfops_r5_scratch"
@@ -158,7 +159,7 @@ def _wait_socket(bins: dict[str, str], socket: Path, home: Path,
 
 def _sql_stream(bins: dict[str, str], socket: Path, home: Path,
                 uid: int, gid: int, sql_path: Path, *,
-                quarantine_plan: dict | None = None) -> None:
+                quarantine_plan: dict | None = None, sealed: bool = False) -> None:
     args = [bins["mariadb"], "--no-defaults", "--protocol=socket",
             "--socket=" + str(socket), "--user=root", "--binary-mode",
             "--local-infile=0", "--database=" + DATABASE]
@@ -175,7 +176,7 @@ def _sql_stream(bins: dict[str, str], socket: Path, home: Path,
         size = 0
         deadline = time.monotonic() + IMPORT_TIMEOUT
         def raw_chunks():
-            with gzip.open(sql_path, "rb") as handle:
+            with (sql_path.open("rb") if sealed else gzip.open(sql_path, "rb")) as handle:
                 while True:
                     block = handle.read(1024 * 1024)
                     if not block:
@@ -224,9 +225,17 @@ def _shutdown(proc: subprocess.Popen | None) -> None:
 
 def restore_one(sql_path: Path, expected_tables: int, *,
                 quarantine_plan: dict | None = None) -> int:
-    """Run one independent MariaDB daemon; remove ONLY this random scratch root."""
+    """Seal first; the scratch engine cannot reopen original untrusted gzip."""
     if type(expected_tables) is not int or not 1 <= expected_tables <= 20000:
         raise Blocked("NATIVE_EXPECTED_TABLES_UNPROVEN")
+    with scratch_sql_host_policy.sealed_sql_stream(
+        sql_path, quarantine_plan=quarantine_plan
+    ) as approved_path:
+        return _restore_one_sealed(approved_path, expected_tables)
+
+
+def _restore_one_sealed(sql_path: Path, expected_tables: int) -> int:
+    """Run an independent MariaDB daemon with only inspected, pinned bytes."""
     bins = _binaries()
     uid, gid = _identity()
     daemon: subprocess.Popen | None = None
@@ -268,8 +277,7 @@ def restore_one(sql_path: Path, expected_tables: int, *,
                                       start_new_session=True)
             _wait_socket(bins, sock, base, daemon, uid, gid)
             _client(bins, sock, base, uid, gid, "CREATE DATABASE " + DATABASE)
-            _sql_stream(bins, sock, base, uid, gid, sql_path,
-                        quarantine_plan=quarantine_plan)
+            _sql_stream(bins, sock, base, uid, gid, sql_path, sealed=True)
             rows = _client(bins, sock, base, uid, gid,
                            "SELECT COUNT(*) FROM information_schema.tables "
                            "WHERE table_schema='" + DATABASE + "' "
@@ -318,7 +326,7 @@ def rehearse(source_package: Path, target_package: Path,
         return _report("NATIVE_BOTH_SCRATCH_IMPORTS_COMPLETED",
                        source=count_a, target=count_b,
                        source_ok=True, target_ok=True)
-    except Blocked as exc:
+    except (Blocked, scratch_sql_host_policy.HostPolicyBlocked) as exc:
         return _report(str(exc))
     except Exception:
         return _report("NATIVE_SCRATCH_RESTORE_UNAVAILABLE")
@@ -384,7 +392,8 @@ def rehearse_quarantined(source_package: Path, target_package: Path,
                       source=count_a, target=count_b,
                       removed_source=pa["removed"], removed_target=pb["removed"],
                       scratch_ok=True)
-    except (Blocked, scratch_guard_quarantine.QuarantineBlocked) as exc:
+    except (Blocked, scratch_guard_quarantine.QuarantineBlocked,
+            scratch_sql_host_policy.HostPolicyBlocked) as exc:
         return report(str(exc))
     except Exception:
         return report("QUARANTINE_SCRATCH_UNAVAILABLE")
