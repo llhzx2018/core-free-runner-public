@@ -82,6 +82,42 @@ with tempfile.TemporaryDirectory(prefix="schema-only-",dir=root) as tmp:
             print("DDL_LINES_IN_SAMPLE="+str(lines),flush=True)
             print("QUALIFIED_DDL_LINES_IN_SAMPLE="+str(qualified),flush=True)
             print("SAMPLE_COMPLETE="+str(complete).upper(),flush=True)
+    if gz:
+        # Independent streaming check: verify checksum/end-of-stream and
+        # UTF-8 without exposing SQL or needing to store decompressed data.
+        import codecs
+        limit = 1024 * 1024 * 1024
+        total = 0
+        utf8_invalid = False
+        decoder = codecs.getincrementaldecoder("utf-8")("strict")
+        integrity = "UNDETERMINED"
+        try:
+            with gzip.open(dump,"rb") as stream:
+                while True:
+                    block = stream.read(1024 * 1024)
+                    if not block:
+                        if not utf8_invalid:
+                            try: decoder.decode(b"",final=True)
+                            except UnicodeDecodeError: utf8_invalid=True
+                        integrity="PASS"
+                        break
+                    total += len(block)
+                    if not utf8_invalid:
+                        try: decoder.decode(block,final=False)
+                        except UnicodeDecodeError: utf8_invalid=True
+                    if total >= limit:
+                        integrity="SIZE_CAP_REACHED"
+                        break
+        except (OSError,EOFError):
+            integrity="GZIP_READ_FAILED"
+        print("GZIP_STREAM_INTEGRITY="+integrity,flush=True)
+        print("UTF8_VALIDITY="+(
+            "INVALID" if utf8_invalid else "VALID" if integrity=="PASS"
+            else "UNPROVEN"),flush=True)
+        print("STREAM_MIB_SCANNED="+str(total // (1024*1024)),flush=True)
+        print("COMPRESSED_MIB="+str(
+            (dump.stat().st_size + (1024*1024) - 1) // (1024*1024)
+        ),flush=True)
 print("SOURCE_BUSINESS_DB_WRITES=NO",flush=True)
 '''
 
@@ -95,7 +131,9 @@ ALLOWED=re.compile(
     r"SQL_DUPLICATE_CREATE_TABLE|OTHER_UNAVAILABLE)|"
     r"EXPORT_STREAM=UNREADABLE|DDL_LINES_IN_SAMPLE=[0-9]{1,9}|"
     r"QUALIFIED_DDL_LINES_IN_SAMPLE=[0-9]{1,9}|"
-    r"SAMPLE_COMPLETE=(?:TRUE|FALSE)|SOURCE_BUSINESS_DB_WRITES=NO)$"
+    r"SAMPLE_COMPLETE=(?:TRUE|FALSE)|GZIP_STREAM_INTEGRITY=(?:PASS|SIZE_CAP_REACHED|GZIP_READ_FAILED|UNDETERMINED)|"
+    r"UTF8_VALIDITY=(?:VALID|INVALID|UNPROVEN)|STREAM_MIB_SCANNED=[0-9]{1,9}|"
+    r"COMPRESSED_MIB=[0-9]{1,9}|SOURCE_BUSINESS_DB_WRITES=NO)$"
 )
 
 def main():
