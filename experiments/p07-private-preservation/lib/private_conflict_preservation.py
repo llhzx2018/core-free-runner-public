@@ -163,7 +163,8 @@ def _write_exclusive(path: Path, value: bytes) -> None:
         os.fsync(handle.fileno())
 
 
-def save_private(bundle: dict, directory: Path, *, source_rows: Any,\n                 target_rows: Any, expected: Any, pk_columns: Any) -> dict:
+def save_private(bundle: dict, directory: Path, *, source_rows: Any,
+                 target_rows: Any, expected: Any, pk_columns: Any) -> dict:
     """Create only one new 0700 directory and private 0600 files, never replace.
 
     Not encrypted. Callers must use an operator-controlled local filesystem,
