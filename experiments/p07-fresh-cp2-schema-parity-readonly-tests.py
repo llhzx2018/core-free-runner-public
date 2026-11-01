@@ -49,7 +49,7 @@ class Checks(unittest.TestCase):
         def make(column_type,default,nullable="NO"):
             values=("mytable","mycol","1","int",column_type,nullable,default,
                     "","","","")
-            row=b"\\t".join(b"V"+str(v).encode("utf-8").hex().upper().encode("ascii") for v in values)
+            row=bytes([9]).join(b"V"+str(v).encode("utf-8").hex().upper().encode("ascii") for v in values)
             return w.category_fingerprint([row],properties)["column_attributes"]
         left={"COLUMNS":{"column_attributes":make("int(11)","'0'")}}
         right={"COLUMNS":{"column_attributes":make("int","0")}}
