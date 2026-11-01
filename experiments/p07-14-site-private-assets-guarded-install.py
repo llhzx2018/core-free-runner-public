@@ -487,6 +487,22 @@ def do_install():
         write_progress(progress)
         print("INSTALLED_ASSET="+str(idx)+" CATEGORY="+rec["category"].upper()+
               " STATUS=NEW_ONLY_SHA_VERIFIED",flush=True)
+    # Verify all 30 logical asset records after the non-overlapping root
+    # installs. Nested SQLite children must be present with exact snapshot
+    # bytes and readable SQLite integrity; no raw business content is logged.
+    for rec,private,target,user in approved:
+        if rec["category"]=="sqlite":
+            must(target.is_file() and not target.is_symlink()
+                 and hashfile(target)==rec["sha256"] and snapshot_ok(target),
+                 "INSTALLED_NESTED_OR_STANDALONE_SQLITE_READBACK_FAILED")
+        elif private.is_file():
+            must(target.is_file() and not target.is_symlink()
+                 and hashfile(target)==rec["sha256"],
+                 "INSTALLED_EXTERNAL_FILE_SHA256_MISMATCH")
+        else:
+            must(target.is_dir() and not target.is_symlink(),
+                 "INSTALLED_EXTERNAL_DIRECTORY_MISSING")
+    print("ALL_30_LOGICAL_SITE_ASSETS_READBACK=PASS",flush=True)
     for label,mid,state,digest in states:
         must(hashfile(base.ROOT/mid/"state.json")==digest,
              "ORIGINAL_MIGRATION_STATE_CHANGED_DURING_COPY")
