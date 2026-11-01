@@ -57,8 +57,8 @@ class Tests(unittest.TestCase):
              mock.patch.object(m.os,"geteuid",return_value=0), \
              mock.patch.object(m,"inventory",return_value=cp), \
              mock.patch.object(m,"vhost",return_value=("FOUND",["/run/php/test.sock"])), \
-             mock.patch.object(m,"socket_status",
-                               return_value="DECLARED_UNIX_SOCKETS_PRESENT"), \
+             mock.patch.object(m,"backend_status",
+                               return_value="TCP_POOL_AND_LISTENER_CONFIRMED"), \
              mock.patch.object(m,"service",return_value="ACTIVE"), \
              mock.patch.object(m,"head_local",
                  side_effect=lambda d,p,tls=False: "HTTP_200" if tls else "HTTP_301"), \
@@ -118,6 +118,83 @@ class Tests(unittest.TestCase):
                              ("FOUND",["/run/php/php8.3-fpm-site.sock"]))
             self.assertEqual(m.vhost("unzip.kewaro.com",root),("NOT_FOUND",[]))
             self.assertEqual(m.vhost("start.kewaro.com.evil",root),("NOT_FOUND",[]))
+    def test_cloudpanel_tcp_pool_listener_matching(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            nginx=root/"nginx"
+            nginx.mkdir()
+            (nginx/"site.conf").write_text(
+                "server { server_name start.kewaro.com; "
+                "location ~ \\.php$ { fastcgi_pass 127.0.0.1:9777; } }")
+            self.assertEqual(m.vhost("start.kewaro.com",nginx),
+                             ("FOUND",["tcp:127.0.0.1:9777"]))
+            pools=root/"php"/"8.3"/"fpm"/"pool.d"
+            pools.mkdir(parents=True)
+            (pools/"start.conf").write_text(
+                "[start]\nlisten = 127.0.0.1:9777\nuser = site_start\n"
+                "group = site_start\n")
+            self.assertTrue(m.fpm_pool_matches(
+                "8.3","site_start","tcp:127.0.0.1:9777",root/"php"))
+            self.assertFalse(m.fpm_pool_matches(
+                "8.3","other_user","tcp:127.0.0.1:9777",root/"php"))
+            proc=root/"tcp"
+            proc.write_text(
+                "sl  local_address rem_address st tx_queue rx_queue tr tm->when retrnsmt uid timeout inode\n"
+                "0: 0100007F:2631 00000000:0000 0A 00000000:00000000 00:00000000 00000000 33 0 11\n")
+            self.assertTrue(m.tcp_listener_present(9777,proc))
+            self.assertFalse(m.tcp_listener_present(9778,proc))
+            with mock.patch.object(m,"fpm_pool_matches",return_value=True), \
+                 mock.patch.object(m,"tcp_listener_present",return_value=True):
+                self.assertEqual(
+                    m.backend_status(["tcp:127.0.0.1:9777"],"8.3","site_start"),
+                    "TCP_POOL_AND_LISTENER_CONFIRMED")
+            with mock.patch.object(m,"fpm_pool_matches",return_value=False):
+                self.assertEqual(
+                    m.backend_status(["tcp:127.0.0.1:9777"],"8.3","site_start"),
+                    "FPM_POOL_OR_SITE_USER_NOT_MATCHED")
+            with mock.patch.object(m,"fpm_pool_matches",return_value=True), \
+                 mock.patch.object(m,"tcp_listener_present",return_value=False):
+                self.assertEqual(
+                    m.backend_status(["tcp:127.0.0.1:9777"],"8.3","site_start"),
+                    "TCP_FPM_LISTENER_NOT_FOUND")
+    def test_unsafe_ambiguous_unknown_backends_block(self):
+        self.assertEqual(m.backend_status([],"8.3","example"),
+                         "NO_FASTCGI_DECLARED")
+        self.assertEqual(m.backend_status(["UNSUPPORTED"],"8.3","example"),
+                         "UNSUPPORTED_FASTCGI_BACKEND")
+        self.assertEqual(m.backend_status(["tcp:127.0.0.1:9000",
+                                             "tcp:127.0.0.1:9001"],
+                                            "8.3","example"),
+                         "AMBIGUOUS_FASTCGI_BACKENDS")
+        with tempfile.TemporaryDirectory() as temp:
+            p=Path(temp)
+            (p/"x.conf").write_text(
+                "server { server_name start.kewaro.com; "
+                "fastcgi_pass 192.0.2.1:9000; }")
+            self.assertEqual(m.vhost("start.kewaro.com",p),
+                             ("FOUND",["UNSUPPORTED"]))
+    def test_https_404_and_redirect_are_review_even_with_tcp_backend(self):
+        self.assertEqual(m.https_route("HTTP_200"),"HTTPS_2XX")
+        self.assertEqual(m.https_route("HTTP_302"),
+                         "HTTPS_REDIRECT_UNVERIFIED")
+        self.assertEqual(m.https_route("HTTP_ERROR_404"),"HTTPS_404")
+        self.assertEqual(m.https_route("LOCAL_CONNECT_OR_TLS_FAILED"),
+                         "HTTPS_NOT_READY")
+        original=m.head_local
+        def new_head(domain,port,tls=False):
+            if tls and domain=="press.kewaro.com":return "HTTP_ERROR_404"
+            if tls and domain=="infra.kewaro.com":return "HTTP_302"
+            return "HTTP_200" if tls else "HTTP_301"
+        with mock.patch.object(m,"head_local",side_effect=new_head):
+            output=self.execute()
+        self.assertIn("LOCAL_14_SITE_SMOKE_PASS=12",output)
+        self.assertIn("LOCAL_14_SITE_SMOKE_REVIEW=2",output)
+        self.assertIn("SITE=press.kewaro.com ",output)
+        self.assertIn("HTTPS443=HTTP_ERROR_404 ROUTE=HTTPS_404 LOCAL_SMOKE=REVIEW",
+                      output)
+        self.assertIn("HTTPS443=HTTP_302 ROUTE=HTTPS_REDIRECT_UNVERIFIED LOCAL_SMOKE=REVIEW",
+                      output)
+
     def test_migration_state_safety_guards(self):
         def bad(states,cp):
             states[m.base.JOBS[1][1]]["source_runtime_frozen"]=True
