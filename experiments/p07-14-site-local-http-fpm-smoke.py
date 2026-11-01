@@ -26,7 +26,7 @@ def must(ok,reason):
     if not ok:raise Block(reason)
 def git_blob(p):
     b=p.read_bytes()
-    return hashlib.sha1(b"blob "+str(len(b)).encode()+b"\\0"+b).hexdigest()
+    return hashlib.sha1(b"blob "+str(len(b)).encode()+b"\0"+b).hexdigest()
 def baseline():
     must(BASE.is_file() and not BASE.is_symlink() and
          git_blob(BASE)==EXPECTED_BASE,"BASELINE_BUNDLE_IDENTITY_CHANGED")
@@ -36,8 +36,8 @@ def baseline():
     return module
 base=baseline()
 DOMAIN=re.compile(r"[a-z0-9][a-z0-9.-]{1,150}[a-z0-9]$")
-PHP=re.compile(r"[0-9]+\\.[0-9]+$")
-SOCKET=re.compile(r"unix:(/run/(?:php|php-fpm)/[a-zA-Z0-9_.-]+\\.sock)")
+PHP=re.compile(r"[0-9]+\.[0-9]+$")
+SOCKET=re.compile(r"unix:(/run/(?:php|php-fpm)/[a-zA-Z0-9_.-]+\.sock)")
 VHOST_DIR=Path("/etc/nginx/sites-enabled")
 def service(name):
     try:
@@ -94,7 +94,7 @@ def vhost(domain,root=VHOST_DIR):
         try:raw=entry.read_text(encoding="utf8",errors="replace")
         except OSError:continue
         conf=re.sub(r"(?m)#.*$","",raw)
-        names=re.findall(r"\\bserver_name\\s+([^;]+);",conf)
+        names=re.findall(r"\bserver_name\s+([^;]+);",conf)
         if any(domain in ns.split() for ns in names):
             matches.append(conf)
     if not matches:return "NOT_FOUND",[]
@@ -126,17 +126,17 @@ def head_local(domain,port,tls=False,timeout=3):
             context.verify_mode=ssl.CERT_NONE
             sock=context.wrap_socket(sock,server_hostname=domain)
             sock.settimeout(timeout)
-        msg=("HEAD / HTTP/1.1\\r\\nHost: "+domain+
-             "\\r\\nUser-Agent: P07-CP2-Local-HEAD/1.0\\r\\n"
-             "Accept: */*\\r\\nConnection: close\\r\\n\\r\\n")
+        msg=("HEAD / HTTP/1.1\r\nHost: "+domain+
+             "\r\nUser-Agent: P07-CP2-Local-HEAD/1.0\r\n"
+             "Accept: */*\r\nConnection: close\r\n\r\n")
         sock.sendall(msg.encode("ascii"))
         buf=b""
-        while b"\\r\\n" not in buf and len(buf)<4096:
+        while b"\r\n" not in buf and len(buf)<4096:
             part=sock.recv(1024)
             if not part:break
             buf+=part
-        line=buf.split(b"\\r\\n",1)[0]
-        match=re.fullmatch(rb"HTTP/1\\.[01] ([0-9]{3})(?: [^\\r\\n]*)?",line)
+        line=buf.split(b"\r\n",1)[0]
+        match=re.fullmatch(rb"HTTP/1\.[01] ([0-9]{3})(?: [^\r\n]*)?",line)
         if not match:return "INVALID_HTTP_RESPONSE"
         status=int(match.group(1))
         if 200<=status<400:return "HTTP_"+str(status)
