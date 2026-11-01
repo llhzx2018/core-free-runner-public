@@ -76,7 +76,7 @@ class Tests(unittest.TestCase):
             m.decide(p,tables("SOURCE"),tables("TARGET",extra=2),
                      keys("SOURCE"),keys("TARGET"))
         with self.assertRaisesRegex(m.Block,"FULL_SCHEMA_OR_TABLE_IDENTITIES_CHANGED"):
-            m.decide(p,tables("SOURCE").replace('"c"*64',''),
+            m.decide(p,tables("SOURCE").replace("c"*64,"d"*64,1),
                      tables("TARGET",extra=2),keys("SOURCE"),keys("TARGET",extra=2))
     def test_output_parser_rejects_unverified_rows(self):
         pks=keys("SOURCE")
