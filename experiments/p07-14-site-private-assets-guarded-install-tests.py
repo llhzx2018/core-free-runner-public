@@ -108,6 +108,83 @@ class Tests(unittest.TestCase):
             states[m.base.JOBS[2][1]]["sites"][-1]["stage_status"]="PULLED_STAGED"
             with self.assertRaisesRegex(m.Stop,"STAGE_SCOPE_CHANGED"):
                 self.check(root,private,states)
+    def test_nested_sqlite_overlay_composed_before_atomic_parent_install(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root,private,states,records,manifest=self.build_private_fixture(tmp)
+            _,approved,_=self.check(root,private,states)
+            parent=next(x for x in approved if x[0]["category"]=="external"
+                        and x[1].is_dir())
+            child=next(x for x in approved if x[0]["category"]=="sqlite"
+                       and x[3]==parent[3])
+            parent_target=parent[2]
+            nested_target=parent_target/"nested"/"state.sqlite"
+            nested_rec=dict(child[0],source_path=str(nested_target))
+            changed=[(nested_rec,child[1],nested_target,child[3]) if x is child else x
+                     for x in approved]
+            # The fixture's state row is amended only for mode lookup.
+            state=next(s for s in states.values() if any(
+                row.get("path")==child[0]["source_path"] for row in s.get("sqlite_assets",[])))
+            entry=next(row for row in state["sqlite_assets"]
+                       if row.get("path")==child[0]["source_path"])
+            entry["path"]=str(nested_target)
+            roots,overlays=m.plan_nested_assets(changed)
+            self.assertEqual(len(roots),29)
+            self.assertEqual(len(overlays[parent_target]),1)
+            self.assertEqual(len([item for value in overlays.values() for item in value]),1)
+            temp=root/"uninstalled-external"
+            temp.mkdir()
+            (temp/"demo.txt").write_text("source private tree")
+            (temp/"nested").mkdir()
+            (temp/"nested"/"state.sqlite").write_bytes(b"old live untrusted DB")
+            (temp/"nested"/"state.sqlite-wal").write_bytes(b"stale wal")
+            before=m.hashfile(child[1])
+            with mock.patch.object(m.os,"chown",return_value=None):
+                m.overlay_sqlite_snapshots(temp,parent_target,overlays[parent_target],
+                                           [(lab,mid,s,"irrelevant") for lab,mid,s
+                                            in [(label,jmid,states[jmid])
+                                                for label,jmid,_ in m.base.JOBS]],
+                                           os.getuid(),os.getgid())
+            self.assertEqual(m.hashfile(temp/"nested"/"state.sqlite"),before)
+            self.assertTrue(m.snapshot_ok(temp/"nested"/"state.sqlite"))
+            self.assertFalse((temp/"nested"/"state.sqlite-wal").exists())
+            self.assertEqual(m.hashfile(child[1]),before)
+            self.assertEqual((temp/"demo.txt").read_text(),"source private tree")
+            self.assertEqual((parent[1]/"demo.txt").read_text(),"safe fixture")
+            self.assertFalse(parent_target.exists())
+
+    def test_nested_external_or_file_parent_is_refused(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root,private,states,_,_=self.build_private_fixture(temp)
+            _,approved,_=self.check(root,private,states)
+            parent=next(x for x in approved if x[0]["category"]=="external" and x[1].is_dir())
+            child=next(x for x in approved if x[0]["category"]=="sqlite")
+            illegal_rec=dict(child[0],category="external")
+            illegal=(illegal_rec,child[1],parent[2]/"nested"/"file",parent[3])
+            changed=[illegal if x is child else x for x in approved]
+            with self.assertRaisesRegex(m.Stop,"TARGET_NESTED_PATH_CONFLICT"):
+                m.plan_nested_assets(changed)
+            bad_parent_rec=dict(parent[0],category="sqlite")
+            changed=[(bad_parent_rec,parent[1],parent[2],parent[3]) if x is parent
+                     else x for x in approved]
+            changed=[(x[0],x[1],parent[2]/"child.sqlite",parent[3])
+                     if x is child else x for x in changed]
+            with self.assertRaisesRegex(m.Stop,"TARGET_NESTED_PATH_CONFLICT"):
+                m.plan_nested_assets(changed)
+
+    def test_nested_sqlite_overlay_rejects_symlink_in_temp_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root,private,states,_,_=self.build_private_fixture(tmp)
+            _,approved,_=self.check(root,private,states)
+            parent=next(x for x in approved if x[0]["category"]=="external" and x[1].is_dir())
+            child=next(x for x in approved if x[0]["category"]=="sqlite" and x[3]==parent[3])
+            tar=parent[2]/"nested"/"data.sqlite"
+            item=(dict(child[0],source_path=str(tar)),child[1],tar,child[3])
+            temp=root/"temp-tree"
+            temp.mkdir()
+            (temp/"nested").symlink_to(root)
+            with self.assertRaisesRegex(m.Stop,"OVERLAY_PARENT_SYMLINK_OR_FILE"):
+                m.overlay_sqlite_snapshots(temp,parent[2],[item],[],os.getuid(),os.getgid())
+
     def test_target_existing_never_overwritten(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp)
