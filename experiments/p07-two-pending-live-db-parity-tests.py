@@ -166,8 +166,37 @@ class Tests(unittest.TestCase):
         with mock.patch.object(sys,"argv",["tool","--restore"]), \
              mock.patch.object(m.os,"geteuid",return_value=0), \
              mock.patch.object(m,"verify_file") as verify:
-            with self.assertRaisesRegex(m.Block,"EXPLICIT_TWO_SITE_READONLY_ARG_REQUIRED"):
+            with self.assertRaisesRegex(m.Block,"EXPLICIT_SCOPED_READONLY_ARG_REQUIRED"):
                 m.main()
             verify.assert_not_called()
+    def test_specific_site_execution_avoids_rescanning_unzip(self):
+        fake=types.ModuleType("server_migration_pull")
+        fake.target_identity=lambda:"TARGETX"
+        fake.source_remote=lambda *a,**k:None
+        inv=types.ModuleType("inventory")
+        inv.build_manifest=Inventory.build_manifest
+        calls=[]
+        def one(migration,inventory,*args):
+            calls.append(args)
+            self.assertEqual(args[0],"ilovem3u8.kewaro.com")
+            self.assertEqual(args[1],m.ORIGINAL17)
+            return "MATCH"
+        result=io.StringIO()
+        from unittest.mock import Mock
+        status=Mock(returncode=0,stdout="0.1.0-release113")
+        with mock.patch.object(sys,"argv",["tool","--compare-ilovem3u8-only-read-only"]), \
+             mock.patch.object(m.os,"geteuid",return_value=0), \
+             mock.patch.object(m,"verify_file"), \
+             mock.patch.object(m.Path,"read_bytes",return_value=b"mock"), \
+             mock.patch.object(m,"gitblob",return_value=m.ENGINE_BLOB), \
+             mock.patch.object(m.subprocess,"run",return_value=status), \
+             mock.patch.object(m,"compare_one",side_effect=one), \
+             mock.patch.dict(sys.modules,{"server_migration_pull":fake,
+                                          "inventory":inv}), \
+             contextlib.redirect_stdout(result):
+            self.assertEqual(m.main(),0)
+        self.assertEqual(len(calls),1)
+        self.assertIn("SITE_COUNT=1",result.getvalue())
+        self.assertIn("CUTOVER_ALLOWED=NO",result.getvalue())
 if __name__=="__main__":
     unittest.main()
