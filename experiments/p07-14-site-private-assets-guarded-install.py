@@ -541,30 +541,78 @@ def write_progress(payload):
             tmp.unlink()
     return path
 
+def load_verified_progress(path,roots,overlays,states):
+    security(path,"file")
+    st=path.lstat()
+    must(st.st_mode&0o077==0 and st.st_size<1024*1024,
+         "PROGRESS_PERMISSIONS_OR_SIZE_CHANGED")
+    try:progress=json.loads(path.read_text(encoding="utf8"))
+    except (ValueError,OSError,UnicodeError):raise Stop("PROGRESS_INVALID") from None
+    must(type(progress) is dict and progress.get("status") in (
+         "STARTED","COPIED_TO_MISSING_PATHS_NOT_CUTOVER_VERIFIED")
+         and progress.get("cron_activated") is False
+         and progress.get("cutover_allowed") is False
+         and type(progress.get("installed")) is list,"PROGRESS_SCOPE_CHANGED")
+    records=progress["installed"]
+    must(len(records)<=len(roots),"PROGRESS_INSTALL_COUNT_UNSAFE")
+    # The original installer records each atomic root immediately after
+    # no-replace rename. Only an exact ordered prefix may be adopted.
+    for idx,old in enumerate(records):
+        rec,private,target,user=roots[idx]
+        must(type(old) is dict and old=={
+            "category":rec["category"],"target":str(target),
+            "nested_sqlite":sum(c[0]["category"]=="sqlite"
+                                for c in overlays.get(target,[]))},
+            "PROGRESS_INSTALLED_PREFIX_CHANGED")
+        verify_atomic_root(roots[idx],overlays.get(target,[]),states)
+    pending=progress.get("pending_temp")
+    must(pending is None or (type(pending) is str and
+         pending.startswith("/home/") and len(pending)<1024),
+         "PROGRESS_PENDING_TEMP_INVALID")
+    # Never auto-adopt, delete or overwrite an orphaned unpublished temp tree.
+    # A pending record requires an independent CP2 read-only forensic check,
+    # even if its path is now absent after a partial rename.
+    must(pending is None,"PENDING_TEMP_REQUIRES_READ_ONLY_RECONCILIATION")
+    for rec,private,target,user in roots[len(records):]:
+        must(not os.path.lexists(target),"UNRECORDED_EXISTING_TARGET_REVIEW_REQUIRED")
+    return progress,len(records)
+
 def do_install():
     must(os.geteuid()==0,"CP2_ROOT_REQUIRED")
-    must(sys.argv[1:]==["--install-only-30-absent-site-assets"],
-         "EXPLICIT_30_SITE_ASSETS_INSTALL_ARGUMENT_REQUIRED")
+    requested=sys.argv[1:]
+    must(requested in (["--install-only-30-absent-site-assets"],
+                       ["--resume-verified-partial-asset-install"]),
+         "EXPLICIT_SITE_ASSET_INSTALL_OR_RESUME_ARGUMENT_REQUIRED")
     states,approved,total_size=check_manifest()
     roots,overlays=plan_nested_assets(approved)
-    # Whole batch adds one full copy of the verified private payload to /home.
-    # Preserve an additional 1 GiB free after the copy.
-    must(shutil.disk_usage("/home").free>total_size+1024**3,
+    progress_path=PRIVATE/"cp2-install-progress.json"
+    if requested==["--resume-verified-partial-asset-install"]:
+        must(os.path.lexists(progress_path),"NO_PARTIAL_PROGRESS_TO_RESUME")
+        progress,resume_index=load_verified_progress(progress_path,roots,overlays,states)
+        must(resume_index>0,"NO_VERIFIED_INSTALLED_PREFIX_TO_RESUME")
+    else:
+        must(not os.path.lexists(progress_path),"PREVIOUS_INSTALL_PROGRESS_EXISTS_REVIEW_REQUIRED")
+        must(all(not os.path.lexists(r[2]) for r in roots),
+             "TARGET_ALREADY_EXISTS_NO_OVERWRITE")
+        progress={"status":"STARTED","installed":[],"pending_temp":None,
+                  "cron_activated":False,"cutover_allowed":False}
+        resume_index=0
+    # Reserve capacity for only the unfinished roots; never retransmit private stage.
+    remaining=sum((p.stat().st_size if p.is_file() else file_tree_integrity(p)[1])
+                  for rec,p,target,user in roots[resume_index:])
+    must(shutil.disk_usage("/home").free>remaining+1024**3,
          "INSUFFICIENT_CP2_INSTALL_SPACE")
     print("PRIVATE_MANIFEST_35_35=PASS",flush=True)
-    print("SITE_INSTALL_TARGETS_MISSING=30",flush=True)
+    print("SITE_INSTALL_LOGICAL_TARGETS=30",flush=True)
     print("ATOMIC_INSTALL_ROOTS="+str(len(roots)),flush=True)
-    print("NESTED_SQLITE_SNAPSHOTS="+str(sum(map(len,overlays.values()))),flush=True)
+    print("NESTED_SQLITE_SNAPSHOTS="+str(nested_sqlite_count(overlays)),flush=True)
+    print("VERIFIED_ALREADY_INSTALLED_ROOTS="+str(resume_index),flush=True)
     print("CRON_KEPT_PRIVATE=5",flush=True)
-    print("APPROVED_COPY_SIZE_MIB="+str((total_size+1024**2-1)//1024**2),flush=True)
+    print("REMAINING_ROOT_COPY_MIB="+str((remaining+1024**2-1)//1024**2),flush=True)
     print("INSTALL_BOUNDARY=CP2_NEW_EMPTY_SITE_PATHS_ONLY",flush=True)
-    progress_path=PRIVATE/"cp2-install-progress.json"
-    must(not os.path.lexists(progress_path),"PREVIOUS_INSTALL_PROGRESS_EXISTS_REVIEW_REQUIRED")
-    progress={"status":"STARTED","installed":[],"pending_temp":None,
-              "cron_activated":False,"cutover_allowed":False}
-    write_progress(progress)
+    if resume_index==0:write_progress(progress)
     print("INSTALL_PROGRESS_PATH="+str(progress_path),flush=True)
-    for idx,(rec,private,target,user) in enumerate(roots,1):
+    for idx,(rec,private,target,user) in enumerate(roots[resume_index:],resume_index+1):
         account=pwd.getpwnam(user)
         uid,gid=account.pw_uid,account.pw_gid
         ensure_parents(target,user,uid,gid)
@@ -581,6 +629,7 @@ def do_install():
             must(file_tree_integrity(temp)[2]==file_tree_integrity(private)[2],
                  "DIRECTORY_STAGED_COPY_CHANGED")
             if target in overlays:
+                compose_nested_externals(temp,target,overlays[target],uid,gid)
                 overlay_sqlite_snapshots(temp,target,overlays[target],
                                          states,uid,gid)
         else:
@@ -589,28 +638,22 @@ def do_install():
             ownership(temp,uid,gid,mode)
             must(hashfile(temp)==rec["sha256"],"FILE_COPY_SHA256_MISMATCH")
         # Linux no-replace rename, so concurrent creation cannot be overwritten.
+        # Pre-publication full logical view check, then final atomic install.
+        if private.is_dir():
+            must(safe_tree_entries(temp)==expected_root_entries(
+                (rec,private,target,user),overlays.get(target,[])),
+                "UNPUBLISHED_ROOT_BYTES_MISMATCH")
         rename_noreplace(temp,target)
         progress["installed"].append({"category":rec["category"],"target":str(target),
-                                      "nested_sqlite":len(overlays.get(target,[]))})
+                                      "nested_sqlite":sum(x[0]["category"]=="sqlite"
+                                          for x in overlays.get(target,[]))})
         progress["pending_temp"]=None
         write_progress(progress)
         print("INSTALLED_ASSET="+str(idx)+" CATEGORY="+rec["category"].upper()+
               " STATUS=NEW_ONLY_SHA_VERIFIED",flush=True)
-    # Verify all 30 logical asset records after the non-overlapping root
-    # installs. Nested SQLite children must be present with exact snapshot
-    # bytes and readable SQLite integrity; no raw business content is logged.
-    for rec,private,target,user in approved:
-        if rec["category"]=="sqlite":
-            must(target.is_file() and not target.is_symlink()
-                 and hashfile(target)==rec["sha256"] and snapshot_ok(target),
-                 "INSTALLED_NESTED_OR_STANDALONE_SQLITE_READBACK_FAILED")
-        elif private.is_file():
-            must(target.is_file() and not target.is_symlink()
-                 and hashfile(target)==rec["sha256"],
-                 "INSTALLED_EXTERNAL_FILE_SHA256_MISMATCH")
-        else:
-            must(target.is_dir() and not target.is_symlink(),
-                 "INSTALLED_EXTERNAL_DIRECTORY_MISSING")
+    # Verify complete logical content of every root including nested records.
+    for root in roots:
+        verify_atomic_root(root,overlays.get(root[2],[]),states)
     print("ALL_30_LOGICAL_SITE_ASSETS_READBACK=PASS",flush=True)
     for label,mid,state,digest in states:
         must(hashfile(base.ROOT/mid/"state.json")==digest,
@@ -619,7 +662,7 @@ def do_install():
     write_progress(progress)
     print("INSTALLED_SITE_ASSETS=30",flush=True)
     print("ATOMIC_SITE_ROOTS_INSTALLED="+str(len(roots)),flush=True)
-    print("NESTED_SQLITE_COMPOSED="+str(sum(map(len,overlays.values()))),flush=True)
+    print("NESTED_SQLITE_COMPOSED="+str(nested_sqlite_count(overlays)),flush=True)
     print("CRON_STILL_PRIVATE_NOT_ACTIVATED=5",flush=True)
     print("ORIGINAL_PRIVATE_EVIDENCE_RETAINED=YES",flush=True)
     print("OLD_SERVER_CONTACTED=NO",flush=True)
