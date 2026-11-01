@@ -93,6 +93,22 @@ class Tests(unittest.TestCase):
         result=m.assess(Missing,site,target)
         self.assertEqual(result["SITE_FILES_ENTRY_PRESENT"],"NO")
         self.assertEqual(result["PHP_OR_OTHER_RUNTIME_MATCH"],"NO")
+        self.assertEqual(result["LOCAL_FILES_VHOST_FPM_EVIDENCE"],"GAP")
+        class RobotsOnly(Smoke):
+            @staticmethod
+            def safe_entry_metadata(row):
+                return {"index.php":False,"index.html":False,"robots.txt":True}
+            @staticmethod
+            def service(service):return "UNKNOWN"
+        target["runtime"]["version"]="8.4"
+        noindex=m.assess(RobotsOnly,site,target)
+        self.assertEqual(noindex["SITE_FILES_ENTRY_PRESENT"],"NO")
+        self.assertEqual(noindex["LOCAL_FILES_VHOST_FPM_EVIDENCE"],"GAP")
+        class DeadFpm(Smoke):
+            @staticmethod
+            def service(service):return "NOT_ACTIVE"
+        bad=m.assess(DeadFpm,site,target)
+        self.assertEqual(bad["LOCAL_FILES_VHOST_FPM_EVIDENCE"],"GAP")
     def test_scan_three_records_is_readonly_scoped(self):
         items={dom:({"ilovem3u8.kewaro.com":"ORIGINAL17",
                    "unzip.kewaro.com":"LEGACY9",
