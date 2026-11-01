@@ -75,8 +75,8 @@ def preflight(pair,base,engine,inventory):
     need(b.returncode==0 and b.stdout.strip()=="0.1.0-release113",
          "RELEASE113_RUNTIME_REQUIRED")
     state,origin,target,_=pair.preflight(engine,inventory,*pair.SITES[1])
-    need(type(target) is str and target!=origin or
-         type(target) is str and target==origin,
+    need(type(target) is str and re.fullmatch("[A-Za-z0-9._-]{1,64}",target)
+         and type(origin) is str and re.fullmatch("[A-Za-z0-9._-]{1,64}",origin),
          "EXISTING_TARGET_DB_NOT_UNIQUELY_BOUND")
     need(state.get("status")=="PREPARE_FAILED" and
          state.get("source_runtime_frozen") is False and
