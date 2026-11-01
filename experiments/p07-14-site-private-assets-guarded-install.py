@@ -579,8 +579,63 @@ def load_verified_progress(path,roots,overlays,states):
         must(not os.path.lexists(target),"UNRECORDED_EXISTING_TARGET_REVIEW_REQUIRED")
     return progress,len(records)
 
+def snapshot_progress_before_resuming(path):
+    """Keep immutable private before-image before any legitimate progress update."""
+    security(path,"file")
+    data=path.read_bytes()
+    must(len(data)<1024*1024,"ORIGINAL_PROGRESS_TOO_LARGE")
+    dest=PRIVATE/("cp2-progress-before-resume-"+uuid.uuid4().hex+".json")
+    fd=os.open(dest,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,"wb") as fp:
+        fp.write(data)
+        fp.flush()
+        os.fsync(fp.fileno())
+    must(hashfile(dest)==hashlib.sha256(data).hexdigest(),
+         "PROGRESS_RECOVERY_COPY_HASH_FAILED")
+    return str(dest)
+
+def pending_temp_matches(root,children,pending):
+    """Read-only complete proof; incomplete directory is preserved, never edited."""
+    rec,private,target,user=root
+    if private.is_dir():
+        must(pending.is_dir() and not pending.is_symlink(),
+             "PENDING_TEMP_TYPE_CHANGED")
+        # Read all existing bytes first; unsafe symlinks/special files fail closed.
+        actual=safe_tree_entries(pending)
+        return actual==expected_root_entries(root,children)
+    must(pending.is_file() and not pending.is_symlink(),
+         "PENDING_TEMP_TYPE_CHANGED")
+    actual=hashfile(pending)
+    return (actual==rec["sha256"] and
+            (rec["category"]!="sqlite" or snapshot_ok(pending)))
+
+def preserve_incomplete_temp(progress,pending,root):
+    """Retain original partial temp byte-for-byte as local recovery evidence."""
+    rec,private,target,user=root
+    must(pending.exists() and not pending.is_symlink(),
+         "PENDING_TEMP_MISSING_OR_UNSAFE_REVIEW_REQUIRED")
+    if pending.is_dir():
+        count,size,digest=file_tree_integrity(pending)
+    else:
+        must(pending.is_file(),"PENDING_TEMP_UNSAFE_KIND")
+        count,size,digest=1,pending.stat().st_size,hashfile(pending)
+    evidence=progress.get("preserved_partial_temps",[])
+    must(type(evidence) is list and len(evidence)<len(root[2].parts)+32,
+         "PRESERVED_TEMP_LEDGER_INVALID")
+    must(all(type(row) is dict and row.get("path")!=str(pending)
+             for row in evidence),"PRESERVED_TEMP_ALREADY_REGISTERED")
+    evidence.append({"path":str(pending),"for_target":str(target),
+                     "content_sha256":digest,"size_bytes":size,
+                     "entry_count":count,"status":"PRESERVED_UNMODIFIED"})
+    progress["preserved_partial_temps"]=evidence
+    progress["pending_temp"]=None
+    write_progress(progress)
+    print("INCOMPLETE_PENDING_TEMP=RETAINED_UNMODIFIED",flush=True)
+    print("PRESERVED_TEMP_EVIDENCE=RECORDED_PRIVATELY",flush=True)
+    return False
+
 def finish_verified_pending(progress,roots,overlays,states,index):
-    """Only an exact byte-complete recorded temp can be completed, explicitly."""
+    """Explicit resume: adopt complete temp; otherwise preserve and rebuild."""
     raw=progress.get("pending_temp")
     if raw is None:return index
     root=roots[index]
@@ -592,31 +647,32 @@ def finish_verified_pending(progress,roots,overlays,states,index):
     uid,gid=account.pw_uid,account.pw_gid
     check_parents(target,user)
     must(not os.path.lexists(target),"PENDING_TARGET_ALREADY_EXISTS")
-    if private.is_dir():
-        must(pending.is_dir() and
-             safe_tree_entries(pending)==expected_root_entries(
-                 root,overlays.get(target,[])),
-             "PENDING_TEMP_INCOMPLETE_KEEP_UNCHANGED")
-    else:
-        must(pending.is_file() and hashfile(pending)==rec["sha256"],
-             "PENDING_TEMP_BYTES_CHANGED_KEEP_UNCHANGED")
-        if rec["category"]=="sqlite":
-            must(snapshot_ok(pending),"PENDING_TEMP_SQLITE_CORRUPT")
-    # Only after exact content proof, apply site ownership to unpublished temp.
+    children=overlays.get(target,[])
+    if not pending_temp_matches(root,children,pending):
+        preserve_incomplete_temp(progress,pending,root)
+        return index
+    # Exact complete image: verify before atomically publishing anything.
     mode=(snapshot_mode(states,rec["source_path"],rec["job"],user)
           if rec["category"]=="sqlite" else None)
     ownership(pending,uid,gid,mode)
-    if rec["category"]=="sqlite":
-        must(stat.S_IMODE(pending.stat().st_mode)==mode,
-             "PENDING_SQLITE_MODE_SET_FAILED")
+    for child_rec,child_private,child_target,child_user in children:
+        if child_rec["category"]=="sqlite":
+            dest=pending/child_target.relative_to(target)
+            child_mode=snapshot_mode(states,child_rec["source_path"],
+                                     child_rec["job"],child_user)
+            must(dest.is_file() and not dest.is_symlink(),
+                 "PENDING_NESTED_SQLITE_CHANGED")
+            os.chown(dest,uid,gid,follow_symlinks=False)
+            os.chmod(dest,child_mode)
+            must(hashfile(dest)==child_rec["sha256"] and snapshot_ok(dest),
+                 "PENDING_NESTED_SQLITE_CHANGED")
     rename_noreplace(pending,target)
     progress["installed"].append({
         "category":rec["category"],"target":str(target),
-        "nested_sqlite":sum(c[0]["category"]=="sqlite"
-                             for c in overlays.get(target,[]))})
+        "nested_sqlite":sum(c[0]["category"]=="sqlite" for c in children)})
     progress["pending_temp"]=None
     write_progress(progress)
-    verify_atomic_root(root,overlays.get(target,[]),states)
+    verify_atomic_root(root,children,states)
     print("RECORDED_PENDING_TEMP_RECOVERED=EXACT_BYTES_ONLY",flush=True)
     return index+1
 
@@ -676,9 +732,19 @@ def do_install():
         progress={"status":"STARTED","installed":[],"pending_temp":None,
                   "cron_activated":False,"cutover_allowed":False}
         resume_index=0
-    # Reserve capacity for only the unfinished roots; never retransmit private stage.
+    # Verify complete staged scope and SQLite modes before first site write.
+    for rec,private,target,user in approved:
+        if rec["category"]=="sqlite":
+            snapshot_mode(states,rec["source_path"],rec["job"],user)
+    for root in roots:
+        if root[1].is_dir():
+            expected_root_entries(root,overlays.get(root[2],[]))
+    # Count the staged roots plus separate nested snapshots (conservative).
     remaining=sum((p.stat().st_size if p.is_file() else file_tree_integrity(p)[1])
                   for rec,p,target,user in roots[resume_index:])
+    remaining+=sum((p.stat().st_size if p.is_file() else file_tree_integrity(p)[1])
+                  for root in roots[resume_index:]
+                  for rec,p,target,user in overlays.get(root[2],[]))
     must(shutil.disk_usage("/home").free>remaining+1024**3,
          "INSUFFICIENT_CP2_INSTALL_SPACE")
     print("PRIVATE_MANIFEST_35_35=PASS",flush=True)
@@ -692,6 +758,8 @@ def do_install():
     if resume_index==0:write_progress(progress)
     print("INSTALL_PROGRESS_PATH="+str(progress_path),flush=True)
     if requested==["--resume-verified-partial-asset-install"]:
+        saved=snapshot_progress_before_resuming(progress_path)
+        print("ORIGINAL_PROGRESS_RECOVERY_COPY="+saved,flush=True)
         resume_index=finish_verified_pending(progress,roots,overlays,states,resume_index)
     for idx,(rec,private,target,user) in enumerate(roots[resume_index:],resume_index+1):
         account=pwd.getpwnam(user)
@@ -715,7 +783,8 @@ def do_install():
                                          states,uid,gid)
         else:
             shutil.copy2(private,temp,follow_symlinks=False)
-            mode=snapshot_mode(states,rec["source_path"]) if rec["category"]=="sqlite" else None
+            mode=(snapshot_mode(states,rec["source_path"],rec["job"],user)
+                  if rec["category"]=="sqlite" else None)
             ownership(temp,uid,gid,mode)
             must(hashfile(temp)==rec["sha256"],"FILE_COPY_SHA256_MISMATCH")
         # Linux no-replace rename, so concurrent creation cannot be overwritten.
