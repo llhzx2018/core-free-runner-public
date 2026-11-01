@@ -75,8 +75,14 @@ class Tests(unittest.TestCase):
         file.chmod(0o600)
         return root,private,states,rows,manifest
     def check(self,root,private,states):
+        actual_security=m.security
+        # CI runs unprivileged; bypass only root ownership in synthetic fixture.
+        # Keep type/symlink validation; production code remains unchanged.
+        synthetic_security=lambda p,kind,root_only=True: actual_security(
+            p,kind,root_only=False)
         with mock.patch.object(m,"PRIVATE",private), \
              mock.patch.object(m.base,"ROOT",root), \
+             mock.patch.object(m,"security",side_effect=synthetic_security), \
              mock.patch.object(m.base,"secure_state",
                  side_effect=lambda p:states[p.parent.name]):
             return m.check_manifest()
