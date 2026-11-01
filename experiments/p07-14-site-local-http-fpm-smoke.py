@@ -271,9 +271,11 @@ def probe():
 # Three-site follow-up: inspect response headers, vhost directives, and root
 # existence without printing private paths, query strings, cookies or secrets.
 ROUTE_REVIEW=("domain.kewaro.com","infra.kewaro.com","press.kewaro.com")
-def response_headers_local(domain,timeout=4):
+def response_headers_local(domain,timeout=4,path="/"):
     """Bounded CP2 loopback TLS HEAD. No redirect following or DNS resolution."""
     must(domain in ROUTE_REVIEW,"OUT_OF_SCOPE_ROUTE_HOST")
+    must(path in ("/","/index.php","/index.html","/robots.txt"),
+         "HTTP_ROUTE_PATH_SCOPE_UNSAFE")
     sock=None
     try:
         sock=socket.create_connection(("127.0.0.1",443),timeout=timeout)
@@ -283,7 +285,7 @@ def response_headers_local(domain,timeout=4):
         ctx.verify_mode=ssl.CERT_NONE
         sock=ctx.wrap_socket(sock,server_hostname=domain)
         sock.settimeout(timeout)
-        req=("HEAD / HTTP/1.1\r\nHost: "+domain+
+        req=("HEAD "+path+" HTTP/1.1\r\nHost: "+domain+
              "\r\nUser-Agent: P07-CP2-Route-Review/1.0\r\n"
              "Connection: close\r\n\r\n")
         sock.sendall(req.encode("ascii"))
@@ -434,9 +436,119 @@ def diagnose_three_routes():
     print("CUTOVER_ALLOWED=NO",flush=True)
     return 0
 
+def nginx_document_root_match(domain,site,root=VHOST_DIR):
+    """Conservative exact-root comparison. Never output actual filesystem paths."""
+    must(domain in ROUTE_REVIEW,"OUT_OF_SCOPE_NGINX_ROOT")
+    user=site.get("site_user")
+    declared=site.get("document_root") or site.get("site_root")
+    if not (isinstance(user,str) and re.fullmatch(r"[a-z_][a-z0-9_-]{0,64}",user)
+            and isinstance(declared,str) and declared.startswith("/home/"+user+"/")
+            and ".." not in Path(declared).parts):
+        return "PANEL_DOCROOT_UNVERIFIED"
+    if not root.is_dir():return "NGINX_VHOST_DIRECTORY_MISSING"
+    matches=[]
+    for f in sorted(root.iterdir()):
+        try:
+            if not f.is_file() or f.stat().st_size>1048576:continue
+            raw=f.read_text(encoding="utf8",errors="replace")
+        except OSError:continue
+        conf=re.sub(r"(?m)#.*$","",raw)
+        names=re.findall(r"\bserver_name\s+([^;]+);",conf)
+        if any(domain in row.split() for row in names):
+            matches.append(conf)
+    if len(matches)!=1:return "NGINX_VHOST_NOT_UNIQUE"
+    roots=set(re.findall(r"(?m)^\s*root\s+([^;\s]+)\s*;",matches[0]))
+    if len(roots)!=1:return "NGINX_ROOT_NOT_UNIQUE"
+    raw=roots.pop()
+    if "$" in raw or ".." in Path(raw).parts or not raw.startswith(
+            "/home/"+user+"/"):
+        return "NGINX_ROOT_DYNAMIC_OR_OUT_OF_SCOPE"
+    p=Path(raw); target=Path(declared)
+    if p.is_symlink() or target.is_symlink() or not p.is_dir() or not target.is_dir():
+        return "NGINX_OR_PANEL_ROOT_MISSING_OR_SYMLINK"
+    try:
+        path=p.resolve(strict=True)
+        dest=target.resolve(strict=True)
+        home=(Path("/home")/user).resolve(strict=True)
+        if home not in path.parents or home not in dest.parents:
+            return "NGINX_OR_PANEL_ROOT_OUT_OF_SCOPE"
+        if path==dest:return "EXACT_MATCH"
+        if dest in path.parents:return "NGINX_NESTED_UNDER_PANEL"
+        if path in dest.parents:return "PANEL_NESTED_UNDER_NGINX"
+        return "DIFFERENT_DIRECTORIES"
+    except (OSError,RuntimeError):
+        return "ROOT_RESOLVE_FAILED"
+
+def safe_entry_metadata(site):
+    user=site.get("site_user")
+    raw=site.get("document_root") or site.get("site_root")
+    if not (isinstance(user,str) and re.fullmatch(r"[a-z_][a-z0-9_-]{0,64}",user)
+            and isinstance(raw,str) and raw.startswith("/home/"+user+"/")
+            and ".." not in Path(raw).parts):
+        return {"index.php":False,"index.html":False,"robots.txt":False}
+    path=Path(raw)
+    try:
+        resolved=path.resolve(strict=True)
+        home=(Path("/home")/user).resolve(strict=True)
+        if (path.is_symlink() or not path.is_dir() or home not in resolved.parents):
+            return {"index.php":False,"index.html":False,"robots.txt":False}
+    except (OSError,RuntimeError):
+        return {"index.php":False,"index.html":False,"robots.txt":False}
+    return {name:(lambda f:f.is_file() and not f.is_symlink())(path/name)
+            for name in ("index.php","index.html","robots.txt")}
+
+def diagnose_three_routes_depth():
+    must(os.geteuid()==0,"CP2_ROOT_REQUIRED")
+    must(sys.argv[1:]==["--review-three-site-root-and-entry"],
+         "EXPLICIT_THREE_ROUTE_DEPTH_ARGUMENT_REQUIRED")
+    sites=staged_sites()
+    must(set(ROUTE_REVIEW)<=set(sites),"THREE_ROUTE_STAGE_SCOPE_CHANGED")
+    panel=inventory()
+    print("PROBE=THREE_SITE_ROOT_AND_ENTRY_CAUSE_CLASSIFICATION",flush=True)
+    print("HTTP=LOOPBACK_HTTPS_HEAD_ONLY_NO_FOLLOW",flush=True)
+    print("CONFIG=READ_ONLY_NO_PATH_CONTENT_OUTPUT",flush=True)
+    reviewed=0
+    for domain in ROUTE_REVIEW:
+        rows=panel.get(domain,[])
+        must(len(rows)==1 and rows[0].get("site_user")==sites[domain].get("site_user"),
+             "THREE_SITE_INVENTORY_CHANGED")
+        entry=safe_entry_metadata(rows[0])
+        mapping=nginx_document_root_match(domain,rows[0])
+        code,headers=response_headers_local(domain)
+        redirects=redirection_class(headers.get("location"),domain)
+        checks={}
+        for name in ("index.php","index.html","robots.txt"):
+            if entry[name]:
+                status,_=response_headers_local(domain,path="/"+name)
+                checks[name]=str(status) if status else "CONNECT_FAILED"
+            else:checks[name]="SKIP_NO_SAFE_FILE"
+        print("SITE="+domain+" HTTPS_ROOT="+str(code)+
+              " REDIRECT_CLASS="+redirects+
+              " NGINX_TO_PANEL_ROOT="+mapping+
+              " PHP_ENTRY="+("PRESENT" if entry["index.php"] else "NOT_PROVEN")+
+              " HTML_ENTRY="+("PRESENT" if entry["index.html"] else "NOT_PROVEN")+
+              " INDEX_PHP_HEAD="+checks["index.php"]+
+              " INDEX_HTML_HEAD="+checks["index.html"]+
+              " ROBOTS_HEAD="+checks["robots.txt"]+
+              " CAUSE=NOT_YET_PROVEN",flush=True)
+        reviewed+=1
+    print("REVIEWED_SITE_COUNT="+str(reviewed),flush=True)
+    print("RESPONSE_BODIES_COOKIES_REDIRECT_URLS_CONFIG_PATHS=NOT_DISPLAYED",flush=True)
+    print("WEB_REQUESTS_MAY_WRITE_NORMAL_ACCESS_LOGS=YES",flush=True)
+    print("PHP_APPLICATION_HANDLERS_MAY_BE_INVOKED_BY_HEAD=YES",flush=True)
+    print("SITE_CONFIG_WRITES=NONE",flush=True)
+    print("DATABASE_SQL_WRITES_BY_PROBE=NONE",flush=True)
+    print("OLD_SERVER_CONTACTED=NO",flush=True)
+    print("CRON_ACTIVATED=NO",flush=True)
+    print("DNS_WRITES=NONE",flush=True)
+    print("CUTOVER_ALLOWED=NO",flush=True)
+    return 0
+
 if __name__=="__main__":
     try:
         raise SystemExit(
+            diagnose_three_routes_depth() if sys.argv[1:]==[
+                "--review-three-site-root-and-entry"] else
             diagnose_three_routes() if sys.argv[1:]==[
                 "--diagnose-only-three-review-routes"] else probe())
     except Block as e:
