@@ -39,8 +39,12 @@ try {
  ok(backend.ok===true,'category_bootstrap_readback');
  const created=(backend.data?.categories||[]).find(x=>x.name===name&&String(x.lifecycle_state||'active')==='active');
  ok(created&&Number(created.id)>0,'category_sqlite_write_readback');
- ok((await page.locator('[data-start-category-section] .vf-category-tree').innerText()).includes(name),
-   'category_sidebar_updates_without_navigation');
+ const navigationText=await page.locator('[data-start-category-section] .vf-category-tree').innerText();
+ if(!navigationText.includes(name))console.log('P01_CATEGORY_SYNC_DIAG',JSON.stringify({
+   message:await local.locator('[data-vf-category-native-status]').textContent(),
+   navigation:navigationText.slice(0,500),url:page.url(),categoryId:created.id
+ }));
+ ok(navigationText.includes(name),'category_sidebar_updates_without_navigation');
  ok(page.url()===before,'category_same_document_url');
 
  const select=local.locator('[data-vf-local-category-select]');
