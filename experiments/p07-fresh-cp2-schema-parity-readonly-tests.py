@@ -27,8 +27,10 @@ class Checks(unittest.TestCase):
             [b"V616263\tV313233",b"V616263\tV343536"],("A","B"))
         self.assertEqual(item["count"],2)
         self.assertEqual(len(item["objects"]),1)
-        self.assertNotIn("abc",str(item))
-        self.assertNotIn("123",str(item))
+        for object_id, (size, digest) in item["objects"].items():
+            self.assertEqual(len(object_id),64)
+            self.assertEqual(size,2)
+            self.assertEqual(len(digest),64)
         self.assertEqual(w.decode_line(b"N\tV30",2),[None,"0"])
         with self.assertRaises(w.Block):
             w.decode_line(b"raw\tV30",2)
