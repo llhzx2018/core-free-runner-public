@@ -332,7 +332,9 @@ def do_install():
     must(sys.argv[1:]==["--install-only-30-absent-site-assets"],
          "EXPLICIT_30_SITE_ASSETS_INSTALL_ARGUMENT_REQUIRED")
     states,approved,total_size=check_manifest()
-    must(shutil.disk_usage("/home").free>2*total_size+1024**3,
+    # Whole batch adds one full copy of the verified private payload to /home.
+    # Preserve an additional 1 GiB free after the copy.
+    must(shutil.disk_usage("/home").free>total_size+1024**3,
          "INSUFFICIENT_CP2_INSTALL_SPACE")
     print("PRIVATE_MANIFEST_35_35=PASS",flush=True)
     print("SITE_INSTALL_TARGETS_MISSING=30",flush=True)
