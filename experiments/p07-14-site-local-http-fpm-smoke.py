@@ -267,8 +267,178 @@ def probe():
     print("DNS_WRITE=NONE",flush=True)
     print("CUTOVER_ALLOWED=NO",flush=True)
     return 0
+
+# Three-site follow-up: inspect response headers, vhost directives, and root
+# existence without printing private paths, query strings, cookies or secrets.
+ROUTE_REVIEW=("domain.kewaro.com","infra.kewaro.com","press.kewaro.com")
+def response_headers_local(domain,timeout=4):
+    """Bounded CP2 loopback TLS HEAD. No redirect following or DNS resolution."""
+    must(domain in ROUTE_REVIEW,"OUT_OF_SCOPE_ROUTE_HOST")
+    sock=None
+    try:
+        sock=socket.create_connection(("127.0.0.1",443),timeout=timeout)
+        sock.settimeout(timeout)
+        ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname=False
+        ctx.verify_mode=ssl.CERT_NONE
+        sock=ctx.wrap_socket(sock,server_hostname=domain)
+        sock.settimeout(timeout)
+        req=("HEAD / HTTP/1.1\r\nHost: "+domain+
+             "\r\nUser-Agent: P07-CP2-Route-Review/1.0\r\n"
+             "Connection: close\r\n\r\n")
+        sock.sendall(req.encode("ascii"))
+        data=b""
+        while b"\r\n\r\n" not in data and len(data)<16384:
+            part=sock.recv(min(2048,16384-len(data)))
+            if not part:break
+            data+=part
+        must(b"\r\n\r\n" in data and len(data)<16384,
+             "ROUTE_HTTP_HEADERS_INCOMPLETE")
+        headers=data.split(b"\r\n\r\n",1)[0].split(b"\r\n")
+        code=re.match(rb"HTTP/1\.[01] ([0-9]{3})(?:\s|$)",headers[0])
+        must(code is not None,"ROUTE_HTTP_STATUS_INVALID")
+        selected={}
+        for line in headers[1:]:
+            if b":" not in line:continue
+            key,value=line.split(b":",1)
+            key=key.strip().lower()
+            if key in (b"location",b"x-redirect-by") and key not in selected:
+                selected[key.decode("ascii")]=value.strip().decode(
+                    "utf8",errors="replace")[:2048]
+        return int(code.group(1)),selected
+    except (OSError,ssl.SSLError,TimeoutError):
+        return 0,{}
+    finally:
+        if sock is not None:
+            try:sock.close()
+            except OSError:pass
+
+def redirection_class(raw,domain):
+    """Never output redirect query, credentials or arbitrary URL/path strings."""
+    if not raw:return "NONE"
+    from urllib.parse import urlsplit
+    try:
+        u=urlsplit(raw)
+        host=(u.hostname or "").lower()
+        if u.scheme and u.scheme.lower() not in ("http","https"):
+            return "UNSAFE_SCHEME"
+        if u.netloc and not u.scheme:return "NETWORK_PATH_REDIRECT"
+        if u.username or u.password:return "CREDENTIAL_URL_REVIEW"
+        if not host:host=domain
+        if host==domain:scope="SAME_HOST"
+        elif host.endswith(".kewaro.com") or host.endswith(".m3u8.one"):
+            scope="RELATED_PUBLIC_DOMAIN"
+        else:scope="OTHER_HOST"
+        path=u.path.lower().strip("/")
+        if not path:purpose="ROOT"
+        elif any(part in ("login","signin","sign-in","auth","wp-login.php",
+                            "admin","wp-admin","user","account")
+                 for part in path.split("/")):purpose="AUTH_OR_ADMIN"
+        else:purpose="OTHER_PATH"
+        scheme=u.scheme.lower() if u.scheme else "RELATIVE"
+        return scope+"_"+purpose+"_"+scheme.upper()
+    except ValueError:
+        return "INVALID_LOCATION"
+
+def site_docroot_evidence(site):
+    """Only read metadata under the target site user's /home; no file content."""
+    user=site.get("site_user")
+    path=site.get("document_root") or site.get("site_root")
+    if not (isinstance(user,str) and re.fullmatch(r"[a-z_][a-z0-9_-]{0,64}",user)
+            and isinstance(path,str)
+            and path.startswith("/home/"+user+"/")
+            and ".." not in Path(path).parts):
+        return "UNVERIFIED","UNKNOWN","UNKNOWN"
+    doc=Path(path)
+    try:
+        resolved=doc.resolve(strict=True)
+        if not doc.is_dir() or not (resolved==Path("/home")/user
+             or Path("/home")/user in resolved.parents):
+            return "UNSAFE_OR_MISSING","UNKNOWN","UNKNOWN"
+        names=("index.php","index.html","index.htm")
+        found=[]
+        for name in names:
+            child=doc/name
+            if child.is_file() and not child.is_symlink():
+                found.append(name)
+        wordpress="YES" if (doc/"wp-config.php").is_file() and not (
+            doc/"wp-config.php").is_symlink() else "NO"
+        return "DIRECTORY_PRESENT",("PRESENT" if found else "NONE"),wordpress
+    except (OSError,RuntimeError,ValueError):
+        return "UNVERIFIED","UNKNOWN","UNKNOWN"
+
+def nginx_route_evidence(domain,root=VHOST_DIR):
+    """Read only bounded nginx files; never dump their content or host paths."""
+    must(domain in ROUTE_REVIEW,"OUT_OF_SCOPE_NGINX_DOMAIN")
+    if not root.is_dir():return "VHOST_CONFIG_MISSING","UNKNOWN","UNKNOWN"
+    matches=[]
+    for f in sorted(root.iterdir()):
+        try:
+            if not f.is_file() or f.stat().st_size>1048576:continue
+            raw=f.read_text(encoding="utf8",errors="replace")
+        except OSError:continue
+        text=re.sub(r"(?m)#.*$","",raw)
+        names=re.findall(r"\bserver_name\s+([^;]+);",text)
+        if any(domain in record.split() for record in names):
+            matches.append(text)
+    if not matches:return "VHOST_NOT_FOUND","UNKNOWN","UNKNOWN"
+    config="\n".join(matches)
+    has_root=bool(re.search(r"\broot\s+[^;]+;",config))
+    has_try=bool(re.search(r"\btry_files\s+[^;]+;",config))
+    has_rewrite=bool(re.search(r"\brewrite\s+[^;]+;",config))
+    has_proxy=bool(re.search(r"\bproxy_pass\s+[^;]+;",config))
+    return ("VHOST_FILES_"+str(len(matches)),
+            "YES" if has_root else "NO",
+            "TRY_FILES_"+("YES" if has_try else "NO")+
+            "_REWRITE_"+("YES" if has_rewrite else "NO")+
+            "_PROXY_"+("YES" if has_proxy else "NO"))
+
+def diagnose_three_routes():
+    must(os.geteuid()==0,"CP2_ROOT_REQUIRED")
+    must(sys.argv[1:]==["--diagnose-only-three-review-routes"],
+         "EXPLICIT_THREE_ROUTE_DIAG_ARGUMENT_REQUIRED")
+    sites=staged_sites()
+    must(set(ROUTE_REVIEW)<=set(sites),"THREE_ROUTE_STAGE_SCOPE_CHANGED")
+    bydomain=inventory()
+    print("PROBE=CP2_THREE_SITE_ROUTE_DIAGNOSIS",flush=True)
+    print("SCOPE=domain.kewaro.com,infra.kewaro.com,press.kewaro.com",flush=True)
+    print("HTTPS_TARGET=127.0.0.1:443_ONLY",flush=True)
+    print("HTTP_METHOD=HEAD_NO_REDIRECT_FOLLOW",flush=True)
+    print("RESPONSE_COOKIES_QUERIES_AND_PRIVATE_PATHS=NOT_DISPLAYED",flush=True)
+    for domain in ROUTE_REVIEW:
+        site=sites[domain]
+        panel=bydomain.get(domain,[])
+        must(len(panel)==1 and panel[0].get("site_user")==site.get("site_user"),
+             "THREE_SITE_PANEL_USER_OR_INVENTORY_CHANGED")
+        source_doc=site_docroot_evidence(site)
+        panel_doc=site_docroot_evidence(panel[0])
+        code,headers=response_headers_local(domain)
+        destination=redirection_class(headers.get("location"),domain)
+        redirect_by="YES" if "x-redirect-by" in headers else "NO"
+        vhost,ng_root,route=nginx_route_evidence(domain)
+        print("SITE="+domain+" HTTPS_STATUS="+str(code)+
+              " REDIRECT_CLASS="+destination+
+              " APP_REDIRECT_HEADER="+redirect_by+
+              " NGINX_CONFIG="+vhost+" NGINX_ROOT="+ng_root+
+              " NGINX_RULES="+route+
+              " STAGED_DOCROOT="+source_doc[0]+
+              " STAGED_INDEX="+source_doc[1]+
+              " CP2_DOCROOT="+panel_doc[0]+
+              " CP2_INDEX="+panel_doc[1]+
+              " CP2_WP_CONFIG="+panel_doc[2],flush=True)
+    print("DIAGNOSTIC_ONLY=NO_SITE_CONFIG_OR_DATABASE_WRITES",flush=True)
+    print("APPLICATION_CAUSE=REQUIRES_TARGETED_REVIEW",flush=True)
+    print("OLD_SERVER_CONTACTED=NO",flush=True)
+    print("CRON_OR_PM2_ACTIVATED=NO",flush=True)
+    print("DNS_WRITES=NONE",flush=True)
+    print("CUTOVER_ALLOWED=NO",flush=True)
+    return 0
+
 if __name__=="__main__":
-    try:raise SystemExit(probe())
+    try:
+        raise SystemExit(
+            diagnose_three_routes() if sys.argv[1:]==[
+                "--diagnose-only-three-review-routes"] else probe())
     except Block as e:
         print("BLOCKED="+str(e),flush=True)
         print("CUTOVER_ALLOWED=NO",flush=True)
