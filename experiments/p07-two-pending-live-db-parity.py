@@ -53,19 +53,36 @@ def private_state(path):
 def preflight(migration,inventory,domain,mid,expected_count,idx,expected_tables):
     record=private_state(STATE_ROOT/mid/"state.json")
     sites=record.get("sites")
-    need(record.get("migration_id")==mid and record.get("status")=="PREPARE_FAILED"
-         and record.get("schema")=="vf-server-ops.server-migration.target-pull.v1"
-         and record.get("cutover_prohibited") is (mid==LEGACY9)
-         and record.get("source_runtime_frozen") is False
-         and record.get("dns_changed_by_p07") is False
-         and record.get("source_delete_allowed") is False
-         and record.get("existing_target_overwrite_allowed") is False
-         and type(sites) is list and len(sites)==expected_count
-         and type(sites[idx]) is dict
-         and sites[idx].get("domain")==domain
-         and sites[idx].get("stage_status")=="PENDING"
-         and record.get("target_server_identity")==migration.target_identity(),
-         "MIGRATION_SAFETY_OR_SITE_BOUNDARY_CHANGED")
+    # The original migration was created with an older engine. Diagnose
+    # each individual safety invariant without printing state JSON, server
+    # identities or credentials. This does NOT weaken any invariant.
+    checks=(
+        ("MIGRATION_ID",record.get("migration_id")==mid),
+        ("STATUS",record.get("status")=="PREPARE_FAILED"),
+        ("SCHEMA",record.get("schema")=="vf-server-ops.server-migration.target-pull.v1"),
+        ("CUTOVER_PROHIBITED_MARKER",record.get("cutover_prohibited") is (mid==LEGACY9)),
+        ("SOURCE_NOT_FROZEN",record.get("source_runtime_frozen") is False),
+        ("DNS_UNCHANGED",record.get("dns_changed_by_p07") is False),
+        ("SOURCE_DELETE_FORBIDDEN",record.get("source_delete_allowed") is False),
+        ("TARGET_OVERWRITE_FORBIDDEN",record.get("existing_target_overwrite_allowed") is False),
+        ("SITE_COUNT",type(sites) is list and len(sites)==expected_count),
+        ("SITE_ORDINAL",type(sites) is list and len(sites)>idx and type(sites[idx]) is dict),
+        ("SITE_DOMAIN",type(sites) is list and len(sites)>idx
+             and type(sites[idx]) is dict and sites[idx].get("domain")==domain),
+        ("SITE_PENDING",type(sites) is list and len(sites)>idx
+             and type(sites[idx]) is dict and sites[idx].get("stage_status")=="PENDING"),
+        ("TARGET_IDENTITY",record.get("target_server_identity")==migration.target_identity()),
+    )
+    failed=[key for key,ok in checks if not ok]
+    if failed:
+        print("FAILED_STATE_GUARDS="+",".join(failed),flush=True)
+        if "CUTOVER_PROHIBITED_MARKER" in failed:
+            val=record.get("cutover_prohibited")
+            classification=("MISSING" if "cutover_prohibited" not in record
+                            else "TRUE" if val is True
+                            else "FALSE" if val is False else "OTHER")
+            print("ORIGINAL_CUTOVER_MARKER="+classification,flush=True)
+        raise Block("MIGRATION_SAFETY_OR_SITE_BOUNDARY_CHANGED")
     if mid==LEGACY9:
         need(record.get("partial_parent_migration_id")==ORIGINAL17,
              "PARENT_MIGRATION_ID_CHANGED")
