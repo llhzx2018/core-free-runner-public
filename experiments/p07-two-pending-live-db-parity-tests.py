@@ -35,7 +35,7 @@ def state(domain,mid,length,index,db="db1"):
                   "site_user":"user1","mysql_databases":[db]}
     return {
        "schema":"vf-server-ops.server-migration.target-pull.v1",
-       "migration_id":mid,"status":"PREPARE_FAILED","cutover_prohibited":True,
+       "migration_id":mid,"status":"PREPARE_FAILED","cutover_prohibited":(mid==m.LEGACY9),
        "source_runtime_frozen":False,"dns_changed_by_p07":False,
        "source_delete_allowed":False,"existing_target_overwrite_allowed":False,
        "target_server_identity":"TARGETX",
@@ -72,6 +72,26 @@ class Tests(unittest.TestCase):
             self.assertIn(result[2],("db2","db3"))
             self.assertEqual(result[3],
                 "/var/lib/vf-server-ops/pull-source/"+mid+"/runtime")
+        # The older original-seventeen has cutover_prohibited=False
+        # (bool(remainder_parent)), whereas the newer child has True.
+        # Keep this exact historical-state invariant without enabling cutover.
+        old=state("ilovem3u8.kewaro.com",m.ORIGINAL17,17,7)
+        self.assertIs(old["cutover_prohibited"],False)
+        with mock.patch.object(m,"private_state",return_value=old):
+            self.assertEqual(m.preflight(
+                FakeMigration,Inventory,"ilovem3u8.kewaro.com",
+                m.ORIGINAL17,17,7,42)[2],"db3")
+        old["cutover_prohibited"]=True
+        with mock.patch.object(m,"private_state",return_value=old):
+            with self.assertRaisesRegex(m.Block,"MIGRATION_SAFETY"):
+                m.preflight(FakeMigration,Inventory,"ilovem3u8.kewaro.com",
+                            m.ORIGINAL17,17,7,42)
+        rows=state("unzip.kewaro.com",m.LEGACY9,9,6)
+        rows["cutover_prohibited"]=False
+        with mock.patch.object(m,"private_state",return_value=rows):
+            with self.assertRaisesRegex(m.Block,"MIGRATION_SAFETY"):
+                m.preflight(FakeMigration,Inventory,
+                            "unzip.kewaro.com",m.LEGACY9,9,6,12)
         rows=state("unzip.kewaro.com",m.LEGACY9,9,6)
         rows["existing_target_overwrite_allowed"]=True
         with mock.patch.object(m,"private_state",return_value=rows):
