@@ -40,6 +40,7 @@ class Tests(unittest.TestCase):
         data=b"protected-original-database-dump"
         archive=scratch/"source.sql.gz"
         archive.write_bytes(data)
+        archive.chmod(0o600)
         import hashlib
         record={
             "migration_id":m.WWW3,"original_site":"www3.m3u8.one",
