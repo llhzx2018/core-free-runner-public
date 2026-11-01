@@ -55,7 +55,7 @@ def preflight(migration,inventory,domain,mid,expected_count,idx,expected_tables)
     sites=record.get("sites")
     need(record.get("migration_id")==mid and record.get("status")=="PREPARE_FAILED"
          and record.get("schema")=="vf-server-ops.server-migration.target-pull.v1"
-         and record.get("cutover_prohibited") is True
+         and record.get("cutover_prohibited") is (mid==LEGACY9)
          and record.get("source_runtime_frozen") is False
          and record.get("dns_changed_by_p07") is False
          and record.get("source_delete_allowed") is False
