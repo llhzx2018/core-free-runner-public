@@ -311,7 +311,7 @@ class Tests(unittest.TestCase):
             progress=private/"cp2-install-progress.json"
             payload={"status":"STARTED","installed":[
                 {"category":"external","target":str(targets[0][2]),"nested_sqlite":0}],
-                "pending_temp":str(root/"temp-orphan"),"cron_activated":False,
+                "pending_temp":"/home/example/.p07-uninstalled-orphan","cron_activated":False,
                 "cutover_allowed":False}
             progress.write_text(json.dumps(payload))
             progress.chmod(0o600)
