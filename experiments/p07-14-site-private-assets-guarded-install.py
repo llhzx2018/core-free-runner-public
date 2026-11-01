@@ -262,10 +262,115 @@ def check_manifest():
     must(len(approved)==30,"SITE_INSTALL_COUNT_CHANGED")
     targets=[str(t) for _,_,t,_ in approved]
     must(len(set(targets))==len(targets),"MULTIPLE_RECORDS_SHARE_TARGET")
-    for i,t in enumerate(targets):
-        must(not any(t.startswith(q+"/") or q.startswith(t+"/") for q in targets[i+1:]),
-             "TARGET_NESTED_PATH_CONFLICT")
+    roots,overlays=plan_nested_assets(approved)
+    # A child SQLite asset may be inside a missing external directory.
+    # It is composed in a private temporary tree before any atomic target write.
+    # Other nesting remains a hard safety failure.
     return states,approved,total_size
+
+def plan_nested_assets(approved):
+    """Return non-overlapping atomic roots + SQLite children to overlay.
+
+    A nested child is legal ONLY when a missing external DIRECTORY contains
+    the separately snapshotted SQLite file. All site targets are initially
+    absent, original private sources remain unchanged, and other overlaps
+    still fail closed. No I/O or target writes here.
+    """
+    must(len(approved)==30,"EXPECTED_30_ASSET_RECORDS_CHANGED")
+    targets=[row[2] for row in approved]
+    must(len(set(targets))==len(targets),"DUPLICATE_ASSET_TARGET")
+    roots=[]
+    overlays={}
+    for record in approved:
+        rec,private,target,user=record
+        parents=[x for x in approved if x[2]!=target and x[2] in target.parents]
+        must(len(parents)<=1,"NESTED_ASSET_PARENT_CHAIN_UNSUPPORTED")
+        if not parents:
+            roots.append(record)
+            continue
+        p=parents[0]
+        parent_rec,parent_private,parent_target,parent_user=p
+        must(parent_rec.get("category")=="external" and parent_private.is_dir()
+             and rec.get("category")=="sqlite" and private.is_file()
+             and user==parent_user,"TARGET_NESTED_PATH_CONFLICT")
+        # Scope remains limited to a file inside an absent external directory.
+        rel=target.relative_to(parent_target)
+        must(rel.parts and all(part not in ("..","") for part in rel.parts),
+             "NESTED_SQLITE_PATH_UNSAFE")
+        overlays.setdefault(parent_target,[]).append(record)
+    root_targets={row[2] for row in roots}
+    must(len(roots)+sum(len(v) for v in overlays.values())==30
+         and all(k in root_targets for k in overlays),
+         "NESTED_ASSET_GRAPH_UNVERIFIED")
+    for i,first in enumerate(roots):
+        must(not any(first[2] in x[2].parents or x[2] in first[2].parents
+                     for x in roots[i+1:]),"ATOMIC_ROOTS_OVERLAP")
+    return roots,overlays
+
+def snapshot_mode(states,source):
+    modes=[row.get("mode",0o600)
+           for label,mid,state,h in states
+           for row in state.get("sqlite_assets",[])
+           if row.get("path")==source]
+    must(len(modes)==1,"SQLITE_SOURCE_MODE_AMBIGUOUS")
+    try:mode=int(modes[0])
+    except (ValueError,TypeError):raise Stop("SQLITE_MODE_UNSAFE") from None
+    must(0<=mode<=0o777 and not mode&0o111,"SQLITE_MODE_UNSAFE")
+    return mode
+
+def overlay_sqlite_snapshots(temp,parent_target,children,states,uid,gid):
+    """Compose independently verified SQLite snapshots in a non-site temp tree.
+
+    Old content in the external tree is never modified in private evidence.
+    Any apparent replacement occurs only inside the new unpublished
+    temporary tree. Existing CP2 site paths are never overwritten.
+    """
+    must(temp.is_dir() and not temp.is_symlink(),"OVERLAY_TEMP_DIR_UNSAFE")
+    for rec,private,target,user in children:
+        must(rec.get("category")=="sqlite" and target!=parent_target
+             and parent_target in target.parents,"OVERLAY_SCOPE_UNVERIFIED")
+        rel=target.relative_to(parent_target)
+        dest=temp/rel
+        must(temp in dest.parents,"OVERLAY_PATH_ESCAPED_TEMP")
+        current=temp
+        for name in rel.parts[:-1]:
+            current=current/name
+            if os.path.lexists(current):
+                st=current.lstat()
+                must(stat.S_ISDIR(st.st_mode) and not stat.S_ISLNK(st.st_mode),
+                     "OVERLAY_PARENT_SYMLINK_OR_FILE")
+            else:
+                current.mkdir(mode=0o750)
+                os.chown(current,uid,gid)
+        if os.path.lexists(dest):
+            st=dest.lstat()
+            must(stat.S_ISREG(st.st_mode) and not stat.S_ISLNK(st.st_mode),
+                 "OVERLAY_EXISTING_CHILD_NOT_REGULAR")
+        # Snapshot excludes the source live WAL and contains a consistent image.
+        # Sidecars from the external dir's unsynchronized copy must not be
+        # reused against that snapshot. They remain in original private staging.
+        for suffix in ("-wal","-shm","-journal"):
+            side=Path(str(dest)+suffix)
+            if os.path.lexists(side):
+                st=side.lstat()
+                must(stat.S_ISREG(st.st_mode) and not stat.S_ISLNK(st.st_mode),
+                     "OVERLAY_SQLITE_SIDECAR_UNSAFE")
+                side.unlink()
+        pending=dest.parent/(".p07-snapshot-"+uuid.uuid4().hex)
+        must(not os.path.lexists(pending),"OVERLAY_TEMP_COLLISION")
+        shutil.copy2(private,pending,follow_symlinks=False)
+        mode=snapshot_mode(states,rec["source_path"])
+        os.chown(pending,uid,gid,follow_symlinks=False)
+        os.chmod(pending,mode)
+        must(hashfile(pending)==rec["sha256"]
+             and snapshot_ok(pending),"OVERLAY_SNAPSHOT_VERIFICATION_FAILED")
+        # Overwrite only the non-live, uninstalled temp copy. Original private
+        # external directory and any CP2 existing site file are untouched.
+        os.replace(pending,dest)
+        must(hashfile(dest)==rec["sha256"]
+             and snapshot_ok(dest),"OVERLAY_SQLITE_READBACK_FAILED")
+    # All nested snapshots are present before the parent directory is
+    # atomically installed at its absent CP2 site path.
 
 def rename_noreplace(source,target):
     libc=ctypes.CDLL(None,use_errno=True)
@@ -332,12 +437,15 @@ def do_install():
     must(sys.argv[1:]==["--install-only-30-absent-site-assets"],
          "EXPLICIT_30_SITE_ASSETS_INSTALL_ARGUMENT_REQUIRED")
     states,approved,total_size=check_manifest()
+    roots,overlays=plan_nested_assets(approved)
     # Whole batch adds one full copy of the verified private payload to /home.
     # Preserve an additional 1 GiB free after the copy.
     must(shutil.disk_usage("/home").free>total_size+1024**3,
          "INSUFFICIENT_CP2_INSTALL_SPACE")
     print("PRIVATE_MANIFEST_35_35=PASS",flush=True)
     print("SITE_INSTALL_TARGETS_MISSING=30",flush=True)
+    print("ATOMIC_INSTALL_ROOTS="+str(len(roots)),flush=True)
+    print("NESTED_SQLITE_SNAPSHOTS="+str(sum(map(len,overlays.values()))),flush=True)
     print("CRON_KEPT_PRIVATE=5",flush=True)
     print("APPROVED_COPY_SIZE_MIB="+str((total_size+1024**2-1)//1024**2),flush=True)
     print("INSTALL_BOUNDARY=CP2_NEW_EMPTY_SITE_PATHS_ONLY",flush=True)
@@ -347,7 +455,7 @@ def do_install():
               "cron_activated":False,"cutover_allowed":False}
     write_progress(progress)
     print("INSTALL_PROGRESS_PATH="+str(progress_path),flush=True)
-    for idx,(rec,private,target,user) in enumerate(approved,1):
+    for idx,(rec,private,target,user) in enumerate(roots,1):
         account=pwd.getpwnam(user)
         uid,gid=account.pw_uid,account.pw_gid
         ensure_parents(target,user,uid,gid)
@@ -363,19 +471,18 @@ def do_install():
             ownership(temp,uid,gid)
             must(file_tree_integrity(temp)[2]==file_tree_integrity(private)[2],
                  "DIRECTORY_STAGED_COPY_CHANGED")
+            if target in overlays:
+                overlay_sqlite_snapshots(temp,target,overlays[target],
+                                         states,uid,gid)
         else:
             shutil.copy2(private,temp,follow_symlinks=False)
-            raw_mode=next((row.get("mode",0o600) for label,mid,state,h in states
-                for row in state.get("sqlite_assets",[])
-                if rec["category"]=="sqlite" and row.get("path")==rec["source_path"]),
-                0o600)
-            mode=int(raw_mode)
-            must(0<=mode<=0o777,"SQLITE_MODE_UNSAFE")
-            ownership(temp,uid,gid,mode if rec["category"]=="sqlite" else None)
+            mode=snapshot_mode(states,rec["source_path"]) if rec["category"]=="sqlite" else None
+            ownership(temp,uid,gid,mode)
             must(hashfile(temp)==rec["sha256"],"FILE_COPY_SHA256_MISMATCH")
         # Linux no-replace rename, so concurrent creation cannot be overwritten.
         rename_noreplace(temp,target)
-        progress["installed"].append({"category":rec["category"],"target":str(target)})
+        progress["installed"].append({"category":rec["category"],"target":str(target),
+                                      "nested_sqlite":len(overlays.get(target,[]))})
         progress["pending_temp"]=None
         write_progress(progress)
         print("INSTALLED_ASSET="+str(idx)+" CATEGORY="+rec["category"].upper()+
@@ -386,6 +493,8 @@ def do_install():
     progress["status"]="COPIED_TO_MISSING_PATHS_NOT_CUTOVER_VERIFIED"
     write_progress(progress)
     print("INSTALLED_SITE_ASSETS=30",flush=True)
+    print("ATOMIC_SITE_ROOTS_INSTALLED="+str(len(roots)),flush=True)
+    print("NESTED_SQLITE_COMPOSED="+str(sum(map(len,overlays.values()))),flush=True)
     print("CRON_STILL_PRIVATE_NOT_ACTIVATED=5",flush=True)
     print("ORIGINAL_PRIVATE_EVIDENCE_RETAINED=YES",flush=True)
     print("OLD_SERVER_CONTACTED=NO",flush=True)
