@@ -5,6 +5,7 @@ import io
 import json
 from pathlib import Path
 import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -20,6 +21,17 @@ m=load("p07-three-pending-db-recovery-evidence.py","pending_recovery_audit")
 fx=load("p07-17-site-staged-local-evidence-tests.py","pending_fixture")
 
 class Tests(unittest.TestCase):
+    @staticmethod
+    def local_fixture_private_file(path,limit=1048576):
+        # CI runner has no root-owned temp files. Preserve mode and type rules
+        # in these synthetic tests; a separate test checks the real root gate.
+        try:meta=path.lstat()
+        except FileNotFoundError:return "ABSENT",None
+        if not (stat.S_ISREG(meta.st_mode) and
+                meta.st_uid==os.getuid() and not meta.st_mode&0o077
+                and 0<meta.st_size<=limit):
+            raise m.Block("PRIVATE_EVIDENCE_KIND_OWNER_OR_PERMISSIONS_CHANGED")
+        return "PRESENT",path
     def make(self,root,*,alter=None):
         states=fx.make_states()
         if alter:alter(states)
@@ -61,6 +73,8 @@ class Tests(unittest.TestCase):
                      side_effect=lambda p:states[p.parent.name]), \
                  mock.patch.object(m.os,"geteuid",return_value=0), \
                  mock.patch.object(m,"WWW3_RECOVERY",scratch), \
+                 mock.patch.object(m,"private_file",
+                                   side_effect=self.local_fixture_private_file), \
                  mock.patch.object(m,"BACKUP_MANIFESTS",tuple(backup)), \
                  mock.patch.object(sys,"argv",[
                    "probe","--audit-three-pending-site-databases-readonly"]), \
@@ -94,9 +108,11 @@ class Tests(unittest.TestCase):
             archive.write_bytes(b"changed")
             archive.chmod(0o600)
             rec={"source_dump_sha256":"a"*64}
-            self.assertEqual(m.archive_proof(rec,archive),"SHA256_MISMATCH")
-            archive.unlink()
-            self.assertEqual(m.archive_proof(rec,archive),"ARCHIVE_ABSENT")
+            with mock.patch.object(m,"private_file",
+                                   side_effect=self.local_fixture_private_file):
+                self.assertEqual(m.archive_proof(rec,archive),"SHA256_MISMATCH")
+                archive.unlink()
+                self.assertEqual(m.archive_proof(rec,archive),"ARCHIVE_ABSENT")
     def test_protected_scratch_mutation_blocks_before_reporting(self):
         def changed(states):
             states[m.base.JOBS[2][1]]["dns_changed_by_p07"]=True
@@ -114,6 +130,20 @@ class Tests(unittest.TestCase):
             with self.assertRaisesRegex(m.Block,"EXPLICIT_THREE_PENDING_DB_AUDIT_REQUIRED"):
                 m.run()
             check.assert_not_called()
+    def test_real_private_file_root_owner_gate_preserved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            f=Path(tmp)/"evidence"
+            f.write_text("{}")
+            f.chmod(0o600)
+            if os.getuid()!=0:
+                with self.assertRaisesRegex(
+                    m.Block,"PRIVATE_EVIDENCE_KIND_OWNER_OR_PERMISSIONS_CHANGED"):
+                    m.private_file(f)
+            f.chmod(0o644)
+            with self.assertRaisesRegex(
+                m.Block,"PRIVATE_EVIDENCE_KIND_OWNER_OR_PERMISSIONS_CHANGED"):
+                m.private_file(f)
+
     def test_no_server_writes_or_source_contact(self):
         txt=(HERE/"p07-three-pending-db-recovery-evidence.py").read_text()
         for token in ("subprocess.run(", "socket.create_connection(",
