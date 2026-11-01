@@ -159,6 +159,26 @@ def run():
     print("ORIGINAL_TARGET_DATABASE_PRESERVED=YES",flush=True)
     print("OLD_SOURCE_BUSINESS_DATABASE_WRITES=NONE",flush=True)
     try:
+        # Preserve the complete CURRENT CP2 target before creating a scratch
+        # DB. This includes all five target-only and six changed-key rows.
+        # CloudPanel export is a READ of the original site DB into this 0700
+        # evidence directory; it does not overwrite any database.
+        target_dump=ROOT/"protected-original-target.sql.gz"
+        try:
+            cloudpanel.export_database(original_target,target_dump,clpctl="clpctl")
+        except (cloudpanel.CloudPanelError,ValueError):
+            raise Block("EXISTING_TARGET_PROTECTED_EXPORT_FAILED") from None
+        need(target_dump.is_file() and not target_dump.is_symlink()
+             and target_dump.stat().st_size>0,
+             "EXISTING_TARGET_PROTECTED_EXPORT_NOT_FOUND")
+        target_dump.chmod(0o600)
+        _n,target_tables=base.inspect_archive(target_dump)
+        need(target_tables==42,"EXISTING_TARGET_42_TABLES_EXPORT_UNVERIFIED")
+        record.update({"status":"EXISTING_TARGET_ARCHIVE_PROTECTED",
+                       "target_dump_sha256":base.sha256_file(target_dump),
+                       "target_ddl_table_count":target_tables})
+        save(record)
+        print("PROTECTED_EXISTING_TARGET_ARCHIVE=SHA256_RECORDED",flush=True)
         code=base.REMOTE_EXPORT
         cmd=shlex.join(["env","PYTHONDONTWRITEBYTECODE=1",
             "PYTHONPATH="+state["source_runtime_path"]+"/lib",
