@@ -34,6 +34,34 @@ class Checks(unittest.TestCase):
         self.assertEqual(w.decode_line(b"N\tV30",2),[None,"0"])
         with self.assertRaises(w.Block):
             w.decode_line(b"raw\tV30",2)
+    def test_column_property_compatibility_is_advisory_only(self):
+        self.assertEqual(w.safe_presentation("COLUMN_TYPE","int(11)","int"),"int")
+        self.assertEqual(w.safe_presentation("COLUMN_TYPE","int(11) unsigned","int"),"int unsigned")
+        self.assertEqual(w.safe_presentation("COLUMN_DEFAULT","'0'","int"),"0")
+        self.assertEqual(w.safe_presentation("CHARACTER_SET_NAME","utf8","varchar"),"utf8mb3")
+        self.assertEqual(w.safe_presentation("COLUMN_TYPE","int(11) zerofill","int"),"int(11) zerofill")
+        self.assertEqual(w.safe_presentation("COLUMN_DEFAULT","'0'","varchar"),"'0'")
+        self.assertEqual(w.safe_presentation("COLLATION_NAME","utf8mb4_0900_ai_ci","varchar"),"utf8mb4_0900_ai_ci")
+    def test_per_field_raw_vs_normalized_counts_do_not_grant_pass(self):
+        properties=("TABLE_NAME","COLUMN_NAME","ORDINAL_POSITION","DATA_TYPE",
+            "COLUMN_TYPE","IS_NULLABLE","COLUMN_DEFAULT","EXTRA",
+            "CHARACTER_SET_NAME","COLLATION_NAME","GENERATION_EXPRESSION")
+        def make(column_type,default,nullable="NO"):
+            values=("mytable","mycol","1","int",column_type,nullable,default,
+                    "","","","")
+            row=b"\\t".join(b"V"+str(v).encode("utf-8").hex().upper().encode("ascii") for v in values)
+            return w.category_fingerprint([row],properties)["column_attributes"]
+        left={"COLUMNS":{"column_attributes":make("int(11)","'0'")}}
+        right={"COLUMNS":{"column_attributes":make("int","0")}}
+        a,b,changed,result=o.column_attribute_differences(left,right)
+        self.assertEqual((a,b,changed),(0,0,1))
+        self.assertEqual(result["COLUMN_TYPE"],(1,0))
+        self.assertEqual(result["COLUMN_DEFAULT"],(1,0))
+        self.assertTrue(all(result[key]==(0,0) for key in result
+                            if key not in ("COLUMN_TYPE","COLUMN_DEFAULT")))
+        dangerous={"COLUMNS":{"column_attributes":make("int","0","YES")}}
+        _,_,_,diff=o.column_attribute_differences(left,dangerous)
+        self.assertEqual(diff["IS_NULLABLE"],(1,1))
     def test_parser_rejects_missing_category(self):
         obj={"mode":"source","categories":{}}
         with self.assertRaises(o.Block):
