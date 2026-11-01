@@ -290,14 +290,17 @@ def plan_nested_assets(approved):
     for record in approved:
         rec,private,target,user=record
         parents=[x for x in approved if x[2]!=target and x[2] in target.parents]
-        must(len(parents)<=1,"NESTED_ASSET_PARENT_CHAIN_UNSUPPORTED")
         if not parents:
             roots.append(record)
             continue
-        p=parents[0]
+        # Flatten nested external directories and SQLite files to the outermost
+        # atomic root. Multiple ancestors are legal only under that root.
+        p=min(parents,key=lambda x:len(x[2].parts))
         parent_rec,parent_private,parent_target,parent_user=p
         must(parent_rec.get("category")=="external" and parent_private.is_dir()
-             and rec.get("category")=="sqlite" and private.is_file()
+             and rec.get("category") in ("sqlite","external")
+             and (private.is_file() or private.is_dir())
+             and (rec.get("category")!="sqlite" or private.is_file())
              and user==parent_user,"TARGET_NESTED_PATH_CONFLICT")
         # Scope remains limited to a file inside an absent external directory.
         rel=target.relative_to(parent_target)
@@ -312,6 +315,103 @@ def plan_nested_assets(approved):
         must(not any(first[2] in x[2].parents or x[2] in first[2].parents
                      for x in roots[i+1:]),"ATOMIC_ROOTS_OVERLAP")
     return roots,overlays
+
+def nested_sqlite_count(overlays):
+    return sum(sum(rec["category"]=="sqlite" for rec,private,target,user in children)
+               for children in overlays.values())
+
+def safe_tree_entries(path):
+    """Exact file/directory hash view, including empty directories, no links."""
+    must(path.is_dir() and not path.is_symlink(),"EXPECTED_TREE_ROOT_INVALID")
+    items={"":"D"}
+    for parent,dirs,files in os.walk(path,topdown=True,followlinks=False):
+        for name in sorted(dirs+files):
+            p=Path(parent)/name
+            st=p.lstat()
+            must(not stat.S_ISLNK(st.st_mode) and not st.st_mode&(stat.S_ISUID|stat.S_ISGID)
+                 and (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)),
+                 "ASSET_TREE_SPECIAL_FILE")
+            key=p.relative_to(path).as_posix()
+            items[key]="D" if stat.S_ISDIR(st.st_mode) else "F"+hashfile(p)
+            must(len(items)<=MAX_FILES,"TREE_FILE_LIMIT")
+    return items
+
+def expected_root_entries(root,children):
+    rec,private,target,user=root
+    must(private.is_dir(),"EXPECTED_ROOT_NOT_DIRECTORY")
+    wanted=safe_tree_entries(private)
+    for child_rec,child_private,child_target,child_user in sorted(
+            children,key=lambda x:len(x[2].parts)):
+        rel=child_target.relative_to(target).as_posix()
+        parts=Path(rel).parts
+        for i in range(1,len(parts)):
+            ancestor="/".join(parts[:i])
+            must(wanted.get(ancestor,"D")=="D","NESTED_PARENT_FILE_CONFLICT")
+            wanted[ancestor]="D"
+        if child_rec["category"]=="external":
+            child_items=(safe_tree_entries(child_private) if child_private.is_dir()
+                         else {"":"F"+hashfile(child_private)})
+            for sub,kind in child_items.items():
+                key=rel+("/"+sub if sub else "")
+                must(key not in wanted or wanted[key]==kind,
+                     "NESTED_EXTERNAL_BYTES_CONFLICT")
+                wanted[key]=kind
+        elif child_rec["category"]=="sqlite":
+            for suffix in ("-wal","-shm","-journal"):
+                wanted.pop(rel+suffix,None)
+            must(wanted.get(rel,"F").startswith("F"),"NESTED_SQLITE_KIND_CONFLICT")
+            wanted[rel]="F"+child_rec["sha256"]
+        else:raise Stop("NESTED_ASSET_CATEGORY_UNEXPECTED")
+    return wanted
+
+def verify_atomic_root(root,children,states):
+    rec,private,target,user=root
+    account=pwd.getpwnam(user)
+    if private.is_dir():
+        must(target.is_dir() and not target.is_symlink()
+             and safe_tree_entries(target)==expected_root_entries(root,children),
+             "INSTALLED_DIRECTORY_BYTES_OR_LAYOUT_CHANGED")
+    else:
+        must(target.is_file() and not target.is_symlink()
+             and hashfile(target)==rec["sha256"],"INSTALLED_FILE_BYTES_CHANGED")
+    for child_rec,child_private,child_target,child_user in children:
+        if child_rec["category"]=="sqlite":
+            must(child_target.is_file() and not child_target.is_symlink()
+                 and hashfile(child_target)==child_rec["sha256"]
+                 and snapshot_ok(child_target),"INSTALLED_SQLITE_BYTES_CHANGED")
+    for each in [root]+children:
+        r,source,actual,owner=each
+        if r["category"]=="sqlite":
+            st=actual.lstat()
+            mode=snapshot_mode(states,r["source_path"],r["job"],owner)
+            must(st.st_uid==account.pw_uid and st.st_gid==account.pw_gid
+                 and stat.S_IMODE(st.st_mode)==mode,"INSTALLED_SQLITE_MODE_OR_OWNER_CHANGED")
+    return True
+
+def compose_nested_externals(temp,parent_target,children,uid,gid):
+    """Only copy an absent child or accept byte-identical already staged bytes."""
+    for rec,private,target,user in sorted(children,key=lambda x:len(x[2].parts)):
+        if rec["category"]!="external":continue
+        rel=target.relative_to(parent_target)
+        dest=temp/rel
+        cur=temp
+        for name in rel.parts[:-1]:
+            cur=cur/name
+            if os.path.lexists(cur):
+                must(cur.is_dir() and not cur.is_symlink(),
+                     "NESTED_EXTERNAL_PARENT_UNSAFE")
+            else:cur.mkdir(mode=0o750)
+        if os.path.lexists(dest):
+            must((dest.is_dir() and not dest.is_symlink()
+                  and safe_tree_entries(dest)==safe_tree_entries(private))
+                 if private.is_dir() else
+                 (dest.is_file() and not dest.is_symlink()
+                  and hashfile(dest)==hashfile(private)),
+                 "NESTED_EXTERNAL_BYTES_CONFLICT")
+        elif private.is_dir():
+            shutil.copytree(private,dest,symlinks=False)
+        else:shutil.copy2(private,dest,follow_symlinks=False)
+    ownership(temp,uid,gid)
 
 def snapshot_mode(states,source,job,user):
     # Parent and child migration jobs can inventory one absolute path.
@@ -335,7 +435,8 @@ def overlay_sqlite_snapshots(temp,parent_target,children,states,uid,gid):
     """
     must(temp.is_dir() and not temp.is_symlink(),"OVERLAY_TEMP_DIR_UNSAFE")
     for rec,private,target,user in children:
-        must(rec.get("category")=="sqlite" and target!=parent_target
+        if rec.get("category")!="sqlite":continue
+        must(target!=parent_target
              and parent_target in target.parents,"OVERLAY_SCOPE_UNVERIFIED")
         rel=target.relative_to(parent_target)
         dest=temp/rel
