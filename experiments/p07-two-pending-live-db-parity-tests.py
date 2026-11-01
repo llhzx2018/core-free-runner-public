@@ -105,23 +105,20 @@ class Tests(unittest.TestCase):
         with mock.patch.object(m,"private_state",return_value=rows):
             self.assertIsNone(m.preflight(
                 FakeMigration,EmptyInventory,"unzip.kewaro.com",m.LEGACY9,9,6,12)[2])
-    def test_legacy_guard_failure_does_not_print_private_state(self):
+    def test_original17_legacy_absent_cutover_marker_is_readonly_compatible(self):
         old=state("ilovem3u8.kewaro.com",m.ORIGINAL17,17,7)
         old.pop("cutover_prohibited")
         old["source"]={"private_secret":"SENSITIVE_SOURCE"}
         out=io.StringIO()
         with mock.patch.object(m,"private_state",return_value=old), \
              contextlib.redirect_stdout(out):
-            with self.assertRaisesRegex(m.Block,"MIGRATION_SAFETY"):
-                m.preflight(FakeMigration,Inventory,"ilovem3u8.kewaro.com",
-                            m.ORIGINAL17,17,7,42)
-        data=out.getvalue()
-        self.assertIn("FAILED_STATE_GUARDS=CUTOVER_PROHIBITED_MARKER",data)
-        self.assertIn("ORIGINAL_CUTOVER_MARKER=MISSING",data)
-        self.assertNotIn("SENSITIVE_SOURCE",data)
-        self.assertNotIn("TARGETX",data)
-        self.assertNotIn("user1",data)
-        old["cutover_prohibited"]=False
+            data=m.preflight(FakeMigration,Inventory,"ilovem3u8.kewaro.com",
+                             m.ORIGINAL17,17,7,42)
+        self.assertEqual(data[2],"db3")
+        self.assertIn("ORIGINAL17_LEGACY_MISSING_MARKER=ACCEPTED_READONLY_ONLY",out.getvalue())
+        for secret in ("SENSITIVE_SOURCE","db1","db3","TARGETX","user1"):
+            self.assertNotIn(secret,out.getvalue())
+        # Even a valid marker exception never overrides any real safety guard.
         old["source_delete_allowed"]=True
         old["existing_target_overwrite_allowed"]=True
         out=io.StringIO()
@@ -132,7 +129,29 @@ class Tests(unittest.TestCase):
                             m.ORIGINAL17,17,7,42)
         self.assertIn("SOURCE_DELETE_FORBIDDEN",out.getvalue())
         self.assertIn("TARGET_OVERWRITE_FORBIDDEN",out.getvalue())
-        self.assertNotIn("ORIGINAL_CUTOVER_MARKER=",out.getvalue())
+        self.assertNotIn("SENSITIVE_SOURCE",out.getvalue())
+
+    def test_wrong_cutover_markers_still_fail_closed(self):
+        for domain,mid,n,idx,count in m.SITES:
+            for bad in (None,"false","true",0,1,[],{}):
+                original=state(domain,mid,n,idx)
+                original["cutover_prohibited"]=bad
+                out=io.StringIO()
+                with mock.patch.object(m,"private_state",return_value=original), \
+                     contextlib.redirect_stdout(out):
+                    with self.assertRaisesRegex(m.Block,"MIGRATION_SAFETY"):
+                        m.preflight(FakeMigration,Inventory,domain,mid,n,idx,count)
+                self.assertIn("CUTOVER_PROHIBITED_MARKER",out.getvalue())
+                self.assertNotIn("TARGETX",out.getvalue())
+        old=state("unzip.kewaro.com",m.LEGACY9,9,6)
+        old.pop("cutover_prohibited")
+        out=io.StringIO()
+        with mock.patch.object(m,"private_state",return_value=old), \
+             contextlib.redirect_stdout(out):
+            with self.assertRaisesRegex(m.Block,"MIGRATION_SAFETY"):
+                m.preflight(FakeMigration,Inventory,"unzip.kewaro.com",
+                            m.LEGACY9,9,6,12)
+        self.assertIn("ORIGINAL_CUTOVER_MARKER=MISSING",out.getvalue())
 
     def test_equal_and_changed_real_boundaries(self):
         domain,mid,length,idx,expected=m.SITES[0]
