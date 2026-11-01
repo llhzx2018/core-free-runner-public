@@ -572,8 +572,7 @@ def load_verified_progress(path,roots,overlays,states):
         candidate=Path(pending)
         next_target=roots[len(records)][2]
         must(candidate.parent==next_target.parent and
-             re.fullmatch(r"\\.p07-uninstalled-[0-9a-f]{32}",candidate.name)
-             and str(candidate).startswith("/home/"),
+             re.fullmatch(r"\.p07-uninstalled-[0-9a-f]{32}",candidate.name),
              "PROGRESS_PENDING_TEMP_OUTSIDE_NEXT_ROOT")
         must(not candidate.is_symlink(),"PROGRESS_PENDING_TEMP_SYMLINK")
     for rec,private,target,user in roots[len(records):]:
