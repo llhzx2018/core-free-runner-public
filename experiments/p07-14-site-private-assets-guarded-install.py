@@ -311,6 +311,22 @@ def ownership(tree,uid,gid,sqlite_mode=None):
     else:
         os.chown(tree,uid,gid,follow_symlinks=False)
         if sqlite_mode is not None:os.chmod(tree,sqlite_mode)
+def write_progress(payload):
+    """Write only private staging progress, never touch original manifest/state."""
+    path=PRIVATE/"cp2-install-progress.json"
+    tmp=PRIVATE/(".cp2-progress-"+uuid.uuid4().hex)
+    fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+    try:
+        with os.fdopen(fd,"w",encoding="utf8") as writer:
+            json.dump(payload,writer,sort_keys=True,separators=(",",":"))
+            writer.flush()
+            os.fsync(writer.fileno())
+        os.replace(tmp,path)
+    finally:
+        if os.path.lexists(tmp):
+            tmp.unlink()
+    return path
+
 def do_install():
     must(os.geteuid()==0,"CP2_ROOT_REQUIRED")
     must(sys.argv[1:]==["--install-only-30-absent-site-assets"],
@@ -323,7 +339,12 @@ def do_install():
     print("CRON_KEPT_PRIVATE=5",flush=True)
     print("APPROVED_COPY_SIZE_MIB="+str((total_size+1024**2-1)//1024**2),flush=True)
     print("INSTALL_BOUNDARY=CP2_NEW_EMPTY_SITE_PATHS_ONLY",flush=True)
-    progress=[]
+    progress_path=PRIVATE/"cp2-install-progress.json"
+    must(not os.path.lexists(progress_path),"PREVIOUS_INSTALL_PROGRESS_EXISTS_REVIEW_REQUIRED")
+    progress={"status":"STARTED","installed":[],"pending_temp":None,
+              "cron_activated":False,"cutover_allowed":False}
+    write_progress(progress)
+    print("INSTALL_PROGRESS_PATH="+str(progress_path),flush=True)
     for idx,(rec,private,target,user) in enumerate(approved,1):
         account=pwd.getpwnam(user)
         uid,gid=account.pw_uid,account.pw_gid
@@ -332,6 +353,8 @@ def do_install():
         must(not os.path.lexists(target),"TARGET_CHANGED_DURING_INSTALL")
         temp=target.parent/(".p07-uninstalled-"+uuid.uuid4().hex)
         must(not os.path.lexists(temp),"TEMP_INSTALL_COLLISION")
+        progress["pending_temp"]=str(temp)
+        write_progress(progress)
         # Do not remove this temp on failure. The operator must inspect it.
         if private.is_dir():
             shutil.copytree(private,temp,symlinks=False)
@@ -350,12 +373,16 @@ def do_install():
             must(hashfile(temp)==rec["sha256"],"FILE_COPY_SHA256_MISMATCH")
         # Linux no-replace rename, so concurrent creation cannot be overwritten.
         rename_noreplace(temp,target)
-        progress.append(str(target))
+        progress["installed"].append({"category":rec["category"],"target":str(target)})
+        progress["pending_temp"]=None
+        write_progress(progress)
         print("INSTALLED_ASSET="+str(idx)+" CATEGORY="+rec["category"].upper()+
               " STATUS=NEW_ONLY_SHA_VERIFIED",flush=True)
     for label,mid,state,digest in states:
         must(hashfile(base.ROOT/mid/"state.json")==digest,
              "ORIGINAL_MIGRATION_STATE_CHANGED_DURING_COPY")
+    progress["status"]="COPIED_TO_MISSING_PATHS_NOT_CUTOVER_VERIFIED"
+    write_progress(progress)
     print("INSTALLED_SITE_ASSETS=30",flush=True)
     print("CRON_STILL_PRIVATE_NOT_ACTIVATED=5",flush=True)
     print("ORIGINAL_PRIVATE_EVIDENCE_RETAINED=YES",flush=True)
