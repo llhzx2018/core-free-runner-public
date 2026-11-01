@@ -300,6 +300,79 @@ class Tests(unittest.TestCase):
         self.assertIn("CUTOVER_ALLOWED=NO",source)
         self.assertIn("HTTP_METHOD=HEAD_NO_REDIRECT_FOLLOW",source)
 
+    def test_three_site_deeper_route_classification_never_acts_or_reveals_paths(self):
+        states,cp=self.fixture()
+        detail={
+            "domain.kewaro.com":(302,{"location":"/dashboard?token=DO_NOT_OUTPUT"}),
+            "infra.kewaro.com":(302,{"location":"/home?secret=DO_NOT_OUTPUT"}),
+            "press.kewaro.com":(404,{})
+        }
+        calls=[]
+        def fake_response(domain,timeout=4,path="/"):
+            calls.append((domain,path))
+            if path=="/":return detail[domain]
+            if path=="/index.php":
+                return (404 if domain=="press.kewaro.com" else 302),{}
+            if path=="/robots.txt":return 200,{}
+            raise AssertionError("Unexpected side-effecting path")
+        def safe_entries(panel):
+            return {"index.php":True,"index.html":False,"robots.txt":True}
+        out=io.StringIO()
+        with mock.patch.object(m.base,"secure_state",
+                 side_effect=lambda p:states[p.parent.name]), \
+             mock.patch.object(m.os,"geteuid",return_value=0), \
+             mock.patch.object(m,"inventory",return_value=cp), \
+             mock.patch.object(m,"safe_entry_metadata",side_effect=safe_entries), \
+             mock.patch.object(m,"nginx_document_root_match",
+                               return_value="EXACT_MATCH"), \
+             mock.patch.object(m,"response_headers_local",
+                               side_effect=fake_response), \
+             mock.patch.object(sys,"argv",["tool","--review-three-site-root-and-entry"]), \
+             contextlib.redirect_stdout(out):
+            self.assertEqual(m.diagnose_three_routes_depth(),0)
+        log=out.getvalue()
+        self.assertIn("REVIEWED_SITE_COUNT=3",log)
+        self.assertIn("NGINX_TO_PANEL_ROOT=EXACT_MATCH",log)
+        self.assertIn("SITE=press.kewaro.com HTTPS_ROOT=404",log)
+        self.assertIn("INDEX_PHP_HEAD=404",log)
+        self.assertIn("INDEX_HTML_HEAD=SKIP_NO_SAFE_FILE",log)
+        self.assertIn("ROBOTS_HEAD=200",log)
+        self.assertIn("CAUSE=NOT_YET_PROVEN",log)
+        self.assertIn("CUTOVER_ALLOWED=NO",log)
+        self.assertNotIn("DO_NOT_OUTPUT",log)
+        self.assertNotIn("/dashboard",log)
+        self.assertEqual(len(calls),9)
+        self.assertEqual(set(path for _,path in calls),
+                         {"/","/index.php","/robots.txt"})
+    def test_bounded_routes_and_root_paths_fail_closed(self):
+        with self.assertRaisesRegex(m.Block,"HTTP_ROUTE_PATH_SCOPE_UNSAFE"):
+            m.response_headers_local("press.kewaro.com",path="/admin/reset")
+        with self.assertRaisesRegex(m.Block,"OUT_OF_SCOPE_NGINX_ROOT"):
+            m.nginx_document_root_match("www3.m3u8.one",{})
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            (root/"vhost").write_text(
+                "server_name press.kewaro.com;\n"
+                "root /home/example/htdocs/press.kewaro.com;\n")
+            self.assertEqual(m.nginx_document_root_match(
+                "press.kewaro.com",
+                {"site_user":"example",
+                 "document_root":"/home/example/htdocs/press.kewaro.com"},
+                root),"NGINX_OR_PANEL_ROOT_MISSING_OR_SYMLINK")
+            self.assertEqual(m.nginx_document_root_match(
+                "press.kewaro.com",
+                {"site_user":"example",
+                 "document_root":"/etc/passwd"},root),
+                "PANEL_DOCROOT_UNVERIFIED")
+    def test_three_site_depth_cli_explicit_scope(self):
+        with mock.patch.object(sys,"argv",["tool","--write"]), \
+             mock.patch.object(m.os,"geteuid",return_value=0), \
+             mock.patch.object(m,"staged_sites") as states:
+            with self.assertRaisesRegex(
+                m.Block,"EXPLICIT_THREE_ROUTE_DEPTH_ARGUMENT_REQUIRED"):
+                m.diagnose_three_routes_depth()
+            states.assert_not_called()
+
     def test_no_remote_or_mutating_commands(self):
         source=(HERE/"p07-14-site-local-http-fpm-smoke.py").read_text()
         for banned in ("ssh ","rsync ","curl ","DROP DATABASE","INSERT INTO",
