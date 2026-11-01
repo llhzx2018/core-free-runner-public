@@ -84,7 +84,7 @@ def inventory():
             out.setdefault(s["domain"],[]).append(s)
     return out
 def vhost(domain,root=VHOST_DIR):
-    """Read enabled Nginx configs only, ignoring comments; no config execution."""
+    """Classify explicit FastCGI backends for a site's enabled Nginx files."""
     must(DOMAIN.fullmatch(domain) is not None,"VHOST_DOMAIN_UNSAFE")
     if not root.is_dir():return "MISSING",[]
     matches=[]
@@ -99,19 +99,77 @@ def vhost(domain,root=VHOST_DIR):
             matches.append(conf)
     if not matches:return "NOT_FOUND",[]
     if len(matches)>3:return "AMBIGUOUS",[]
-    upstreams=[]
+    endpoints=set()
     for conf in matches:
-        upstreams.extend(SOCKET.findall(conf))
-    return "FOUND",sorted(set(upstreams))
-def socket_status(paths):
-    if not paths:return "NO_UNIX_SOCKET_DECLARED"
-    result=[]
-    for path in paths:
-        try:st=Path(path).stat()
-        except OSError:return "DECLARED_SOCKET_MISSING"
-        if not stat.S_ISSOCK(st.st_mode):return "DECLARED_SOCKET_NOT_SOCKET"
-        result.append(path)
-    return "DECLARED_UNIX_SOCKETS_PRESENT"
+        for raw in re.findall(r"\bfastcgi_pass\s+([^;\s]+)\s*;",conf):
+            if re.fullmatch(r"unix:/run/(?:php|php-fpm)/[A-Za-z0-9_.-]+\.sock",raw):
+                endpoints.add(raw[5:])
+            elif re.fullmatch(r"127\.0\.0\.1:[0-9]{1,5}",raw):
+                port=int(raw.rsplit(":",1)[1])
+                endpoints.add("tcp:"+raw if 1<=port<=65535 else "UNSUPPORTED")
+            else:
+                endpoints.add("UNSUPPORTED")
+    return "FOUND",sorted(endpoints)
+
+def fpm_pool_matches(version,user,endpoint,root=Path("/etc/php")):
+    """Match the configured site-user pool to the exact Nginx listener."""
+    must(PHP.fullmatch(version) and
+         re.fullmatch(r"[a-z_][a-z0-9_-]{0,64}",user),
+         "FPM_POOL_IDENTITY_INVALID")
+    root=root/version/"fpm/pool.d"
+    if not root.is_dir() or root.is_symlink():return False
+    matches=0
+    for conf in sorted(root.glob("*.conf")):
+        if conf.is_symlink() or not conf.is_file() or conf.stat().st_size>262144:
+            continue
+        try:raw=conf.read_text(encoding="utf8",errors="replace")
+        except OSError:continue
+        raw=re.sub(r"(?m)^\s*[;#].*$","",raw)
+        listens=re.findall(r"(?m)^\s*listen\s*=\s*([^\s;#]+)",raw)
+        users=re.findall(r"(?m)^\s*user\s*=\s*([^\s;#]+)",raw)
+        expected=endpoint[4:] if endpoint.startswith("tcp:") else endpoint
+        if len(listens)==1 and len(users)==1 and listens[0]==expected and users[0]==user:
+            matches+=1
+    return matches==1
+
+def tcp_listener_present(port,proc=Path("/proc/net/tcp")):
+    """Kernel LISTEN socket observation; no connection or FPM invocation."""
+    try:
+        for row in proc.read_text(encoding="ascii").splitlines()[1:]:
+            cols=row.split()
+            if len(cols)<4:continue
+            address,hexport=cols[1].split(":",1)
+            if (address in ("0100007F","00000000")
+                    and int(hexport,16)==port and cols[3]=="0A"):
+                return True
+    except (ValueError,OSError,IndexError):
+        return False
+    return False
+
+def backend_status(endpoints,version,user):
+    if not endpoints:return "NO_FASTCGI_DECLARED"
+    if len(endpoints)!=1:return "AMBIGUOUS_FASTCGI_BACKENDS"
+    endpoint=endpoints[0]
+    if endpoint=="UNSUPPORTED":return "UNSUPPORTED_FASTCGI_BACKEND"
+    if not fpm_pool_matches(version,user,endpoint):
+        return "FPM_POOL_OR_SITE_USER_NOT_MATCHED"
+    if endpoint.startswith("tcp:"):
+        port=int(endpoint.rsplit(":",1)[1])
+        return ("TCP_POOL_AND_LISTENER_CONFIRMED" if tcp_listener_present(port)
+                else "TCP_FPM_LISTENER_NOT_FOUND")
+    path=Path(endpoint)
+    try:st=path.stat()
+    except OSError:return "UNIX_FPM_SOCKET_NOT_FOUND"
+    return ("UNIX_POOL_AND_SOCKET_CONFIRMED" if stat.S_ISSOCK(st.st_mode)
+            else "UNIX_FPM_SOCKET_KIND_DIFFER")
+
+def https_route(https):
+    if re.fullmatch(r"HTTP_2[0-9]{2}",https):
+        return "HTTPS_2XX"
+    if re.fullmatch(r"HTTP_3[0-9]{2}",https):
+        return "HTTPS_REDIRECT_UNVERIFIED"
+    if https=="HTTP_ERROR_404":return "HTTPS_404"
+    return "HTTPS_NOT_READY"
 def head_local(domain,port,tls=False,timeout=3):
     """Always connect to literal loopback IP; SNI and Host equal fixed scoped domain."""
     must(DOMAIN.fullmatch(domain) is not None and port in (80,443),
@@ -178,26 +236,30 @@ def probe():
         phpversion=(type(version) is str and PHP.fullmatch(version) is not None)
         fpm=(service("php"+version+"-fpm") if php and phpversion else
              "NOT_APPLICABLE" if not php else "UNKNOWN")
-        conf,socks=vhost(domain)
-        unix=socket_status(socks) if php else "NOT_APPLICABLE"
+        conf,endpoints=vhost(domain)
+        backend=(backend_status(endpoints,version,src["site_user"])
+                 if php and phpversion else
+                 "NOT_APPLICABLE" if not php else "UNKNOWN")
         http=head_local(domain,80)
         https=head_local(domain,443,tls=True)
-        http_ok=http.startswith(("HTTP_2","HTTP_3","ACCESS_PROTECTED"))
-        https_ok=https.startswith(("HTTP_2","HTTP_3","ACCESS_PROTECTED"))
+        route=https_route(https)
         ready=(match and conf=="FOUND" and
                ((php and phpversion and fpm=="ACTIVE" and
-                 unix=="DECLARED_UNIX_SOCKETS_PRESENT") or not php) and
-               (http_ok or https_ok))
+                 backend in ("TCP_POOL_AND_LISTENER_CONFIRMED",
+                             "UNIX_POOL_AND_SOCKET_CONFIRMED")) or not php) and
+               route=="HTTPS_2XX")
         full+=int(bool(ready))
         gaps+=int(not ready)
         print("SITE="+domain+" RUNTIME_MATCH="+("YES" if match else "NO")+
-              " VHOST="+conf+" FPM="+fpm+" PHP_BACKEND="+unix+
-              " HTTP80="+http+" HTTPS443="+https+
-              " LOCAL_SMOKE="+("PASS" if ready else "REVIEW"),flush=True)
+              " VHOST="+conf+" FPM="+fpm+" PHP_BACKEND="+backend+
+              " HTTP80="+http+" HTTPS443="+https+" ROUTE="+route+
+              " LOCAL_SMOKE="+("PASS_HTTP_HEAD_ONLY" if ready else "REVIEW"),flush=True)
     print("LOCAL_14_SITE_SMOKE_PASS="+str(full),flush=True)
     print("LOCAL_14_SITE_SMOKE_REVIEW="+str(gaps),flush=True)
     print("SOURCE_TARGET_APPLICATION_PARITY=NOT_VERIFIED",flush=True)
     print("PHP_DYNAMIC_EXECUTION=NOT_DIRECTLY_PROVEN",flush=True)
+    print("FPM_POOL_AND_LISTENER=CONFIG_AND_KERNEL_OBSERVATION_ONLY",flush=True)
+    print("HTTP_REDIRECTS_AND_404=REVIEW_NOT_PASS",flush=True)
     print("TLS_CERTIFICATE_VALIDITY=NOT_VERIFIED",flush=True)
     print("CRON_OR_PM2_ACTIVATED=NO",flush=True)
     print("SOURCE_SERVER_CONTACTED=NO",flush=True)
