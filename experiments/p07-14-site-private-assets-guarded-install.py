@@ -566,25 +566,105 @@ def load_verified_progress(path,roots,overlays,states):
             "PROGRESS_INSTALLED_PREFIX_CHANGED")
         verify_atomic_root(roots[idx],overlays.get(target,[]),states)
     pending=progress.get("pending_temp")
-    must(pending is None or (type(pending) is str and
-         pending.startswith("/home/") and len(pending)<1024),
-         "PROGRESS_PENDING_TEMP_INVALID")
-    # Never auto-adopt, delete or overwrite an orphaned unpublished temp tree.
-    # A pending record requires an independent CP2 read-only forensic check,
-    # even if its path is now absent after a partial rename.
-    must(pending is None,"PENDING_TEMP_REQUIRES_READ_ONLY_RECONCILIATION")
+    if pending is not None:
+        must(type(pending) is str and len(records)<len(roots),
+             "PROGRESS_PENDING_TEMP_INVALID")
+        candidate=Path(pending)
+        next_target=roots[len(records)][2]
+        must(candidate.parent==next_target.parent and
+             re.fullmatch(r"\\.p07-uninstalled-[0-9a-f]{32}",candidate.name)
+             and str(candidate).startswith("/home/"),
+             "PROGRESS_PENDING_TEMP_OUTSIDE_NEXT_ROOT")
+        must(not candidate.is_symlink(),"PROGRESS_PENDING_TEMP_SYMLINK")
     for rec,private,target,user in roots[len(records):]:
         must(not os.path.lexists(target),"UNRECORDED_EXISTING_TARGET_REVIEW_REQUIRED")
     return progress,len(records)
+
+def finish_verified_pending(progress,roots,overlays,states,index):
+    """Only an exact byte-complete recorded temp can be completed, explicitly."""
+    raw=progress.get("pending_temp")
+    if raw is None:return index
+    root=roots[index]
+    rec,private,target,user=root
+    pending=Path(raw)
+    must(pending.exists() and not pending.is_symlink(),
+         "PENDING_TEMP_MISSING_OR_UNSAFE_REVIEW_REQUIRED")
+    account=pwd.getpwnam(user)
+    uid,gid=account.pw_uid,account.pw_gid
+    check_parents(target,user)
+    must(not os.path.lexists(target),"PENDING_TARGET_ALREADY_EXISTS")
+    if private.is_dir():
+        must(pending.is_dir() and
+             safe_tree_entries(pending)==expected_root_entries(
+                 root,overlays.get(target,[])),
+             "PENDING_TEMP_INCOMPLETE_KEEP_UNCHANGED")
+    else:
+        must(pending.is_file() and hashfile(pending)==rec["sha256"],
+             "PENDING_TEMP_BYTES_CHANGED_KEEP_UNCHANGED")
+        if rec["category"]=="sqlite":
+            must(snapshot_ok(pending),"PENDING_TEMP_SQLITE_CORRUPT")
+    # Only after exact content proof, apply site ownership to unpublished temp.
+    mode=(snapshot_mode(states,rec["source_path"],rec["job"],user)
+          if rec["category"]=="sqlite" else None)
+    ownership(pending,uid,gid,mode)
+    if rec["category"]=="sqlite":
+        must(stat.S_IMODE(pending.stat().st_mode)==mode,
+             "PENDING_SQLITE_MODE_SET_FAILED")
+    rename_noreplace(pending,target)
+    progress["installed"].append({
+        "category":rec["category"],"target":str(target),
+        "nested_sqlite":sum(c[0]["category"]=="sqlite"
+                             for c in overlays.get(target,[]))})
+    progress["pending_temp"]=None
+    write_progress(progress)
+    verify_atomic_root(root,overlays.get(target,[]),states)
+    print("RECORDED_PENDING_TEMP_RECOVERED=EXACT_BYTES_ONLY",flush=True)
+    return index+1
+
+def do_audit_partial(states,approved,roots,overlays):
+    """CP2 read-only audit; no file copy, permissions change or state writes."""
+    path=PRIVATE/"cp2-install-progress.json"
+    must(path.is_file() and not path.is_symlink(),"PROGRESS_NOT_FOUND")
+    progress,index=load_verified_progress(path,roots,overlays,states)
+    pending=progress.get("pending_temp")
+    print("AUDIT=READ_ONLY_CP2_PARTIAL_ASSETS",flush=True)
+    print("MANIFEST_SCOPE=35",flush=True)
+    print("EXPECTED_LOGICAL_ASSETS=30",flush=True)
+    print("EXPECTED_ATOMIC_ROOTS="+str(len(roots)),flush=True)
+    print("VERIFIED_ALREADY_INSTALLED_ROOTS="+str(index),flush=True)
+    print("PENDING_TEMP_RECORDED="+("YES" if pending else "NO"),flush=True)
+    if pending:
+        candidate=Path(pending)
+        print("PENDING_TEMP_EXISTS="+("YES" if os.path.lexists(candidate) else "NO"),flush=True)
+        print("PENDING_TEMP_KIND="+("DIRECTORY" if candidate.is_dir() else
+              "FILE" if candidate.is_file() else "OTHER_OR_MISSING"),flush=True)
+    # Count duplicate SQLite path across jobs without disclosing private paths.
+    by_path={}
+    for label,mid,state,digest in states:
+        for row in state.get("sqlite_assets",[]):
+            if type(row) is dict and type(row.get("path")) is str:
+                by_path.setdefault(row["path"],set()).add(label)
+    print("SQLITE_PATHS_RECORDED_IN_MULTIPLE_JOBS="+str(
+        sum(len(labels)>1 for labels in by_path.values())),flush=True)
+    print("CRON_ACTIVATED=NO",flush=True)
+    print("RESUME_READY="+("REQUIRES_EXPLICIT_VERIFIED_PENDING_RECOVERY"
+                           if pending else "ELIGIBLE_FOR_OWNER_CONTROLLED_RESUME"),flush=True)
+    print("SITE_RUNTIME_HTTP_PHP_PARITY=NOT_VERIFIED",flush=True)
+    print("DNS_WRITE=NONE",flush=True)
+    print("CUTOVER_ALLOWED=NO",flush=True)
+    return 0
 
 def do_install():
     must(os.geteuid()==0,"CP2_ROOT_REQUIRED")
     requested=sys.argv[1:]
     must(requested in (["--install-only-30-absent-site-assets"],
-                       ["--resume-verified-partial-asset-install"]),
+                       ["--resume-verified-partial-asset-install"],
+                       ["--audit-existing-partial-assets-readonly"]),
          "EXPLICIT_SITE_ASSET_INSTALL_OR_RESUME_ARGUMENT_REQUIRED")
     states,approved,total_size=check_manifest()
     roots,overlays=plan_nested_assets(approved)
+    if requested==["--audit-existing-partial-assets-readonly"]:
+        return do_audit_partial(states,approved,roots,overlays)
     progress_path=PRIVATE/"cp2-install-progress.json"
     if requested==["--resume-verified-partial-asset-install"]:
         must(os.path.lexists(progress_path),"NO_PARTIAL_PROGRESS_TO_RESUME")
@@ -612,6 +692,8 @@ def do_install():
     print("INSTALL_BOUNDARY=CP2_NEW_EMPTY_SITE_PATHS_ONLY",flush=True)
     if resume_index==0:write_progress(progress)
     print("INSTALL_PROGRESS_PATH="+str(progress_path),flush=True)
+    if requested==["--resume-verified-partial-asset-install"]:
+        resume_index=finish_verified_pending(progress,roots,overlays,states,resume_index)
     for idx,(rec,private,target,user) in enumerate(roots[resume_index:],resume_index+1):
         account=pwd.getpwnam(user)
         uid,gid=account.pw_uid,account.pw_gid
