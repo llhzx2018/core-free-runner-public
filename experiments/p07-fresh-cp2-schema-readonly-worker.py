@@ -70,7 +70,7 @@ def query_statement(table,schema_field,cols,db):
            col+" AS CHAR CHARACTER SET utf8mb4))))" for col in cols]
     return ("SELECT "+",".join(cells)+" FROM information_schema."+
             table+" WHERE "+schema_field+"='"+db+"' ORDER BY "+
-            ",".join("("+col+" IS NULL),"+col for col in cols[:2])+";")
+            cols[0]+";")
 def decode_line(line,width):
     cells=line.split(b"\t")
     need(len(cells)==width,"METADATA_FIELD_COUNT_UNVERIFIED")
