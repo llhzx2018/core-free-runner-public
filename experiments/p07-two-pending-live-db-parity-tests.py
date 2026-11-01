@@ -187,6 +187,7 @@ class Tests(unittest.TestCase):
         with mock.patch.object(sys,"argv",["tool","--compare-ilovem3u8-only-read-only"]), \
              mock.patch.object(m.os,"geteuid",return_value=0), \
              mock.patch.object(m,"verify_file"), \
+             mock.patch.object(m.Path,"is_file",return_value=True), \
              mock.patch.object(m.Path,"read_bytes",return_value=b"mock"), \
              mock.patch.object(m,"gitblob",return_value=m.ENGINE_BLOB), \
              mock.patch.object(m.subprocess,"run",return_value=status), \
