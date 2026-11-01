@@ -198,8 +198,13 @@ def compare_one(migration,inventory,domain,mid,total,idx,expected_tables):
 
 def main():
     need(os.geteuid()==0,"CP2_ROOT_REQUIRED")
-    need(sys.argv[1:]==["--compare-two-pending-site-databases-read-only"],
-         "EXPLICIT_TWO_SITE_READONLY_ARG_REQUIRED")
+    flags={
+        "--compare-two-pending-site-databases-read-only":SITES,
+        "--compare-ilovem3u8-only-read-only":SITES[1:],
+    }
+    need(len(sys.argv)==2 and sys.argv[1] in flags,
+         "EXPLICIT_SCOPED_READONLY_ARG_REQUIRED")
+    chosen=flags[sys.argv[1]]
     verify_file()
     import_path=Path("/opt/vf-server-ops/lib/server_migration_pull.py")
     need(import_path.is_file() and
@@ -213,9 +218,9 @@ def main():
     import server_migration_pull as migration
     import inventory
     print("PROBE=P07_TWO_PENDING_LIVE_SOURCE_TARGET_READONLY",flush=True)
-    print("SITE_COUNT=2",flush=True)
+    print("SITE_COUNT="+str(len(chosen)),flush=True)
     results=[]
-    for data in SITES:
+    for data in chosen:
         try:results.append(compare_one(migration,inventory,*data))
         except Block as exc:
             print("SITE_BLOCKED="+data[0]+":"+str(exc),flush=True)
