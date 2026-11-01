@@ -137,7 +137,7 @@ def under_site(site,source):
          not INVALID_NAME.search(source),
          "SITE_ASSET_PATH_UNSAFE")
     return Path(source),user
-def expected_manifest_records(states):
+def expected_manifest_records(states, manifest_keys):
     rows=[]
     for label,mid,state,_ in states:
         staged_users={s["site_user"] for s in state["sites"]
@@ -150,9 +150,10 @@ def expected_manifest_records(states):
                 if row.get("user") not in staged_users:continue
                 user=row["user"]
                 source,_=under_site({"site_user":user},row.get("path"))
-                # Private stage was generated only for assets *absent* on CP2.
-                if os.path.lexists(source):continue
-                rows.append((label,category,str(source),user,row))
+                # Immutable private manifest is the stage-time absence ledger.
+                # Do not re-evaluate absence during a partial-install resume.
+                if (label,category,str(source)) in manifest_keys:
+                    rows.append((label,category,str(source),user,row))
         runtime=state.get("runtime_assets") or {}
         must(type(runtime) is dict and type(runtime.get("system_cron",[])) is list,
              "CRON_INVENTORY_CHANGED")
@@ -160,7 +161,8 @@ def expected_manifest_records(states):
             must(type(row) is dict and type(row.get("path")) is str and
                  re.fullmatch(r"/etc/cron\.d/[A-Za-z0-9_.-]+",row["path"]),
                  "CRON_INVENTORY_SCOPE_CHANGED")
-            rows.append((label,"cron",row["path"],"root",row))
+            if (label,"cron",row["path"]) in manifest_keys:
+                rows.append((label,"cron",row["path"],"root",row))
     totals={key:sum(r[1]==key for r in rows) for key in EXPECTED}
     must(totals==EXPECTED and len(rows)==MAX_ITEMS,
          "EXPECTED_35_ITEM_SCOPE_CHANGED")
@@ -196,7 +198,12 @@ def check_manifest():
          len(manifest["records"])==MAX_ITEMS,
          "PRIVATE_MANIFEST_SCOPE_CHANGED")
     states=site_states()
-    inventory=expected_manifest_records(states)
+    manifest_keys=set()
+    for rec in manifest["records"]:
+        must(type(rec) is dict,"PRIVATE_RECORD_INVALID")
+        manifest_keys.add((rec.get("job"),rec.get("category"),rec.get("source_path")))
+    must(len(manifest_keys)==MAX_ITEMS,"PRIVATE_MANIFEST_DUPLICATE_KEYS")
+    inventory=expected_manifest_records(states,manifest_keys)
     expected={(a,b,c):(user,row) for a,b,c,user,row in inventory}
     seen=set()
     approved=[]
@@ -256,7 +263,6 @@ def check_manifest():
         if rec["category"]!="cron":
             target,site_user=under_site({"site_user":user},rec["source_path"])
             check_parents(target,site_user,allow_missing=True)
-            must(not os.path.lexists(target),"TARGET_ALREADY_EXISTS_NO_OVERWRITE")
             approved.append((rec,path,target,site_user))
     must(seen==set(expected),"PRIVATE_RECORDS_NOT_COMPLETE")
     must(len(approved)==30,"SITE_INSTALL_COUNT_CHANGED")
@@ -307,14 +313,16 @@ def plan_nested_assets(approved):
                      for x in roots[i+1:]),"ATOMIC_ROOTS_OVERLAP")
     return roots,overlays
 
-def snapshot_mode(states,source):
-    modes=[row.get("mode",0o600)
-           for label,mid,state,h in states
-           for row in state.get("sqlite_assets",[])
-           if row.get("path")==source]
-    must(len(modes)==1,"SQLITE_SOURCE_MODE_AMBIGUOUS")
-    try:mode=int(modes[0])
-    except (ValueError,TypeError):raise Stop("SQLITE_MODE_UNSAFE") from None
+def snapshot_mode(states,source,job,user):
+    # Parent and child migration jobs can inventory one absolute path.
+    # Bind permission metadata to the manifest's exact job and site user.
+    matches=[row for label,mid,state,h in states if label==job
+             for row in state.get("sqlite_assets",[])
+             if row.get("path")==source and row.get("user")==user]
+    must(len(matches)==1,"SQLITE_SOURCE_IDENTITY_AMBIGUOUS")
+    raw=matches[0].get("mode",0o600)
+    must(type(raw) is int,"SQLITE_MODE_UNSAFE")
+    mode=raw
     must(0<=mode<=0o777 and not mode&0o111,"SQLITE_MODE_UNSAFE")
     return mode
 
@@ -359,7 +367,7 @@ def overlay_sqlite_snapshots(temp,parent_target,children,states,uid,gid):
         pending=dest.parent/(".p07-snapshot-"+uuid.uuid4().hex)
         must(not os.path.lexists(pending),"OVERLAY_TEMP_COLLISION")
         shutil.copy2(private,pending,follow_symlinks=False)
-        mode=snapshot_mode(states,rec["source_path"])
+        mode=snapshot_mode(states,rec["source_path"],rec["job"],user)
         os.chown(pending,uid,gid,follow_symlinks=False)
         os.chmod(pending,mode)
         must(hashfile(pending)==rec["sha256"]
