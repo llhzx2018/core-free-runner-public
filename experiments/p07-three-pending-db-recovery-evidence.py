@@ -107,6 +107,14 @@ def archive_proof(rec,path):
             if not part:break
             sha.update(part)
     return "SHA256_PASS" if sha.hexdigest()==expected else "SHA256_MISMATCH"
+def backup_manifest_presence(path):
+    """Metadata existence only; historical backup manifests may be world-readable."""
+    try:meta=path.lstat()
+    except FileNotFoundError:return "ABSENT"
+    except OSError:return "UNREADABLE"
+    return ("PRESENT" if stat.S_ISREG(meta.st_mode) and meta.st_uid==0
+            and not meta.st_mode&0o022 and meta.st_size<8*1024*1024
+            else "UNSAFE_OR_UNVERIFIED")
 def run():
     need(os.geteuid()==0,"CP2_ROOT_REQUIRED")
     need(sys.argv[1:]==["--audit-three-pending-site-databases-readonly"],
@@ -128,7 +136,7 @@ def run():
               " PREPARE_DB_PASS_RECORDS="+str(passes)+
               " DATA_PARITY=NOT_VERIFIED",flush=True)
     for i,manifest in enumerate(BACKUP_MANIFESTS,1):
-        status,_=private_file(manifest,limit=8*1024*1024)
+        status=backup_manifest_presence(manifest)
         print("ILOVEM3U8_PROTECTED_BACKUP_MANIFEST_"+str(i)+"="+status,
               flush=True)
     record_path=WWW3_RECOVERY/"status.json"
