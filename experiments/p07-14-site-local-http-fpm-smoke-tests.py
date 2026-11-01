@@ -48,7 +48,7 @@ class Tests(unittest.TestCase):
                          "runtime":{"type":"php","version":"8.3"}}]
             final[mid]=states[mid]
         return states,cp
-    def execute(self,changed=None):
+    def execute(self,changed=None,heads=None):
         states,cp=self.fixture()
         if changed:changed(states,cp)
         out=io.StringIO()
@@ -61,7 +61,8 @@ class Tests(unittest.TestCase):
                                return_value="TCP_POOL_AND_LISTENER_CONFIRMED"), \
              mock.patch.object(m,"service",return_value="ACTIVE"), \
              mock.patch.object(m,"head_local",
-                 side_effect=lambda d,p,tls=False: "HTTP_200" if tls else "HTTP_301"), \
+                 side_effect=(heads or
+                     (lambda d,p,tls=False: "HTTP_200" if tls else "HTTP_301"))), \
              mock.patch.object(sys,"argv",["tool","--probe-only-14-staged-sites"]), \
              contextlib.redirect_stdout(out):
             m.probe()
@@ -180,13 +181,11 @@ class Tests(unittest.TestCase):
         self.assertEqual(m.https_route("HTTP_ERROR_404"),"HTTPS_404")
         self.assertEqual(m.https_route("LOCAL_CONNECT_OR_TLS_FAILED"),
                          "HTTPS_NOT_READY")
-        original=m.head_local
         def new_head(domain,port,tls=False):
             if tls and domain=="press.kewaro.com":return "HTTP_ERROR_404"
             if tls and domain=="infra.kewaro.com":return "HTTP_302"
             return "HTTP_200" if tls else "HTTP_301"
-        with mock.patch.object(m,"head_local",side_effect=new_head):
-            output=self.execute()
+        output=self.execute(heads=new_head)
         self.assertIn("LOCAL_14_SITE_SMOKE_PASS=12",output)
         self.assertIn("LOCAL_14_SITE_SMOKE_REVIEW=2",output)
         self.assertIn("SITE=press.kewaro.com ",output)
