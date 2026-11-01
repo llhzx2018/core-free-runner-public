@@ -161,8 +161,17 @@ class Tests(unittest.TestCase):
             illegal_rec=dict(child[0],category="external")
             illegal=(illegal_rec,child[1],parent[2]/"nested"/"file",parent[3])
             changed=[illegal if x is child else x for x in approved]
-            with self.assertRaisesRegex(m.Stop,"TARGET_NESTED_PATH_CONFLICT"):
-                m.plan_nested_assets(changed)
+            roots,nested=m.plan_nested_assets(changed)
+            self.assertIn(parent[2],nested)
+            self.assertEqual(len(nested[parent[2]]),1)
+            # The synthetic external child may only be installed if its
+            # staged bytes are absent or identical within the temp root.
+            work=root/"external-temp"
+            work.mkdir()
+            with mock.patch.object(m,"ownership",return_value=None):
+                m.compose_nested_externals(work,parent[2],nested[parent[2]],
+                                           os.getuid(),os.getgid())
+            self.assertEqual(m.hashfile(work/"nested"/"file"),m.hashfile(child[1]))
             bad_parent_rec=dict(parent[0],category="sqlite")
             changed=[(bad_parent_rec,parent[1],parent[2],parent[3]) if x is parent
                      else x for x in approved]
@@ -213,9 +222,112 @@ class Tests(unittest.TestCase):
         with mock.patch.object(sys,"argv",["tool","--wrong"]), \
              mock.patch.object(m,"check_manifest") as preflight, \
              mock.patch.object(m.os,"geteuid",return_value=0):
-            with self.assertRaisesRegex(m.Stop,"EXPLICIT_30_SITE_ASSETS_INSTALL_ARGUMENT_REQUIRED"):
+            with self.assertRaisesRegex(m.Stop,"EXPLICIT_SITE_ASSET_INSTALL_OR_RESUME_ARGUMENT_REQUIRED"):
                 m.do_install()
             preflight.assert_not_called()
+
+    def test_job_scoped_sqlite_mode_allows_parent_child_duplicate(self):
+        source="/home/example/data.sqlite"
+        states=[
+            ("ORIGINAL17","a",{"sqlite_assets":[{"path":source,"user":"example","mode":0o600}]},"sha"),
+            ("LEGACY9","b",{"sqlite_assets":[{"path":source,"user":"example","mode":0o640}]},"sha"),
+        ]
+        self.assertEqual(m.snapshot_mode(states,source,"ORIGINAL17","example"),0o600)
+        self.assertEqual(m.snapshot_mode(states,source,"LEGACY9","example"),0o640)
+        with self.assertRaisesRegex(m.Stop,"SQLITE_SOURCE_IDENTITY_AMBIGUOUS"):
+            m.snapshot_mode(states,source,"LAST2","example")
+        states[0][2]["sqlite_assets"].append({"path":source,"user":"example","mode":0o600})
+        with self.assertRaisesRegex(m.Stop,"SQLITE_SOURCE_IDENTITY_AMBIGUOUS"):
+            m.snapshot_mode(states,source,"ORIGINAL17","example")
+
+    def test_manifest_identity_survives_partial_install(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root,private,states,records,manifest=self.build_private_fixture(temp)
+            with mock.patch.object(m.os.path,"lexists",return_value=True):
+                got=m.expected_manifest_records(
+                    [(label,mid,states[mid],"sha") for label,mid,_ in m.base.JOBS],
+                    {(row["job"],row["category"],row["source_path"]) for row in records})
+            self.assertEqual(len(got),35)
+
+    def test_resume_from_five_verified_roots_to_thirty_and_fail_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home=Path(temp)
+            private=home/"private"
+            private.mkdir()
+            (private/"external").mkdir()
+            targets=home/"targets"
+            targets.mkdir()
+            approved=[]
+            for i in range(30):
+                source=private/"external"/("sample-"+str(i))
+                source.write_bytes(("content-%02d" % i).encode())
+                target=targets/("site-%02d" % i)
+                rec={"category":"external","job":"ORIGINAL17",
+                     "source_path":"/home/example/file-"+str(i),
+                     "sha256":m.hashfile(source)}
+                approved.append((rec,source,target,"example"))
+                if i<5:target.write_bytes(source.read_bytes())
+            initial={"status":"STARTED","installed":[
+                {"category":"external","target":str(x[2]),"nested_sqlite":0}
+                for x in approved[:5]],
+                "pending_temp":None,"cron_activated":False,"cutover_allowed":False}
+            progress=private/"cp2-install-progress.json"
+            progress.write_text(json.dumps(initial))
+            progress.chmod(0o600)
+            acct=types.SimpleNamespace(pw_uid=os.getuid(),pw_gid=os.getgid())
+            original_security=m.security
+            def relaxed_security(p,k,root_only=True):
+                return original_security(p,k,root_only=False)
+            def execute():
+                with mock.patch.object(m,"PRIVATE",private), \
+                     mock.patch.object(m,"check_manifest",return_value=([],approved,300)), \
+                     mock.patch.object(m,"security",side_effect=relaxed_security), \
+                     mock.patch.object(m.pwd,"getpwnam",return_value=acct), \
+                     mock.patch.object(m,"ensure_parents",return_value=[]), \
+                     mock.patch.object(m,"check_parents",return_value=None), \
+                     mock.patch.object(m,"ownership",return_value=None), \
+                     mock.patch.object(m.os,"geteuid",return_value=0), \
+                     mock.patch.object(m.shutil,"disk_usage",
+                         return_value=types.SimpleNamespace(free=10*1024**3)), \
+                     mock.patch.object(sys,"argv",["tool","--resume-verified-partial-asset-install"]), \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    return m.do_install()
+            self.assertEqual(execute(),0)
+            self.assertEqual(json.loads(progress.read_text())["status"],
+                             "COPIED_TO_MISSING_PATHS_NOT_CUTOVER_VERIFIED")
+            self.assertEqual(len(json.loads(progress.read_text())["installed"]),30)
+            self.assertTrue(all(a[2].read_bytes()==a[1].read_bytes() for a in approved))
+
+    def test_progress_rejects_unknown_existing_and_orphan_temp(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            private=root/"private"
+            private.mkdir()
+            good=private/"sample"
+            good.write_bytes(b"good")
+            targets=[({"category":"external","sha256":m.hashfile(good)},good,
+                      root/("target"+str(i)),"example") for i in range(30)]
+            targets[0][2].write_bytes(b"good")
+            progress=private/"cp2-install-progress.json"
+            payload={"status":"STARTED","installed":[
+                {"category":"external","target":str(targets[0][2]),"nested_sqlite":0}],
+                "pending_temp":str(root/"temp-orphan"),"cron_activated":False,
+                "cutover_allowed":False}
+            progress.write_text(json.dumps(payload))
+            progress.chmod(0o600)
+            acct=types.SimpleNamespace(pw_uid=os.getuid(),pw_gid=os.getgid())
+            original_security=m.security
+            with mock.patch.object(m,"security",
+                  side_effect=lambda p,k,root_only=True:original_security(p,k,root_only=False)), \
+                 mock.patch.object(m.pwd,"getpwnam",return_value=acct):
+                with self.assertRaisesRegex(m.Stop,"PENDING_TEMP_REQUIRES_READ_ONLY_RECONCILIATION"):
+                    m.load_verified_progress(progress,targets,{},[])
+                payload["pending_temp"]=None
+                progress.write_text(json.dumps(payload))
+                targets[1][2].write_bytes(b"unrelated")
+                with self.assertRaisesRegex(m.Stop,"UNRECORDED_EXISTING_TARGET_REVIEW_REQUIRED"):
+                    m.load_verified_progress(progress,targets,{},[])
+
     def test_never_activates_cron_or_touches_source(self):
         text=(HERE/"p07-14-site-private-assets-guarded-install.py").read_text()
         for forbidden in ("source_remote(", "run_ssh(", "source_python(", 
