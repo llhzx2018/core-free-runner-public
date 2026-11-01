@@ -327,7 +327,8 @@ class Tests(unittest.TestCase):
                 # clobbering the target or touching private staged data.
                 Path(payload["pending_temp"]).write_bytes(b"good")
                 with mock.patch.object(m,"check_parents",return_value=None), \
-                     mock.patch.object(m,"ownership",return_value=None):
+                     mock.patch.object(m,"ownership",return_value=None), \
+                     mock.patch.object(m,"PRIVATE",private):
                     self.assertEqual(m.finish_verified_pending(
                         loaded,targets,{},[],index),2)
                 self.assertFalse(Path(payload["pending_temp"]).exists())
