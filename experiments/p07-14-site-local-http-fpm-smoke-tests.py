@@ -210,6 +210,96 @@ class Tests(unittest.TestCase):
             with self.assertRaisesRegex(m.Block,"EXPLICIT_LOCAL_HTTP_PROBE_ARGUMENT_REQUIRED"):
                 m.probe()
             s.assert_not_called()
+    def test_three_route_details_record_only_review_and_redact_redirect(self):
+        states,cp=self.fixture()
+        records={
+            "domain.kewaro.com":(302,{"location":"https://domain.kewaro.com/login?token=secret"}),
+            "infra.kewaro.com":(302,{"location":"https://accounts.kewaro.com/auth?jwt=secret",
+                                      "x-redirect-by":"Application"}),
+            "press.kewaro.com":(404,{})
+        }
+        out=io.StringIO()
+        with mock.patch.object(m.base,"secure_state",
+                 side_effect=lambda p:states[p.parent.name]), \
+             mock.patch.object(m.os,"geteuid",return_value=0), \
+             mock.patch.object(m,"inventory",return_value=cp), \
+             mock.patch.object(m,"response_headers_local",side_effect=lambda d:records[d]), \
+             mock.patch.object(m,"site_docroot_evidence",
+                               return_value=("DIRECTORY_PRESENT","PRESENT","NO")), \
+             mock.patch.object(m,"nginx_route_evidence",
+                               return_value=("VHOST_FILES_2","YES",
+                                             "TRY_FILES_YES_REWRITE_NO_PROXY_NO")), \
+             mock.patch.object(sys,"argv",["tool","--diagnose-only-three-review-routes"]), \
+             contextlib.redirect_stdout(out):
+            self.assertEqual(m.diagnose_three_routes(),0)
+        log=out.getvalue()
+        self.assertEqual(sum(x.startswith("SITE=") for x in log.splitlines()),3)
+        self.assertIn("HTTPS_STATUS=404",log)
+        self.assertIn("REDIRECT_CLASS=SAME_HOST_AUTH_OR_ADMIN_HTTPS",log)
+        self.assertIn("REDIRECT_CLASS=RELATED_PUBLIC_DOMAIN_AUTH_OR_ADMIN_HTTPS",log)
+        self.assertNotIn("token",log)
+        self.assertNotIn("secret",log)
+        self.assertNotIn("jwt",log)
+        self.assertIn("CUTOVER_ALLOWED=NO",log)
+    def test_three_route_http_header_parser_never_follows_redirect(self):
+        fake=FakeSocket(
+            b"HTTP/1.1 302 Found\r\n"
+            b"Location: https://domain.kewaro.com/login?session=SECRET\r\n"
+            b"Set-Cookie: private=SECRET\r\n\r\n")
+        class FakeTLS:
+            def __init__(self):self.check_hostname=None;self.verify_mode=None
+            def wrap_socket(self,s,server_hostname):
+                self.name=server_hostname
+                return s
+        ctx=FakeTLS()
+        with mock.patch.object(m.socket,"create_connection",return_value=fake) as conn, \
+             mock.patch.object(m.ssl,"SSLContext",return_value=ctx):
+            code,headers=m.response_headers_local("domain.kewaro.com")
+        self.assertEqual(code,302)
+        self.assertEqual(ctx.name,"domain.kewaro.com")
+        self.assertIn("location",headers)
+        self.assertNotIn("set-cookie",headers)
+        self.assertIn(b"HEAD / HTTP/1.1",fake.sent)
+        self.assertEqual(conn.call_args.args[0],("127.0.0.1",443))
+        self.assertTrue(fake.closed)
+    def test_three_route_out_of_scope_and_unsafe_paths_fail_closed(self):
+        with self.assertRaisesRegex(m.Block,"OUT_OF_SCOPE_ROUTE_HOST"):
+            m.response_headers_local("www3.m3u8.one")
+        with self.assertRaisesRegex(m.Block,"OUT_OF_SCOPE_NGINX_DOMAIN"):
+            m.nginx_route_evidence("www3.m3u8.one")
+        self.assertEqual(m.site_docroot_evidence({
+            "site_user":"example","document_root":"/etc/passwd"}),
+            ("UNVERIFIED","UNKNOWN","UNKNOWN"))
+        self.assertEqual(m.site_docroot_evidence({
+            "site_user":"example","document_root":"/home/example/../other"}),
+            ("UNVERIFIED","UNKNOWN","UNKNOWN"))
+        self.assertEqual(m.redirection_class("javascript:alert(1)",
+                                              "domain.kewaro.com"),"UNSAFE_SCHEME")
+        self.assertEqual(m.redirection_class(
+            "https://x:passwd@domain.kewaro.com/login?secret",
+            "domain.kewaro.com"),"CREDENTIAL_URL_REVIEW")
+        self.assertEqual(m.redirection_class("https://unrelated.example/test?secret",
+            "domain.kewaro.com"),"OTHER_HOST_OTHER_PATH_HTTPS")
+    def test_nginx_routing_config_only_metadata(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            (root/"site.conf").write_text(
+                "server { server_name press.kewaro.com; "
+                "root /home/hidden/wp; index index.php; "
+                "location / { try_files $uri $uri/ /index.php?$args; } }")
+            self.assertEqual(m.nginx_route_evidence("press.kewaro.com",root),
+                ("VHOST_FILES_1","YES","TRY_FILES_YES_REWRITE_NO_PROXY_NO"))
+            self.assertEqual(m.nginx_route_evidence("domain.kewaro.com",root),
+                ("VHOST_NOT_FOUND","UNKNOWN","UNKNOWN"))
+    def test_three_route_no_config_changes(self):
+        source=(HERE/"p07-14-site-local-http-fpm-smoke.py").read_text()
+        for prohibited in ("nginx -s reload","systemctl restart",
+                           "crontab -","os.replace(","shutil.copytree(",
+                           "DROP DATABASE","DNS_UPDATE","subprocess.Popen"):
+            self.assertNotIn(prohibited,source)
+        self.assertIn("CUTOVER_ALLOWED=NO",source)
+        self.assertIn("HTTP_METHOD=HEAD_NO_REDIRECT_FOLLOW",source)
+
     def test_no_remote_or_mutating_commands(self):
         source=(HERE/"p07-14-site-local-http-fpm-smoke.py").read_text()
         for banned in ("ssh ","rsync ","curl ","DROP DATABASE","INSERT INTO",
