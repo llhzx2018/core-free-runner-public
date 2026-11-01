@@ -37,7 +37,11 @@ class CloudPanel(types.ModuleType):
     def __init__(self):
         super().__init__("cloudpanel")
         self.calls=[]
+        self.exports=[]
         self.CloudPanelError=type("CloudPanelError",(Exception,),{})
+    def export_database(self,db,path,clpctl=None):
+        self.exports.append((db,clpctl))
+        Path(path).write_bytes(b"synthetic-target-archive")
     def add_database(self,domain,db,user,pw,clpctl=None):
         self.calls.append((domain,db,user,pw,clpctl))
 
@@ -88,6 +92,13 @@ class TestIsolated(unittest.TestCase):
             self.assertEqual(record["readback_rows"],1013)
             self.assertFalse(record["cutover_allowed"])
             self.assertTrue(record["original_target_preserved"])
+            self.assertEqual(len(cp.exports),1)
+            self.assertEqual(cp.exports[0],(target_id,"clpctl"))
+            self.assertTrue((m.ROOT/"protected-original-target.sql.gz").exists())
+            self.assertIn("target_dump_sha256",record)
+            self.assertEqual(record["target_ddl_table_count"],42)
+            self.assertIn("PROTECTED_EXISTING_TARGET_ARCHIVE=SHA256_RECORDED",
+                          buffer.getvalue())
             self.assertEqual(len(cp.calls),1)
             self.assertEqual(cp.calls[0][0],m.DOMAIN)
             self.assertIn(cp.calls[0][1].split("-")[0],"p07scratch")
