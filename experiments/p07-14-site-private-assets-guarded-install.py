@@ -150,6 +150,8 @@ def expected_manifest_records(states):
                 if row.get("user") not in staged_users:continue
                 user=row["user"]
                 source,_=under_site({"site_user":user},row.get("path"))
+                # Private stage was generated only for assets *absent* on CP2.
+                if os.path.lexists(source):continue
                 rows.append((label,category,str(source),user,row))
         runtime=state.get("runtime_assets") or {}
         must(type(runtime) is dict and type(runtime.get("system_cron",[])) is list,
@@ -282,8 +284,6 @@ def ensure_parents(target,user,uid,gid):
     home=Path("/home")/user
     must(home.is_dir() and not home.is_symlink(),"SITE_HOME_INVALID")
     missing=[]
-    for p in reversed(list(target.parent.parents)):
-        if p==home:break
     ptr=home
     rel=target.parent.relative_to(home)
     for part in rel.parts:
@@ -340,10 +340,11 @@ def do_install():
                  "DIRECTORY_STAGED_COPY_CHANGED")
         else:
             shutil.copy2(private,temp,follow_symlinks=False)
-            mode=int(next((row.get("mode",0o600) for label,mid,state,h in states
+            raw_mode=next((row.get("mode",0o600) for label,mid,state,h in states
                 for row in state.get("sqlite_assets",[])
                 if rec["category"]=="sqlite" and row.get("path")==rec["source_path"]),
-                0o600))
+                0o600)
+            mode=int(raw_mode)
             must(0<=mode<=0o777,"SQLITE_MODE_UNSAFE")
             ownership(temp,uid,gid,mode if rec["category"]=="sqlite" else None)
             must(hashfile(temp)==rec["sha256"],"FILE_COPY_SHA256_MISMATCH")
