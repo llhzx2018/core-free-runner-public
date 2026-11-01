@@ -76,6 +76,7 @@ class Tests(unittest.TestCase):
                  mock.patch.object(m,"private_file",
                                    side_effect=self.local_fixture_private_file), \
                  mock.patch.object(m,"BACKUP_MANIFESTS",tuple(backup)), \
+                 mock.patch.object(m,"backup_manifest_presence",return_value="PRESENT"), \
                  mock.patch.object(sys,"argv",[
                    "probe","--audit-three-pending-site-databases-readonly"]), \
                  contextlib.redirect_stdout(out):
