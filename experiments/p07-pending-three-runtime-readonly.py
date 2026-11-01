@@ -124,7 +124,7 @@ def assess(smoke,site,target):
            and src.get("type")==runtime.get("type")
            and src.get("version")==runtime.get("version"))
     entry=smoke.safe_entry_metadata(target)
-    present=any(entry.values())
+    present=bool(entry.get("index.php") or entry.get("index.html"))
     vhost,endpoints=smoke.vhost(site["domain"])
     kind=runtime.get("type") if type(runtime) is dict else None
     version=runtime.get("version") if type(runtime) is dict else None
@@ -134,6 +134,10 @@ def assess(smoke,site,target):
     else:
         fpm="NOT_APPLICABLE" if kind!="php" else "UNKNOWN"
         backend="NOT_APPLICABLE" if kind!="php" else "UNKNOWN"
+    php_ok=(fpm=="ACTIVE" and backend in (
+        "TCP_POOL_AND_LISTENER_CONFIRMED","UNIX_POOL_AND_SOCKET_CONFIRMED"))
+    evidence_ok=bool(match and present and vhost=="FOUND" and
+                     (php_ok if kind=="php" else True))
     return {"SITE_FILES_ENTRY_PRESENT":"YES" if present else "NO",
             "PHP_OR_OTHER_RUNTIME_MATCH":"YES" if match else "NO",
             "NGINX_VHOST":vhost,
@@ -141,7 +145,8 @@ def assess(smoke,site,target):
             "FPM_BACKEND":backend,
             "SITE_FILES_FULL_PARITY":"NOT_VERIFIED",
             "APPLICATION_DB_CONFIG_MAPPING":"NOT_VERIFIED",
-            "HTTP_APP_FUNCTIONALITY":"NOT_TESTED"}
+            "HTTP_APP_FUNCTIONALITY":"NOT_TESTED",
+            "LOCAL_FILES_VHOST_FPM_EVIDENCE":("MATCH" if evidence_ok else "GAP")}
 def scan(base,smoke):
     items=status_scope(base)
     inventory=smoke.inventory()
@@ -174,11 +179,7 @@ def main():
     for domain,db,result in rows:
         print("SITE="+domain+" DATABASE_CANDIDATE="+db+" "+
               " ".join(k+"="+str(v) for k,v in result.items()),flush=True)
-        gaps+=int(result["SITE_FILES_ENTRY_PRESENT"]!="YES"
-                  or result["PHP_OR_OTHER_RUNTIME_MATCH"]!="YES"
-                  or result["NGINX_VHOST"]!="FOUND"
-                  or (result["FPM_SERVICE"]=="NOT_ACTIVE")
-                  or "NOT_MATCHED" in result["FPM_BACKEND"])
+        gaps+=int(result["LOCAL_FILES_VHOST_FPM_EVIDENCE"]!="MATCH")
     print("WEB_RUNTIME_GAP_COUNT="+str(gaps),flush=True)
     print("CLOUDPANEL_SITE_DB_CONFIGURATION=NOT_MODIFIED",flush=True)
     print("SOURCE_VPS_CONTACTED=NO",flush=True)
