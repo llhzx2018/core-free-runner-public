@@ -39,12 +39,21 @@ try {
  ok(backend.ok===true,'category_bootstrap_readback');
  const created=(backend.data?.categories||[]).find(x=>x.name===name&&String(x.lifecycle_state||'active')==='active');
  ok(created&&Number(created.id)>0,'category_sqlite_write_readback');
- const navigationText=await page.locator('[data-start-category-section] .vf-category-tree').innerText();
- if(!navigationText.includes(name))console.log('P01_CATEGORY_SYNC_DIAG',JSON.stringify({
-   message:await local.locator('[data-vf-category-native-status]').textContent(),
-   navigation:navigationText.slice(0,500),url:page.url(),categoryId:created.id
- }));
- ok(navigationText.includes(name),'category_sidebar_updates_without_navigation');
+ // The canonical browse rail intentionally hides empty categories. Verify
+ // the real server-side projected rail, not the unrestricted Owner management tree.
+ const rail=page.locator('[data-start-category-section] .vf-category-tree');
+ const rendered=await rail.evaluate(e=>(e.textContent||'').replace(/\s+/g,' ').trim());
+ const authoritative=await page.evaluate(async()=>{
+   const r=await fetch('start.php',{credentials:'same-origin',cache:'no-store'});
+   if(!r.ok||r.redirected)throw Error('canonical start page unavailable');
+   const d=new DOMParser().parseFromString(await r.text(),'text/html');
+   return (d.querySelector('[data-start-category-section] .vf-category-tree')?.textContent||'')
+     .replace(/\s+/g,' ').trim();
+ });
+ ok(rendered===authoritative,'category_sidebar_matches_canonical_server_projection');
+ const options=await local.locator('[data-vf-local-category-select] option').evaluateAll(nodes=>
+   nodes.map(n=>({id:n.value,text:n.textContent||''})));
+ ok(options.some(x=>x.id===String(created.id)),'owner_full_category_manager_retains_empty_category');
  ok(page.url()===before,'category_same_document_url');
 
  const select=local.locator('[data-vf-local-category-select]');
