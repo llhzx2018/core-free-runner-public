@@ -82,11 +82,40 @@ def decode_line(line,width):
              "METADATA_HEX_ENCODING_UNVERIFIED")
         result.append(None if v==b"N" else bytes.fromhex(v[1:].decode("ascii")).decode("utf-8"))
     return result
+def safe_presentation(attr,value,data_type):
+    # A diagnostic-only equivalence hint. Never an automatic schema PASS.
+    if value is None:
+        return None
+    ints=("tinyint","smallint","mediumint","int","integer","bigint")
+    nums=ints+("decimal","numeric","float","double","real")
+    if attr=="COLUMN_TYPE" and data_type and data_type.lower() in ints:
+        m=re.fullmatch(r"(tinyint|smallint|mediumint|int|integer|bigint)\(([1-9][0-9]?)\)( unsigned)?",value,re.I)
+        if m and int(m.group(2))<=20:
+            return m.group(1).lower()+(m.group(3) or "").lower()
+    if attr=="COLUMN_DEFAULT" and data_type and data_type.lower() in nums:
+        m=re.fullmatch(r"'(-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?)'",value)
+        if m:
+            return m.group(1)
+    if attr=="CHARACTER_SET_NAME" and value.lower()=="utf8":
+        return "utf8mb3"
+    return value
+
+def attribute_hash(column_id,attribute,value):
+    # Column-bound domain separation, so simple defaults are not directly
+    # exposed by their unsalted SHA256 to the calling operator.
+    encoded=json.dumps(value,ensure_ascii=False,separators=(",",":")).encode("utf-8")
+    return hashlib.sha256(
+        b"P07-COLUMN-ATTRIBUTE-V1\0"+column_id.encode("ascii")+b"\0"+
+        attribute.encode("ascii")+b"\0"+encoded
+    ).hexdigest()
+
 def category_fingerprint(lines,cols):
     # SQL statement output is intentionally not returned to the caller. Key
     # each object by its first field, hash the full field-value tuples, and
     # report only aggregate evidence of object-level differences.
     groups={}
+    column_attributes={}
+    column_detail=(tuple(cols[:2])==("TABLE_NAME","COLUMN_NAME"))
     count=0
     for raw in lines:
         need(len(raw)<=16*1024*1024,"SCHEMA_METADATA_ROW_TOO_LARGE")
@@ -96,11 +125,33 @@ def category_fingerprint(lines,cols):
         identity=hashlib.sha256(fields[0].encode("utf-8")).hexdigest()
         digest=hashlib.sha256(json.dumps(fields,ensure_ascii=False,separators=(",",":")).encode("utf-8")).digest()
         groups.setdefault(identity,[]).append(digest)
+        if column_detail:
+            need(fields[1] is not None and 0<len(fields[1])<=256,
+                 "METADATA_COLUMN_ID_UNVERIFIED")
+            cid=hashlib.sha256(
+                (fields[0]+"\0"+fields[1]).encode("utf-8")
+            ).hexdigest()
+            need(cid not in column_attributes,
+                 "METADATA_COLUMN_ID_COLLISION")
+            data_type=fields[cols.index("DATA_TYPE")]
+            need(type(data_type) is str and bool(data_type),
+                 "METADATA_COLUMN_DATA_TYPE_UNVERIFIED")
+            column_attributes[cid]={
+                attr:[
+                    attribute_hash(cid,attr,value),
+                    attribute_hash(cid,attr,safe_presentation(attr,value,data_type))
+                ]
+                for attr,value in zip(cols[2:],fields[2:])
+            }
         count+=1
         need(count<=100000,"SCHEMA_METADATA_ROW_COUNT_EXCEEDED")
     objects={name:[len(values),hashlib.sha256(b"".join(sorted(values))).hexdigest()]
              for name,values in groups.items()}
-    return {"count":count,"objects":objects}
+    entry={"count":count,"objects":objects}
+    if column_detail:
+        need(len(column_attributes)==count,"METADATA_COLUMN_PROFILES_INCOMPLETE")
+        entry["column_attributes"]=column_attributes
+    return entry
 def scan(base,domain,db):
     need(domain==DOMAIN and re.fullmatch("[A-Za-z0-9._-]{1,64}",db) is not None,
          "FIXED_INCIDENT_DOMAIN_AND_DB_REQUIRED")
