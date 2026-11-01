@@ -56,11 +56,22 @@ def preflight(migration,inventory,domain,mid,expected_count,idx,expected_tables)
     # The original migration was created with an older engine. Diagnose
     # each individual safety invariant without printing state JSON, server
     # identities or credentials. This does NOT weaken any invariant.
+    # The exact ORIGINAL17 state on CP2 predates cutover_prohibited:
+    # verified by the Owner's redacted real-state probe. Only the original
+    # migration may omit this optional legacy marker; a present marker must
+    # be False. All actual no-cutover/no-overwrite guards remain mandatory,
+    # and this read-only tool can NEVER promote a migration.
+    cutover_marker_ok=(
+        (mid==ORIGINAL17 and
+         ("cutover_prohibited" not in record or
+          record.get("cutover_prohibited") is False))
+        or (mid==LEGACY9 and record.get("cutover_prohibited") is True)
+    )
     checks=(
         ("MIGRATION_ID",record.get("migration_id")==mid),
         ("STATUS",record.get("status")=="PREPARE_FAILED"),
         ("SCHEMA",record.get("schema")=="vf-server-ops.server-migration.target-pull.v1"),
-        ("CUTOVER_PROHIBITED_MARKER",record.get("cutover_prohibited") is (mid==LEGACY9)),
+        ("CUTOVER_PROHIBITED_MARKER",cutover_marker_ok),
         ("SOURCE_NOT_FROZEN",record.get("source_runtime_frozen") is False),
         ("DNS_UNCHANGED",record.get("dns_changed_by_p07") is False),
         ("SOURCE_DELETE_FORBIDDEN",record.get("source_delete_allowed") is False),
@@ -83,6 +94,8 @@ def preflight(migration,inventory,domain,mid,expected_count,idx,expected_tables)
                             else "FALSE" if val is False else "OTHER")
             print("ORIGINAL_CUTOVER_MARKER="+classification,flush=True)
         raise Block("MIGRATION_SAFETY_OR_SITE_BOUNDARY_CHANGED")
+    if mid==ORIGINAL17 and "cutover_prohibited" not in record:
+        print("ORIGINAL17_LEGACY_MISSING_MARKER=ACCEPTED_READONLY_ONLY",flush=True)
     if mid==LEGACY9:
         need(record.get("partial_parent_migration_id")==ORIGINAL17,
              "PARENT_MIGRATION_ID_CHANGED")
