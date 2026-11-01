@@ -26,6 +26,8 @@ class Tests(unittest.TestCase):
         target=b"second gzip data"
         (self.root/"source.sql.gz").write_bytes(source)
         (self.root/"protected-original-target.sql.gz").write_bytes(target)
+        os.chmod(self.root/"source.sql.gz",0o600)
+        os.chmod(self.root/"protected-original-target.sql.gz",0o600)
         self.db="p07scratch-1a2b3c4d5e6f"
         self.user="p07stage-1a2b3c4d5e6f"
         self.rec={
