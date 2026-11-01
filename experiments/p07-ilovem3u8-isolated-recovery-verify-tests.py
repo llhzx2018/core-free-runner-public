@@ -64,10 +64,23 @@ class Tests(unittest.TestCase):
         path.write_text(json.dumps(data))
         os.chmod(path,0o600)
     def run_verify(self,other_names=None,src_count=1013,tgt_count=1015):
-        with mock.patch.object(m,"cloudpanel_site_db_names",
-              return_value=other_names or {self.db,"original-db"}), \
+        # CI is a non-root runner. Mock ONLY the root-UID part of the file
+        # checks, retaining actual permission, file/symlink and size guards.
+        def synthetic_private_file(path,maxsize):
+            try:x=path.lstat()
+            except OSError:raise m.Block("PRIVATE_RECOVERY_FILE_MISSING") from None
+            import stat
+            if (not stat.S_ISREG(x.st_mode) or x.st_mode&0o077
+                    or path.is_symlink() or not 0<x.st_size<=maxsize):
+                raise m.Block("PRIVATE_RECOVERY_FILE_UNSAFE")
+            return path
+        with mock.patch.object(m,"private_dir"), \
+             mock.patch.object(m,"private_file",side_effect=synthetic_private_file), \
+             mock.patch.object(m,"cloudpanel_site_db_names",
+               return_value=other_names if other_names is not None
+                   else {self.db,"original-db"}), \
              mock.patch.object(m,"archive_tuple_count",
-              side_effect=[src_count,tgt_count]):
+               side_effect=[src_count,tgt_count]):
             return m.verify(self.stage,self.base,self.root,self.state)
     def test_valid_recovered_state_avoids_reinstall_and_cutover(self):
         result=self.run_verify()
