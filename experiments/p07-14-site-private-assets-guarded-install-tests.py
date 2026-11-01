@@ -311,7 +311,7 @@ class Tests(unittest.TestCase):
             progress=private/"cp2-install-progress.json"
             payload={"status":"STARTED","installed":[
                 {"category":"external","target":str(targets[0][2]),"nested_sqlite":0}],
-                "pending_temp":"/home/example/.p07-uninstalled-orphan","cron_activated":False,
+                "pending_temp":str(root/(".p07-uninstalled-"+"f"*32)),"cron_activated":False,
                 "cutover_allowed":False}
             progress.write_text(json.dumps(payload))
             progress.chmod(0o600)
@@ -320,11 +320,24 @@ class Tests(unittest.TestCase):
             with mock.patch.object(m,"security",
                   side_effect=lambda p,k,root_only=True:original_security(p,k,root_only=False)), \
                  mock.patch.object(m.pwd,"getpwnam",return_value=acct):
-                with self.assertRaisesRegex(m.Stop,"PENDING_TEMP_REQUIRES_READ_ONLY_RECONCILIATION"):
-                    m.load_verified_progress(progress,targets,{},[])
+                loaded,index=m.load_verified_progress(progress,targets,{},[])
+                self.assertEqual(index,1)
+                self.assertEqual(loaded["pending_temp"],payload["pending_temp"])
+                # An exact completed temp may be atomically adopted without
+                # clobbering the target or touching private staged data.
+                Path(payload["pending_temp"]).write_bytes(b"good")
+                with mock.patch.object(m,"check_parents",return_value=None), \
+                     mock.patch.object(m,"ownership",return_value=None):
+                    self.assertEqual(m.finish_verified_pending(
+                        loaded,targets,{},[],index),2)
+                self.assertFalse(Path(payload["pending_temp"]).exists())
+                self.assertEqual(targets[1][2].read_bytes(),b"good")
+                self.assertEqual(good.read_bytes(),b"good")
+                # Recreate the original 1-item progress. An unrelated
+                # pre-existing target remains a hard fail, with no overwrite.
                 payload["pending_temp"]=None
                 progress.write_text(json.dumps(payload))
-                targets[1][2].write_bytes(b"unrelated")
+                targets[2][2].write_bytes(b"unrelated")
                 with self.assertRaisesRegex(m.Stop,"UNRECORDED_EXISTING_TARGET_REVIEW_REQUIRED"):
                     m.load_verified_progress(progress,targets,{},[])
 
