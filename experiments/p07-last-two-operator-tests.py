@@ -1028,12 +1028,12 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                  ("PREPARE",2),("EXECUTE",1),("EXECUTE",1),
                  ("DEALLOCATE",1),("DEALLOCATE",2),
                  ("ASSIGN",3),("PREPARE",3),("EXECUTE",3)],
-                # Wrong reference to the assigned SQL variable.
+                # Deallocation before execution must never be accepted.
                 [("ASSIGN",1),("ASSIGN",2),("PREPARE",1),
                  ("PREPARE",2),("EXECUTE",1),("EXECUTE",2),
                  ("DEALLOCATE",1),("DEALLOCATE",2),
-                 ("ASSIGN",3),("PREPARE",3),("EXECUTE",3),
-                 ("DEALLOCATE",3)],
+                 ("ASSIGN",3),("PREPARE",3),("DEALLOCATE",3),
+                 ("EXECUTE",3)],
             ):
                 text=(static.decode()+probe+
                       "".join(line(action,i) for action,i in modified)+
