@@ -918,8 +918,8 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
             "CREATE TABLE real (id INT);\n"+header+
             group(1,"SELECT 1; SELECT 2")+
             "INSERT INTO real VALUES(1);\n"+
-            group(2,"SET SESSION SQL_NOTES = @backup + 1")+
-            group(3,"SET @session = @old + 1")+
+            group(2,"SET SESSION SQL_BIG_SELECTS = 1")+
+            group(3,"SET @session := @old + 1")+
             "INSERT INTO real VALUES(2);\n"
         )
         with tempfile.TemporaryDirectory() as folder:
@@ -977,7 +977,7 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
             marker=root/"quarantine-receipt.json"
             raw=(b"CREATE TABLE demo (v INT);\n" +
                  b"".join(b"INSERT INTO demo VALUES ("+str(i).encode()+b");\n"
-                          for i in range(300)))
+                          for i in range(2000)))
             blob=gzip.compress(raw,mtime=0)
             sha=__import__("hashlib").sha256(blob).hexdigest()
             name="www3-hex-"+("a"*32)+".sql.gz"
