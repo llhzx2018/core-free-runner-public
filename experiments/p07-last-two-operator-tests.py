@@ -1556,6 +1556,38 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
             module.diagnostic_reason(Exception("mysql connection to secret host")),
             "COMPARISON_UNCLASSIFIED")
 
+    def test_readonly_advisory_locates_real_row_drift_without_leaking_sql(self):
+        import contextlib,gzip,io,sys
+        a=self.module()
+        overlay=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay/lib"
+        sys.path.insert(0,str(overlay))
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            original=root/"source.sql.gz"
+            target=root/"target.sql.gz"
+            statements="".join(
+                "CREATE TABLE t"+str(i)+" (id int NOT NULL);\n"
+                for i in range(157)
+            )
+            source=statements+"INSERT INTO t1 VALUES (1);\n"
+            changed=statements+"INSERT INTO t1 VALUES (2);\n"
+            for file,data in ((original,source),(target,changed)):
+                with gzip.open(file,"wt",encoding="utf-8") as output:
+                    output.write(data)
+            with contextlib.redirect_stdout(io.StringIO()) as buffer:
+                a.explain_advisory(original,target)
+            message=buffer.getvalue()
+            self.assertIn("ADVISORY_SCHEMA=CLASSIFIED",message)
+            self.assertIn("ADVISORY_SOURCE_TABLES=157",message)
+            self.assertIn("ADVISORY_TARGET_TABLES=157",message)
+            self.assertIn("ADVISORY_ROW_SCOPE=157_MATCHING_NAMES",message)
+            self.assertIn("ADVISORY_MULTISET_STATUS=ROW_MULTISET_DIFFER",message)
+            self.assertIn("ADVISORY_MULTISET_DIFFERING_ORDINALS=",message)
+            self.assertIn("ADVISORY_NOT_A_MIGRATION_PASS_GATE=YES",message)
+            self.assertNotIn("CREATE TABLE",message)
+            self.assertNotIn("VALUES (2)",message)
+            self.assertNotIn("t1 VALUES",message)
+
     def test_receipt_requires_original_created_scratch_status(self):
         import json,os,types
         m=self.module()
