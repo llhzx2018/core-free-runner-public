@@ -22,6 +22,8 @@ cli plugin install /tmp/provider.zip --activate >/dev/null
 docker cp plugin-source/src/includes/v510-copy.php "$WP:/var/www/html/wp-content/plugins/vf-tool-m3u8/includes/v510-copy.php"
 docker cp plugin-source/src/public/js/modules/test-links.js "$WP:/var/www/html/wp-content/plugins/vf-tool-m3u8/public/js/modules/test-links.js"
 docker cp plugin-source/src/public/dist/test-links.js "$WP:/var/www/html/wp-content/plugins/vf-tool-m3u8/public/dist/test-links.js"
+docker cp control/lanes/s01-test-links-browser/custom-copy.php "$WP:/tmp/custom-copy.php"
+cli eval-file /tmp/custom-copy.php > proof/custom-copy.json
 docker cp lane/fixture.php "$WP:/var/www/html/wp-content/mu-plugins/progress-fixture.php"
 docker exec "$WP" chown -R www-data:www-data /var/www/html/wp-content/themes/vf-tools-theme
 cli theme activate vf-tools-theme >/dev/null
