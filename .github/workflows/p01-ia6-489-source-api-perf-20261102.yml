@@ -1,0 +1,208 @@
+name: P01 IA6 489 source API latency baseline comparison
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p01-ia6-489-source-api-perf-20261102.yml']
+permissions:
+  contents: read
+jobs:
+  focused-browser:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor == 'llhzx2018' &&
+      startsWith(github.event.pull_request.title, 'test(P01):')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      PRODUCT_BRANCH: feat/ia-v6-frontstage-admin-parity-system-jobs-r1
+      PRODUCT_SHA: a9b9a97f39dc7a74d8a4c0f84ebf3b0f40e44968
+      BASE_SHA: fa8d39851a4db9b4e779831aba0dbc4ba51a9153
+      TARGET_SHA: a9b9a97f39dc7a74d8a4c0f84ebf3b0f40e44968
+      TARGET_VERSION: 2.47.489
+      P01_TEST_PASSWORD: IA6SyntheticScope2026!
+    steps:
+      - name: Checkout registered public-safe runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Install isolated runtime and Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd php-xml >/dev/null
+          php -m | grep -Fxi pdo_sqlite
+          npm install --no-audit --no-fund --no-save playwright@1.57.0 >/dev/null
+          npx playwright install chromium >/dev/null
+      - name: Audit target identity against rendered workflow
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import json,os
+          from pathlib import Path
+          Path('/tmp/p01-five-scope-lane.json').write_text(json.dumps({
+            'schema':'vf-ephemeral-lane-spec/v1',
+            'lane_id':'p01-ia6-489-five-domain',
+            'project_id':'P01',
+            'repository':os.environ['PRODUCT_REPO'],
+            'target_version':os.environ['TARGET_VERSION'],
+            'target_sha':os.environ['TARGET_SHA'],
+            'target_tree':'',
+            'source_versions':['2.47.488'],
+            'schema_version':'',
+            'candidate_run':'',
+            'previous_lane':{},
+            'extra':{}
+          }))
+          PY
+          python3 scripts/ephemeral_lane_spec.py audit-rendered --spec /tmp/p01-five-scope-lane.json --input .github/workflows/p01-ia6-489-source-api-perf-20261102.yml
+          echo P01_IA6_SCOPED_TARGET_IDENTITY_AUDIT=PASS
+      - name: Read exact private candidate only in ephemeral runner
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          actual="$(git ls-remote "https://x-access-token:$READ_TOKEN@github.com/$PRODUCT_REPO.git" "refs/heads/$PRODUCT_BRANCH" | awk '{print $1}')"
+          test "$actual" = "$PRODUCT_SHA"
+          git clone -q --no-checkout "https://x-access-token:$READ_TOKEN@github.com/$PRODUCT_REPO.git" candidate
+          git -C candidate fetch -q --depth 1 origin "$PRODUCT_SHA"
+          git -C candidate checkout -q --detach FETCH_HEAD
+          test "$(git -C candidate rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$TARGET_VERSION"
+          for x in candidate/tests/integration/p01_ia6_governed_source_paging_browser.mjs candidate/tests/integration/p01_ia6_jobs_history_browser.mjs candidate/tests/integration/p01_ia6_settings_lost_receipt_browser.mjs; do node --check "$x"; done
+          git clone -q --no-checkout "https://x-access-token:$READ_TOKEN@github.com/$PRODUCT_REPO.git" baseline
+          git -C baseline fetch -q --depth 1 origin "$BASE_SHA"
+          git -C baseline checkout -q --detach FETCH_HEAD
+          test "$(git -C baseline rev-parse HEAD)" = "$BASE_SHA"
+          test "$(tr -d '\r\n ' < baseline/VERSION)" = 2.47.488
+          echo P01_IA6_SCOPED_NEW_HEAD_BINDING=PASS
+      - name: Prepare source paging disposable localhost install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          : >/tmp/p01-scope-pids
+          install_one() {
+            local root="$1" port="$2" setup="/tmp/p01-scope-$2-setup" cookie="/tmp/p01-scope-$2-cookie"
+            [[ "$root" == /tmp/p01-ia6-* && "$port" =~ ^[0-9]+$ ]]
+            mkdir -p "$root"
+            if [[ "$port" == 19472 ]]; then cp -a baseline/src/. "$root/"; else cp -a candidate/src/. "$root/"; fi
+            php -S 127.0.0.1:"$port" -t "$root" >/tmp/p01-scope-"$port".log 2>&1 &
+            echo $! >>/tmp/p01-scope-pids
+            for i in $(seq 1 45); do
+              if curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$port/setup.php" -o "$setup" >/dev/null 2>&1; then break; fi
+              sleep 1
+            done
+            test -s "$setup"
+            local csrf
+            csrf="$(python3 - "$setup" <<'PY'
+          import re,sys
+          html=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',html)
+          assert m,'isolated setup csrf missing'
+          print(m.group(1))
+          PY
+          )"
+            curl -fsS -c "$cookie" -b "$cookie" -X POST "http://127.0.0.1:$port/setup.php" \
+              --data-urlencode "setup_csrf=$csrf" \
+              --data-urlencode "site_title=IA6 Synthetic $port" \
+              --data-urlencode "admin_password=$P01_TEST_PASSWORD" \
+              --data-urlencode "admin_password_confirm=$P01_TEST_PASSWORD" >/dev/null
+            (cd "$root" && php cli/verify.php) | grep -Fx VERIFY_PASS=YES
+            if [[ "$port" == 19472 ]]; then test "$(tr -d '\r\n ' < "$root/VERSION.txt")" = 2.47.488; else test "$(tr -d '\r\n ' < "$root/VERSION.txt")" = "$TARGET_VERSION"; fi
+          }
+          install_one /tmp/p01-ia6-source-page-scope 19471
+          install_one /tmp/p01-ia6-source-page-baseline 19472
+          echo P01_IA6_SOURCE_PAGING_FRESH_ISOLATED_INSTALL=PASS
+      - name: Bounded paging real Owner Guest HTTP and Chromium
+        id: paging
+        continue-on-error: true
+        shell: bash
+        env:
+          VF_E2E_RUNTIME_ROOT: /tmp/p01-ia6-source-page-scope
+          VF_IA6_DISPOSABLE_ACK: IA6-SOURCE-PAGES-ONLY
+          P01_TEST_ORIGIN: http://127.0.0.1:19471
+        run: |
+          set -Eeuo pipefail
+          grep -Fq '[data-vf-remote-sources-pages][hidden]{display:none!important}' candidate/src/assets/local-subsite-management.css
+          node candidate/tests/integration/p01_ia6_governed_source_paging_browser.mjs
+          echo P01_IA6_489_PAGING_BROWSER=PASS
+      - name: Final exact-source paging outcome must pass
+        if: always()
+        shell: bash
+        run: |
+          echo PAGING_OUTCOME=${{ steps.paging.outcome }}
+          test "${{ steps.paging.outcome }}" = success
+          echo P01_IA6_489_SCOPED_PAGING_REAL_BROWSER=PASS
+      - name: Compare actual Owner source API latencies and page bounds
+        shell: bash
+        env:
+          VF_IA6_DISPOSABLE_ACK: IA6-SOURCE-PAGES-ONLY
+          P01_TEST_PASSWORD: IA6SyntheticScope2026!
+        run: |
+          set -Eeuo pipefail
+          sed "s/VF_VERSION!=='2.47.489'/VF_VERSION!=='2.47.488'/" candidate/tests/integration/p01_ia6_governed_source_paging_seed.php >/tmp/p01-ia6-baseline-seed.php
+          sed 's/$i<120/$i<2000/' candidate/tests/integration/p01_ia6_governed_source_paging_seed.php >/tmp/p01-ia6-candidate-2000-seed.php
+          sed "s/VF_VERSION!=='2.47.489'/VF_VERSION!=='2.47.488'/;s/\\$i<120/\\$i<2000/" candidate/tests/integration/p01_ia6_governed_source_paging_seed.php >/tmp/p01-ia6-baseline-2000-seed.php
+          node --input-type=module <<'JS'
+          import {chromium} from 'playwright';
+          import {spawnSync} from 'node:child_process';
+          const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+          const env=process.env,states={};
+          try {
+            for(const [role,port] of [['baseline',19472],['candidate',19471]]){
+              const context=await browser.newContext();
+              const origin='http://127.0.0.1:'+port;
+              const login=await context.request.post(origin+'/api.php?action=login',{data:{password:env.P01_TEST_PASSWORD}});
+              if(login.status()!==200||(await login.json()).ok!==true)throw Error(role+' login');
+              const cookie=(await context.cookies()).find(x=>x.name==='vfnav_session');
+              if(!cookie?.value)throw Error(role+' Owner session');
+              states[role]={context,origin,sid:cookie.value,root:'/tmp/p01-ia6-source-page-'+(role==='baseline'?'baseline':'scope')};
+              const guest=await browser.newContext();
+              if((await guest.request.get(origin+'/ia5-source-status.php?domain=courses&offset=0')).status()!==403)throw Error('guest deny '+role);
+              await guest.close();
+            }
+            for(const count of [120,2000]){
+              for(const role of ['baseline','candidate']){
+                const state=states[role];
+                const seed=role==='baseline'?(count===120?'/tmp/p01-ia6-baseline-seed.php':'/tmp/p01-ia6-baseline-2000-seed.php'):
+                  (count===120?'candidate/tests/integration/p01_ia6_governed_source_paging_seed.php':'/tmp/p01-ia6-candidate-2000-seed.php');
+                const run=spawnSync('php',[seed,state.root,state.sid],{encoding:'utf8',env});
+                if(run.status!==0)throw Error(role+' '+count+' seed: '+(run.stderr||run.stdout).slice(0,200));
+              }
+              const times={baseline:[],candidate:[]};
+              for(let i=0;i<40;i++){
+                for(const role of i%2===0?['baseline','candidate']:['candidate','baseline']){
+                  const state=states[role],start=performance.now();
+                  const response=await state.context.request.get(state.origin+'/ia5-source-status.php?domain=courses&offset=0');
+                  const ms=performance.now()-start;
+                  if(response.status()!==200)throw Error(role+' response status '+response.status());
+                  const json=await response.json();
+                  if(json.ok!==true||json.items?.length!==50||JSON.stringify(json).includes('SYNTHETIC_TOKEN_MUST_NOT_LEAK'))throw Error(role+' preview response invalid');
+                  if(role==='candidate'&&(json.items_total!==count||json.items_limit!==50))throw Error('candidate count not bounded');
+                  if(i>=5)times[role].push(ms);
+                }
+              }
+              const stats=role=>{const a=times[role].sort((x,y)=>x-y);return {median_ms:+a[17].toFixed(3),p95_ms:+a[33].toFixed(3),samples:a.length}};
+              console.log('P01_SOURCE_API_LATENCY='+JSON.stringify({records:count,baseline:stats('baseline'),candidate:stats('candidate')}));
+              const s=states.candidate,offset=count-50;
+              const tail=await s.context.request.get(s.origin+'/ia5-source-status.php?domain=courses&offset='+offset);
+              const result=await tail.json();
+              if(result.items?.length!==50||result.items_offset!==offset)throw Error('candidate last page');
+            }
+            console.log('P01_SOURCE_API_BASELINE_CANDIDATE_120_2000_OWNER_LATENCY=PASS');
+          }finally{for(const x of Object.values(states))await x.context.close();await browser.close();}
+          JS
+          echo P01_SOURCE_API_SCOPED_PERFORMANCE_MEASURED=PASS
+      - name: Erase all source fixtures credentials and transient state
+        if: always()
+        shell: bash
+        run: |
+          if test -f /tmp/p01-scope-pids; then while read -r pid; do kill "$pid" >/dev/null 2>&1 || true; done </tmp/p01-scope-pids; fi
+          rm -rf candidate baseline /tmp/p01-ia6-source-page-baseline /tmp/p01-ia6-source-page-scope /tmp/p01-ia6-jobs-scope /tmp/p01-ia6-settings-scope
+          rm -f /tmp/p01-ia6-baseline-seed.php /tmp/p01-ia6-candidate-2000-seed.php /tmp/p01-ia6-baseline-2000-seed.php /tmp/p01-scope-pids /tmp/p01-ia6-job-seed.env /tmp/p01-five-scope-lane.json /tmp/p01-scope-1947*
+          echo P01_IA6_489_SCOPED_CLEANUP=PASS
