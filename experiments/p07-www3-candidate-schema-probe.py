@@ -8,6 +8,7 @@ data, freeze, activation or DNS. A parser PASS is NOT import/cutover approval.
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import importlib.util
 import json
@@ -19,7 +20,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import urllib.request
 
 PARENT="pull-20261101T045943Z-923729a1"
 CHILD="pull-20261101T052411Z-35663c25"
@@ -30,10 +30,13 @@ RUNTIME=Path("/opt/vf-server-ops")
 ENGINE_BLOB="71fb59ad7d005b88e39cbeed4b3302c7f313bd06"
 CANDIDATE_HEAD="06038930003114ad4223f1d03784c5338e371af3"
 CANDIDATE_BLOB="29062b76d6b1fba65014e2a89b9566c3f93cdede"
-CANDIDATE_URL=(
-    "https://raw.githubusercontent.com/llhzx2018/vf-server-ops/"
-    + CANDIDATE_HEAD + "/lib/sql_diff_evidence.py"
-)
+# Private PR source cannot be fetched anonymously by CP2. This independent
+# preflight adapter reuses the pinned PUBLIC release113 schema parser and only
+# extends its READ-ONLY source line decoding; it does not claim exact candidate
+# binary identity or grant permission to import/cut over.
+RELEASE113_SQL_ADVISORY_BLOB="02a377c90279b924b9d589525c5edcb098bed263"
+SCHEMA_LINE_LIMIT=128*1024*1024
+_DML_LINE=re.compile(r"^(?:INSERT|REPLACE)\s+INTO\b",re.I)
 SCHEMA="vf-server-ops.server-migration.target-pull.v1"
 REMOTE=r'''
 import inventory,cloudpanel,os,sys
@@ -174,15 +177,60 @@ def verify_current_runtime():
     need(path.is_file() and not path.is_symlink()
          and blob(path.read_bytes())==ENGINE_BLOB,"RELEASE113_ENGINE_DRIFT")
 
-def fetch_pinned_candidate():
+def load_release113_schema_adapter():
+    """Load the installed public, SHA-pinned parser into a fresh module only."""
+    path=RUNTIME/"lib/sql_diff_evidence.py"
+    need(path.is_file() and not path.is_symlink()
+         and blob(path.read_bytes())==RELEASE113_SQL_ADVISORY_BLOB,
+         "RELEASE113_SQL_ADVISORY_DRIFT")
+    spec=importlib.util.spec_from_file_location("p07_released_sql_schema_parser",path)
+    need(spec is not None and spec.loader is not None,
+         "RELEASE113_SQL_ADVISORY_IMPORT_FAILED")
+    module=importlib.util.module_from_spec(spec)
     try:
-        with urllib.request.urlopen(CANDIDATE_URL,timeout=25) as response:
-            data=response.read(1024*1024)
-    except (OSError,ValueError):
-        raise Block("PINNED_CANDIDATE_FETCH_FAILED") from None
-    need(0<len(data)<1024*1024 and blob(data)==CANDIDATE_BLOB,
-         "PINNED_CANDIDATE_INTEGRITY_FAILED")
-    return data
+        spec.loader.exec_module(module)
+    except (ImportError,OSError,ValueError):
+        raise Block("RELEASE113_SQL_ADVISORY_IMPORT_FAILED") from None
+    need(callable(getattr(module,"_schema_statements",None))
+         and callable(getattr(module,"_read_lines",None))
+         and hasattr(module,"_SCHEMA_START")
+         and hasattr(module,"AdvisoryDiagnosticUnavailable"),
+         "RELEASE113_SQL_ADVISORY_CONTRACT_CHANGED")
+    return module
+
+
+def compatible_schema_lines(path, parser):
+    """Whole-stream validation: invalid UTF-8 only in unambiguous DML lines.
+
+    Original source is not modified, transcoded, repaired or imported. This is
+    *one way* schema-presence evidence only; DDL continuation with invalid
+    bytes fails rather than being silently skipped.
+    """
+    pending_ddl=False
+    try:
+        with gzip.open(path,"rt",encoding="utf-8",errors="surrogateescape") as h:
+            for raw in h:
+                if len(raw)>SCHEMA_LINE_LIMIT:
+                    raise parser.AdvisoryDiagnosticUnavailable(
+                        "SQL_SOURCE_LINE_TOO_LARGE")
+                line=raw.strip()
+                if any(0xDC80<=ord(char)<=0xDCFF for char in raw):
+                    if pending_ddl:
+                        raise parser.AdvisoryDiagnosticUnavailable(
+                            "SQL_SOURCE_NONUTF8_SCHEMA_CONTINUATION")
+                    if not _DML_LINE.match(raw.lstrip()):
+                        raise parser.AdvisoryDiagnosticUnavailable(
+                            "SQL_SOURCE_NONUTF8_OUTSIDE_KNOWN_DML")
+                if pending_ddl:
+                    if line.endswith(";"):
+                        pending_ddl=False
+                elif parser._SCHEMA_START.match(line):
+                    pending_ddl=not line.endswith(";")
+                yield raw
+    except (OSError,EOFError,UnicodeError) as exc:
+        raise parser.AdvisoryDiagnosticUnavailable(
+            "SQL_DIAGNOSTIC_INPUT_UNAVAILABLE") from exc
+
 
 def inspect_existing_site(domain,db):
     import inventory
@@ -194,40 +242,39 @@ def inspect_existing_site(domain,db):
     need(len(rows)==1 and db not in (rows[0].get("mysql_databases") or []),
          "CP2_TARGET_DATABASE_ALREADY_BOUND_OR_SITE_MISSING")
 
-def scan_candidate(module_bytes,archive):
-    with tempfile.TemporaryDirectory(prefix="p07-module-",dir="/root") as loc:
-        # This is a private transient module; never install candidate runtime.
-        candidate=Path(loc)/"sql_diff_evidence_candidate.py"
-        candidate.write_bytes(module_bytes)
-        spec=importlib.util.spec_from_file_location("p07_sql_diff_candidate",candidate)
-        need(spec is not None and spec.loader is not None,
-             "CANDIDATE_IMPORT_UNAVAILABLE")
-        module=importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        try:
-            count=module.require_nonempty_source_schema(archive)
-        except module.AdvisoryDiagnosticUnavailable as exc:
-            reason=str(exc)
-            allowed={
-                "SQL_DIAGNOSTIC_INPUT_UNAVAILABLE",
-                "SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA",
-                "SQL_SOURCE_NONUTF8_OUTSIDE_KNOWN_DML",
-                "SQL_SOURCE_NONUTF8_SCHEMA_CONTINUATION",
-                "SQL_SOURCE_LINE_TOO_LARGE",
-                "SQL_SCHEMA_STATEMENT_INCOMPLETE",
-                "SQL_SCHEMA_STATEMENT_TOO_LARGE",
-                "SQL_DUPLICATE_CREATE_TABLE",
-            }
-            print("CANDIDATE_SCHEMA_RESULT=BLOCKED",flush=True)
-            print("CANDIDATE_SCHEMA_REASON="+(
-                reason if reason in allowed else "OTHER_UNPROVEN"
-            ),flush=True)
-            return False
-    need(type(count) is int and count>0,
-         "CANDIDATE_SCHEMA_COUNT_INVALID")
-    print("CANDIDATE_SCHEMA_RESULT=PASS_PRESENCE_ONLY",flush=True)
-    print("CANDIDATE_SCHEMA_TABLE_COUNT="+str(count),flush=True)
+def scan_schema_adapter(parser,archive):
+    # This is a one-way schema presence probe, NOT candidate-byte parity,
+    # cross-engine compatibility, data parity, or import/cutover authorization.
+    old=parser._read_lines
+    try:
+        parser._read_lines=lambda path:compatible_schema_lines(path,parser)
+        tables,_other=parser._schema_statements(archive)
+        if not tables:
+            raise parser.AdvisoryDiagnosticUnavailable(
+                "SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA")
+    except parser.AdvisoryDiagnosticUnavailable as exc:
+        reason=str(exc)
+        allowed={
+            "SQL_DIAGNOSTIC_INPUT_UNAVAILABLE",
+            "SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA",
+            "SQL_SOURCE_NONUTF8_OUTSIDE_KNOWN_DML",
+            "SQL_SOURCE_NONUTF8_SCHEMA_CONTINUATION",
+            "SQL_SOURCE_LINE_TOO_LARGE",
+            "SQL_SCHEMA_STATEMENT_INCOMPLETE",
+            "SQL_SCHEMA_STATEMENT_TOO_LARGE",
+            "SQL_DUPLICATE_CREATE_TABLE",
+        }
+        print("SCHEMA_PRESENCE_RESULT=BLOCKED",flush=True)
+        print("SCHEMA_PRESENCE_REASON="+(
+            reason if reason in allowed else "OTHER_UNPROVEN"
+        ),flush=True)
+        return False
+    finally:
+        parser._read_lines=old
+    print("SCHEMA_PRESENCE_RESULT=PASS_ADVISORY_ONLY",flush=True)
+    print("SCHEMA_PRESENCE_TABLE_COUNT="+str(len(tables)),flush=True)
     return True
+
 
 def main():
     need(os.geteuid()==0,"CP2_ROOT_REQUIRED")
@@ -239,7 +286,7 @@ def main():
     sys.path.insert(0,str(RUNTIME/"lib"))
     import server_migration_pull as engine
     inspect_existing_site(DOMAIN,db)
-    candidate=fetch_pinned_candidate()
+    adapter=load_release113_schema_adapter()
     remote_file=(
         f"/var/lib/vf-server-ops/pull-source/{TAIL}/data/"
         f"www3-schema-{os.urandom(16).hex()}.sql.gz"
@@ -249,7 +296,9 @@ def main():
         "PYTHONDONTWRITEBYTECODE=1","python3","-B","-c",REMOTE,
         DOMAIN,db,remote_file,TAIL,
     ])
-    print("MODE=EXISTING_TAIL_CANDIDATE_SCHEMA_PROBE",flush=True)
+    print("MODE=EXISTING_TAIL_BYTE_PRESERVING_SCHEMA_ADVISORY",flush=True)
+    print("PRIVATE_PR_CANDIDATE_DOWNLOAD=NO",flush=True)
+    print("PRIVATE_PR_EXACT_BINARY_VERIFICATION=NOT_PERFORMED",flush=True)
     print("DATABASE_IMPORT=NO",flush=True)
     print("SOURCE_BUSINESS_WRITES=NO",flush=True)
     print("CP2_SITE_OR_DB_WRITES=NO",flush=True)
@@ -274,7 +323,7 @@ def main():
             engine.pull_path(tail["source"],remote_file,archive)
             need(archive.is_file() and not archive.is_symlink()
                  and archive.stat().st_size>1024,"SOURCE_GZIP_COPY_UNVERIFIED")
-            failed=not scan_candidate(candidate,archive)
+            failed=not scan_schema_adapter(adapter,archive)
     finally:
         if created:
             try:
