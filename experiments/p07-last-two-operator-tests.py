@@ -217,6 +217,10 @@ class CandidateWww3SchemaTests(unittest.TestCase):
         self.assertEqual(n.CANDIDATE_BLOB,"29062b76d6b1fba65014e2a89b9566c3f93cdede")
         self.assertEqual(n.DOMAIN,"www3.m3u8.one")
         self.assertEqual(n.ENGINE_BLOB,m.ENGINE_BLOB)
+        self.assertEqual(n.RELEASE113_SQL_ADVISORY_BLOB,
+                         "02a377c90279b924b9d589525c5edcb098bed263")
+        source=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay/lib/sql_diff_evidence.py"
+        self.assertEqual(n.blob(source.read_bytes()), n.RELEASE113_SQL_ADVISORY_BLOB)
 
     def test_no_target_database_create_import_or_resume_callsite(self):
         code=Path(__file__).with_name("p07-www3-candidate-schema-probe.py").read_text()
@@ -227,7 +231,12 @@ class CandidateWww3SchemaTests(unittest.TestCase):
                           "chmod(0o777", "shutil.rmtree("):
             self.assertNotIn(forbidden,code)
         self.assertIn('engine.pull_path(tail["source"],remote_file,archive)',code)
-        self.assertIn("candidate=fetch_pinned_candidate()",code)
+        self.assertIn("adapter=load_release113_schema_adapter()",code)
+        self.assertIn("SCHEMA_PRESENCE_RESULT=PASS_ADVISORY_ONLY",code)
+        self.assertIn("PRIVATE_PR_EXACT_BINARY_VERIFICATION=NOT_PERFORMED",code)
+        self.assertNotIn("urllib.request",code)
+        self.assertNotIn("CANDIDATE_URL=",code)
+        self.assertNotIn("fetch_pinned_candidate()",code)
         self.assertIn("SOURCE_TEMP_CLEANUP=",code)
         self.assertIn("CUTOVER_ALLOWED=NO",code)
 
@@ -306,5 +315,71 @@ class CandidateWww3SchemaTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code,23)
                 self.assertEqual(len(calls),1)
                 self.assertFalse(out.exists())
+
+
+    def test_actual_public_release_schema_parser_handles_only_safe_invalid_dml(self):
+        import gzip,io,contextlib,sys
+        n=self.module()
+        overlay=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay"
+        sys.path.insert(0,str(overlay/"lib"))
+        with mock.patch.object(n,"RUNTIME",overlay):
+            parser=n.load_release113_schema_adapter()
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/"source.sql.gz"
+            valid=(
+                b"SET NAMES utf8mb4;\nCREATE TABLE \`one\` (\`id\` INT);\n"
+                b"INSERT INTO \`one\` VALUES ('"+bytes([255])+b"');\n"
+                b"CREATE TABLE \`two\` (\`id\` INT);\n"
+                b"REPLACE INTO \`two\` VALUES ('"+bytes([254])+b"');\n"
+            )
+            with gzip.open(path,"wb") as handle:
+                handle.write(valid)
+            before=path.read_bytes()
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertTrue(n.scan_schema_adapter(parser,path))
+            self.assertIn("SCHEMA_PRESENCE_RESULT=PASS_ADVISORY_ONLY",out.getvalue())
+            self.assertIn("SCHEMA_PRESENCE_TABLE_COUNT=2",out.getvalue())
+            self.assertEqual(path.read_bytes(),before)
+            # No in-memory adaptation may leak into the released parser.
+            with self.assertRaises(parser.AdvisoryDiagnosticUnavailable):
+                parser._schema_statements(path)
+
+    def test_schema_adapter_rejects_invalid_ddl_unknown_dml_continuation_and_gzip(self):
+        import gzip,io,contextlib,sys
+        n=self.module()
+        overlay=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay"
+        sys.path.insert(0,str(overlay/"lib"))
+        with mock.patch.object(n,"RUNTIME",overlay):
+            parser=n.load_release113_schema_adapter()
+        rows=(
+            b"CREATE TABLE \`broken\` (\`id\` "+bytes([255])+b" INT);\n",
+            b"CREATE TABLE \`a\` (\nINSERT INTO \`bad\` VALUES ('"+
+                bytes([255])+b"');\n);\n",
+            b"CREATE TABLE \`a\` (\`id\` INT);\nUPDATE \`a\` SET id='"+
+                bytes([255])+b"';\n",
+            b"INSERT INTO \`a\` VALUES ('"+bytes([255])+b"');\n",
+            b"CREATE TABLE \`a\` (\`id\` INT);\n"+bytes([255])+b"INSERT INTO \`a\` VALUES(1);\n",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for index,data in enumerate(rows):
+                with self.subTest(index=index):
+                    path=Path(directory)/f"source-{index}.sql.gz"
+                    with gzip.open(path,"wb") as handle:
+                        handle.write(data)
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        self.assertFalse(n.scan_schema_adapter(parser,path))
+            path=Path(directory)/"source-corrupt.sql.gz"
+            path.write_bytes(b"\x1f\x8bnot-valid-gzip")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertFalse(n.scan_schema_adapter(parser,path))
+    
+    def test_private_product_cannot_be_downloaded_by_anonymous_operator(self):
+        n=self.module()
+        code=Path(__file__).with_name("p07-www3-candidate-schema-probe.py").read_text()
+        self.assertIn("PRIVATE_PR_CANDIDATE_DOWNLOAD=NO",code)
+        self.assertIn("PRIVATE_PR_EXACT_BINARY_VERIFICATION=NOT_PERFORMED",code)
+        self.assertNotIn("raw.githubusercontent.com/llhzx2018/vf-server-ops",code)
+        self.assertNotIn("urllib.request",code)
+        self.assertNotIn("curl ",code)
 
 if __name__=="__main__":unittest.main()
