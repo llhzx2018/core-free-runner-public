@@ -158,6 +158,50 @@ def read_copy_format(path):
         return "PLAIN_SQL",plain
     raise Block("TARGET_SCRATCH_EXPORT_FORMAT_UNPROVEN")
 
+def inspect_target_export_bytes(path,format_name):
+    """Validate the WHOLE exported stream; GZIP magic alone is not proof.
+
+    Distinguish gzip trailer/decompression errors from SQL-text UTF-8 errors.
+    Only sanitized fixed categories and whole-stream byte count leave CP2.
+    This never reads or prints row values, filenames, secrets or SQL fragments.
+    """
+    import codecs,zlib
+    need(format_name in ("GZIP","PLAIN_SQL"),"TARGET_EXPORT_FORMAT_UNKNOWN")
+    utf8=codecs.getincrementaldecoder("utf-8")("strict")
+    invalid=False
+    bytes_seen=0
+    reader=gzip.open if format_name=="GZIP" else open
+    try:
+        with reader(path,"rb") as stream:
+            while True:
+                block=stream.read(1024*1024)
+                if not block:break
+                bytes_seen+=len(block)
+                need(bytes_seen<=4*1024*1024*1024,
+                     "TARGET_DUMP_DECOMPRESSED_SIZE_LIMIT")
+                if not invalid:
+                    try:utf8.decode(block,final=False)
+                    except UnicodeDecodeError:invalid=True
+        if not invalid:
+            try:utf8.decode(b"",final=True)
+            except UnicodeDecodeError:invalid=True
+    except EOFError:
+        return ("TRUNCATED","UNPROVEN",bytes_seen)
+    except gzip.BadGzipFile as error:
+        # Never return the exception itself; it can contain bytes of SQL.
+        msg=str(error)
+        kind=("CRC_FAILED" if "CRC check failed" in msg
+              else "SIZE_TRAILER_FAILED" if "Incorrect length" in msg
+              else "BAD_GZIP_STREAM")
+        return (kind,"UNPROVEN",bytes_seen)
+    except zlib.error:
+        return ("DEFLATE_INVALID","UNPROVEN",bytes_seen)
+    except OSError:
+        return ("READ_ERROR","UNPROVEN",bytes_seen)
+    need(bytes_seen>0,"TARGET_DUMP_EMPTY_AFTER_DECOMPRESSION")
+    return ("PASS","INVALID" if invalid else "VALID",bytes_seen)
+
+
 def try_fingerprint(module,name,a,b):
     fun=getattr(module,name,None)
     if not callable(fun):return "UNAVAILABLE"
@@ -412,6 +456,20 @@ def run():
         print("SCRATCH_EXPORT_READONLY=COMPLETE",flush=True)
         format_name,compare_path=read_copy_format(target)
         print("SCRATCH_EXPORT_FORMAT="+format_name,flush=True)
+        stream_status,utf8_status,uncompressed_bytes=inspect_target_export_bytes(
+            compare_path,format_name
+        )
+        print("TARGET_EXPORT_STREAM_INTEGRITY="+stream_status,flush=True)
+        print("TARGET_EXPORT_UTF8="+utf8_status,flush=True)
+        print("TARGET_EXPORT_SQL_BYTES="+str(uncompressed_bytes),flush=True)
+        if stream_status!="PASS":
+            print("SCRATCH_PARITY_CLASS=TARGET_EXPORT_BINARY_UNPROVEN",flush=True)
+            print("SCRATCH_STATIC_COPY_PARITY=NOT_PROVEN",flush=True)
+            return 13
+        if utf8_status!="VALID":
+            print("SCRATCH_PARITY_CLASS=TARGET_EXPORT_UTF8_UNPROVEN",flush=True)
+            print("SCRATCH_STATIC_COPY_PARITY=NOT_PROVEN",flush=True)
+            return 13
         explain_advisory(imported,compare_path)
         for label,fun in (
             ("STRUCTURE","sql_structure_fingerprint"),
