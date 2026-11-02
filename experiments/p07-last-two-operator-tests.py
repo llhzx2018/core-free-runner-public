@@ -896,6 +896,159 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                 with self.assertRaisesRegex(m.Stop,"SOURCE_UNPROVEN_SIDE_EFFECTS"):
                     m.strict_scope(dump)
 
+    def test_quarantine_copy_removes_only_13_verified_dynamic_lines(self):
+        import gzip,sys
+        m=self.module()
+        overlay=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay/lib"
+        sys.path.insert(0,str(overlay))
+        import sql_diff_evidence
+        header=(
+            "/*!50003 SELECT COUNT(*) INTO @found FROM INFORMATION_SCHEMA.TABLES "
+            "WHERE TABLE_SCHEMA='db' AND TABLE_NAME='table' */;\n"
+        )
+        def group(index,yes):
+            return (
+                "/*!50003 SET @q"+str(index)+"=IF(@found, '"+yes+"', 'SELECT 1') */;\n"
+                "/*!50003 PREPARE p"+str(index)+" FROM @q"+str(index)+" */;\n"
+                "/*!50003 EXECUTE p"+str(index)+" */;\n"
+                "/*!50003 DEALLOCATE PREPARE p"+str(index)+" */;\n"
+            )
+        source=(
+            "-- static SQL preserved byte for byte\n"
+            "CREATE TABLE real (id INT);\n"+header+
+            group(1,"SELECT 1; SELECT 2")+
+            "INSERT INTO real VALUES(1);\n"+
+            group(2,"SET SESSION SQL_NOTES = @backup + 1")+
+            group(3,"SET @session = @old + 1")+
+            "INSERT INTO real VALUES(2);\n"
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            before=Path(folder)/"source.sql.gz"
+            output=Path(folder)/"quarantined.sql.gz"
+            with gzip.open(before,"wt",encoding="utf-8") as stream:
+                stream.write(source)
+            parsed=sql_diff_evidence.dynamic_guard_syntax_counts(before)
+            self.assertEqual(parsed["recognized_unsafe"],3)
+            self.assertEqual(parsed["unsafe_yes_branches"],3)
+            self.assertEqual(parsed["unsafe_no_branches"],0)
+            digest=m.make_quarantined_sql(before,output)
+            self.assertEqual(
+                digest,__import__("hashlib").sha256(output.read_bytes()).hexdigest()
+            )
+            with gzip.open(output,"rt",encoding="utf-8") as stream:
+                remaining=stream.read()
+            self.assertEqual(remaining,
+                "-- static SQL preserved byte for byte\n"
+                "CREATE TABLE real (id INT);\n"
+                "INSERT INTO real VALUES(1);\n"
+                "INSERT INTO real VALUES(2);\n")
+            with gzip.open(before,"rt",encoding="utf-8") as stream:
+                self.assertEqual(stream.read(),source)
+            with mock.patch.object(sql_diff_evidence,
+                    "require_nonempty_source_schema",return_value=157):
+                self.assertIsNone(m.strict_scope(output,quarantined=True))
+                with gzip.open(output,"wt",encoding="utf-8") as stream:
+                    stream.write(remaining+"UPDATE real SET id=99;\n")
+                with self.assertRaisesRegex(
+                    m.Stop,"QUARANTINE_STATIC_SQL_UNPROVEN"
+                ):
+                    m.strict_scope(output,quarantined=True)
+
+            for altered in (
+                source.replace("/*!50003 DEALLOCATE PREPARE p2 */;\n",""),
+                source.replace("/*!50003 PREPARE p1 FROM @q1 */;",
+                               "/*!50003 PREPARE p1 FROM @different */;"),
+                source.replace("@q3=IF(@found,","@q3=IF(@notfound,"),
+                source.replace("/*!50003 EXECUTE p1 */;",
+                               "/*!50003 EXECUTE another */;"),
+            ):
+                with gzip.open(before,"wt",encoding="utf-8") as stream:
+                    stream.write(altered)
+                output.unlink()
+                with self.assertRaises(m.Stop):
+                    m.make_quarantined_sql(before,output)
+                self.assertFalse(output.exists())
+
+    def test_quarantined_scratch_mode_has_distinct_identity_and_no_full_parity(self):
+        import contextlib,gzip,io,sys,subprocess,types
+        m=self.module()
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            marker=root/"quarantine-receipt.json"
+            raw=(b"CREATE TABLE demo (v INT);\n" +
+                 b"".join(b"INSERT INTO demo VALUES ("+str(i).encode()+b");\n"
+                          for i in range(300)))
+            blob=gzip.compress(raw,mtime=0)
+            sha=__import__("hashlib").sha256(blob).hexdigest()
+            name="www3-hex-"+("a"*32)+".sql.gz"
+            tail={"source":{"host":"old.example"},"target_server_identity":"target",
+                  "source_runtime_path":"/source/runtime"}
+            base=types.SimpleNamespace(
+                verify_state=lambda:(tail,"original"),
+                verify_current_runtime=lambda:None,
+                RUNTIME=root,DOMAIN="www3.m3u8.one",TAIL="pull-synthetic",
+                load_release113_schema_adapter=lambda:object(),
+                inspect_existing_site=lambda *args:None,
+                strict_hex_export_utf8=lambda path:True,
+                scan_schema_adapter=lambda *args,**kwargs:True)
+            recorded=[]
+            engine=types.ModuleType("server_migration_pull")
+            engine.PullMigrationError=type("PullMigrationError",(Exception,),{})
+            engine.target_identity=lambda:"target"
+            engine.source_remote=lambda *args,**kwargs:subprocess.CompletedProcess(
+                [],0,"EXISTING_HEX=OWNER_SCOPED\nHEX_NAME="+name+
+                "\nHEX_BYTES="+str(len(blob))+"\nHEX_SHA256="+sha+"\n","")
+            engine.pull_path=lambda src,remote,path:Path(path).write_bytes(blob)
+            engine.compare_database_dumps=lambda *args:"CANONICAL_SQL_EXACT"
+            cp=types.ModuleType("cloudpanel")
+            cp.CloudPanelError=type("CloudPanelError",(Exception,),{})
+            cp.add_database=lambda *args:recorded.append("create")
+            cp.export_database=lambda *args:Path(args[1]).write_bytes(b"fixture")
+            inv=types.ModuleType("inventory")
+            inv.build_manifest=lambda *args:{"sites":[]}
+            real_tmp=tempfile.TemporaryDirectory
+            def private_tmp(*args,**kwargs):
+                kwargs["dir"]=root
+                return real_tmp(*args,**kwargs)
+            def save(path,record,first=False):
+                if first:self.assertFalse(marker.exists())
+                marker.write_text(__import__("json").dumps(record))
+                recorded.append(record["status"])
+            def sanitise(before,after):
+                recorded.append("transform")
+                after.write_bytes(before.read_bytes())
+                return sha
+            def import_sql(args,env,dbname,source):
+                recorded.append("import")
+                self.assertEqual(source.name,"quarantined.sql.gz")
+                self.assertEqual(dbname,"quarantine-db")
+                self.assertTrue(marker.exists())
+            with mock.patch.dict(sys.modules,{
+                       "server_migration_pull":engine,
+                       "cloudpanel":cp,"inventory":inv}),\
+                 mock.patch.object(m,"load_helper",return_value=base),\
+                 mock.patch.object(m.os,"geteuid",return_value=0),\
+                 mock.patch.object(sys,"argv",["script","--stage-www3-quarantine-scratch-only"]),\
+                 mock.patch.object(m,"scratch_name",return_value=("quarantine-db","qu","secret")),\
+                 mock.patch.object(m,"absent_sql",return_value="/usr/bin/mysql"),\
+                 mock.patch.object(m,"receipt_path",return_value=marker),\
+                 mock.patch.object(m,"save",side_effect=save),\
+                 mock.patch.object(m,"strict_scope"),\
+                 mock.patch.object(m,"make_quarantined_sql",side_effect=sanitise),\
+                 mock.patch.object(m,"restricted_user",
+                    return_value=(["mysql"],{"MYSQL_PWD":"secret"})),\
+                 mock.patch.object(m,"import_only_scratch",side_effect=import_sql),\
+                 mock.patch.object(m.tempfile,"TemporaryDirectory",side_effect=private_tmp),\
+                 contextlib.redirect_stdout(io.StringIO()) as logged:
+                self.assertEqual(m.run(),0)
+            printed=logged.getvalue()
+            self.assertIn("QUARANTINED_ADVISORY_NOT_ACTIVATED",printed)
+            self.assertNotIn("SCRATCH_PARITY=PASS",printed)
+            self.assertIn("QUARANTINE_ORIGINAL_SQL_EQUIVALENCE=NOT_PROVEN",printed)
+            self.assertEqual(__import__("json").loads(marker.read_text())["quarantined_dynamic_groups"],3)
+            self.assertLess(recorded.index("transform"),recorded.index("create"))
+            self.assertLess(recorded.index("create"),recorded.index("import"))
+
     def test_release113_strict_scope_accepts_safe_and_rejects_unsafe(self):
         import gzip,sys
         m=self.module()
