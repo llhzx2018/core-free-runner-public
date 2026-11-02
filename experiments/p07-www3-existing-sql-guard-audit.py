@@ -6,7 +6,7 @@ Never print SQL text, row data, table names, source host or credentials.
 Only bounded fixed categories and numbers may leave this script.
 """
 from __future__ import annotations
-import hashlib,importlib.util,os,sys,tempfile
+import gzip,hashlib,importlib.util,os,re,sys,tempfile
 from pathlib import Path
 
 HELPER=Path(__file__).with_name("p07-www3-candidate-schema-probe.py")
@@ -27,6 +27,61 @@ def module_from_pinned(file,expected,label):
     obj=importlib.util.module_from_spec(spec)
     spec.loader.exec_module(obj)
     return obj
+
+def bounded_dynamic_flow_shape(path, verifier):
+    """Fixed-only source grammar evidence; no SQL, table, variable, or digest."""
+    summary=verifier.sql_dynamic_guard_flow_diagnostic(path)
+    pattern=(r"^SQL_GUARD_FLOW_V1 "
+             r"(?:probe|assignment|safe_assignment|prepare|execute|deallocate|"
+             r"unknown_set|unknown_control)=[0-9]{1,8}(?: "
+             r"(?:probe|assignment|safe_assignment|prepare|execute|deallocate|"
+             r"unknown_set|unknown_control)=[0-9]{1,8}){7} "
+             r"recognized=[0-9]{1,8} outcome="
+             r"(?:UNKNOWN_CONTROL_GRAMMAR|UNSAFE_BRANCH|"
+             r"NO_COMPLETE_DYNAMIC_GROUP|UNBALANCED_STAGES|"
+             r"SEQUENCE_REJECTED|RECOGNIZED)$")
+    need(isinstance(summary,str) and len(summary)<512
+         and re.fullmatch(pattern,summary),
+         "SOURCE_GUARD_FLOW_FORMAT_UNPROVEN")
+    totals={name:0 for name in ("RAW","MYSQL_4_TO_7","MYSQL_8_PLUS",
+                                "MARIADB","UNKNOWN_VERSION")}
+    probes={"MYSQL_8_PLUS":0,"MYSQL_4_TO_7":0,"MARIADB":0,"RAW":0}
+    assigns=dict(probes)
+    header=re.compile(r"^/\*(?P<flavor>!|M!)(?P<version>[0-9]{5,6})\s+"
+                      r"(?P<body>.+?)\s*\*/;?$",re.I)
+    first=re.compile(r"^(?P<verb>PREPARE|EXECUTE|DEALLOCATE)"
+                     r"(?:\s+|$)",re.I)
+    read=re.compile(r"^(?:SELECT\s+COUNT\s*\(\s*\*\s*\)\s+INTO|"
+                    r"SET\s+@[a-z_])",re.I)
+    try:
+        with gzip.open(path,"rt",encoding="utf-8",errors="strict") as dump:
+            for raw in dump:
+                line=raw.strip()
+                matched=header.fullmatch(line)
+                body=matched.group("body") if matched else line
+                version=int(matched.group("version")) if matched else None
+                flavor=matched.group("flavor") if matched else ""
+                if flavor=="M!":
+                    kind="MARIADB"
+                elif version is None:
+                    kind="RAW"
+                elif 40000<=version<80000:
+                    kind="MYSQL_4_TO_7"
+                elif 80000<=version<=999999:
+                    kind="MYSQL_8_PLUS"
+                else:
+                    kind="UNKNOWN_VERSION"
+                if first.match(body):
+                    totals[kind]+=1
+                if read.match(body):
+                    if body.upper().startswith("SELECT"):
+                        probes[kind]+=1
+                    elif body.upper().startswith("SET"):
+                        assigns[kind]+=1
+    except (OSError,EOFError,UnicodeError):
+        raise Block("SOURCE_GUARD_FLOW_SCAN_UNAVAILABLE") from None
+    return summary, totals, probes, assigns
+
 
 def execute():
     need(os.geteuid()==0 and sys.argv[1:]==["--audit-existing-www3-side-effects-only"],
@@ -60,6 +115,16 @@ def execute():
         )
         need(default==analyzed and analyzed and results,
              "SIDE_EFFECT_AUDIT_INCONSISTENT_OR_NO_LONGER_REPRODUCIBLE")
+        summary,controls,probes,assignments=bounded_dynamic_flow_shape(
+            sql,verify
+        )
+        print(summary,flush=True)
+        for label in ("RAW","MYSQL_4_TO_7","MYSQL_8_PLUS","MARIADB",
+                      "UNKNOWN_VERSION"):
+            print("DYNAMIC_CONTROL_"+label+"="+str(controls[label]),flush=True)
+        for label in ("RAW","MYSQL_4_TO_7","MYSQL_8_PLUS","MARIADB"):
+            print("DYNAMIC_PROBE_"+label+"="+str(probes[label]),flush=True)
+            print("DYNAMIC_ASSIGN_"+label+"="+str(assignments[label]),flush=True)
         print("SIDE_EFFECT_GUARD=BLOCKED_REPRODUCED",flush=True)
         print("SIDE_EFFECT_FINDINGS_REPORTED="+str(len(results)),flush=True)
         for index,(reason,line_number) in enumerate(results,1):
