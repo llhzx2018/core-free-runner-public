@@ -962,4 +962,104 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                 self.assertNotIn("app-config",json.dumps(recorded))
 
 
+
+class SourceLinkReadOnlyTests(unittest.TestCase):
+    def module(self):
+        script=Path(__file__).with_name("p07-www3-source-link-readonly.py")
+        spec=importlib.util.spec_from_file_location("p07_www3_source_link_test",script)
+        m=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def test_read_only_source_probe_has_no_write_or_cleanup_command(self):
+        code=Path(__file__).with_name("p07-www3-source-link-readonly.py").read_text()
+        for forbidden in (
+            "engine.pull_path(", "cloudpanel.add_database(", "cloudpanel.import_database(",
+            "engine.resume_prepare_migration(", "engine.prepare_migration(",
+            "engine.save_state(", "engine.freeze", "rm -f", "unlink(",
+            "engine.cutover_migration(", "cloudpanel.delete_database(",
+        ):
+            self.assertNotIn(forbidden,code)
+        m=self.module()
+        self.assertEqual(m.PIN,"8f640e7505c5b49ad5a7574d82c0030eb6e7b884")
+        self.assertIsNotNone(m.load_helper())
+        self.assertEqual(m.classify("Permission denied (publickey)",255),
+                         "SSH_AUTH_DENIED")
+        self.assertEqual(m.classify("Host key verification failed",255),
+                         "SSH_HOST_KEY_UNVERIFIED")
+        self.assertEqual(m.classify("Connection timed out",255),
+                         "SSH_CONNECTION_TIMEOUT")
+        self.assertEqual(m.classify("No route to host",255),
+                         "SSH_NETWORK_UNREACHABLE")
+
+    def test_ssh_transport_failure_is_read_only_and_never_claims_cleanup(self):
+        import contextlib,io,sys,subprocess,types
+        m=self.module()
+        source={"identity_file":None,"ssh_user":"root"}
+        tail={"target_server_identity":"cp2","source":source}
+        base=types.SimpleNamespace(
+            verify_state=lambda:(tail,"legacy_db"),
+            verify_current_runtime=lambda:None,
+            RUNTIME=Path("/opt/vf-server-ops"),
+            inspect_existing_site=lambda *args:None,
+            DOMAIN="www3.m3u8.one",TAIL="pull-synthetic"
+        )
+        engine=types.ModuleType("server_migration_pull")
+        engine.target_identity=lambda:"cp2"
+        class PullMigrationError(Exception):pass
+        engine.PullMigrationError=PullMigrationError
+        calls=[]
+        def fail(src,command,**kwargs):
+            calls.append(command)
+            return subprocess.CompletedProcess([],255,"","Permission denied (publickey)")
+        engine.source_remote=fail
+        with mock.patch.dict(sys.modules,{"server_migration_pull":engine}),\
+             mock.patch.object(m,"load_helper",return_value=base),\
+             mock.patch.object(m.os,"geteuid",return_value=0),\
+             mock.patch.object(sys,"argv",["script","--read-only-source-ssh-and-temp-audit"]),\
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(m.run(),13)
+        printed=output.getvalue()
+        self.assertIn("SOURCE_SSH_REASON=SSH_AUTH_DENIED",printed)
+        self.assertIn("SOURCE_HEX_TEMP_AUDIT=UNPROVEN",printed)
+        self.assertIn("SOURCE_TEMP_CLEANUP=NOT_ATTEMPTED",printed)
+        self.assertEqual(len(calls),1)
+        self.assertIn("printf",calls[0])
+
+    def test_ssh_success_reports_only_bounded_temp_counts(self):
+        import contextlib,io,sys,subprocess,types
+        m=self.module()
+        source={"identity_file":None,"ssh_user":"root"}
+        tail={"target_server_identity":"cp2","source":source}
+        base=types.SimpleNamespace(
+            verify_state=lambda:(tail,"legacy_db"),
+            verify_current_runtime=lambda:None,
+            RUNTIME=Path("/opt/vf-server-ops"),
+            inspect_existing_site=lambda *args:None,
+            DOMAIN="www3.m3u8.one",TAIL="pull-synthetic"
+        )
+        engine=types.ModuleType("server_migration_pull")
+        engine.target_identity=lambda:"cp2"
+        class PullMigrationError(Exception):pass
+        engine.PullMigrationError=PullMigrationError
+        calls=[]
+        def ok(src,command,**kwargs):
+            calls.append(command)
+            result=("P07_SSH_READONLY_OK" if len(calls)==1 else
+                    "SOURCE_HEX_TEMP_AUDIT=PASS\n"
+                    "SOURCE_HEX_TEMP_FILES=1\nSOURCE_HEX_TEMP_UNSAFE=0\n")
+            return subprocess.CompletedProcess([],0,result,"")
+        engine.source_remote=ok
+        with mock.patch.dict(sys.modules,{"server_migration_pull":engine}),\
+             mock.patch.object(m,"load_helper",return_value=base),\
+             mock.patch.object(m.os,"geteuid",return_value=0),\
+             mock.patch.object(sys,"argv",["script","--read-only-source-ssh-and-temp-audit"]),\
+             contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(m.run(),0)
+        self.assertIn("SOURCE_HEX_TEMP_FILES=1",output.getvalue())
+        self.assertIn("SOURCE_HEX_TEMP_AUDIT=PASS",output.getvalue())
+        self.assertIn("SOURCE_TEMP_CLEANUP=NOT_ATTEMPTED",output.getvalue())
+        self.assertEqual(len(calls),2)
+        self.assertIn("python3 -B",calls[1])
+
 if __name__=="__main__":unittest.main()
