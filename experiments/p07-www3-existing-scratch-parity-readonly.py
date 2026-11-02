@@ -444,11 +444,194 @@ def _column_attribute_delta_groups(source: str, target: str) -> set[str]:
     return changed
 
 
+
+def _attribute_detail_categories(source: str, target: str) -> set[str]:
+    """More granular risk classification. Never proves SQL compatibility.
+
+    Parsing is deliberately conservative. Unknown SQL, syntactic ambiguity,
+    and different evaluated expressions remain unapproved; no values leak.
+    """
+    def scan(value):
+        typ = _ATTR_TYPE.match(value)
+        if not typ:
+            return None
+        tokens = _ATTR_TOKENS.findall(value[typ.end():])
+        known = {key: [] for key in _ATTR_GROUPS if key != "OTHER_OR_UNPARSED"}
+        unknown = []
+        i = 0
+        while i < len(tokens):
+            head = tokens[i].upper()
+            following = tokens[i + 1].upper() if i + 1 < len(tokens) else ""
+            category = None
+            end = i + 1
+            if head == "NOT" and following == "NULL":
+                category, end = "NULLABILITY", i + 2
+            elif head == "NULL":
+                category = "NULLABILITY"
+            elif head == "DEFAULT" or head == "ON" and following == "UPDATE":
+                category = "DEFAULT" if head == "DEFAULT" else "ON_UPDATE"
+                j = i + (1 if head == "DEFAULT" else 2)
+                if j < len(tokens):
+                    if tokens[j] == "(":
+                        depth = 0
+                        while j < len(tokens):
+                            if tokens[j] == "(":
+                                depth += 1
+                            elif tokens[j] == ")":
+                                depth -= 1
+                            j += 1
+                            if depth == 0:
+                                break
+                    else:
+                        j += 1
+                        if j < len(tokens) and tokens[j] == "(":
+                            depth = 0
+                            while j < len(tokens):
+                                if tokens[j] == "(":
+                                    depth += 1
+                                elif tokens[j] == ")":
+                                    depth -= 1
+                                j += 1
+                                if depth == 0:
+                                    break
+                end = j
+            elif head in ("COLLATE", "CHARSET", "COMMENT"):
+                category = {"COLLATE": "COLLATION"}.get(head, head)
+                end = min(i + 2, len(tokens))
+            elif head == "CHARACTER" and following == "SET":
+                category, end = "CHARSET", min(i + 3, len(tokens))
+            elif head == "AUTO_INCREMENT":
+                category = "AUTO_INCREMENT"
+            elif head in ("UNSIGNED", "ZEROFILL"):
+                category = "UNSIGNED_ZEROFILL"
+            if category:
+                known[category].append(tuple(tokens[i:end]))
+            else:
+                unknown.append(tokens[i])
+            i = max(i + 1, end)
+        return known, tuple(unknown)
+
+    left = scan(source)
+    right = scan(target)
+    if left is None or right is None:
+        return {"PARSER_UNPROVEN"}
+    l_groups, l_other = left
+    r_groups, r_other = right
+    result = set()
+    if l_other != r_other:
+        result.add("UNRECOGNIZED_TOKENS_CHANGED")
+    for key in l_groups:
+        before = l_groups[key]
+        after = r_groups[key]
+        if before == after:
+            continue
+        if len(before) != 1 or len(after) != 1:
+            result.add(key + "_PRESENCE_OR_MULTIPLE")
+            continue
+        a = before[0]
+        b = after[0]
+        if key in ("DEFAULT", "ON_UPDATE"):
+            expr_a, expr_b = a[1 if key == "DEFAULT" else 2:], b[1 if key == "DEFAULT" else 2:]
+            if len(expr_a) == len(expr_b) == 1:
+                xa, xb = expr_a[0], expr_b[0]
+                # Same digits, different quote syntax: not automatically safe.
+                numeric = re.compile(r"[-+]?(?:[0-9]+|[0-9]*\.[0-9]+)")
+                qa = xa[1:-1] if len(xa) > 1 and xa[0] == xa[-1] == "'" else xa
+                qb = xb[1:-1] if len(xb) > 1 and xb[0] == xb[-1] == "'" else xb
+                if qa == qb and numeric.fullmatch(qa) and xa != xb:
+                    result.add(key + "_NUMERIC_QUOTING_UNPROVEN")
+                    continue
+            result.add(key + "_EXPRESSION_OR_LITERAL_CHANGED")
+        else:
+            result.add(key + "_CHANGED")
+    if not result and source != target:
+        result.add("PRESENTATION_OR_CASE_UNPROVEN")
+    return result
+
+
+_COLLATION_TOKEN = re.compile(
+    r"(?:^|\s)(?:COLLATE)\s*=\s*(?P<value>[A-Za-z0-9_]+)(?=\s|;|$)",
+    re.I,
+)
+_COLLATION_RISK_GROUPS = (
+    "SOURCE_ONLY", "TARGET_ONLY", "CASE_ONLY",
+    "MYSQL0900_TO_UCA1400", "UCA1400_TO_MYSQL0900",
+    "SAME_CHARSET_DIFFERENT_RULE", "DIFFERENT_CHARSET",
+    "OTHER_OR_UNPROVEN",
+)
+
+
+def _collation_risk_class(source: str, target: str) -> str:
+    """Table-suffix risk summary only; no migration approval or SQL output."""
+    a = _COLLATION_TOKEN.findall(source)
+    b = _COLLATION_TOKEN.findall(target)
+    if len(a) > 1 or len(b) > 1:
+        return "OTHER_OR_UNPROVEN"
+    if not a and b:
+        return "TARGET_ONLY"
+    if a and not b:
+        return "SOURCE_ONLY"
+    if not a and not b:
+        return "OTHER_OR_UNPROVEN"
+    x, y = a[0], b[0]
+    if x.lower() == y.lower():
+        return "CASE_ONLY" if x != y else "OTHER_OR_UNPROVEN"
+    if "0900" in x.lower() and "uca1400" in y.lower():
+        return "MYSQL0900_TO_UCA1400"
+    if "uca1400" in x.lower() and "0900" in y.lower():
+        return "UCA1400_TO_MYSQL0900"
+    def charset(value):
+        if value.lower().startswith("utf8mb4_"):
+            return "utf8mb4"
+        if value.lower().startswith("utf8_"):
+            return "utf8"
+        if value.lower().startswith("latin1_"):
+            return "latin1"
+        return None
+    cx, cy = charset(x), charset(y)
+    if cx is None or cy is None:
+        return "OTHER_OR_UNPROVEN"
+    return "SAME_CHARSET_DIFFERENT_RULE" if cx == cy else "DIFFERENT_CHARSET"
+
+
+def explain_collation_risk(source, target, evidence):
+    """Classify all parsed table option differences, no SQL/table names."""
+    from collections import Counter
+    try:
+        l = evidence._schema_statements(source)[0]
+        r = evidence._schema_statements(target)[0]
+        if len(l) != 157 or set(l) != set(r):
+            raise ValueError("TABLE_SCOPE_UNPROVEN")
+        count = Counter()
+        ordinals = []
+        for index, name in enumerate(sorted(l), 1):
+            aa = evidence._split_create_table(l[name])
+            bb = evidence._split_create_table(r[name])
+            if aa is None or bb is None:
+                raise ValueError("SUFFIX_UNPROVEN")
+            if aa[2] == bb[2]:
+                continue
+            option_classes = evidence._table_option_change_classes(aa[2], bb[2])
+            if "COLLATION" not in option_classes:
+                continue
+            count[_collation_risk_class(aa[2], bb[2])] += 1
+            ordinals.append(index)
+        print("ADVISORY_COLLATION_RISK=CLASSIFIED_NOT_APPROVED", flush=True)
+        for label in _COLLATION_RISK_GROUPS:
+            print("ADVISORY_COLLATION_" + label + "_TABLES=" + str(count[label]), flush=True)
+        print("ADVISORY_COLLATION_CHANGED_TABLE_ORDINALS=" +
+              (",".join(map(str, ordinals[:40])) if ordinals else "NONE"), flush=True)
+    except Exception:
+        print("ADVISORY_COLLATION_RISK=UNPROVEN", flush=True)
+
+
+
 def explain_column_change_classes(source,target,evidence):
     """Classify parsed column changes; never approve type/attribute deltas."""
     from collections import Counter
     classes=Counter()
     attribute_classes=Counter()
+    detail_classes=Counter()
     ordinals=[]
     try:
         left=evidence._schema_statements(source)[0]
@@ -480,6 +663,7 @@ def explain_column_change_classes(source,target,evidence):
             a=index(left[table]);b=index(right[table])
             categories=set()
             attribute_categories=set()
+            detail_categories=set()
             if set(a)!=set(b):
                 categories.add("NAME_SET_CHANGED")
             for col in a.keys() & b.keys():
@@ -494,10 +678,12 @@ def explain_column_change_classes(source,target,evidence):
                 else:
                     categories.add("ATTRIBUTES_CHANGED")
                     attribute_categories.update(_column_attribute_delta_groups(a[col],b[col]))
+                    detail_categories.update(_attribute_detail_categories(a[col],b[col]))
             if categories:
                 ordinals.append(ordinal)
                 for kind in categories:classes[kind]+=1
                 for kind in attribute_categories:attribute_classes[kind]+=1
+                for kind in detail_categories:detail_classes[kind]+=1
         print("ADVISORY_COLUMN_CLASSES=CLASSIFIED_NOT_APPROVED",flush=True)
         for name in ("NAME_SET_CHANGED","TYPE_FAMILY_CHANGED",
                      "TYPE_PARAMETER_CHANGED","ATTRIBUTES_CHANGED",
@@ -505,6 +691,17 @@ def explain_column_change_classes(source,target,evidence):
             print("ADVISORY_COLUMN_"+name+"="+str(classes[name]),flush=True)
         for name in _ATTR_GROUPS:
             print("ADVISORY_ATTRIBUTE_"+name+"_TABLES="+str(attribute_classes[name]),flush=True)
+        for key in (
+            "DEFAULT_NUMERIC_QUOTING_UNPROVEN",
+            "DEFAULT_EXPRESSION_OR_LITERAL_CHANGED",
+            "DEFAULT_PRESENCE_OR_MULTIPLE",
+            "ON_UPDATE_EXPRESSION_OR_LITERAL_CHANGED",
+            "ON_UPDATE_PRESENCE_OR_MULTIPLE",
+            "UNRECOGNIZED_TOKENS_CHANGED",
+            "PRESENTATION_OR_CASE_UNPROVEN",
+            "PARSER_UNPROVEN",
+        ):
+            print("ADVISORY_DETAIL_" + key + "_TABLES=" + str(detail_classes[key]), flush=True)
         print("ADVISORY_COLUMN_CHANGED_TABLE_ORDINALS="+
               (",".join(str(i) for i in ordinals[:40]) if ordinals else "NONE"),
               flush=True)
@@ -575,6 +772,7 @@ def explain_advisory(source,target):
                 print("ADVISORY_AUTO_INCREMENT_"+name+"="+str(n),flush=True)
         print("ADVISORY_SCHEMA_DIFF_IS_NOT_COMPATIBILITY_APPROVAL=YES",flush=True)
         explain_column_change_classes(source,target,evidence)
+        explain_collation_risk(source,target,evidence)
     try:
         results=evidence.data_content_evidence(source,target)
         value=results.get("comparison")
