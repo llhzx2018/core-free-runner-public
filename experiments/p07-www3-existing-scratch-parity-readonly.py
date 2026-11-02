@@ -238,6 +238,24 @@ def explain_advisory(source,target):
         print("ADVISORY_SCHEMA=UNPROVEN",flush=True)
         return
     print("ADVISORY_SCHEMA=CLASSIFIED",flush=True)
+    import verify
+    for label,path in (("SOURCE",source),("TARGET",target)):
+        try:
+            verify.sql_structure_fingerprint(path)
+            state="PARSED"
+        except verify.RestoreVerifyError as error:
+            reason=str(error)
+            state=(
+                "CONDITIONAL_DDL" if reason.startswith("conditional SQL DDL")
+                else "CUSTOM_DELIMITER" if reason.startswith("custom SQL delimiters")
+                else "UNTERMINATED_SCHEMA" if reason.startswith("unterminated SQL schema")
+                else "NO_COMPARABLE_SCHEMA" if reason.startswith("no comparable SQL schema")
+                else "SCHEMA_PARSE_UNPROVEN"
+            )
+        except Exception:
+            state="SCHEMA_PARSE_UNPROVEN"
+        print("ADVISORY_"+label+"_STRUCTURE_PARSER="+state,flush=True)
+
     for name in ("source_tables","target_tables","common_tables",
                  "mismatched_tables","changed_columns","changed_indexes",
                  "changed_options","source_only_tables","target_only_tables"):
