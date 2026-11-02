@@ -1,5 +1,5 @@
 """No real VPS, SSH, or database; negative bounds for last-two staging."""
-import copy, importlib.util, json
+import copy, importlib.util, json, os, stat, tempfile
 from pathlib import Path
 from unittest import mock
 import unittest
@@ -115,6 +115,63 @@ class Tests(unittest.TestCase):
         self.assertIn('descendant.get("partial_parent_migration_id") == ORIGINAL',source)
         self.assertIn('entry.get("migration_id")!=NINE_CHILD',source)
         self.assertNotIn("remainder_parent=NINE_CHILD",source)
+
+    def test_missing_recovery_directory_initialized_privately(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent=Path(directory)/"vf-server-ops"
+            parent.mkdir(mode=0o700)
+            target=parent/"operator-recovery"
+            with mock.patch.object(m,"RECOVERY_DIR",target):
+                self.assertFalse(target.exists())
+                m.ensure_private_recovery_dir()
+                metadata=target.lstat()
+                self.assertTrue(stat.S_ISDIR(metadata.st_mode))
+                self.assertEqual(stat.S_IMODE(metadata.st_mode),0o700)
+                self.assertEqual(metadata.st_uid,os.geteuid())
+                # Existing private recovery receipts are never removed or replaced.
+                receipt=target/"existing-receipt"
+                receipt.write_text("preserve this receipt")
+                m.ensure_private_recovery_dir()
+                self.assertEqual(receipt.read_text(),"preserve this receipt")
+
+    def test_recovery_directory_unsafe_existing_forms_fail_closed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent=Path(directory)/"vf-server-ops"
+            parent.mkdir(mode=0o700)
+            target=parent/"operator-recovery"
+            outside=Path(directory)/"outside"
+            outside.mkdir(mode=0o700)
+            target.symlink_to(outside, target_is_directory=True)
+            with mock.patch.object(m,"RECOVERY_DIR",target),self.assertRaises(m.Stop):
+                m.ensure_private_recovery_dir()
+            self.assertTrue(target.is_symlink())
+            target.unlink()
+            target.mkdir(mode=0o700)
+            target.chmod(0o755)
+            with mock.patch.object(m,"RECOVERY_DIR",target),self.assertRaises(m.Stop):
+                m.ensure_private_recovery_dir()
+            self.assertEqual(stat.S_IMODE(target.lstat().st_mode),0o755)
+            target.rmdir()
+            target.write_text("do not overwrite")
+            with mock.patch.object(m,"RECOVERY_DIR",target),self.assertRaises(m.Stop):
+                m.ensure_private_recovery_dir()
+            self.assertEqual(target.read_text(),"do not overwrite")
+
+    def test_unsafe_recovery_parent_fails_before_directory_creation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent=Path(directory)/"vf-server-ops"
+            parent.mkdir(mode=0o700)
+            parent.chmod(0o777)
+            target=parent/"operator-recovery"
+            with mock.patch.object(m,"RECOVERY_DIR",target),self.assertRaises(m.Stop):
+                m.ensure_private_recovery_dir()
+            self.assertFalse(target.exists())
+
+    def test_snapshot_has_guarded_private_directory_initialization(self):
+        text=p.read_text()
+        self.assertIn("    ensure_private_recovery_dir()\\n    p = RECOVERY_DIR",text)
+        self.assertIn("flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY",text)
+        self.assertIn("os.fsync(f.fileno())",text)
 
     def test_existing_website_prevents_write(self):
         import sys
