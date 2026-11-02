@@ -932,6 +932,39 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
         self.assertNotIn("print(sql)",code)
         self.assertNotIn("print(line)",code)
 
+    def test_exact_release113_dynamic_branch_proof_categorizes_real_unsafe_sql(self):
+        import gzip,sys
+        script=Path(__file__).with_name("p07-www3-existing-sql-guard-audit.py")
+        spec=importlib.util.spec_from_file_location("p07_branch_proof_tests",script)
+        audit=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(audit)
+        overlay=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay/lib"
+        sys.path.insert(0,str(overlay))
+        import verify,sql_diff_evidence
+        with tempfile.TemporaryDirectory() as directory:
+            source=Path(directory)/"source.sql.gz"
+            text=(
+                "/*!50003 SET @a=IF(@seen, 'ALTER TABLE sample ADD COLUMN v INT',"
+                " 'SELECT 1') */;\n"
+                "/*!50003 SET @b=IF(@seen, 'SET @q=1', 'SELECT 0') */;\n"
+                "/*!50003 SET @c=IF(@seen, 'SELECT 1; DROP TABLE sample',"
+                " 'SELECT 1') */;\n"
+            )
+            with gzip.open(source,"wt",encoding="utf-8") as out:
+                out.write(text)
+            evidence,found=audit.bounded_branch_proof(
+                source,verify,sql_diff_evidence)
+            self.assertEqual(evidence["recognized_unsafe"],2)
+            self.assertEqual(len(found),2)
+            self.assertEqual([row[2] for row in found],
+                             ["DDL_ALTER","READ_UNPROVEN"])
+            self.assertEqual([row[3] for row in found],
+                             ["SIDE_EFFECT_OR_CONTROL_KEYWORD",
+                              "CONTROL_OR_MULTISTATEMENT"])
+            self.assertEqual([row[0] for row in found],[1,3])
+            self.assertNotIn("sample",str(found))
+            self.assertNotIn("DROP TABLE",str(found))
+
     def test_readonly_audit_exposes_only_fixed_guard_classes_not_sql(self):
         import contextlib,io,sys,types
         script=Path(__file__).with_name("p07-www3-existing-sql-guard-audit.py")
@@ -977,6 +1010,11 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                                               "verify":fake_verify}),\
                  mock.patch.object(audit.tempfile,"TemporaryDirectory",
                                    side_effect=redirected),\
+                 mock.patch.object(audit,"bounded_branch_proof",
+                    return_value=({"recognized_unsafe":1,"unsafe_yes_branches":1,
+                                   "unsafe_no_branches":0},
+                         [(19,"YES","DDL_ALTER",
+                           "SIDE_EFFECT_OR_CONTROL_KEYWORD")])),\
                  mock.patch.object(sys,"argv",["auditor",
                      "--audit-existing-www3-side-effects-only"]),\
                  contextlib.redirect_stdout(io.StringIO()) as output:
