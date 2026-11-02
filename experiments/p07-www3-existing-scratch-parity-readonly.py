@@ -269,6 +269,15 @@ def explain_advisory(source,target):
                  "FINGERPRINT_EQUAL_NOT_VERIFIED","FINGERPRINT_DIFFER")
         print("ADVISORY_DATA_STATUS="+
               (value if value in allowed else "UNPROVEN"),flush=True)
+        if value=="UNAVAILABLE":
+            reasons=("MULTILINE_DML_UNPROVEN","DML_COMMAND_UNRECOGNIZED",
+                     "NO_COMPARABLE_LOGICAL_CONTENT","DUMP_UNREADABLE",
+                     "OTHER_VERIFIER_FAILURE","NONE")
+            for part in ("source","target"):
+                reason=results.get(part+"_reason")
+                if reason not in reasons:reason="UNPROVEN"
+                print("ADVISORY_DATA_"+part.upper()+"_REASON="+
+                      reason,flush=True)
         for name in ("source_objects","target_objects",
                      "source_dml_statements","target_dml_statements"):
             n=results.get(name)
