@@ -850,6 +850,32 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
 
 
 
+    def test_existing_source_snapshot_transport_mismatch_is_blocked(self):
+        import hashlib,subprocess,types
+        m=self.module()
+        data=b"first-pass-existing-source"
+        valid=hashlib.sha256(data).hexdigest()
+        tail={"source":{"host":"old.example"},
+              "source_runtime_path":"/source/runtime"}
+        base=types.SimpleNamespace(DOMAIN="www3.m3u8.one",TAIL="pull-synthetic")
+        engine=types.SimpleNamespace(PullMigrationError=type("PullMigrationError",(Exception,),{}))
+        def reply(*args,**kwargs):
+            return subprocess.CompletedProcess([],0,
+                "EXISTING_HEX=OWNER_SCOPED"+chr(10)+
+                "HEX_NAME=www3-hex-"+("a"*32)+".sql.gz"+chr(10)+
+                "HEX_BYTES="+str(len(data))+chr(10)+
+                "HEX_SHA256="+valid+chr(10),"")
+        engine.source_remote=reply
+        engine.pull_path=lambda src,remote,local:Path(local).write_bytes(data)
+        with tempfile.TemporaryDirectory() as directory:
+            local=Path(directory)/"source.gz"
+            self.assertEqual(m.import_existing_verified_source(
+                engine,tail,"db",base,local),valid)
+            engine.pull_path=lambda src,remote,local:Path(local).write_bytes(
+                data[:-1]+b"z")
+            with self.assertRaisesRegex(m.Stop,"SOURCE_HEX_TRANSFER_DIGEST_MISMATCH"):
+                m.import_existing_verified_source(engine,tail,"db",base,local)
+
     def test_isolated_staging_full_synthetic_success_and_failed_import_preservation(self):
         import contextlib,gzip,io,subprocess,sys,types
         m=self.module()
