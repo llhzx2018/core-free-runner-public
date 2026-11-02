@@ -853,7 +853,7 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
     def test_existing_source_snapshot_transport_mismatch_is_blocked(self):
         import hashlib,subprocess,types
         m=self.module()
-        data=b"first-pass-existing-source"
+        data=b"".join(__import__("hashlib").sha256(str(i).encode()).hexdigest().encode() for i in range(100))
         valid=hashlib.sha256(data).hexdigest()
         tail={"source":{"host":"old.example"},
               "source_runtime_path":"/source/runtime"}
