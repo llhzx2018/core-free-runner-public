@@ -41,7 +41,7 @@ def load_receipt(base,stage,target_server_identity,source_db):
     need(folder.is_dir() and not folder.is_symlink(),
          "SCRATCH_RECEIPT_PARENT_UNPROVEN")
     info=folder.lstat()
-    need(stat.S_ISDIR(info.st_mode) and info.st_uid==0
+    need(stat.S_ISDIR(info.st_mode) and info.st_uid==os.getuid()
          and not(info.st_mode&0o077),
          "SCRATCH_RECEIPT_PARENT_UNSAFE")
     identifier=hashlib.sha256(
@@ -51,7 +51,7 @@ def load_receipt(base,stage,target_server_identity,source_db):
     need(not marker.is_symlink(),"SCRATCH_RECEIPT_SYMLINK")
     try:
         record_stat=marker.lstat()
-        need(stat.S_ISREG(record_stat.st_mode) and record_stat.st_uid==0
+        need(stat.S_ISREG(record_stat.st_mode) and record_stat.st_uid==os.getuid()
              and not(record_stat.st_mode&0o077)
              and record_stat.st_nlink==1 and 0<record_stat.st_size<65536,
              "SCRATCH_RECEIPT_UNSAFE")
