@@ -52,3 +52,8 @@ node control/lanes/s01-segment-browser/check.cjs
 cli eval-file /tmp/snapshot.php > proof/state-after.sha256
 cmp proof/state-before.sha256 proof/state-after.sha256
 echo SEGMENT_DATA_PROTECTION_PASS
+
+# Synthetic SEO-variable check after protected-state comparison.
+fixture_en_id=$(python3 -c 'import json; print(int(json.load(open("proof/seo-seed.json"))["pair"]["en"]))')
+cli post meta update "$fixture_en_id" rank_math_description 'Segment %title% description.' >/dev/null
+node control/lanes/s01-segment-browser/varcheck.cjs

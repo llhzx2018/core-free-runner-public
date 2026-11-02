@@ -1,0 +1,2 @@
+const {chromium}=require('playwright'),assert=require('assert/strict');
+(async()=>{const b=await chromium.launch({headless:true});try{const p=await b.newPage();await p.goto('http://127.0.0.1:18880/m3u8-segment-viewer/',{waitUntil:'networkidle'});let s=await p.locator('meta[name="description"]').getAttribute('content');assert.ok(s.startsWith('Segment ')&&s.endsWith(' description.')&&!s.includes('%title%'),s);console.log('RANK_MATH_VARIABLE_EXPANSION=PASS '+s)}finally{await b.close()}})().catch(e=>{console.error(e);process.exitCode=1});

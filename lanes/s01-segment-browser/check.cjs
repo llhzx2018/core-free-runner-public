@@ -8,6 +8,7 @@ console.log(JSON.stringify({requested:lang,url:page.url(),obs:await page.locator
 const meta=await page.locator('meta[name="description"]').getAttribute('content');assert.equal(meta,lang==='zh'?'自定义中文检测页面描述。':'Custom English checker page description.');
 const root=page.locator('.vf-segment-viewer[data-vf-tool-id]').first();await root.waitFor();
 assert.equal(await page.locator('h1').count(),1);
+if(lang==='zh'){const invalid=await page.evaluate(()=>document.documentElement.outerHTML.includes('aria-value无w'));assert.equal(invalid,false,'translated output must not corrupt aria-valuenow');}
 assert.equal(await root.locator('[data-vf-segment-result]').isVisible(),false,'result starts hidden');
 assert.ok(await root.locator('[data-vf-segment-input]').isVisible());
 const steps=await page.locator('.vf-tool-steps-list').innerText(),faq=await page.locator('.vf-tool-faq-list').innerText();
