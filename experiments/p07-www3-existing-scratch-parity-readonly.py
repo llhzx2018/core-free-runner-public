@@ -183,19 +183,57 @@ def diagnostic_reason(exc):
         if ("["+reason+"]") in text:return reason
     return "COMPARISON_UNCLASSIFIED"
 
+def bounded_schema_error(error,schema):
+    # Only fixed release113 reason codes can leave the private parser.
+    if type(error) is schema.AdvisoryDiagnosticUnavailable:
+        known={
+            "SQL_SCHEMA_STATEMENT_TOO_LARGE",
+            "SQL_SCHEMA_STATEMENT_INCOMPLETE",
+            "SQL_DUPLICATE_CREATE_TABLE",
+            "SQL_DIAGNOSTIC_INPUT_UNAVAILABLE",
+        }
+        if str(error) in known:return str(error)
+    return "OTHER_UNPROVEN"
+
+
+def conservative_create_heads(path,schema):
+    # Identity-only fallback for advisory row diagnostics. Never grants
+    # schema or migration equivalence, and never tolerates duplicates.
+    names=set()
+    for raw in schema._read_lines(path):
+        line=raw.strip()
+        if not line.upper().startswith("CREATE TABLE "):
+            continue
+        if len(line)>4096:raise ValueError("CREATE_HEADER_UNPROVEN")
+        match=schema._TABLE_NAME.match(line)
+        if not match:raise ValueError("CREATE_HEADER_UNPROVEN")
+        identity=match.group(1) or match.group(2)
+        if identity in names:raise ValueError("DUPLICATE_CREATE_HEADER")
+        names.add(identity)
+        if len(names)>157:raise ValueError("TOO_MANY_CREATE_HEADERS")
+    if len(names)!=157:raise ValueError("CREATE_HEADER_COUNT_UNPROVEN")
+    return names
+
+
 def explain_row_multisets(source,target,schema):
     import sql_row_evidence as tuples
     import sql_multiset_evidence as multiset
+    scope="157_FULL_SCHEMA_IDENTITIES"
     try:
         source_tables=set(schema._schema_statements(source)[0])
         target_tables=set(schema._schema_statements(target)[0])
-        if len(source_tables)!=157 or source_tables!=target_tables:
+    except Exception:
+        try:
+            source_tables=conservative_create_heads(source,schema)
+            target_tables=conservative_create_heads(target,schema)
+            scope="157_CREATE_HEAD_IDENTITIES_ONLY"
+        except Exception:
             print("ADVISORY_ROW_SCOPE=UNPROVEN",flush=True)
             return
-    except Exception:
+    if len(source_tables)!=157 or source_tables!=target_tables:
         print("ADVISORY_ROW_SCOPE=UNPROVEN",flush=True)
         return
-    print("ADVISORY_ROW_SCOPE=157_MATCHING_NAMES",flush=True)
+    print("ADVISORY_ROW_SCOPE="+scope,flush=True)
     for name,func,allowed,fields in (
         ("TUPLES",tuples.diagnostic,
          ("ROW_TUPLES_DIFFER","ROW_TUPLES_EQUAL_NOT_VERIFIED",
