@@ -270,12 +270,22 @@ def explain_row_multisets(source,target,schema):
 def explain_advisory(source,target):
     """Read-only release113 diagnostics; counts are never acceptance proof."""
     import sql_diff_evidence as evidence
+    values=None
     try:
         values=evidence.schema_difference_counts(source,target)
     except Exception:
         print("ADVISORY_SCHEMA=UNPROVEN",flush=True)
-        return
-    print("ADVISORY_SCHEMA=CLASSIFIED",flush=True)
+        for label,path in (("SOURCE",source),("TARGET",target)):
+            try:
+                table_map,_=evidence._schema_statements(path)
+                print("ADVISORY_"+label+"_SCHEMA_PARSER=PARSED",flush=True)
+                print("ADVISORY_"+label+"_SCHEMA_TABLES="+
+                      str(len(table_map)),flush=True)
+            except Exception as error:
+                print("ADVISORY_"+label+"_SCHEMA_PARSER="+
+                      bounded_schema_error(error,evidence),flush=True)
+    else:
+        print("ADVISORY_SCHEMA=CLASSIFIED",flush=True)
     import verify
     for label,path in (("SOURCE",source),("TARGET",target)):
         try:
@@ -294,12 +304,13 @@ def explain_advisory(source,target):
             state="SCHEMA_PARSE_UNPROVEN"
         print("ADVISORY_"+label+"_STRUCTURE_PARSER="+state,flush=True)
 
-    for name in ("source_tables","target_tables","common_tables",
-                 "mismatched_tables","changed_columns","changed_indexes",
-                 "changed_options","source_only_tables","target_only_tables"):
-        n=values.get(name)
-        if type(n) is int and 0<=n<=5000000:
-            print("ADVISORY_"+name.upper()+"="+str(n),flush=True)
+    if values is not None:
+        for name in ("source_tables","target_tables","common_tables",
+                     "mismatched_tables","changed_columns","changed_indexes",
+                     "changed_options","source_only_tables","target_only_tables"):
+            n=values.get(name)
+            if type(n) is int and 0<=n<=5000000:
+                print("ADVISORY_"+name.upper()+"="+str(n),flush=True)
     try:
         results=evidence.data_content_evidence(source,target)
         value=results.get("comparison")
