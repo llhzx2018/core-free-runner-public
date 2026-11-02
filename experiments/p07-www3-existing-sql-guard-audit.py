@@ -12,7 +12,7 @@ from pathlib import Path
 HELPER=Path(__file__).with_name("p07-www3-candidate-schema-probe.py")
 STAGE=Path(__file__).with_name("p07-www3-isolated-stage.py")
 HELPER_BLOB="8f640e7505c5b49ad5a7574d82c0030eb6e7b884"
-STAGE_BLOB="a94b6b93188eb429c1b353ed93d318c3a467dff1"
+STAGE_BLOB="72e1123822ee7b4bf985a196fbe0b692f35ed2aa"
 
 class Block(Exception): pass
 def need(ok,reason):
