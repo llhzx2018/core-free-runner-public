@@ -11,7 +11,7 @@ assert.equal(await page.locator('h1').count(),1);
 if(lang==='zh'){const invalid=await page.evaluate(()=>document.documentElement.outerHTML.includes('aria-value无w'));assert.equal(invalid,false,'translated output must not corrupt aria-valuenow');}
 assert.equal(await root.locator('[data-vf-segment-result]').isVisible(),false,'result starts hidden');
 assert.ok(await root.locator('[data-vf-segment-input]').isVisible());
-const u=await root.locator('[data-vf-segment-url]').boundingBox(),m=await root.locator('[data-vf-segment-input]').boundingBox();assert.ok(u&&m&&u.width>=200&&m.width>=200,'both source inputs need readable width');
+const u=await root.locator('[data-vf-segment-url]').boundingBox(),m=await root.locator('[data-vf-segment-input]').boundingBox();assert.ok(u&&m&&u.width>=200&&m.width>=200,'both source inputs need readable width');assert.ok(u.width/m.width>=0.8&&u.width/m.width<=1.25,`source inputs should be balanced: ${u.width} / ${m.width}`);
 assert.equal(await page.locator('.vf-tool-hero-directory').isVisible(),false,'one tools-directory entry');
 const steps=await page.locator('.vf-tool-steps-list').innerText(),faq=await page.locator('.vf-tool-faq-list').innerText();
 assert.ok(steps.includes(lang==='zh'?'媒体播放清单':'media playlist'));
