@@ -286,6 +286,22 @@ def explain_advisory(source,target):
     except Exception:
         print("ADVISORY_DATA_STATUS=UNPROVEN",flush=True)
     explain_row_multisets(source,target,evidence)
+    try:
+        import sql_pk_conflict_evidence as pk
+        report=pk.diagnostic(source,target)
+        result=report.get("comparison")
+        if result not in ("PK_LITERAL_DIFFER","PK_LITERAL_EQUAL_NOT_VERIFIED",
+                          "UNAVAILABLE"):
+            result="UNPROVEN"
+        print("ADVISORY_PK_STATUS="+result,flush=True)
+        for name in ("pk_tables_evaluable","pk_tables_unavailable",
+                     "differing_pk_tables","source_only_keys",
+                     "target_only_keys","same_key_changed_literals"):
+            n=report.get(name)
+            if type(n) is int and 0<=n<=5000000:
+                print("ADVISORY_PK_"+name.upper()+"="+str(n),flush=True)
+    except Exception:
+        print("ADVISORY_PK_STATUS=UNPROVEN",flush=True)
     print("ADVISORY_NOT_A_MIGRATION_PASS_GATE=YES",flush=True)
 
 
