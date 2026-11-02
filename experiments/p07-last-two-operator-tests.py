@@ -850,6 +850,55 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
 
 
 
+    def test_sql_side_effect_readonly_reason_preserves_default_verdict(self):
+        import gzip,sys
+        m=self.module()
+        overlay=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay/lib"
+        sys.path.insert(0,str(overlay))
+        import verify
+        with tempfile.TemporaryDirectory() as td:
+            source=Path(td)/"input.sql.gz"
+            cases=(
+                (b"CREATE TABLE sample (id INT);\nINSERT INTO sample VALUES (1);\n",False),
+                (b"UPDATE sample SET id=2;\n",True),
+                (b"CREATE TABLE sample (id INT); DROP TABLE other;\n",True),
+                (b"/*!50100 UNKNOWN_STMT something */;\n",True),
+                (b"SET GLOBAL sql_log_bin=0;\n",True),
+            )
+            for value,expected in cases:
+                with self.subTest(expected=expected,value=value[:12]):
+                    with gzip.open(source,"wb") as out:
+                        out.write(value)
+                    found=[]
+                    default=m.standalone_sql_unproven_side_effects(source,verify)
+                    observed=m.standalone_sql_unproven_side_effects(
+                        source,verify,findings=found)
+                    self.assertEqual(default,expected)
+                    self.assertEqual(observed,default)
+                    self.assertEqual(bool(found),expected)
+                    for kind,line in found:
+                        self.assertTrue(kind.isupper())
+                        self.assertIsInstance(line,int)
+                        self.assertGreater(line,0)
+
+    def test_sql_guard_audit_has_no_business_database_or_cleanup_calls(self):
+        code=Path(__file__).with_name(
+            "p07-www3-existing-sql-guard-audit.py").read_text()
+        for forbidden in (
+            "cloudpanel.add_database(", "cloudpanel.import_database(",
+            "engine.prepare_migration(", "engine.resume_prepare_migration(",
+            "engine.save_state(", "engine.cutover_migration(",
+            "engine.source_export_database(", "rm -f",
+            "cloudpanel.delete_database(", "shutil.rmtree(",
+        ):
+            self.assertNotIn(forbidden,code)
+        self.assertIn("SIDE_EFFECT_GUARD=BLOCKED_REPRODUCED",code)
+        self.assertIn("SOURCE_NEW_EXPORT=NO",code)
+        self.assertIn("CP2_DATABASE_CREATE_IMPORT_MODIFY=NO",code)
+        self.assertIn("SOURCE_TEMP_CLEANUP=NOT_ATTEMPTED_RETAINED",code)
+        self.assertNotIn("print(sql)",code)
+        self.assertNotIn("print(line)",code)
+
     def test_existing_source_snapshot_transport_mismatch_is_blocked(self):
         import hashlib,subprocess,types
         m=self.module()
