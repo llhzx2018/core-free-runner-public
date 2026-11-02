@@ -587,25 +587,36 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
             self.assertNotIn(banned,src)
 
     def test_scratch_marker_is_private_exclusive_and_never_reused(self):
-        import types
+        import types,sys
         m=self.module()
         with tempfile.TemporaryDirectory() as folder:
             base=types.SimpleNamespace(BASE=Path(folder),TAIL="pull-test",DOMAIN="www3.m3u8.one")
             root=Path(folder)/"pull-test"/"target-transactions"
             root.mkdir(parents=True,mode=0o700)
             root.chmod(0o700)
-            p=m.receipt_path(base,"p07safescratch1")
-            self.assertTrue(str(p).startswith(str(root)))
-            with mock.patch.dict(sys.modules,{"server_migration":type("L",(),{
-                 "atomic_private_json":staticmethod(lambda path,entry:None)})}):
-                m.save(p,{"status":"INTENT_RESERVED"},first=True)
-                self.assertEqual(p.stat().st_mode&0o777,0o600)
-                self.assertEqual(json.loads(p.read_text())["status"],"INTENT_RESERVED")
-                with self.assertRaises(m.Stop):
-                    m.receipt_path(base,"p07safescratch1")
-                with self.assertRaises(FileExistsError):
-                    m.save(p,{"status":"OVERWRITE"},first=True)
-                self.assertEqual(json.loads(p.read_text())["status"],"INTENT_RESERVED")
+            # CI runner is unprivileged; simulate only the root-owned
+            # PRIVATE receipt directory, never relax the product guard.
+            original_lstat=Path.lstat
+            def root_owned_lstat(path):
+                info=original_lstat(path)
+                if path==root:
+                    import types
+                    return types.SimpleNamespace(
+                        st_uid=0,st_mode=info.st_mode)
+                return info
+            with mock.patch.object(Path,"lstat",root_owned_lstat):
+                p=m.receipt_path(base,"p07safescratch1")
+                self.assertTrue(str(p).startswith(str(root)))
+                with mock.patch.dict(sys.modules,{"server_migration":type("L",(),{
+                     "atomic_private_json":staticmethod(lambda path,entry:None)})}):
+                    m.save(p,{"status":"INTENT_RESERVED"},first=True)
+                    self.assertEqual(p.stat().st_mode&0o777,0o600)
+                    self.assertEqual(json.loads(p.read_text())["status"],"INTENT_RESERVED")
+                    with self.assertRaises(m.Stop):
+                        m.receipt_path(base,"p07safescratch1")
+                    with self.assertRaises(FileExistsError):
+                        m.save(p,{"status":"OVERWRITE"},first=True)
+                    self.assertEqual(json.loads(p.read_text())["status"],"INTENT_RESERVED")
 
     def test_catalog_absence_requires_independent_zero(self):
         import subprocess as real_sub
