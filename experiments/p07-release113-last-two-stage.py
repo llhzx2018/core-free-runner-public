@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Owner-authorized P07 release113 staging for only two untouched sites.
 
-Safe continuation after the nine-site partial PREPARE_FAILED child. This does
+Safe continuation after the nine-site partial PREPARE_FAILED child. The two-site
+job has the original 17-site parent as its lineage owner (a sibling of the
+nine-site child), matching the consolidated recovery provenance contract. This does
 not resume the child, modify source business data, touch the blocked unzip
 site, rewrite any existing DB, freeze source, or cut over DNS.
 """
@@ -252,7 +254,7 @@ def main() -> int:
         try:
             descendant = engine.prepare_migration(
                 parent["source"], list(DOMAINS), "PREPARE_PULL_MIGRATION",
-                remainder_parent=NINE_CHILD,
+                remainder_parent=ORIGINAL,
                 expected_source_identity=parent["source_server_identity"],
                 expected_remainder_sites=[dict(row) for row in last_two],
             )
@@ -270,7 +272,8 @@ def main() -> int:
                     continue
                 entry=json.loads(child_file.read_text())
                 if (type(entry) is dict and
-                        entry.get("partial_parent_migration_id")==NINE_CHILD):
+                        entry.get("partial_parent_migration_id")==ORIGINAL
+                        and entry.get("migration_id")!=NINE_CHILD):
                     found.append(str(entry.get("migration_id") or candidate.name))
             print("NEW_CHILD_IDS=" + (",".join(found) if found else "NONE"), flush=True)
             print("INSPECT_NEW_CHILD_BEFORE_ANY_RETRY=YES", flush=True)
@@ -278,7 +281,7 @@ def main() -> int:
         require(private_bytes(ORIGINAL_FILE) == parent_bytes
                 and private_bytes(NINE_FILE) == child_bytes,
                 "PARENT_OR_NINE_CHILD_MODIFIED")
-        require(descendant.get("partial_parent_migration_id") == NINE_CHILD
+        require(descendant.get("partial_parent_migration_id") == ORIGINAL
                 and descendant.get("cutover_prohibited") is True
                 and descendant.get("source_runtime_frozen") is False
                 and descendant.get("dns_changed_by_p07") is False
