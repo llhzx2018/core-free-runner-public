@@ -1529,6 +1529,45 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
         spec.loader.exec_module(obj)
         return obj
 
+    def test_native_scratch_fallback_is_database_scoped_and_readonly(self):
+        import subprocess,types
+        m=self.module()
+        db="p07abcde123451"
+        record={"scratch_database":db,"username":"limited",
+                "password":"confidential-not-for-log"}
+        grants=[]
+        stage=types.SimpleNamespace(restricted_user=lambda *args:(
+            grants.append(args) or ["mysql","--user=limited"],
+            {"MYSQL_PWD":record["password"]}
+        ))
+        with tempfile.TemporaryDirectory() as folder:
+            target=Path(folder)/"scratch-native-readonly.sql"
+            def runner(args,**kwargs):
+                self.assertEqual(args[1],"--no-defaults")
+                self.assertEqual(args[-1],db)
+                self.assertIn("--single-transaction",args)
+                self.assertIn("--skip-lock-tables",args)
+                self.assertIn("--hex-blob",args)
+                self.assertIn("--skip-extended-insert",args)
+                self.assertNotIn(record["password"]," ".join(args))
+                self.assertNotIn("--force",args)
+                kwargs["stdout"].write(b"CREATE TABLE demo(id int);\n")
+                return subprocess.CompletedProcess(args,0)
+            with mock.patch("shutil.which",side_effect=lambda name:
+                  "/usr/bin/"+name if name in ("mysql","mariadb-dump") else None),\
+                 mock.patch.object(m.subprocess,"run",side_effect=runner):
+                self.assertEqual(
+                    m.native_readonly_scratch_dump(record,stage,target),
+                    "COMPLETE")
+            self.assertTrue(target.exists())
+            self.assertEqual(target.stat().st_mode & 0o777,0o600)
+            self.assertEqual(len(grants),1)
+            self.assertEqual(grants[0][1],db)
+            # Fail closed if the DB is not the exact scratch identity.
+            with self.assertRaisesRegex(m.Block,"NATIVE_DUMP_IDENTITY_UNPROVEN"):
+                m.native_readonly_scratch_dump(
+                    dict(record,scratch_database="production"),stage,target)
+
     def test_target_gzip_integrity_utf8_and_plain_format_are_distinct(self):
         import gzip,zlib
         m=self.module()
@@ -1819,6 +1858,8 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
                 import_calls=[]
                 with mock.patch.object(m,"load",side_effect=[helper,stage]),\
                      mock.patch.object(m,"count_scratch_metadata",return_value=(157,1848)),\
+                     mock.patch.object(m,"native_readonly_scratch_dump",
+                        return_value="CLIENT_UNAVAILABLE"),\
                      mock.patch.object(m.os,"geteuid",return_value=0),\
                      mock.patch.object(m.tempfile,"TemporaryDirectory",side_effect=redirected),\
                      mock.patch.object(sys,"argv",["audit",
@@ -1857,10 +1898,12 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
                 if outcome=="export-fail":
                     self.assertIn("SCRATCH_PARITY_CLASS=EXPORT_UNAVAILABLE",text)
                 if outcome=="target-crc":
+                    self.assertIn("NATIVE_SCRATCH_EXPORT=CLIENT_UNAVAILABLE",text)
                     self.assertIn("TARGET_EXPORT_STREAM_INTEGRITY=CRC_FAILED",text)
                     self.assertIn("SCRATCH_PARITY_CLASS=TARGET_EXPORT_BINARY_UNPROVEN",text)
                     self.assertNotIn("ADVISORY_SCHEMA=",text)
                 if outcome=="target-invalid-utf8":
+                    self.assertIn("NATIVE_SCRATCH_EXPORT=CLIENT_UNAVAILABLE",text)
                     self.assertIn("TARGET_EXPORT_STREAM_INTEGRITY=PASS",text)
                     self.assertIn("TARGET_EXPORT_UTF8=INVALID",text)
                     self.assertIn("SCRATCH_PARITY_CLASS=TARGET_EXPORT_UTF8_UNPROVEN",text)
