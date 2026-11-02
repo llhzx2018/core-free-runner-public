@@ -55,6 +55,36 @@ class ByteContext(unittest.TestCase):
         self.assertEqual(sum(result.values()),0)
 
 
+class CurrentTailRecoveryScope(unittest.TestCase):
+    def test_advisory_binds_actual_failed_tail_and_original_parent(self):
+        constants = {}
+        for node in raw.body:
+            if isinstance(node,ast.Assign):
+                for dest in node.targets:
+                    if isinstance(dest,ast.Name) and isinstance(node.value,ast.Constant):
+                        constants[dest.id] = node.value.value
+        self.assertEqual(constants.get("MID"), "pull-20261102T005644Z-7178c7d5")
+        self.assertEqual(constants.get("PARENT"), "pull-20261101T045943Z-923729a1")
+        source=SCRIPT.read_text()
+        self.assertIn('sites[0].get("stage_status")=="PULLED_STAGED"',source)
+        self.assertIn('sites[1].get("stage_status")=="PENDING"',source)
+        self.assertIn('s.get("target_runtime_activated") is False',source)
+        self.assertIn('s.get("existing_target_overwrite_allowed") is False',source)
+        self.assertNotIn("engine.resume_prepare_migration(",source)
+        self.assertNotIn("engine.cutover_migration(",source)
+        self.assertNotIn("target_create_database_local(",source)
+
+    def test_remote_output_whitelist_excludes_secrets_and_uses_temporary_dump(self):
+        source=SCRIPT.read_text()
+        self.assertIn('with tempfile.TemporaryDirectory(',remote)
+        self.assertIn('cloudpanel.export_database(database,dump,clpctl="clpctl")',remote)
+        self.assertIn('SOURCE_BUSINESS_DB_WRITES=NO',remote)
+        self.assertIn("if ALLOWED.fullmatch(line):print(line)",source)
+        self.assertNotIn("print(response.stderr)",source)
+        self.assertNotIn("print(response.stdout)",source)
+        self.assertNotIn("mysql:import",source)
+
+
 class TempExportLifecycle(unittest.TestCase):
     def test_classifier_runs_inside_temporary_export_scope(self):
         calls = [n for n in ast.walk(tree) if isinstance(n,ast.Call)
