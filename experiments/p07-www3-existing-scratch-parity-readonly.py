@@ -364,10 +364,91 @@ def explain_row_multisets(source,target,schema):
             print("ADVISORY_"+name+"_STATUS=UNPROVEN",flush=True)
 
 
+
+_ATTR_TOKENS = re.compile(
+    r"'(?:\\.|''|[^'\\])*'|\"(?:\\.|\"\"|[^\"\\])*\"|"
+    r"\`(?:\`\`|[^\`])*\`|[A-Za-z_][A-Za-z_0-9$]*|"
+    r"[-+]?[0-9]+(?:\.[0-9]+)?|[^\s]", re.S,
+)
+_ATTR_TYPE = re.compile(r"^[A-Za-z]+\s*(?:\([^)]*\))?", re.I | re.S)
+_ATTR_GROUPS = (
+    "NULLABILITY", "DEFAULT", "COLLATION", "CHARSET",
+    "COMMENT", "ON_UPDATE", "AUTO_INCREMENT", "UNSIGNED_ZEROFILL",
+    "OTHER_OR_UNPARSED",
+)
+
+
+def _column_attribute_delta_groups(source: str, target: str) -> set[str]:
+    """Conservative quote-aware attribute categories; not a compatibility gate."""
+    def parse(definition: str):
+        typ = _ATTR_TYPE.match(definition)
+        if typ is None:
+            return None
+        tokens = _ATTR_TOKENS.findall(definition[typ.end():])
+        groups = {name: [] for name in _ATTR_GROUPS if name != "OTHER_OR_UNPARSED"}
+        unknown = []
+
+        def consume_value(pos):
+            if pos >= len(tokens):
+                return pos
+            if tokens[pos] == "(":
+                depth = 0
+                while pos < len(tokens):
+                    if tokens[pos] == "(":
+                        depth += 1
+                    if tokens[pos] == ")":
+                        depth -= 1
+                    pos += 1
+                    if depth == 0:
+                        break
+                return pos
+            pos += 1
+            if pos < len(tokens) and tokens[pos] == "(":
+                return consume_value(pos)
+            return pos
+
+        i = 0
+        while i < len(tokens):
+            word = tokens[i].upper()
+            next_word = tokens[i + 1].upper() if i + 1 < len(tokens) else ""
+            category = None
+            end = i + 1
+            if word == "NOT" and next_word == "NULL":
+                category, end = "NULLABILITY", i + 2
+            elif word == "NULL":
+                category = "NULLABILITY"
+            elif word in ("DEFAULT", "COLLATE", "COMMENT", "CHARSET"):
+                category = {"COLLATE": "COLLATION", "CHARSET": "CHARSET"}.get(word, word)
+                end = consume_value(i + 1) if word == "DEFAULT" else min(i + 2, len(tokens))
+            elif word == "CHARACTER" and next_word == "SET":
+                category, end = "CHARSET", min(i + 3, len(tokens))
+            elif word == "ON" and next_word == "UPDATE":
+                category, end = "ON_UPDATE", consume_value(i + 2)
+            elif word == "AUTO_INCREMENT":
+                category = "AUTO_INCREMENT"
+            elif word in ("UNSIGNED", "ZEROFILL"):
+                category = "UNSIGNED_ZEROFILL"
+            if category is None:
+                unknown.append(tokens[i])
+            else:
+                groups[category].append(tuple(tokens[i:end]))
+            i = max(end, i + 1)
+        return groups, tuple(unknown)
+
+    a, b = parse(source), parse(target)
+    if a is None or b is None:
+        return {"OTHER_OR_UNPARSED"}
+    changed = {name for name in a[0] if a[0][name] != b[0][name]}
+    if a[1] != b[1] or not changed:
+        changed.add("OTHER_OR_UNPARSED")
+    return changed
+
+
 def explain_column_change_classes(source,target,evidence):
     """Classify parsed column changes; never approve type/attribute deltas."""
     from collections import Counter
     classes=Counter()
+    attribute_classes=Counter()
     ordinals=[]
     try:
         left=evidence._schema_statements(source)[0]
@@ -398,6 +479,7 @@ def explain_column_change_classes(source,target,evidence):
             if left[table]==right[table]:continue
             a=index(left[table]);b=index(right[table])
             categories=set()
+            attribute_categories=set()
             if set(a)!=set(b):
                 categories.add("NAME_SET_CHANGED")
             for col in a.keys() & b.keys():
@@ -411,14 +493,18 @@ def explain_column_change_classes(source,target,evidence):
                     categories.add("TYPE_PARAMETER_CHANGED")
                 else:
                     categories.add("ATTRIBUTES_CHANGED")
+                    attribute_categories.update(_column_attribute_delta_groups(a[col],b[col]))
             if categories:
                 ordinals.append(ordinal)
                 for kind in categories:classes[kind]+=1
+                for kind in attribute_categories:attribute_classes[kind]+=1
         print("ADVISORY_COLUMN_CLASSES=CLASSIFIED_NOT_APPROVED",flush=True)
         for name in ("NAME_SET_CHANGED","TYPE_FAMILY_CHANGED",
                      "TYPE_PARAMETER_CHANGED","ATTRIBUTES_CHANGED",
                      "UNPARSED_COLUMN"):
             print("ADVISORY_COLUMN_"+name+"="+str(classes[name]),flush=True)
+        for name in _ATTR_GROUPS:
+            print("ADVISORY_ATTRIBUTE_"+name+"_TABLES="+str(attribute_classes[name]),flush=True)
         print("ADVISORY_COLUMN_CHANGED_TABLE_ORDINALS="+
               (",".join(str(i) for i in ordinals[:40]) if ordinals else "NONE"),
               flush=True)
