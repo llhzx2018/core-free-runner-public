@@ -477,38 +477,47 @@ def make_quarantined_sql(original,quarantined):
     except (OSError,UnicodeError,EOFError):
         raise Stop("QUARANTINE_SOURCE_SQL_UNREADABLE") from None
     need(len(events)==13,"QUARANTINE_CONTROL_COUNT_CHANGED")
-    seen_probe=None
-    state="PROBE"
-    variable=None
-    statement=None
+    # The dump may interleave multiple independent groups, e.g. ASSIGN-1,
+    # ASSIGN-2, PREPARE-1, PREPARE-2, EXECUTE-1, EXECUTE-2.  The old single
+    # group state machine incorrectly required contiguous four-line groups.
+    # Maintain a separate lifecycle for every bound prepared statement.
+    seen_probes=set()
+    used_probes=set()
+    unconsumed_variables={}
+    active_statements={}
     groups=0
     for number,kind,identity,related in events:
-        if state=="PROBE":
-            need(kind=="PROBE" and seen_probe is None,
+        if kind=="PROBE":
+            need(not seen_probes, "QUARANTINE_PROBE_DUPLICATE")
+            seen_probes.add(identity)
+        elif kind=="ASSIGN":
+            need(related in seen_probes
+                 and identity not in unconsumed_variables,
                  "QUARANTINE_CONTROL_ORDER_UNPROVEN")
-            seen_probe=identity
-            state="ASSIGN"
-        elif state=="ASSIGN":
-            need(kind=="ASSIGN" and related==seen_probe,
-                 "QUARANTINE_CONTROL_ORDER_UNPROVEN")
-            variable=identity
-            state="PREPARE"
-        elif state=="PREPARE":
-            need(kind=="PREPARE" and related==variable,
+            unconsumed_variables[identity]=related
+            used_probes.add(related)
+        elif kind=="PREPARE":
+            need(identity not in active_statements
+                 and related in unconsumed_variables,
                  "QUARANTINE_CONTROL_BINDING_UNPROVEN")
-            statement=identity
-            state="EXECUTE"
-        elif state=="EXECUTE":
-            need(kind=="EXECUTE" and identity==statement,
+            del unconsumed_variables[related]
+            active_statements[identity]=False
+        elif kind=="EXECUTE":
+            need(identity in active_statements
+                 and active_statements[identity] is False,
                  "QUARANTINE_CONTROL_BINDING_UNPROVEN")
-            state="DEALLOCATE"
-        elif state=="DEALLOCATE":
-            need(kind=="DEALLOCATE" and identity==statement,
+            active_statements[identity]=True
+        elif kind=="DEALLOCATE":
+            need(active_statements.get(identity) is True,
                  "QUARANTINE_CONTROL_BINDING_UNPROVEN")
+            del active_statements[identity]
             groups+=1
-            state="ASSIGN"
+        else:
+            raise Stop("QUARANTINE_CONTROL_CLASS_UNPROVEN")
         removed.add(number)
-    need(groups==3 and state=="ASSIGN" and len(removed)==13,
+    need(groups==3 and len(removed)==13
+         and len(seen_probes)==1 and seen_probes==used_probes
+         and not unconsumed_variables and not active_statements,
          "QUARANTINE_CONTROL_SEQUENCE_UNPROVEN")
     need(quarantined.parent==original.parent and quarantined!=original
          and not os.path.lexists(quarantined),
