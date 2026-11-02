@@ -25,21 +25,158 @@ def scratch_name(base):
     return site_lifecycle.derive_database_identity(
         base.DOMAIN,base.TAIL+":isolated-hex-first-pass",1)
 
-def absent_sql(name):
-    """Read the SQL catalog independently of the CloudPanel site inventory."""
-    binary=shutil.which("mariadb") or shutil.which("mysql")
-    need(binary is not None and re.fullmatch("[A-Za-z0-9]{1,60}",name),
-         "TARGET_CATALOG_CLIENT_UNPROVEN")
-    query="SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='"+name+"'"
+def _target_master_credentials():
+    """Read CP2's existing CloudPanel master connection, never print secrets.
+
+    CloudPanel source-side export already proves that a direct root/socket
+    assumption is not portable. Require a documented, local-only connection;
+    authentication failure can NEVER be interpreted as database absence.
+    """
+    env=os.environ.copy()
+    env.setdefault("SUDO_USER","root")
     try:
-        r=subprocess.run([binary,"--protocol=socket","--user=root","-N",
-                          "-e",query],stdin=subprocess.DEVNULL,
-                         capture_output=True,timeout=30,check=False)
+        result=subprocess.run(
+            ["clpctl","db:show:master-credentials"],
+            stdin=subprocess.DEVNULL,capture_output=True,
+            timeout=30,check=False,env=env,
+        )
     except (OSError,subprocess.SubprocessError):
-        raise Stop("TARGET_CATALOG_UNREACHABLE") from None
-    need(r.returncode==0 and r.stdout.strip()==b"0",
-         "TARGET_DATABASE_ALREADY_EXISTS_OR_CATALOG_UNKNOWN")
-    return binary
+        raise Stop("TARGET_CATALOG_MASTER_CREDENTIALS_UNAVAILABLE") from None
+    need(result.returncode==0 and 0<len(result.stdout)<=32768,
+         "TARGET_CATALOG_MASTER_CREDENTIALS_UNAVAILABLE")
+    raw=result.stdout.decode("utf-8","replace")
+    # Reuse the same conservative CloudPanel formats already verified on
+    # the source VPS: a single local mysql Connect Command OR four fields.
+    lines=[line for line in raw.splitlines()
+           if re.search(r"Connect\s+Command",line,re.I)]
+    values={}
+    if len(lines)==1:
+        tail=re.split(r"Connect\s+Command",lines[0],
+                      maxsplit=1,flags=re.I)[1].strip(" \t:|")
+        try: parts=shlex.split(tail)
+        except ValueError:
+            raise Stop("TARGET_CATALOG_MASTER_FORMAT_UNPROVEN") from None
+        need(parts and Path(parts[0]).name in ("mysql","mariadb"),
+             "TARGET_CATALOG_MASTER_FORMAT_UNPROVEN")
+        prefix={"-h":"host","-P":"port","-u":"user","-p":"password"}
+        long={"--host":"host","--port":"port",
+              "--user":"user","--password":"password"}
+        index=1
+        while index<len(parts):
+            item=parts[index]
+            found=None
+            value=None
+            for opt,key in long.items():
+                if item.startswith(opt+"="):
+                    found=key
+                    value=item[len(opt)+1:]
+                    break
+            if found is None:
+                for opt,key in prefix.items():
+                    if item.startswith(opt):
+                        found=key
+                        value=item[len(opt):]
+                        if not value:
+                            index+=1
+                            if index>=len(parts):
+                                raise Stop("TARGET_CATALOG_MASTER_FORMAT_UNPROVEN")
+                            value=parts[index]
+                        break
+            need(found is not None and found not in values and value,
+                 "TARGET_CATALOG_MASTER_FORMAT_UNPROVEN")
+            values[found]=value
+            index+=1
+    elif not lines:
+        names={"host":"host","port":"port","username":"user",
+               "user":"user","password":"password"}
+        for line in raw.splitlines():
+            body=line.strip()
+            if body.startswith("|"):
+                cells=[v.strip() for v in body.strip("|").split("|")]
+                if len(cells)!=2:
+                    continue
+                label,value=cells
+            elif ":" in body:
+                label,value=body.split(":",1)
+                value=value.strip()
+            else:
+                continue
+            label=names.get(re.sub(r"[\s_-]+","",label).lower())
+            if label is None:
+                continue
+            need(label not in values and value,
+                 "TARGET_CATALOG_MASTER_FORMAT_UNPROVEN")
+            values[label]=value
+    need(set(values)=={"host","port","user","password"},
+         "TARGET_CATALOG_MASTER_FORMAT_UNPROVEN")
+    need(values["host"] in ("127.0.0.1","localhost","::1")
+         and re.fullmatch(r"[0-9]{1,5}",values["port"])
+         and 1<=int(values["port"])<=65535
+         and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}",values["user"])
+         and 0<len(values["password"])<=1024
+         and not any(c in values["password"] for c in ("\x00","\n","\r")),
+         "TARGET_CATALOG_MASTER_SCOPE_UNPROVEN")
+    return values
+
+
+def absent_sql(name):
+    """Independently prove absence in the *real* CP2 SQL catalog.
+
+    A master-authenticated SQL catalog query must return exactly 0; 1+ means
+    the database already exists and must be retained. Connection failure or
+    insufficient global privileges is never permission to create anything.
+    The caller still separately verifies CloudPanel binding and owner markers.
+    """
+    binary=shutil.which("mariadb") or shutil.which("mysql")
+    need(binary is not None and re.fullmatch(r"[A-Za-z0-9]{1,60}",name),
+         "TARGET_CATALOG_CLIENT_UNPROVEN")
+    identity=_target_master_credentials()
+    environment=os.environ.copy()
+    environment["MYSQL_PWD"]=identity["password"]
+    arguments=[
+        binary,"--protocol=tcp","--host="+identity["host"],
+        "--port="+identity["port"],"--user="+identity["user"],
+        "--batch","--skip-column-names",
+    ]
+    try:
+        # A low-privilege SQL account can falsely report zero schemas because
+        # information_schema hides schemas it cannot see. Verify the master
+        # account has global ALL PRIVILEGES before trusting a zero result.
+        grants=subprocess.run(
+            arguments+["--execute=SHOW GRANTS"],
+            stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,env=environment,check=False,timeout=30,
+        )
+    except (OSError,subprocess.SubprocessError):
+        raise Stop("TARGET_CATALOG_AUTH_UNAVAILABLE") from None
+    need(grants.returncode==0 and 0<len(grants.stdout)<=65536,
+         "TARGET_CATALOG_AUTH_UNAVAILABLE")
+    try:lines=grants.stdout.decode("utf-8","strict").splitlines()
+    except UnicodeError:
+        raise Stop("TARGET_CATALOG_PRIVILEGES_UNPROVEN") from None
+    need(any(re.match(
+        r"^GRANT\s+ALL(?:\s+PRIVILEGES)?\s+ON\s+\*\.\*\s+TO\b",
+        line,re.I,
+    ) for line in lines),"TARGET_CATALOG_PRIVILEGES_UNPROVEN")
+    sql=("SELECT COUNT(*) FROM information_schema.SCHEMATA "
+         "WHERE SCHEMA_NAME='"+name+"'")
+    try:
+        result=subprocess.run(
+            arguments+["--execute="+sql],
+            stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,env=environment,check=False,timeout=30,
+        )
+    except (OSError,subprocess.SubprocessError):
+        raise Stop("TARGET_CATALOG_QUERY_FAILED") from None
+    need(result.returncode==0,"TARGET_CATALOG_QUERY_FAILED")
+    raw=result.stdout.strip()
+    if raw==b"0":
+        print("SCRATCH_SQL_CATALOG=ABSENT_VERIFIED",flush=True)
+        return binary
+    if re.fullmatch(rb"[1-9][0-9]{0,6}",raw):
+        raise Stop("TARGET_SCRATCH_DATABASE_ALREADY_EXISTS_RETAIN")
+    raise Stop("TARGET_CATALOG_QUERY_AMBIGUOUS")
+
 
 def strict_scope(sql):
     """No target DB exists before the whole source SQL passes these gates."""
