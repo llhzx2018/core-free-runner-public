@@ -1529,6 +1529,38 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
         spec.loader.exec_module(obj)
         return obj
 
+    def test_target_gzip_integrity_utf8_and_plain_format_are_distinct(self):
+        import gzip,zlib
+        m=self.module()
+        with tempfile.TemporaryDirectory() as folder:
+            original=b"INSERT INTO sample VALUES ('safe');\n"*200
+            valid=Path(folder)/"valid.sql.gz"
+            valid.write_bytes(gzip.compress(original,mtime=0))
+            self.assertEqual(m.inspect_target_export_bytes(valid,"GZIP"),
+                             ("PASS","VALID",len(original)))
+            invalid=Path(folder)/"invalid.sql.gz"
+            bad=original+b"INSERT INTO sample VALUES ('\xff');\n"
+            invalid.write_bytes(gzip.compress(bad,mtime=0))
+            self.assertEqual(m.inspect_target_export_bytes(invalid,"GZIP"),
+                             ("PASS","INVALID",len(bad)))
+            truncated=Path(folder)/"truncated.sql.gz"
+            truncated.write_bytes(valid.read_bytes()[:-5])
+            result=m.inspect_target_export_bytes(truncated,"GZIP")
+            self.assertIn(result[0],("TRUNCATED","SIZE_TRAILER_FAILED"))
+            self.assertEqual(result[1],"UNPROVEN")
+            corrupt=Path(folder)/"broken.sql.gz"
+            data=bytearray(valid.read_bytes())
+            data[-8]^=0xff
+            corrupt.write_bytes(data)
+            result=m.inspect_target_export_bytes(corrupt,"GZIP")
+            self.assertEqual(result[0],"CRC_FAILED")
+            self.assertEqual(result[1],"UNPROVEN")
+            plain=Path(folder)/"plain.sql"
+            plain.write_bytes(original)
+            self.assertEqual(m.inspect_target_export_bytes(plain,"PLAIN_SQL"),
+                             ("PASS","VALID",len(original)))
+            self.assertNotIn("sample",str(result))
+
     def test_readonly_guard_never_creates_imports_or_cleans_database(self):
         module=self.module()
         code=Path(__file__).with_name(
