@@ -382,4 +382,102 @@ class CandidateWww3SchemaTests(unittest.TestCase):
         self.assertNotIn("urllib.request",code)
         self.assertNotIn("curl ",code)
 
+
+    def test_hex_export_remote_uses_socket_read_only_and_refuses_duplicates(self):
+        import contextlib,gzip,io,sys,types
+        n=self.module()
+        with tempfile.TemporaryDirectory() as directory:
+            base=Path(directory)
+            data=base/n.TAIL/"data"
+            data.mkdir(parents=True)
+            output=data/"www3-hex-safe.sql.gz"
+            raw=(b"CREATE TABLE sample (payload BLOB);\n"
+                 b"INSERT INTO sample VALUES (0xFF);\n")*30
+            inventory=types.ModuleType("inventory")
+            inventory.build_manifest=lambda root:{"sites":[{
+                "domain":n.DOMAIN,"mysql_databases":["dbfixture"]}]}
+            dump=types.ModuleType("subprocess")
+            import subprocess as base_subprocess
+            for name in ("DEVNULL","PIPE","TimeoutExpired","SubprocessError"):
+                setattr(dump,name,getattr(base_subprocess,name))
+            class Process:
+                def __init__(self):
+                    self.stdout=io.BytesIO(raw)
+                def wait(self,timeout=None):
+                    return 0
+                def poll(self):
+                    return 0
+                def kill(self):
+                    raise AssertionError("a complete export must not be killed")
+            calls=[]
+            dump.run=lambda *args,**kw:base_subprocess.CompletedProcess(
+                args[0],0,
+                b"--hex-blob --single-transaction --quick --default-character-set "
+                b"--no-tablespaces --set-gtid-purged --set-charset",b"")
+            def spawned(command,**kwargs):
+                calls.append(command)
+                return Process()
+            dump.Popen=spawned
+            shutil=types.ModuleType("shutil")
+            shutil.which=lambda name:"/usr/bin/mysqldump" if name=="mysqldump" else None
+            remote=n.REMOTE_HEX.replace(
+                'Path("/var/lib/vf-server-ops/pull-source")',
+                f"Path({str(base)!r})",
+            )
+            payload={"inventory":inventory,"subprocess":dump,"shutil":shutil}
+            args=["-c",n.DOMAIN,"dbfixture",str(output),n.TAIL]
+            with mock.patch.dict(sys.modules,payload),mock.patch.object(sys,"argv",args):
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    exec(compile(remote,"<source-dump>","exec"),
+                         {"__name__":"__main__"})
+                self.assertEqual(out.getvalue().strip(),
+                                 "HEX_SOURCE_EXPORT=CREATED_UNVERIFIED")
+                self.assertEqual(gzip.decompress(output.read_bytes()),raw)
+                self.assertEqual(len(calls),1)
+                self.assertIn("--hex-blob",calls[0])
+                self.assertIn("--single-transaction",calls[0])
+                self.assertIn("--skip-lock-tables",calls[0])
+                self.assertNotIn("--password", " ".join(calls[0]))
+                with self.assertRaises(SystemExit) as refused:
+                    exec(compile(remote,"<source-dump>","exec"),
+                         {"__name__":"__main__"})
+                self.assertEqual(refused.exception.code,23)
+            self.assertEqual(len(calls),1)
+
+    def test_hex_export_read_only_utf8_and_gzip_gates(self):
+        import gzip,io,contextlib
+        n=self.module()
+        with tempfile.TemporaryDirectory() as directory:
+            f=Path(directory)/"file.sql.gz"
+            with gzip.open(f,"wb") as stream:
+                stream.write(b"CREATE TABLE sample (v BLOB);\n"+
+                             b"INSERT INTO sample VALUES (0xFF);\n"*30)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertTrue(n.strict_hex_export_utf8(f))
+            self.assertIn("UTF8_STREAM_INTACT",out.getvalue())
+            with gzip.open(f,"wb") as stream:
+                stream.write(b"CREATE TABLE sample (v TEXT);\n"+
+                             b"INSERT INTO sample VALUES ('"+bytes([255])+b"');\n"*30)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertFalse(n.strict_hex_export_utf8(f))
+            self.assertIn("NON_UTF8_REMAINS",out.getvalue())
+            broken=f.read_bytes()[:-6]
+            f.write_bytes(broken)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertFalse(n.strict_hex_export_utf8(f))
+            self.assertIn("GZIP_INVALID",out.getvalue())
+
+    def test_hex_option_never_enters_target_import_or_state_update(self):
+        n=self.module()
+        source=Path(__file__).with_name("p07-www3-candidate-schema-probe.py").read_text()
+        self.assertIn("--prove-hex-export-source-only",source)
+        self.assertIn("expected_tables=157",source)
+        self.assertIn("TARGET_DATABASE_WRITES=NO",source)
+        self.assertIn("MIGRATION_RETRY=NO",source)
+        self.assertIn("SOURCE_TEMP_CLEANUP=",source)
+        for forbidden in ("engine.resume_prepare_migration(", "engine.prepare_migration(",
+                          "cloudpanel.import_database(", "cloudpanel.add_database(",
+                          "engine.cutover_migration(", "engine.save_state("):
+            self.assertNotIn(forbidden,source)
+
 if __name__=="__main__":unittest.main()
