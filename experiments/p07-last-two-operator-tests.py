@@ -810,6 +810,32 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
             with self.assertRaises(verify.RestoreVerifyError):
                 m.standalone_sql_unproven_side_effects(path,verify)
 
+    def test_release113_strict_scope_accepts_safe_and_rejects_unsafe(self):
+        import gzip,sys
+        m=self.module()
+        overlay=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay/lib"
+        sys.path.insert(0,str(overlay))
+        import verify,sql_diff_evidence
+        self.assertFalse(hasattr(verify,"sql_unproven_side_effects"))
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/"real.sql.gz"
+            with mock.patch.object(sql_diff_evidence,
+                   "require_nonempty_source_schema",return_value=157):
+                with gzip.open(path,"wb") as f:
+                    f.write(b"CREATE TABLE sample (id INT);"+bytes([10])+
+                            b"INSERT INTO sample VALUES(1);"+bytes([10]))
+                self.assertIsNone(m.strict_scope(path))
+                with gzip.open(path,"wb") as f:
+                    f.write(b"CREATE TABLE sample (id INT);"+bytes([10])+
+                            b"UPDATE sample SET id=2;"+bytes([10]))
+                with self.assertRaisesRegex(m.Stop,"SOURCE_UNPROVEN_SIDE_EFFECTS"):
+                    m.strict_scope(path)
+                with gzip.open(path,"wb") as f:
+                    f.write(b"CREATE TABLE sample (id INT);"+bytes([10])+
+                            b"INSERT INTO external.sample VALUES(1);"+bytes([10]))
+                with self.assertRaisesRegex(m.Stop,"SOURCE_SQL_ESCAPES_SCRATCH_SCOPE"):
+                    m.strict_scope(path)
+
     def test_preflight_sql_denies_database_escape(self):
         import gzip,sys
         m=self.module()
