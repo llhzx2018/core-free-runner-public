@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P07: verify exact candidate SQL schema-presence parser against live www3 export.
+"""P07: check real www3 SQL with pinned public release113 schema-presence adapter.
 
 Owner-run CP2 diagnostic for the EXISTING partly staged 2026-11-02 tail.
 Read-only business SQL; one temporary old-VPS export and private CP2 copy.
