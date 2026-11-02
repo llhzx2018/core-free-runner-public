@@ -327,10 +327,10 @@ class CandidateWww3SchemaTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/"source.sql.gz"
             valid=(
-                b"SET NAMES utf8mb4;\nCREATE TABLE \`one\` (\`id\` INT);\n"
-                b"INSERT INTO \`one\` VALUES ('"+bytes([255])+b"');\n"
-                b"CREATE TABLE \`two\` (\`id\` INT);\n"
-                b"REPLACE INTO \`two\` VALUES ('"+bytes([254])+b"');\n"
+                b"SET NAMES utf8mb4;\nCREATE TABLE `one` (`id` INT);\n"
+                b"INSERT INTO `one` VALUES ('"+bytes([255])+b"');\n"
+                b"CREATE TABLE `two` (`id` INT);\n"
+                b"REPLACE INTO `two` VALUES ('"+bytes([254])+b"');\n"
             )
             with gzip.open(path,"wb") as handle:
                 handle.write(valid)
@@ -352,13 +352,13 @@ class CandidateWww3SchemaTests(unittest.TestCase):
         with mock.patch.object(n,"RUNTIME",overlay):
             parser=n.load_release113_schema_adapter()
         rows=(
-            b"CREATE TABLE \`broken\` (\`id\` "+bytes([255])+b" INT);\n",
-            b"CREATE TABLE \`a\` (\nINSERT INTO \`bad\` VALUES ('"+
+            b"CREATE TABLE `broken` (`id` "+bytes([255])+b" INT);\n",
+            b"CREATE TABLE `a` (\nINSERT INTO `bad` VALUES ('"+
                 bytes([255])+b"');\n);\n",
-            b"CREATE TABLE \`a\` (\`id\` INT);\nUPDATE \`a\` SET id='"+
+            b"CREATE TABLE `a` (`id` INT);\nUPDATE `a` SET id='"+
                 bytes([255])+b"';\n",
-            b"INSERT INTO \`a\` VALUES ('"+bytes([255])+b"');\n",
-            b"CREATE TABLE \`a\` (\`id\` INT);\n"+bytes([255])+b"INSERT INTO \`a\` VALUES(1);\n",
+            b"INSERT INTO `a` VALUES ('"+bytes([255])+b"');\n",
+            b"CREATE TABLE `a` (`id` INT);\n"+bytes([255])+b"INSERT INTO `a` VALUES(1);\n",
         )
         with tempfile.TemporaryDirectory() as directory:
             for index,data in enumerate(rows):
