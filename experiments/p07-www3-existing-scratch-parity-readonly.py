@@ -183,6 +183,38 @@ def diagnostic_reason(exc):
         if ("["+reason+"]") in text:return reason
     return "COMPARISON_UNCLASSIFIED"
 
+def explain_advisory(source,target):
+    """Read-only release113 diagnostics; counts are never acceptance proof."""
+    import sql_diff_evidence as evidence
+    try:
+        values=evidence.schema_difference_counts(source,target)
+    except Exception:
+        print("ADVISORY_SCHEMA=UNPROVEN",flush=True)
+        return
+    print("ADVISORY_SCHEMA=CLASSIFIED",flush=True)
+    for name in ("source_tables","target_tables","common_tables",
+                 "mismatched_tables","changed_columns","changed_indexes",
+                 "changed_options","source_only_tables","target_only_tables"):
+        n=values.get(name)
+        if type(n) is int and 0<=n<=5000000:
+            print("ADVISORY_"+name.upper()+"="+str(n),flush=True)
+    try:
+        results=evidence.data_content_evidence(source,target)
+        value=results.get("comparison")
+        allowed=("UNAVAILABLE","NO_DML_STATEMENTS",
+                 "FINGERPRINT_EQUAL_NOT_VERIFIED","FINGERPRINT_DIFFER")
+        print("ADVISORY_DATA_STATUS="+
+              (value if value in allowed else "UNPROVEN"),flush=True)
+        for name in ("source_objects","target_objects",
+                     "source_dml_statements","target_dml_statements"):
+            n=results.get(name)
+            if type(n) is int and 0<=n<=5000000:
+                print("ADVISORY_DATA_"+name.upper()+"="+str(n),flush=True)
+    except Exception:
+        print("ADVISORY_DATA_STATUS=UNPROVEN",flush=True)
+    print("ADVISORY_NOT_A_MIGRATION_PASS_GATE=YES",flush=True)
+
+
 def run():
     need(os.geteuid()==0 and sys.argv[1:]==[
         "--read-only-existing-www3-scratch-parity"
