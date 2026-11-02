@@ -202,7 +202,7 @@ def inspect_target_export_bytes(path,format_name):
     return ("PASS","INVALID" if invalid else "VALID",bytes_seen)
 
 
-def native_readonly_scratch_dump(record,stage,destination):
+def native_readonly_scratch_dump(record,stage,destination, *, schema_only=False):
     """Single read-only MariaDB dump of the existing scratch, with HEX blobs.
 
     The existing CloudPanel gzip may contain raw non-UTF8 binary data. Never
@@ -238,6 +238,8 @@ def native_readonly_scratch_dump(record,stage,destination):
         "--skip-comments","--skip-dump-date",
         db,
     ]
+    if schema_only:
+        args.insert(-1,"--no-data")
     # Private plain SQL is ephemeral; only fixed status codes are printed.
     try:
         fd=os.open(destination,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
@@ -368,7 +370,7 @@ def explain_row_multisets(source,target,schema):
 _ATTR_TOKENS = re.compile(
     r"'(?:\\.|''|[^'\\])*'|\"(?:\\.|\"\"|[^\"\\])*\"|"
     r"\`(?:\`\`|[^\`])*\`|[A-Za-z_][A-Za-z_0-9$]*|"
-    r"[-+]?[0-9]+(?:\.[0-9]+)?|[^\s]", re.S,
+    r"0[xX][0-9a-fA-F]+|[-+]?[0-9]+(?:\.[0-9]+)?|[^\s]", re.S,
 )
 _ATTR_GROUPS = (
     "NULLABILITY", "DEFAULT", "COLLATION", "CHARSET",
@@ -452,6 +454,79 @@ def _time_default_key(expr):
     if match: return int(match.group(2) or 0)
     match = re.fullmatch(r"NOW\(([0-6]?)\)", text)
     return int(match.group(1) or 0) if match else None
+
+
+def _decode_sql_literal(text):
+    """Decode one bounded single-quoted literal in memory, never evaluate SQL.
+
+    Return unknown on nonstandard escapes. The decoder establishes lexical
+    bytes only; connection charset, SQL mode and default behavior stay gated.
+    """
+    if not isinstance(text,str) or len(text)>65536 or not re.fullmatch(r"'(?:\\.|''|[^'\\])*'",text,re.S):
+        return None
+    out=[]; i=1
+    escapes={"0":"\x00","b":"\b","n":"\n","r":"\r","t":"\t","Z":"\x1a","'":"'",'"':'"',"\\":"\\"}
+    while i<len(text)-1:
+        c=text[i]
+        if c=="'" and text[i+1:i+2]=="'":out.append("'");i+=2
+        elif c=="\\":
+            if text[i+1] not in escapes:return None
+            out.append(escapes[text[i+1]]);i+=2
+        else:out.append(c);i+=1
+    return "".join(out)
+
+
+def _scalar_default(expr):
+    """Recognize only wrapped literals; no functions/casts/operators execute."""
+    tokens=tuple(expr);wrappers=0
+    while len(tokens)>2 and tokens[0]=="(" and tokens[-1]==")":
+        depth=0;end=None
+        for i,t in enumerate(tokens):
+            if t=="(":depth+=1
+            elif t==")":depth-=1
+            if depth==0:end=i;break
+        if end!=len(tokens)-1 or wrappers>=8:break
+        tokens=tokens[1:-1];wrappers+=1
+    prefix=""
+    if len(tokens)==2 and re.fullmatch(r"_[A-Za-z][A-Za-z0-9_]*|[nNbBxX]",tokens[0]):
+        prefix=tokens[0].lower();tokens=tokens[1:]
+    if len(tokens)!=1:return {"kind":"EXPRESSION","wrappers":wrappers,"prefix":prefix,"value":None}
+    token=tokens[0];kind="UNKNOWN";value=None
+    if token.upper()=="NULL" and not prefix:kind="NULL";value="NULL"
+    elif re.fullmatch(r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?",token) and not prefix:
+        from decimal import Decimal
+        kind="NUMBER";value=Decimal(token)
+    elif re.fullmatch(r"0[xX][0-9a-fA-F]+",token) and not prefix:
+        kind="HEX";value=token[2:].lower()
+    else:
+        decoded=_decode_sql_literal(token)
+        if decoded is not None:kind="STRING";value=decoded
+    return {"kind":kind,"wrappers":wrappers,"prefix":prefix,"value":value}
+
+
+def _default_resolution(source,target):
+    """Safe structured detail; never return default literals or identifiers."""
+    a,b=_attribute_scan(source),_attribute_scan(target)
+    if a is None or b is None or a[0]!=b[0]:return {"relation":"PARSER_UNPROVEN"}
+    x,y=a[1]["DEFAULT"],b[1]["DEFAULT"]
+    if len(x)!=1 or len(y)!=1:return {"relation":"PRESENCE_UNPROVEN"}
+    x,y=_scalar_default(x[0][1:]),_scalar_default(y[0][1:])
+    prefixes={"","_utf8","_utf8mb3","_utf8mb4","_ascii","_latin1","_binary","n","b","x"}
+    result={"source_kind":x["kind"],"target_kind":y["kind"],
+            "source_wrappers":x["wrappers"],"target_wrappers":y["wrappers"],
+            "source_prefix":x["prefix"] if x["prefix"] in prefixes else "OTHER_UNPROVEN",
+            "target_prefix":y["prefix"] if y["prefix"] in prefixes else "OTHER_UNPROVEN"}
+    if x["value"] is None or y["value"] is None:relation="EXPRESSION_UNPROVEN"
+    elif x["kind"]!=y["kind"]:relation="KIND_CHANGED_UNPROVEN"
+    elif x["value"]!=y["value"]:relation="LITERAL_VALUE_DIFFER"
+    elif x["prefix"]!=y["prefix"]:relation="EQUAL_LITERAL_CHARSET_CONTEXT_REQUIRED"
+    elif x["wrappers"]!=y["wrappers"]:relation="EQUAL_LITERAL_PARENTHESES_ONLY"
+    else:relation="EQUAL_LITERAL_SPELLING_ONLY"
+    result["relation"]=relation
+    if x["kind"]==y["kind"]=="STRING" and x["value"] is not None and y["value"] is not None:
+        result["both_empty"]=x["value"]==y["value"]==""
+        result["both_ascii"]=x["value"].isascii() and y["value"].isascii()
+    return result
 
 
 def _literal_parts(expr):
@@ -793,15 +868,17 @@ def explain_conditional_ddl(source, target):
 
 
 def _redacted_branch_shape(literal):
-    """Fixed vocabulary only: never emit literals, identifiers or variable names."""
+    """Fixed public vocabulary only; private literals/names stay redacted."""
     if not isinstance(literal,str) or len(literal)>4096: return "UNPROVEN"
-    body = literal[1:-1].replace("''", "'")
+    body = _decode_sql_literal(literal)
+    if body is None:return "LITERAL_ESCAPE_UNPROVEN"
     tokens = _ATTR_TOKENS.findall(body)
-    words = set("SET SELECT SESSION GLOBAL PERSIST PERSIST_ONLY NAMES COLLATE FROM DUAL COUNT INTO WHERE AND OR IF NULL TRUE FALSE ON OFF SQL_MODE SQL_NOTES TIME_ZONE CHARACTER_SET_CLIENT CHARACTER_SET_RESULTS COLLATION_CONNECTION FOREIGN_KEY_CHECKS UNIQUE_CHECKS AUTOCOMMIT SQL_SAFE_UPDATES MAX_EXECUTION_TIME SQL_LOG_BIN GTID_PURGED INFORMATION_SCHEMA TABLES TABLE_SCHEMA TABLE_NAME INNODB_TABLES INNODB_TABLESPACES".split())
+    words = set("SET SELECT SESSION GLOBAL PERSIST PERSIST_ONLY NAMES COLLATE FROM DUAL COUNT INTO WHERE AND OR IF NULL TRUE FALSE ON OFF SQL_MODE SQL_NOTES TIME_ZONE CHARACTER_SET_CLIENT CHARACTER_SET_RESULTS COLLATION_CONNECTION FOREIGN_KEY_CHECKS UNIQUE_CHECKS AUTOCOMMIT SQL_SAFE_UPDATES MAX_EXECUTION_TIME SQL_LOG_BIN GTID_PURGED INFORMATION_SCHEMA PERFORMANCE_SCHEMA TABLES TABLE_SCHEMA TABLE_NAME INNODB_TABLES INNODB_TABLESPACES SESSION_VARIABLES VARIABLE_NAME ROCKSDB_BULK_LOAD SQL_REQUIRE_PRIMARY_KEY SQL_GENERATE_INVISIBLE_PRIMARY_KEY SQL_AUTO_IS_NULL UNIQUE_CHECKS CHECK_CONSTRAINT_CHECKS MAX_STATEMENT_TIME OPTIMIZER_SWITCH".split())
     parts = []
     i = 0
     while i < len(tokens):
         t = tokens[i]
+        if t.startswith("`") and t.endswith("`"):t=t[1:-1].replace("``","`")
         if t == "@":
             is_system = i+1 < len(tokens) and tokens[i+1] == "@"
             i += 2 if is_system else 1
@@ -813,7 +890,10 @@ def _redacted_branch_shape(literal):
             parts.append(label)
             continue
         if t.upper() in words: parts.append(t.upper())
-        elif t[:1] in ("'", '"'): parts.append("LITERAL")
+        elif t[:1] in ("'", '"'):
+            decoded=_decode_sql_literal(t)
+            public={"rocksdb_bulk_load","performance_schema","information_schema","session_variables"}
+            parts.append("SYSTEM_LITERAL_"+decoded.upper() if decoded in public else "LITERAL")
         elif re.fullmatch(r"[-+]?[0-9]+(?:\.[0-9]+)?",t): parts.append("NUMBER")
         elif t in ("=", ";", ",", "(", ")", ".", "*", "+", "-"): parts.append(t)
         else: parts.append("IDENTIFIER")
@@ -958,12 +1038,195 @@ def explain_advisory(source,target, *, compatibility_only=False):
     print("ADVISORY_NOT_A_MIGRATION_PASS_GATE=YES",flush=True)
 
 
+def _metadata_queries(db):
+    """Four fixed catalog-only queries; no caller-provided SQL fragments."""
+    need(isinstance(db,str) and re.fullmatch(r"[A-Za-z0-9_-]{1,64}",db),"METADATA_DB_SCOPE_UNPROVEN")
+    where=" WHERE TABLE_SCHEMA='"+db+"'"
+    return {
+        "server":"SELECT JSON_OBJECT('version',VERSION())",
+        "tables":"SELECT JSON_OBJECT('name',TABLE_NAME,'collation',TABLE_COLLATION,'engine',ENGINE) FROM information_schema.TABLES"+where+" AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME",
+        "columns":"SELECT JSON_OBJECT('table',TABLE_NAME,'column',COLUMN_NAME,'charset',CHARACTER_SET_NAME,'collation',COLLATION_NAME) FROM information_schema.COLUMNS"+where+" AND COLLATION_NAME IS NOT NULL ORDER BY TABLE_NAME,ORDINAL_POSITION",
+        "collations":"SELECT JSON_OBJECT('name',COLLATION_NAME,'charset',CHARACTER_SET_NAME) FROM information_schema.COLLATION_CHARACTER_SET_APPLICABILITY",
+    }
+
+
+def _read_catalog(args,env,db):
+    result={}
+    for key,sql in _metadata_queries(db).items():
+        response=subprocess.run(args+["--batch","--raw","--skip-column-names","--execute="+sql],
+            env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+            timeout=60,check=False)
+        need(response.returncode==0 and 0<len(response.stdout)<=2*1024*1024,"METADATA_QUERY_UNAVAILABLE")
+        result[key]=[json.loads(row) for row in response.stdout.decode("utf-8","strict").splitlines()]
+        need(len(result[key])<=10000 and all(isinstance(row,dict) for row in result[key]),"METADATA_QUERY_FORMAT_UNPROVEN")
+    return result
+
+
+def live_source_catalog(engine,tail,source_db,base,stage):
+    """Read catalog in source memory over the already-bound SSH connection.
+
+    Only pinned credential-parser code and fixed catalog SELECTs are sent.
+    No new source dump, script file, SQL command from the export, or cleanup.
+    Private table/column identities stay in the CP2 process, never printed.
+    """
+    import inspect,shlex
+    code="import os,re,shlex,subprocess,json,sys,shutil\nfrom pathlib import Path\n"
+    code+="class Block(Exception): pass\nclass Stop(Exception): pass\n"
+    code+=inspect.getsource(need)+"\n"
+    code+=inspect.getsource(stage._target_master_credentials)+"\n"
+    code+=inspect.getsource(_metadata_queries)+"\n"+inspect.getsource(_read_catalog)+"\n"
+    code+='''
+try:
+    import inventory
+    domain,db=sys.argv[1:]
+    sites=[x for x in inventory.build_manifest(Path('/')).get('sites',[]) if isinstance(x,dict) and x.get('domain')==domain]
+    need(len(sites)==1 and sites[0].get('mysql_databases')==[db],'SOURCE_BINDING')
+    identity=_target_master_credentials()
+    binary=shutil.which('mysql') or shutil.which('mariadb')
+    need(binary is not None,'SOURCE_CLIENT')
+    env=os.environ.copy();env['MYSQL_PWD']=identity['password']
+    args=[binary,'--no-defaults','--protocol=tcp','--host='+identity['host'],'--port='+identity['port'],'--user='+identity['user']]
+    print(json.dumps(_read_catalog(args,env,db),separators=(',',':')))
+except Exception:
+    print('SOURCE_METADATA_UNAVAILABLE')
+    raise SystemExit(13) from None
+'''
+    args=["env","PYTHONPATH="+tail["source_runtime_path"]+"/lib","PYTHONDONTWRITEBYTECODE=1",
+          "python3","-B","-c",code,base.DOMAIN,source_db]
+    response=engine.source_remote(tail["source"],shlex.join(args),timeout=300,check=False)
+    need(response.returncode==0 and isinstance(response.stdout,str) and len(response.stdout)<=3*1024*1024,"SOURCE_METADATA_UNAVAILABLE")
+    return json.loads(response.stdout)
+
+
+def live_target_catalog(record,stage):
+    import shutil
+    binary=shutil.which("mysql") or shutil.which("mariadb")
+    need(binary is not None,"TARGET_METADATA_CLIENT_UNAVAILABLE")
+    args,env=stage.restricted_user(binary,record["scratch_database"],record["username"],record["password"])
+    return _read_catalog([args[0],"--no-defaults",*args[1:]],env,record["scratch_database"])
+
+
+def _catalog_maps(catalog):
+    need(isinstance(catalog,dict) and set(catalog)=={"server","tables","columns","collations"},"CATALOG_SHAPE")
+    need(all(isinstance(v,list) and len(v)<=10000 for v in catalog.values()),"CATALOG_SIZE")
+    known={}
+    for row in catalog["collations"]:
+        need(isinstance(row,dict) and set(row)=={"name","charset"},"CATALOG_COLLATION_SHAPE")
+        name,charset=row["name"],row["charset"]
+        need(isinstance(name,str) and re.fullmatch(r"[A-Za-z0-9_]{1,64}",name),"CATALOG_NAME")
+        # MariaDB's UCA family includes generic rows with no charset binding.
+        if charset is None:continue
+        need(isinstance(charset,str) and re.fullmatch(r"[A-Za-z0-9_]{1,64}",charset),"CATALOG_CHARSET")
+        if name.startswith("uca1400_"):
+            # CCSA lists one UCA row per charset; compose its documented full
+            # name from that actual binding, rather than guessing a charset.
+            name=charset+"_"+name
+        need(name not in known,"CATALOG_DUPLICATE_COLLATION")
+        known[name]=charset
+    tables={};columns={}
+    for row in catalog["tables"]:
+        need(isinstance(row,dict) and set(row)=={"name","collation","engine"},"CATALOG_TABLE_SHAPE")
+        name=row["name"]
+        need(isinstance(name,str) and name not in tables and row["collation"] in known,"CATALOG_TABLE_IDENTITY")
+        tables[name]=row["collation"]
+    for row in catalog["columns"]:
+        need(isinstance(row,dict) and set(row)=={"table","column","charset","collation"},"CATALOG_COLUMN_SHAPE")
+        key=(row["table"],row["column"])
+        need(all(isinstance(v,str) for v in key) and key not in columns and key[0] in tables
+             and known.get(row["collation"])==row["charset"],"CATALOG_COLUMN_IDENTITY")
+        columns[key]=row["collation"]
+    return tables,columns,known
+
+
+def explain_live_collations(source,target,source_sql,target_sql):
+    from collections import Counter
+    import sql_diff_evidence as schema
+    a,ac,ak=_catalog_maps(source);b,bc,bk=_catalog_maps(target)
+    sa=schema._schema_statements(source_sql)[0];sb=schema._schema_statements(target_sql)[0]
+    need(len(sa)==157 and set(sa)==set(sb)==set(a)==set(b),"LIVE_COLLATION_TABLE_SCOPE")
+    need(set(ac)==set(bc),"LIVE_COLLATION_COLUMN_SCOPE")
+    pairs=Counter((a[k],b[k]) for k in a if a[k]!=b[k])
+    cpairs=Counter((ac[k],bc[k]) for k in ac if ac[k]!=bc[k])
+    print("SEMANTIC_LIVE_TABLE_COLLATION_DIFFERING="+str(sum(pairs.values())),flush=True)
+    print("SEMANTIC_LIVE_COLUMN_COLLATION_DIFFERING="+str(sum(cpairs.values())),flush=True)
+    for label,items in (("TABLE",pairs),("COLUMN",cpairs)):
+        for i,((old,new),count) in enumerate(sorted(items.items()),1):
+            # Both names were validated against actual public server catalogs.
+            print("SEMANTIC_LIVE_"+label+"_COLLATION_"+str(i)+"="+old+":"+new+":"+str(count),flush=True)
+    print("SEMANTIC_LIVE_METADATA_IS_FROZEN_SNAPSHOT_PROOF=NO",flush=True)
+    print("SEMANTIC_LIVE_COLLATION_ACTION="+("PRESERVE_SOURCE_RULE_IN_REVIEWED_REPAIR" if pairs or cpairs else "NO_LIVE_COLLATION_CHANGE_OBSERVED"),flush=True)
+
+
+def explain_remaining_defaults(source,target):
+    import sql_diff_evidence as schema
+    import sql_pk_conflict_evidence as pk
+    a=schema._schema_statements(source)[0];b=schema._schema_statements(target)[0]
+    need(len(a)==157 and set(a)==set(b),"DEFAULT_TABLE_SCOPE")
+    count=0
+    for ordinal,name in enumerate(sorted(a),1):
+        sa,sb=schema._split_create_table(a[name]),schema._split_create_table(b[name])
+        need(sa is not None and sb is not None,"DEFAULT_SCHEMA_PARSE")
+        def columns(parts):
+            rows={}
+            for item,multiplicity in parts[0].items():
+                match=pk._DEF.match(item)
+                need(multiplicity==1 and match is not None,"DEFAULT_COLUMN_PARSE")
+                key=match.group("field")
+                need(key not in rows,"DEFAULT_COLUMN_DUPLICATE")
+                rows[key]=item[match.end():]
+            return rows
+        ca,cb=columns(sa),columns(sb)
+        need(list(ca)==list(cb),"DEFAULT_COLUMN_SCOPE")
+        for colord,key in enumerate(ca,1):
+            if ca[key]==cb[key]:continue
+            detail=_attribute_detail_categories(ca[key],cb[key])
+            if "DEFAULT_EXPRESSION_OR_LITERAL_CHANGED" not in detail:continue
+            count+=1;need(count<=100,"DEFAULT_DETAIL_LIMIT")
+            result=_default_resolution(ca[key],cb[key])
+            print("SEMANTIC_DEFAULT_"+str(count)+"="+str(ordinal)+":"+str(colord)+":"+
+                  json.dumps(result,sort_keys=True,separators=(",",":")),flush=True)
+    print("SEMANTIC_DEFAULT_UNRESOLVED_COLUMNS_EXAMINED="+str(count),flush=True)
+    print("SEMANTIC_DEFAULT_RESULT_IS_SCHEMA_APPROVAL=NO",flush=True)
+
+
+def semantic_resolution(original,root,record,stage,base,engine,tail,source_db):
+    target=root/"scratch-native-readonly.sql"
+    status=native_readonly_scratch_dump(record,stage,target,schema_only=True)
+    need(status=="COMPLETE","TARGET_SCHEMA_EXPORT_UNAVAILABLE")
+    stream,encoding,size=inspect_target_export_bytes(target,"PLAIN_SQL")
+    need(stream=="PASS" and encoding=="VALID","TARGET_SCHEMA_ENCODING_UNPROVEN")
+    print("TARGET_EXPORT_SCOPE=SCHEMA_ONLY_NO_ROWS",flush=True)
+    print("TARGET_SCHEMA_SQL_BYTES="+str(size),flush=True)
+    explain_remaining_defaults(original,target)
+    explain_quarantined_dynamic(original)
+    phase="TARGET_QUERY"
+    try:
+        target_catalog=live_target_catalog(record,stage)
+        phase="SOURCE_QUERY"
+        source_catalog=live_source_catalog(engine,tail,source_db,base,stage)
+        phase="COLLATION_SCOPE_AND_NAMES"
+        explain_live_collations(source_catalog,target_catalog,original,target)
+        print("SEMANTIC_LIVE_METADATA=READ_ONLY_COMPLETE",flush=True)
+    except Exception as exc:
+        print("SEMANTIC_LIVE_METADATA=UNAVAILABLE_NO_INFERENCE",flush=True)
+        print("SEMANTIC_LIVE_METADATA_FAILURE_PHASE="+phase,flush=True)
+        if isinstance(exc,Block) and re.fullmatch(r"[A-Z0-9_]{1,96}",str(exc)):
+            print("SEMANTIC_LIVE_METADATA_FAILURE_CODE="+str(exc),flush=True)
+    print("PREVIOUS_157_TABLE_PK_AND_MULTISET_EVIDENCE=NOT_RERUN",flush=True)
+    print("SCRATCH_STATIC_COPY_PARITY=NOT_PROVEN",flush=True)
+    print("SCRATCH_FULL_SOURCE_EQUIVALENCE=NOT_PROVEN",flush=True)
+    print("SCRATCH_PARITY_CLASS=SEMANTIC_RESOLUTION_ONLY",flush=True)
+    return 13
+
+
 def run():
     allowed = ("--read-only-existing-www3-scratch-parity",
-               "--read-only-existing-www3-compatibility-closure")
+               "--read-only-existing-www3-compatibility-closure",
+               "--read-only-existing-www3-semantic-resolution")
     need(os.geteuid()==0 and len(sys.argv)==2 and sys.argv[1] in allowed,
          "EXPLICIT_EXISTING_SCRATCH_READONLY_REQUIRED")
     compatibility_only = sys.argv[1] == allowed[1]
+    semantic_only = sys.argv[1] == allowed[2]
     os.umask(0o077)
     base=load(HELPER_NAME,HELPER_BLOB)
     stage=load(STAGE_NAME,STAGE_BLOB)
@@ -976,7 +1239,8 @@ def run():
          "TARGET_IDENTITY_CHANGED")
     base.inspect_existing_site(base.DOMAIN,source_db)
     record=load_receipt(base,stage,tail["target_server_identity"],source_db)
-    print("MODE="+("WWW3_EXISTING_COMPATIBILITY_READ_ONLY" if compatibility_only else
+    print("MODE="+("WWW3_EXISTING_SEMANTIC_READ_ONLY" if semantic_only else
+                   "WWW3_EXISTING_COMPATIBILITY_READ_ONLY" if compatibility_only else
                    "WWW3_EXISTING_QUARANTINE_READ_ONLY_PARITY"),flush=True)
     print("SCRATCH_RECEIPT=PARITY_UNPROVEN_RETAIN_SCRATCH",flush=True)
     print("DATABASE_CREATE_IMPORT_ALTER_DELETE=NONE",flush=True)
@@ -995,6 +1259,8 @@ def run():
         sha=stage.import_existing_verified_source(engine,tail,source_db,base,original)
         need(sha==record["source_snapshot_sha256"],
              "SOURCE_ARCHIVE_RECEIPT_MISMATCH")
+        if semantic_only:
+            return semantic_resolution(original,root,record,stage,base,engine,tail,source_db)
         if compatibility_only:
             explain_quarantined_dynamic(original)
         imported=root/"quarantined.sql.gz"
