@@ -1659,6 +1659,54 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
             self.assertNotIn("VALUES (2)",message)
             self.assertNotIn("t1 VALUES",message)
 
+    def test_readonly_schema_categories_are_counts_not_compatibility_pass(self):
+        import contextlib,gzip,io,sys
+        a=self.module()
+        overlay=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay/lib"
+        sys.path.insert(0,str(overlay))
+        with tempfile.TemporaryDirectory() as folder:
+            left=Path(folder)/"source.sql.gz"
+            right=Path(folder)/"target.sql.gz"
+            source="".join(
+                "CREATE TABLE t"+str(i)+
+                " (id INT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;\n"
+                for i in range(157)
+            )
+            target=source
+            target=target.replace(
+                "CREATE TABLE t5 (id INT NOT NULL)",
+                "CREATE TABLE t5 (id BIGINT NOT NULL)"
+            ).replace(
+                "CREATE TABLE t6 (id INT NOT NULL)",
+                "CREATE TABLE t6 (id INT DEFAULT 0)"
+            ).replace(
+                "CREATE TABLE t7 (id INT NOT NULL)",
+                "CREATE TABLE t7 (id INT(11) NOT NULL)"
+            ).replace(
+                "CREATE TABLE t8 (id INT NOT NULL) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+                "CREATE TABLE t8 (id INT NOT NULL) ENGINE=MyISAM DEFAULT CHARSET=latin1"
+            )
+            for path,value in ((left,source),(right,target)):
+                with gzip.open(path,"wt",encoding="utf-8") as stream:
+                    stream.write(value)
+            with contextlib.redirect_stdout(io.StringIO()) as result:
+                a.explain_advisory(left,right)
+            report=result.getvalue()
+            self.assertIn("ADVISORY_SCHEMA=CLASSIFIED",report)
+            self.assertIn("ADVISORY_MISMATCHED_TABLES=4",report)
+            self.assertIn("ADVISORY_OPTION_ENGINE=1",report)
+            self.assertIn("ADVISORY_OPTION_CHARSET=1",report)
+            self.assertIn(
+                "ADVISORY_COLUMN_CLASSES=CLASSIFIED_NOT_APPROVED",report)
+            self.assertIn("ADVISORY_COLUMN_TYPE_FAMILY_CHANGED=1",report)
+            self.assertIn("ADVISORY_COLUMN_TYPE_PARAMETER_CHANGED=1",report)
+            self.assertIn("ADVISORY_COLUMN_ATTRIBUTES_CHANGED=1",report)
+            self.assertIn(
+                "ADVISORY_SCHEMA_DIFF_IS_NOT_COMPATIBILITY_APPROVAL=YES",report)
+            self.assertNotIn("MyISAM",report)
+            self.assertNotIn("latin1",report)
+            self.assertNotIn("BIGINT",report)
+
     def test_schema_parse_rejection_still_checks_rows_advisory_only(self):
         import contextlib,gzip,io,sys
         a=self.module()
