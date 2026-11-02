@@ -242,7 +242,7 @@ def inspect_existing_site(domain,db):
     need(len(rows)==1 and db not in (rows[0].get("mysql_databases") or []),
          "CP2_TARGET_DATABASE_ALREADY_BOUND_OR_SITE_MISSING")
 
-def scan_schema_adapter(parser,archive):
+def scan_schema_adapter(parser,archive,expected_tables=None):
     # This is a one-way schema presence probe, NOT candidate-byte parity,
     # cross-engine compatibility, data parity, or import/cutover authorization.
     old=parser._read_lines
@@ -275,6 +275,10 @@ def scan_schema_adapter(parser,archive):
         return False
     finally:
         parser._read_lines=old
+    if expected_tables is not None and len(tables)!=expected_tables:
+        print("SCHEMA_PRESENCE_RESULT=BLOCKED",flush=True)
+        print("SCHEMA_PRESENCE_REASON=TABLE_COUNT_CHANGED",flush=True)
+        return False
     print("SCHEMA_PRESENCE_RESULT=PASS_ADVISORY_ONLY",flush=True)
     print("SCHEMA_PRESENCE_TABLE_COUNT="+str(len(tables)),flush=True)
     return True
@@ -308,7 +312,7 @@ except (OSError,subprocess.SubprocessError):
     print("HEX_SOURCE_EXPORT=CLIENT_UNAVAILABLE",flush=True)
     raise SystemExit(13)
 help_text=help_result.stdout.decode("latin-1")
-needed=("--hex-blob","--single-transaction","--quick","--skip-lock-tables")
+needed=("--hex-blob","--single-transaction","--quick","--default-character-set")
 if help_result.returncode or any(flag not in help_text for flag in needed):
     print("HEX_SOURCE_EXPORT=FLAGS_UNVERIFIED",flush=True)
     raise SystemExit(13)
@@ -434,7 +438,7 @@ def probe_hex_source_only():
                  and local.stat().st_size>1024,
                  "HEX_SOURCE_COPY_UNVERIFIED")
             utf8_ok=strict_hex_export_utf8(local)
-            schema_ok=scan_schema_adapter(parser,local)
+            schema_ok=scan_schema_adapter(parser,local,expected_tables=157)
             if not (utf8_ok and schema_ok):
                 raise Block("HEX_SOURCE_EXPORT_NEEDS_OTHER_STRATEGY")
             # The existing original dump has 157 source tables. A new
