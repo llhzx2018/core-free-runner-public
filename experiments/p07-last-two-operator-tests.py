@@ -618,20 +618,103 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                         m.save(p,{"status":"OVERWRITE"},first=True)
                     self.assertEqual(json.loads(p.read_text())["status"],"INTENT_RESERVED")
 
-    def test_catalog_absence_requires_independent_zero(self):
+    def test_catalog_absence_requires_master_grants_and_exact_zero(self):
         import subprocess as real_sub
         m=self.module()
-        with mock.patch.object(m.shutil,"which",side_effect=lambda name:"/usr/bin/mysql"),\
+        info={"host":"127.0.0.1","port":"3306",
+              "user":"root","password":"fixture-hidden-secret"}
+        allowed=b"GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost'\n"
+        def output(value):
+            return real_sub.CompletedProcess([],0,value,b"")
+        with mock.patch.object(m.shutil,"which",
+               side_effect=lambda name:"/usr/bin/mysql"),\
+             mock.patch.object(m,"_target_master_credentials",
+               return_value=info),\
              mock.patch.object(m.subprocess,"run",
-               return_value=real_sub.CompletedProcess([],0,b"0\n",b"")) as call:
+               side_effect=[output(allowed),output(b"0\n")]) as call:
             self.assertEqual(m.absent_sql("p07safescratch1"),"/usr/bin/mysql")
-            self.assertIn("information_schema.SCHEMATA",call.call_args.args[0][-1])
+            self.assertEqual(call.call_count,2)
+            self.assertIn("information_schema.SCHEMATA",
+                          call.call_args.args[0][-1])
+            self.assertIn("SCHEMA_NAME='p07safescratch1'",
+                          call.call_args.args[0][-1])
             self.assertNotIn("DROP",call.call_args.args[0][-1])
-        with mock.patch.object(m.shutil,"which",return_value="/usr/bin/mysql"),\
+            for c in call.call_args_list:
+                self.assertEqual(c.kwargs["env"]["MYSQL_PWD"],
+                                 "fixture-hidden-secret")
+                self.assertNotIn("fixture-hidden-secret"," ".join(c.args[0]))
+        with mock.patch.object(m.shutil,"which",
+               return_value="/usr/bin/mysql"),\
+             mock.patch.object(m,"_target_master_credentials",
+               return_value=info),\
              mock.patch.object(m.subprocess,"run",
-               return_value=real_sub.CompletedProcess([],0,b"1\n",b"")):
-            with self.assertRaises(m.Stop):
+               side_effect=[output(allowed),output(b"1\n")]):
+            with self.assertRaisesRegex(
+                m.Stop,"TARGET_SCRATCH_DATABASE_ALREADY_EXISTS_RETAIN"
+            ):
                 m.absent_sql("p07safescratch1")
+
+    def test_catalog_denies_unknown_credentials_permissions_and_ambiguous_read(self):
+        import subprocess as real_sub
+        m=self.module()
+        info={"host":"localhost","port":"3306","user":"root",
+              "password":"fixture-not-exposed"}
+        ok=b"GRANT ALL PRIVILEGES ON *.* TO 'root'@'localhost'\n"
+        no=b"GRANT SELECT ON *.* TO 'readonly'@'localhost'\n"
+        def output(data,code=0):
+            return real_sub.CompletedProcess([],code,data,b"")
+        for grants, count,expected in (
+            (no,b"0\n","TARGET_CATALOG_PRIVILEGES_UNPROVEN"),
+            (ok,b"\n","TARGET_CATALOG_QUERY_AMBIGUOUS"),
+            (ok,b"two\n","TARGET_CATALOG_QUERY_AMBIGUOUS"),
+            (ok,b"1\n","TARGET_SCRATCH_DATABASE_ALREADY_EXISTS_RETAIN"),
+            (ok,b"0\n","NONE"),
+        ):
+            with self.subTest(expected=expected),\
+                 mock.patch.object(m.shutil,"which",return_value="/usr/bin/mysql"),\
+                 mock.patch.object(m,"_target_master_credentials",return_value=info),\
+                 mock.patch.object(m.subprocess,"run",
+                     side_effect=[output(grants),output(count)]) as calls:
+                if expected=="NONE":
+                    self.assertEqual(m.absent_sql("p07safescratch1"),"/usr/bin/mysql")
+                else:
+                    with self.assertRaisesRegex(m.Stop,expected):
+                        m.absent_sql("p07safescratch1")
+                if expected=="TARGET_CATALOG_PRIVILEGES_UNPROVEN":
+                    self.assertEqual(calls.call_count,1)
+        with mock.patch.object(m.shutil,"which",return_value="/usr/bin/mysql"),\
+             mock.patch.object(m,"_target_master_credentials",
+                                side_effect=m.Stop("TARGET_CATALOG_MASTER_CREDENTIALS_UNAVAILABLE")):
+            with self.assertRaisesRegex(m.Stop,"TARGET_CATALOG_MASTER_CREDENTIALS_UNAVAILABLE"):
+                m.absent_sql("p07safescratch1")
+
+    def test_cp2_master_credentials_conservative_parsing_and_no_stdout_leak(self):
+        import subprocess as real_sub
+        m=self.module()
+        samples=(
+            b"Connect Command: mysql -h127.0.0.1 -P3306 -uroot -p'fixture-secret'\n",
+            b"Host: localhost\nPort: 3306\nUser Name: root\nPassword: fixture-secret\n",
+            b"| Host | localhost |\n| Port | 3306 |\n"
+            b"| User Name | root |\n| Password | fixture-secret |\n",
+        )
+        for sample in samples:
+            with self.subTest(sample=sample[:9]),\
+                 mock.patch.object(m.subprocess,"run",
+                   return_value=real_sub.CompletedProcess([],0,sample,b"")) as call:
+                got=m._target_master_credentials()
+                self.assertEqual(got["password"],"fixture-secret")
+                self.assertIn("db:show:master-credentials",call.call_args.args[0])
+        for malformed in (
+            b"Connect Command: mysql -h192.0.2.1 -P3306 -uroot -psecret",
+            b"Connect Command: mysql -h127.0.0.1 -P3306 -uroot -psecret --execute=DROP",
+            b"Host: remote.example\nPort: 3306\nUser Name: root\nPassword: secret\n",
+            b"Host: localhost\nPort: 3306\nUser Name: root\nPassword: one\nPassword: two\n",
+        ):
+            with self.subTest(malformed=malformed[:18]),\
+                 mock.patch.object(m.subprocess,"run",
+                    return_value=real_sub.CompletedProcess([],0,malformed,b"")):
+                with self.assertRaises(m.Stop):
+                    m._target_master_credentials()
 
     def test_only_new_database_scoped_grants_are_accepted(self):
         import subprocess as real_sub
