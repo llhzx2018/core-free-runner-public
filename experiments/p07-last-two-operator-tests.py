@@ -796,13 +796,13 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path=Path(d)/"case.sql.gz"
             with gzip.open(path,"wb") as f:
-                f.write(b"CREATE TABLE sample (id INT);\\nINSERT INTO sample VALUES(1);\\n")
+                f.write(b"CREATE TABLE sample (id INT);\nINSERT INTO sample VALUES(1);\n")
             self.assertFalse(m.standalone_sql_unproven_side_effects(path,verify))
             for payload in (
-                b"UPDATE sample SET id=2;\\n",
-                b"DELETE FROM sample;\\n",
-                b"SET GLOBAL sql_log_bin=0;\\n",
-                b"CREATE TABLE a(id INT); DROP TABLE b;\\n",
+                b"UPDATE sample SET id=2;\n",
+                b"DELETE FROM sample;\n",
+                b"SET GLOBAL sql_log_bin=0;\n",
+                b"CREATE TABLE a(id INT); DROP TABLE b;\n",
             ):
                 with gzip.open(path,"wb") as f:f.write(payload)
                 self.assertTrue(m.standalone_sql_unproven_side_effects(path,verify))
