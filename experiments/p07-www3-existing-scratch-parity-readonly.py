@@ -404,10 +404,28 @@ def explain_advisory(source,target):
     if values is not None:
         for name in ("source_tables","target_tables","common_tables",
                      "mismatched_tables","changed_columns","changed_indexes",
-                     "changed_options","source_only_tables","target_only_tables"):
+                     "changed_options","source_only_tables","target_only_tables",
+                     "unclassified_tables",
+                     "other_schema_source_only","other_schema_target_only"):
             n=values.get(name)
             if type(n) is int and 0<=n<=5000000:
                 print("ADVISORY_"+name.upper()+"="+str(n),flush=True)
+        # Existing release113 classifier already distinguishes engine /
+        # charset / collation / AUTO_INCREMENT and unparsed suffix changes.
+        # Report counters only; these are NEVER compatibility approvals.
+        option_classes=values.get("changed_option_classes",{})
+        for name in ("ENGINE","CHARSET","COLLATION","AUTO_INCREMENT",
+                     "ROW_FORMAT","OTHER_OR_UNPARSED"):
+            n=option_classes.get(name)
+            if type(n) is int and 0<=n<=157:
+                print("ADVISORY_OPTION_"+name+"="+str(n),flush=True)
+        auto=values.get("auto_increment_counter_relation",{})
+        for name in ("SOURCE_GREATER","TARGET_GREATER","SOURCE_ONLY",
+                     "TARGET_ONLY","EQUAL","UNKNOWN_OR_UNPARSED"):
+            n=auto.get(name)
+            if type(n) is int and 0<=n<=157:
+                print("ADVISORY_AUTO_INCREMENT_"+name+"="+str(n),flush=True)
+        print("ADVISORY_SCHEMA_DIFF_IS_NOT_COMPATIBILITY_APPROVAL=YES",flush=True)
     try:
         results=evidence.data_content_evidence(source,target)
         value=results.get("comparison")
