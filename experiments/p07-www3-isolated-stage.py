@@ -477,48 +477,25 @@ def make_quarantined_sql(original,quarantined):
     except (OSError,UnicodeError,EOFError):
         raise Stop("QUARANTINE_SOURCE_SQL_UNREADABLE") from None
     need(len(events)==13,"QUARANTINE_CONTROL_COUNT_CHANGED")
-    # The dump may interleave multiple independent groups, e.g. ASSIGN-1,
-    # ASSIGN-2, PREPARE-1, PREPARE-2, EXECUTE-1, EXECUTE-2.  The old single
-    # group state machine incorrectly required contiguous four-line groups.
-    # Maintain a separate lifecycle for every bound prepared statement.
-    seen_probes=set()
-    used_probes=set()
-    unconsumed_variables={}
-    active_statements={}
-    groups=0
-    for number,kind,identity,related in events:
-        if kind=="PROBE":
-            need(not seen_probes, "QUARANTINE_PROBE_DUPLICATE")
-            seen_probes.add(identity)
-        elif kind=="ASSIGN":
-            need(related in seen_probes
-                 and identity not in unconsumed_variables,
-                 "QUARANTINE_CONTROL_ORDER_UNPROVEN")
-            unconsumed_variables[identity]=related
-            used_probes.add(related)
-        elif kind=="PREPARE":
-            need(identity not in active_statements
-                 and related in unconsumed_variables,
-                 "QUARANTINE_CONTROL_BINDING_UNPROVEN")
-            del unconsumed_variables[related]
-            active_statements[identity]=False
-        elif kind=="EXECUTE":
-            need(identity in active_statements
-                 and active_statements[identity] is False,
-                 "QUARANTINE_CONTROL_BINDING_UNPROVEN")
-            active_statements[identity]=True
-        elif kind=="DEALLOCATE":
-            need(active_statements.get(identity) is True,
-                 "QUARANTINE_CONTROL_BINDING_UNPROVEN")
-            del active_statements[identity]
-            groups+=1
-        else:
-            raise Stop("QUARANTINE_CONTROL_CLASS_UNPROVEN")
-        removed.add(number)
-    need(groups==3 and len(removed)==13
-         and len(seen_probes)==1 and seen_probes==used_probes
-         and not unconsumed_variables and not active_statements,
-         "QUARANTINE_CONTROL_SEQUENCE_UNPROVEN")
+    # These guarded controls are NEVER executed in quarantine mode.
+    # Therefore source-side control ordering or parameter binding is not
+    # evidence of static COPY safety.  Demanding an executable group would
+    # reject dumps that can be made safe simply by removing ALL controls.
+    # Instead prove that the complete, unique 13-line set consists of exactly
+    # one metadata probe and three each of assignment, PREPARE, EXECUTE and
+    # DEALLOCATE.  Every OTHER SQL line is retained verbatim and scanned
+    # independently for ANY executable side effects before database creation.
+    from collections import Counter
+    expected=Counter({
+        "PROBE":1,"ASSIGN":3,"PREPARE":3,"EXECUTE":3,"DEALLOCATE":3
+    })
+    actual=Counter(event[1] for event in events)
+    need(actual==expected,"QUARANTINE_CONTROL_TYPE_COUNTS_UNPROVEN")
+    removed={event[0] for event in events}
+    need(len(removed)==13,"QUARANTINE_CONTROL_UNIQUE_LINES_UNPROVEN")
+    # We do not evaluate, execute or rely on ANY of these 13 lines.
+    # Their original effects are explicitly NOT_PROVEN and do not
+    # authorize full parity, website activation, cutover, or cleanup.
     need(quarantined.parent==original.parent and quarantined!=original
          and not os.path.lexists(quarantined),
          "QUARANTINE_OUTPUT_PATH_UNSAFE")
