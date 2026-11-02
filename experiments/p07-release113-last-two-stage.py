@@ -196,9 +196,45 @@ def ensure_target_unoccupied(sites: list[dict]) -> None:
                 "TARGET_HAS_ALREADY_STAGED_SITE_OR_DB")
 
 
+def ensure_private_recovery_dir() -> None:
+    """Initialize only a missing private receipt directory; never fix unsafe ones.
+
+    The operator may run on a fresh CP2 that has no operator-recovery folder.
+    The parent must already exist and be owned by the executing root. Reject
+    symlinks, foreign ownership, or group/world writable paths before mkdir.
+    Refuse an existing non-private directory rather than chmod or replace it.
+    """
+    parent = RECOVERY_DIR.parent
+    try:
+        parent_meta = parent.lstat()
+    except OSError:
+        raise Stop("RECOVERY_PARENT_UNAVAILABLE") from None
+    require(
+        stat.S_ISDIR(parent_meta.st_mode)
+        and parent_meta.st_uid == os.geteuid()
+        and not parent_meta.st_mode & 0o022,
+        "RECOVERY_PARENT_UNSAFE",
+    )
+    try:
+        os.mkdir(RECOVERY_DIR, 0o700)
+    except FileExistsError:
+        pass
+    except OSError:
+        raise Stop("RECOVERY_DIR_CREATE_FAILED") from None
+    try:
+        meta = RECOVERY_DIR.lstat()
+    except OSError:
+        raise Stop("RECOVERY_DIR_UNAVAILABLE") from None
+    require(
+        stat.S_ISDIR(meta.st_mode)
+        and meta.st_uid == os.geteuid()
+        and stat.S_IMODE(meta.st_mode) == 0o700,
+        "RECOVERY_DIR_UNSAFE",
+    )
+
+
 def snapshot(name: str, original: bytes) -> None:
-    require(RECOVERY_DIR.exists() and RECOVERY_DIR.is_dir()
-            and not RECOVERY_DIR.is_symlink(), "RECOVERY_DIR_MISSING_OR_UNSAFE")
+    ensure_private_recovery_dir()
     p = RECOVERY_DIR / (name + ".before-last-two.json")
     flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
     if hasattr(os, "O_NOFOLLOW"):
