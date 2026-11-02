@@ -412,16 +412,32 @@ class CandidateWww3SchemaTests(unittest.TestCase):
                 def kill(self):
                     raise AssertionError("a complete export must not be killed")
             calls=[]
-            dump.run=lambda *args,**kw:base_subprocess.CompletedProcess(
-                args[0],0,
-                b"--hex-blob --single-transaction --quick --default-character-set "
-                b"--no-tablespaces --set-gtid-purged --set-charset",b"")
+            master_line = (
+                b"Connect Command: mysql -h127.0.0.1 -P3306 -uroot "
+                b"-p'fixture-private-password'\n"
+            )
+            def fake_run(cmd, **kw):
+                if cmd[:2]==["clpctl","db:show:master-credentials"]:
+                    return base_subprocess.CompletedProcess(cmd,0,master_line,b"")
+                if "--execute=SELECT 1" in cmd:
+                    self.assertEqual(kw["env"]["MYSQL_PWD"],
+                                     "fixture-private-password")
+                    return base_subprocess.CompletedProcess(cmd,0,b"1\n",b"")
+                return base_subprocess.CompletedProcess(
+                    cmd,0,
+                    b"--hex-blob --single-transaction --quick --default-character-set "
+                    b"--no-tablespaces --set-gtid-purged --set-charset",b"")
+            dump.run=fake_run
             def spawned(command,**kwargs):
+                self.assertEqual(kwargs["env"]["MYSQL_PWD"],
+                                 "fixture-private-password")
                 calls.append(command)
                 return Process()
             dump.Popen=spawned
             shutil=types.ModuleType("shutil")
-            shutil.which=lambda name:"/usr/bin/mysqldump" if name=="mysqldump" else None
+            shutil.which=lambda name:(
+                "/usr/bin/"+name if name in ("mysqldump","mysql") else None
+            )
             remote=n.REMOTE_HEX.replace(
                 'Path("/var/lib/vf-server-ops/pull-source")',
                 f"Path({str(base)!r})",
@@ -433,7 +449,9 @@ class CandidateWww3SchemaTests(unittest.TestCase):
                     exec(compile(remote,"<source-dump>","exec"),
                          {"__name__":"__main__"})
                 self.assertEqual(out.getvalue().strip(),
-                                 "HEX_SOURCE_EXPORT=CREATED_UNVERIFIED")
+                    "HEX_EXPORT_AUTH=READ_ONLY_CONNECTION_PASS\n"
+                    "HEX_SOURCE_EXPORT=CREATED_UNVERIFIED")
+                self.assertNotIn("fixture-private-password",out.getvalue())
                 self.assertEqual(gzip.decompress(output.read_bytes()),raw)
                 self.assertEqual(len(calls),1)
                 self.assertIn("--hex-blob",calls[0])
@@ -445,6 +463,51 @@ class CandidateWww3SchemaTests(unittest.TestCase):
                          {"__name__":"__main__"})
                 self.assertEqual(refused.exception.code,23)
             self.assertEqual(len(calls),1)
+
+    def test_hex_cloudpanel_auth_parser_rejects_untrusted_commands(self):
+        import contextlib,io,sys,types
+        n=self.module()
+        # Exercise the exact old-server parser without ever contacting a VPS.
+        source=n.REMOTE_HEX
+        part=source[source.index("def parse_master_command("):
+                    source.index("master=managed_master_credentials()")]
+        # Function definitions here are inert; never execute the remote export.
+        ns={"__name__":"test_auth_parser"}
+        import os,subprocess,shlex,re,shutil
+        from pathlib import Path
+        ns.update(os=os,subprocess=subprocess,shlex=shlex,re=re,shutil=shutil,
+                  Path=Path)
+        exec(compile(part,"<auth-test>","exec"),ns)
+        parse=ns["parse_master_command"]
+        cred=parse("Connect Command: mysql -h127.0.0.1 -P3306 "
+                   "-uroot -p'fixture-private-password'")
+        self.assertIsNotNone(cred)
+        self.assertEqual(cred["host"],"127.0.0.1")
+        self.assertEqual(cred["password"],"fixture-private-password")
+        for unsafe in (
+            "Connect Command: mysql -h192.0.2.18 -P3306 -uroot -psecret",
+            "Connect Command: mysql -h127.0.0.1 -P3306 -uroot -psecret; echo LEAK",
+            "Connect Command: bash -c 'mysql -h127.0.0.1'",
+            "Connect Command: mysql -h127.0.0.1 -P3306 -uroot -psecret --execute=DROP",
+            "Connect Command: mysql -h127.0.0.1 -P3306 -uroot",
+            "Connect Command: mysql -h127.0.0.1 -P3306 -uroot -psecret\n"
+            "Connect Command: mysql -h127.0.0.1 -P3306 -uroot -psecret",
+        ):
+            with self.subTest(unsafe=unsafe[:40]):
+                self.assertIsNone(parse(unsafe))
+
+    def test_hex_path_does_not_expose_cloudpanel_master_credentials(self):
+        code=Path(__file__).with_name(
+            "p07-www3-candidate-schema-probe.py"
+        ).read_text()
+        self.assertIn("db:show:master-credentials",code)
+        self.assertIn('env["MYSQL_PWD"]=',code)
+        self.assertIn('stderr=subprocess.DEVNULL',code)
+        self.assertIn("HEX_EXPORT_AUTH=READ_ONLY_CONNECTION_PASS",code)
+        self.assertNotIn("print(result.stdout)",code)
+        self.assertNotIn("print(master)",code)
+        self.assertNotIn('"--password="+',code)
+        self.assertNotIn("shell=True",code)
 
     def test_hex_export_read_only_utf8_and_gzip_gates(self):
         import gzip,io,contextlib
