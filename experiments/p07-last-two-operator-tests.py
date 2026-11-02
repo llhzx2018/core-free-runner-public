@@ -1580,13 +1580,61 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
             self.assertIn("ADVISORY_SCHEMA=CLASSIFIED",message)
             self.assertIn("ADVISORY_SOURCE_TABLES=157",message)
             self.assertIn("ADVISORY_TARGET_TABLES=157",message)
-            self.assertIn("ADVISORY_ROW_SCOPE=157_MATCHING_NAMES",message)
+            self.assertIn("ADVISORY_ROW_SCOPE=157_FULL_SCHEMA_IDENTITIES",message)
             self.assertIn("ADVISORY_MULTISET_STATUS=ROW_MULTISET_DIFFER",message)
             self.assertIn("ADVISORY_MULTISET_DIFFERING_ORDINALS=",message)
             self.assertIn("ADVISORY_NOT_A_MIGRATION_PASS_GATE=YES",message)
             self.assertNotIn("CREATE TABLE",message)
             self.assertNotIn("VALUES (2)",message)
             self.assertNotIn("t1 VALUES",message)
+
+    def test_schema_parse_rejection_still_checks_rows_advisory_only(self):
+        import contextlib,gzip,io,sys
+        a=self.module()
+        rootlib=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay/lib"
+        sys.path.insert(0,str(rootlib))
+        import sql_diff_evidence as schema
+        with tempfile.TemporaryDirectory() as folder:
+            x=Path(folder)/"source.sql.gz"
+            y=Path(folder)/"target.sql.gz"
+            creation="".join(
+                "CREATE TABLE t"+str(n)+" (id int NOT NULL);\n"
+                for n in range(157)
+            )
+            for path,contents in (
+                (x,creation+"INSERT INTO t1 VALUES (1);\n"),
+                (y,creation+"INSERT INTO t1 VALUES (2);\n"),
+            ):
+                with gzip.open(path,"wt",encoding="utf-8") as output:
+                    output.write(contents)
+            blocked= schema.AdvisoryDiagnosticUnavailable(
+                "SQL_SCHEMA_STATEMENT_INCOMPLETE")
+            with mock.patch.object(schema,"_schema_statements",
+                                   side_effect=blocked),\
+                 contextlib.redirect_stdout(io.StringIO()) as captured:
+                a.explain_advisory(x,y)
+            report=captured.getvalue()
+            self.assertIn("ADVISORY_SCHEMA=UNPROVEN",report)
+            self.assertIn(
+                "ADVISORY_SOURCE_SCHEMA_PARSER=SQL_SCHEMA_STATEMENT_INCOMPLETE",report)
+            self.assertIn(
+                "ADVISORY_TARGET_SCHEMA_PARSER=SQL_SCHEMA_STATEMENT_INCOMPLETE",report)
+            self.assertIn(
+                "ADVISORY_ROW_SCOPE=157_CREATE_HEAD_IDENTITIES_ONLY",report)
+            self.assertIn("ADVISORY_MULTISET_STATUS=ROW_MULTISET_DIFFER",report)
+            self.assertIn("ADVISORY_NOT_A_MIGRATION_PASS_GATE=YES",report)
+            self.assertNotIn("INSERT INTO",report)
+            self.assertNotIn("VALUES (2)",report)
+            # Incomplete CREATE identity coverage is never a parity claim.
+            with gzip.open(y,"wt",encoding="utf-8") as output:
+                output.write(creation.replace("CREATE TABLE t55 ", "")+
+                             "INSERT INTO t1 VALUES (2);\n")
+            with mock.patch.object(schema,"_schema_statements",
+                                   side_effect=blocked),\
+                 contextlib.redirect_stdout(io.StringIO()) as captured:
+                a.explain_advisory(x,y)
+            self.assertIn("ADVISORY_ROW_SCOPE=UNPROVEN",captured.getvalue())
+            self.assertNotIn("ADVISORY_MULTISET_STATUS=ROW_MULTISET_EQUAL",captured.getvalue())
 
     def test_receipt_requires_original_created_scratch_status(self):
         import json,os,types
