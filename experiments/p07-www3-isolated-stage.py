@@ -224,13 +224,22 @@ def _sql_line_stacks_commands(line: str) -> bool:
     return False
 
 
-def standalone_sql_unproven_side_effects(path: Path, verifier) -> bool:
+def standalone_sql_unproven_side_effects(path: Path, verifier, *, findings=None) -> bool:
     """Reject privileged and stacked SQL before exact or logical parity.
 
     Known session-only dynamic guard flows are exempt. Normal comments,
     literals and the exact MariaDB sandbox banner are not SQL commands.
     """
     known_dynamic = verifier._cross_engine_known_dynamic_guard_lines(path)
+    flagged = False
+    def record(kind: str, line_number: int) -> bool:
+        nonlocal flagged
+        flagged = True
+        if findings is not None:
+            if len(findings) < 8:
+                findings.append((kind, line_number))
+            return False
+        return True
     opener = gzip.open if path.name.endswith(".gz") else open
     try:
         with opener(path, "rt", encoding="utf-8", errors="strict") as handle:
@@ -267,16 +276,33 @@ def standalone_sql_unproven_side_effects(path: Path, verifier) -> bool:
                     # body. Reject privileged lines inside it independently.
                     continue
                 elif re.match(r"^/\*(?:!|M!)", line, re.I):
-                    return True
+                    if record("UNPROVEN_VERSIONED_SQL", number):
+                        return True
+                    continue
                 if _SQL_SIDE_EFFECT_HEAD_RE.match(line):
-                    return True
+                    token = re.match(r"^[A-Z_]+", line.upper())
+                    head = token.group(0) if token else "UNKNOWN"
+                    if head not in {
+                        "GRANT","REVOKE","FLUSH","RESET","SHUTDOWN",
+                        "CALL","DO","PREPARE","EXECUTE","DEALLOCATE",
+                        "UPDATE","DELETE","TRUNCATE","LOAD",
+                        "CREATE","ALTER","DROP","RENAME","SET","SELECT"
+                    }:
+                        head = "OTHER"
+                    if record("SIDE_EFFECT_HEAD_"+head, number):
+                        return True
+                    continue
                 if re.match(
                     r"^(?:SET|SELECT|INSERT|REPLACE|UPDATE|DELETE|"
                     r"CREATE|ALTER|DROP|GRANT|REVOKE)\b",
                     line, re.I,
                 ) and _sql_line_stacks_commands(line):
-                    return True
-        return in_comment
+                    if record("MULTI_STATEMENT", number):
+                        return True
+        if in_comment:
+            if record("UNTERMINATED_SQL_COMMENT", number):
+                return True
+        return flagged
     except (OSError, EOFError, UnicodeError) as exc:
         raise verifier.RestoreVerifyError("SQL side-effect scan cannot be read") from exc
 
