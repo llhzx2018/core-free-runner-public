@@ -1612,7 +1612,7 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
     def test_readonly_existing_import_parity_modes_preserve_receipt(self):
         import contextlib,gzip,io,json,stat,sys,subprocess,types
         m=self.module()
-        for outcome in ("mismatch","match","export-fail"):
+        for outcome in ("mismatch","match","export-fail","header-drift","sql-copy-drift"):
             with self.subTest(outcome=outcome),tempfile.TemporaryDirectory() as folder:
                 root=Path(folder)
                 tailid="pull-synthetic"
@@ -1620,11 +1620,16 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
                 transactions=root/tailid/"target-transactions"
                 transactions.mkdir(parents=True,mode=0o700)
                 transactions.chmod(0o700)
-                source=b"CREATE TABLE sample (id INT);\nINSERT INTO sample VALUES(1);\n"
+                source=(b"CREATE TABLE sample (id INT);\n" +
+                        b"".join(b"INSERT INTO sample VALUES("+str(i).encode()+b");\n"
+                                 for i in range(250)))
                 archived=gzip.compress(source,mtime=0)
                 sha=__import__("hashlib").sha256(archived).hexdigest()
                 transform=gzip.compress(source,mtime=0)
-                transformsha=__import__("hashlib").sha256(transform).hexdigest()
+                transformsha=__import__("hashlib").sha256(
+                    gzip.compress(source,mtime=20) if outcome in (
+                        "header-drift","sql-copy-drift") else transform
+                ).hexdigest()
                 meta={
                     "schema":"p07.www3.quarantined-static-copy.v1",
                     "migration_id":tailid,"domain":"www3.m3u8.one",
@@ -1651,12 +1656,21 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
                     verify_current_runtime=lambda:None,
                     inspect_existing_site=lambda *args:None,
                 )
+                convert_calls=[0]
+                def convert(original,converted):
+                    convert_calls[0]+=1
+                    payload=(
+                        gzip.compress(source+b"-- drift",mtime=0)
+                        if outcome=="sql-copy-drift" and convert_calls[0]==2
+                        else transform
+                    )
+                    Path(converted).write_bytes(payload)
+                    return __import__("hashlib").sha256(payload).hexdigest()
                 stage=types.SimpleNamespace(
                     scratch_name=lambda base,quarantined:(scratch,"p07u","RANDOM-NEW"),
                     import_existing_verified_source=lambda engine,tail,db,base,path:(
                         path.write_bytes(archived) and sha),
-                    make_quarantined_sql=lambda original,converted:(
-                        converted.write_bytes(transform) and transformsha),
+                    make_quarantined_sql=convert,
                     strict_scope=lambda *args,**kwargs:None,
                 )
                 engine=types.ModuleType("server_migration_pull")
@@ -1664,7 +1678,7 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
                 class PullMigrationError(Exception):pass
                 engine.PullMigrationError=PullMigrationError
                 def cmp(a,b):
-                    if outcome=="match":return "CROSS_ENGINE_LOGICAL_CONTENT"
+                    if outcome in ("match","header-drift"):return "CROSS_ENGINE_LOGICAL_CONTENT"
                     raise PullMigrationError(
                         "MySQL logical-content verification failed "
                         "[SCHEMA_OR_DATA_MISMATCH] [PRIVATE]")
@@ -1695,14 +1709,22 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
                      contextlib.redirect_stdout(io.StringIO()) as captured:
                     code=m.run()
                 text=captured.getvalue()
-                self.assertEqual(code,0 if outcome=="match" else 13)
+                self.assertEqual(code,0 if outcome in ("match","header-drift") else 13)
                 self.assertEqual(marker.read_bytes(),initial)
                 self.assertIn("DATABASE_CREATE_IMPORT_ALTER_DELETE=NONE",text)
                 self.assertNotIn("PRIVATE-SQL",text)
                 self.assertIn("SCRATCH_READONLY_TABLES=157",text)
-                if outcome=="match":
+                if outcome in ("match","header-drift"):
                     self.assertIn("SCRATCH_STATIC_COPY_PARITY=READONLY_MATCH",text)
                     self.assertNotIn("SCRATCH_PARITY=PASS",text)
+                if outcome=="header-drift":
+                    self.assertIn("QUARANTINE_COMPRESSED_RECEIPT_HASH=NOT_REPRODUCIBLE",text)
+                    self.assertIn("QUARANTINE_INFLATED_CONTENT_RECHECK=PASS",text)
+                    self.assertIn("SCRATCH_ORIGINAL_COMPRESSED_INPUT_EQUALITY=NOT_PROVEN",text)
+                if outcome=="sql-copy-drift":
+                    self.assertEqual(convert_calls[0],2)
+                    self.assertNotIn("SCRATCH_EXPORT_READONLY=COMPLETE",text)
+                    self.assertNotIn("SCRATCH_STATIC_COPY_PARITY=READONLY_MATCH",text)
                 if outcome=="mismatch":
                     self.assertIn("SCRATCH_PARITY_CLASS=SCHEMA_OR_DATA_MISMATCH",text)
                 if outcome=="export-fail":
