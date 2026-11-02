@@ -1040,7 +1040,7 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                       "INSERT INTO real VALUES (28);\n")
                 with gzip.open(path,"wt",encoding="utf-8") as file:
                     file.write(text)
-                copy.unlink()
+                copy.unlink(missing_ok=True)
                 with self.assertRaises(m.Stop):
                     m.make_quarantined_sql(path,copy)
                 self.assertFalse(copy.exists())
