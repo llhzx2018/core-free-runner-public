@@ -50,6 +50,8 @@ echo BROWSER_CHECK_SEPARATE
 cli option add vf_m3u8_isolated_protection_case '{"note":"synthetic only","revision":17}' --format=json >/dev/null
 canonical(){ cli eval '$r=VF_M3U8_Update_State_V1::snapshot(); if(is_wp_error($r)) WP_CLI::error($r->get_error_code()); echo $r["fingerprint_sha256"];'; }
 canonical > proof/canonical-state-before.sha256
+cli option get vf_tool_m3u8_version > proof/provider-version-before.txt
+test "$(cat proof/provider-version-before.txt)" = 1.25.97
 cli eval-file /tmp/plugin-snapshot.php > proof/plugin-options-before.json
 cli eval-file /tmp/plugin-snapshot.php > proof/plugin-options-repeat-before-install.json
 tv(){ test "$(cli theme get vf-tools-theme --field=version)" = "$1"; }
@@ -73,6 +75,8 @@ echo CANONICAL_PROVIDER_STATE_PRESERVED_PASS
 cli eval-file /tmp/snapshot.php > proof/state-after.sha256
 cmp proof/state-before.sha256 proof/state-after.sha256
 echo THEME_CONTENT_STATE_PRESERVED_PASS
+cli option get vf_tool_m3u8_version > proof/provider-version-after.txt
+test "$(cat proof/provider-version-after.txt)" = 1.25.98
 cli eval-file /tmp/plugin-snapshot.php > proof/plugin-options-after.json
 python3 - <<'PYPLUGIN'
 import json,pathlib
@@ -80,8 +84,8 @@ a=json.loads(pathlib.Path('proof/plugin-options-before.json').read_text())
 b=json.loads(pathlib.Path('proof/plugin-options-after.json').read_text())
 changed=[k for k in sorted(set(a)|set(b)) if a.get(k)!=b.get(k)]
 print('LEGACY_MIGRATION_METADATA_CHANGED',changed)
-assert changed==[], changed
-pathlib.Path('proof/legacy-metadata-warning.json').write_text(json.dumps({'status':'UNCHANGED','changed':changed,'snapshot_preserved':True,'scope':'independently verified pre-existing; not user/provider state fingerprint'}))
+assert changed==['vf_tool_m3u8_version'], changed
+pathlib.Path('proof/legacy-metadata-warning.json').write_text(json.dumps({'status':'VERSION_UPDATED_OTHER_OPTIONS_UNCHANGED','changed':changed,'snapshot_preserved':True,'scope':'independently verified pre-existing; not user/provider state fingerprint'}))
 PYPLUGIN
 echo LEGACY_MIGRATION_METADATA_WARNING_RECORDED
 cli eval-file /tmp/snapshot.php > proof/state-after.sha256
