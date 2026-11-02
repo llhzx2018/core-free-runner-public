@@ -64,6 +64,13 @@ def _target_master_credentials():
         index=1
         while index<len(parts):
             item=parts[index]
+            # CloudPanel v2's documented Connect Command ends in -A
+            # (skip mysql auto-rehash). It has no write or query effect.
+            # Permit only that exact final token; all other extra argv
+            # are still rejected before any SQL connection is attempted.
+            if item=="-A" and index==len(parts)-1:
+                index+=1
+                continue
             found=None
             value=None
             for opt,key in long.items():
