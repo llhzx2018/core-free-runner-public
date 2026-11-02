@@ -692,6 +692,17 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
         import subprocess as real_sub
         m=self.module()
         samples=(
+            # CloudPanel v2 documentation: box table plus Connect Command
+            # with quoted values and trailing -A (skip client auto-rehash).
+            b"+---------+-------------+\n"
+            b"| Name    | Value       |\n"
+            b"+---------+-------------+\n"
+            b"| Host    | 127.0.0.1   |\n"
+            b"| User Name | root      |\n"
+            b"| Password | fixture-secret |\n"
+            b"| Port    | 3306        |\n"
+            b"Connect Command: mysql -h'127.0.0.1' -P'3306' -u'root' "
+            b"-p'fixture-secret' -A\n",
             b"Connect Command: mysql -h127.0.0.1 -P3306 -uroot -p'fixture-secret'\n",
             b"Host: localhost\nPort: 3306\nUser Name: root\nPassword: fixture-secret\n",
             b"| Host | localhost |\n| Port | 3306 |\n"
@@ -706,6 +717,8 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                 self.assertIn("db:show:master-credentials",call.call_args.args[0])
         for malformed in (
             b"Connect Command: mysql -h192.0.2.1 -P3306 -uroot -psecret",
+            b"Connect Command: mysql -h127.0.0.1 -P3306 -uroot -psecret -A --execute=DROP",
+            b"Connect Command: mysql -h127.0.0.1 -P3306 -uroot -psecret -A -A",
             b"Connect Command: mysql -h127.0.0.1 -P3306 -uroot -psecret --execute=DROP",
             b"Host: remote.example\nPort: 3306\nUser Name: root\nPassword: secret\n",
             b"Host: localhost\nPort: 3306\nUser Name: root\nPassword: one\nPassword: two\n",
