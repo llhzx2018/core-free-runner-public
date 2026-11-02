@@ -34,7 +34,10 @@ ROOT = Path("/opt/vf-server-ops")
 STATES = Path("/var/lib/vf-server-ops/server-migrations")
 ORIGINAL_FILE = STATES / ORIGINAL / "state.json"
 NINE_FILE = STATES / NINE_CHILD / "state.json"
-RECOVERY_DIR = Path("/var/lib/vf-server-ops/operator-recovery")
+# Receipts belong in a dedicated root-private directory. The existing
+# /var/lib/vf-server-ops may be administered by another service account or
+# carry shared permissions; do not chmod, chown, or implicitly trust it.
+RECOVERY_DIR = Path("/root/p07-last-two-recovery")
 LOCK = Path("/run/lock/p07-legacy-nine-staging.lock")
 RUNTIME_BLOB = "a48aa44b96b0a554ae9170d289c46d5cfb56d937"
 ENGINE_BLOB = "71fb59ad7d005b88e39cbeed4b3302c7f313bd06"
@@ -200,8 +203,8 @@ def ensure_private_recovery_dir() -> None:
     """Initialize only a missing private receipt directory; never fix unsafe ones.
 
     The operator may run on a fresh CP2 that has no operator-recovery folder.
-    The parent must already exist and be owned by the executing root. Reject
-    symlinks, foreign ownership, or group/world writable paths before mkdir.
+    The /root parent must already exist and be root-owned. Reject symlinks,
+    foreign ownership or group/world writable paths before mkdir.
     Refuse an existing non-private directory rather than chmod or replace it.
     """
     parent = RECOVERY_DIR.parent
