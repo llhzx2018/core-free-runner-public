@@ -280,6 +280,184 @@ def scan_schema_adapter(parser,archive):
     return True
 
 
+
+# Optional source-only re-export path. It never talks to a target DB.
+# A hex-blob export is not a data-integrity proof or database-import approval.
+REMOTE_HEX=r'''
+import gzip,inventory,os,shutil,subprocess,sys
+from pathlib import Path
+domain,db,out,mid=sys.argv[1:]
+root=Path("/var/lib/vf-server-ops/pull-source")/mid/"data"
+target=Path(out)
+if not root.is_dir() or root.is_symlink() or target.parent!=root or not target.name.startswith("www3-hex-") or target.suffix!=".gz":
+    raise SystemExit(21)
+source=[x for x in inventory.build_manifest(Path("/")).get("sites",[])
+        if isinstance(x,dict) and x.get("domain")==domain]
+if len(source)!=1 or source[0].get("mysql_databases")!=[db]:
+    raise SystemExit(22)
+if os.path.lexists(target):
+    raise SystemExit(23)
+binary=shutil.which("mysqldump") or shutil.which("mariadb-dump")
+if not binary:
+    print("HEX_SOURCE_EXPORT=CLIENT_UNAVAILABLE",flush=True)
+    raise SystemExit(13)
+try:
+    help_result=subprocess.run([binary,"--help"],capture_output=True,
+         stdin=subprocess.DEVNULL,timeout=20,check=False)
+except (OSError,subprocess.SubprocessError):
+    print("HEX_SOURCE_EXPORT=CLIENT_UNAVAILABLE",flush=True)
+    raise SystemExit(13)
+help_text=help_result.stdout.decode("latin-1")
+needed=("--hex-blob","--single-transaction","--quick","--skip-lock-tables")
+if help_result.returncode or any(flag not in help_text for flag in needed):
+    print("HEX_SOURCE_EXPORT=FLAGS_UNVERIFIED",flush=True)
+    raise SystemExit(13)
+options=[
+    "--protocol=socket","--user=root","--single-transaction",
+    "--quick","--hex-blob","--skip-lock-tables",
+    "--default-character-set=utf8mb4",
+]
+if "--set-charset" in help_text:
+    options.append("--set-charset")
+if "--no-tablespaces" in help_text:
+    options.append("--no-tablespaces")
+if "--set-gtid-purged" in help_text:
+    options.append("--set-gtid-purged=OFF")
+command=[binary,*options,db]
+proc=None
+written=0
+complete=False
+try:
+    # Root-private transient file; no credentials in argv or on disk.
+    with target.open("xb") as archive:
+        os.chmod(target,0o600)
+        proc=subprocess.Popen(command,stdout=subprocess.PIPE,
+             stderr=subprocess.DEVNULL,stdin=subprocess.DEVNULL)
+        with gzip.GzipFile(fileobj=archive,mode="wb",compresslevel=4) as zipped:
+            while True:
+                block=proc.stdout.read(1024*1024)
+                if not block:
+                    break
+                written+=len(block)
+                if written>2*1024*1024*1024:
+                    raise RuntimeError("LIMIT")
+                zipped.write(block)
+        status=proc.wait(timeout=60)
+        if status==0 and written>1024 and target.stat().st_size>1024:
+            complete=True
+finally:
+    if proc is not None and proc.poll() is None:
+        proc.kill()
+        proc.wait()
+    if not complete:
+        target.unlink(missing_ok=True)
+if not complete:
+    print("HEX_SOURCE_EXPORT=SOCKET_AUTH_OR_EXPORT_UNPROVEN",flush=True)
+    raise SystemExit(13)
+print("HEX_SOURCE_EXPORT=CREATED_UNVERIFIED",flush=True)
+'''
+
+
+def strict_hex_export_utf8(path):
+    """Validate the entire gzip stream including checksum, no data output."""
+    import codecs
+    decoder=codecs.getincrementaldecoder("utf-8")("strict")
+    total=0
+    try:
+        with gzip.open(path,"rb") as stream:
+            while True:
+                block=stream.read(1024*1024)
+                if not block:
+                    decoder.decode(b"",final=True)
+                    break
+                total+=len(block)
+                if total>2*1024*1024*1024:
+                    print("HEX_EXPORT_CHECK=SIZE_CAP",flush=True)
+                    return False
+                decoder.decode(block,final=False)
+    except UnicodeDecodeError:
+        print("HEX_EXPORT_CHECK=NON_UTF8_REMAINS",flush=True)
+        return False
+    except (OSError,EOFError,UnicodeError):
+        print("HEX_EXPORT_CHECK=GZIP_INVALID",flush=True)
+        return False
+    print("HEX_EXPORT_CHECK=UTF8_STREAM_INTACT" if total>1024
+          else "HEX_EXPORT_CHECK=EMPTY",flush=True)
+    return total>1024
+
+
+def probe_hex_source_only():
+    """Source-only, one unique dump; no target database is created/imported."""
+    need(os.geteuid()==0,"CP2_ROOT_REQUIRED")
+    os.umask(0o077)
+    tail,db=verify_state()
+    verify_current_runtime()
+    sys.path.insert(0,str(RUNTIME/"lib"))
+    import server_migration_pull as engine
+    inspect_existing_site(DOMAIN,db)
+    parser=load_release113_schema_adapter()
+    remote_file=(f"/var/lib/vf-server-ops/pull-source/{TAIL}/data/"
+                 f"www3-hex-{os.urandom(16).hex()}.sql.gz")
+    command=shlex.join([
+        "env",f"PYTHONPATH={tail['source_runtime_path']}/lib",
+        "PYTHONDONTWRITEBYTECODE=1","python3","-B","-c",
+        REMOTE_HEX,DOMAIN,db,remote_file,TAIL,
+    ])
+    print("MODE=WWW3_SOURCE_ONLY_HEX_EXPORT_PROOF",flush=True)
+    print("SOURCE_BUSINESS_DB_WRITES=NO",flush=True)
+    print("SOURCE_TEMP_EXPORT=YES",flush=True)
+    print("CP2_DATABASE_CREATE_OR_IMPORT=NO",flush=True)
+    print("MIGRATION_RETRY=NO",flush=True)
+    print("CUTOVER_ALLOWED=NO",flush=True)
+    cleanup=True
+    try:
+        result=engine.source_remote(
+            tail["source"],command,timeout=1800,check=False)
+        safe_markers={
+            "HEX_SOURCE_EXPORT=CLIENT_UNAVAILABLE",
+            "HEX_SOURCE_EXPORT=FLAGS_UNVERIFIED",
+            "HEX_SOURCE_EXPORT=SOCKET_AUTH_OR_EXPORT_UNPROVEN",
+        }
+        if result.returncode:
+            message=(result.stdout or "").strip()
+            if message in safe_markers:
+                print(message,flush=True)
+            raise Block("HEX_SOURCE_EXPORT_UNAVAILABLE_NO_TARGET_WRITES")
+        need((result.stdout or "").strip()=="HEX_SOURCE_EXPORT=CREATED_UNVERIFIED",
+             "HEX_SOURCE_EXPORT_STATUS_UNVERIFIED")
+        with tempfile.TemporaryDirectory(
+            prefix="p07-www3-hex-review-",dir="/root",
+        ) as folder:
+            local=Path(folder)/"hex-source.sql.gz"
+            engine.pull_path(tail["source"],remote_file,local)
+            need(local.is_file() and not local.is_symlink()
+                 and local.stat().st_size>1024,
+                 "HEX_SOURCE_COPY_UNVERIFIED")
+            utf8_ok=strict_hex_export_utf8(local)
+            schema_ok=scan_schema_adapter(parser,local)
+            if not (utf8_ok and schema_ok):
+                raise Block("HEX_SOURCE_EXPORT_NEEDS_OTHER_STRATEGY")
+            # The existing original dump has 157 source tables. A new
+            # exporter must not silently omit any before isolated recovery.
+            # parse count is printed by scan_schema_adapter, but does not
+            # assert data-object equivalence.
+            print("HEX_SOURCE_PROOF=SCHEMA_AND_UTF8_ONLY",flush=True)
+    finally:
+        try:
+            gone=engine.source_remote(
+                tail["source"],"rm -f -- "+shlex.quote(remote_file),
+                timeout=60,check=False)
+            cleanup=gone.returncode==0
+        except Exception:
+            cleanup=False
+        print("SOURCE_TEMP_CLEANUP="+("PASS" if cleanup else "UNPROVEN"),
+              flush=True)
+    need(cleanup,"SOURCE_TEMP_CLEANUP_UNPROVEN")
+    print("TARGET_DATABASE_WRITES=NO",flush=True)
+    print("MIGRATION_STATE_MUTATED=NO",flush=True)
+    return 0
+
+
 def main():
     need(os.geteuid()==0,"CP2_ROOT_REQUIRED")
     need(sys.argv[1:]==["--probe-existing-www3-only"],
@@ -350,6 +528,8 @@ def main():
 
 if __name__=="__main__":
     try:
+        if sys.argv[1:]==["--prove-hex-export-source-only"]:
+            raise SystemExit(probe_hex_source_only())
         raise SystemExit(main())
     except (Block, OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
         print("BLOCKED="+(
