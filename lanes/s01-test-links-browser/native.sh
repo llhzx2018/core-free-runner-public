@@ -15,13 +15,11 @@ cli(){ docker exec --user www-data "$WP" php /usr/local/bin/wp "$@" --path=/var/
 cli config set VF_WP_UPDATE_TEST_MODE true --raw >/dev/null
 cli config set DISABLE_WP_CRON true --raw >/dev/null
 cli core install --url=http://127.0.0.1:18880 --title='Synthetic Frontend Review' --admin_user=admin --admin_password='Synthetic-Only-Update-54!' --admin_email=runner@example.invalid --skip-email >/dev/null
-docker exec "$WP" mkdir -p /var/www/html/wp-content/themes/vf-tools-theme /var/www/html/wp-content/mu-plugins
-docker cp target/src/. "$WP:/var/www/html/wp-content/themes/vf-tools-theme/"
-docker cp provider/vf-tools-m3u8_V1.25.98.zip "$WP:/tmp/provider.zip"
+docker exec "$WP" mkdir -p /var/www/html/wp-content/mu-plugins
+docker cp proof/vf-tools-theme_V1.35.224.zip "$WP:/tmp/theme.zip"
+cli theme install /tmp/theme.zip >/dev/null
+docker cp proof/vf-tools-m3u8_V1.25.99.zip "$WP:/tmp/provider.zip"
 cli plugin install /tmp/provider.zip --activate >/dev/null
-docker cp plugin-source/src/includes/v510-copy.php "$WP:/var/www/html/wp-content/plugins/vf-tool-m3u8/includes/v510-copy.php"
-docker cp plugin-source/src/public/js/modules/test-links.js "$WP:/var/www/html/wp-content/plugins/vf-tool-m3u8/public/js/modules/test-links.js"
-docker cp plugin-source/src/public/dist/test-links.js "$WP:/var/www/html/wp-content/plugins/vf-tool-m3u8/public/dist/test-links.js"
 docker cp control/lanes/s01-test-links-browser/custom-copy.php "$WP:/tmp/custom-copy.php"
 cli eval-file /tmp/custom-copy.php > proof/custom-copy.json
 docker cp lane/fixture.php "$WP:/var/www/html/wp-content/mu-plugins/progress-fixture.php"
