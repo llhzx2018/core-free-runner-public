@@ -30,6 +30,7 @@ docker cp lane/wp-check.php "$WP:/tmp/wp-check.php";cli eval-file /tmp/wp-check.
 cli rewrite structure '/%postname%/' --hard >/dev/null
 docker cp lane/mount-seed.php "$WP:/tmp/mount-seed.php";cli eval-file /tmp/mount-seed.php > proof/mounts.json
 docker cp lane/seed.php "$WP:/tmp/seed.php";cli eval-file /tmp/seed.php > proof/seed.json
+docker cp control/lanes/s01-segment-browser/observe.php "$WP:/var/www/html/wp-content/mu-plugins/observe.php"
 docker cp control/lanes/s01-segment-browser/seo-seed.php "$WP:/tmp/seo-seed.php";cli eval-file /tmp/seo-seed.php > proof/seo-seed.json
 docker cp lane/extra-seed.php "$WP:/tmp/extra-seed.php";cli eval-file /tmp/extra-seed.php > proof/cases.json
 docker cp lane/snapshot.php "$WP:/tmp/snapshot.php"

@@ -1,0 +1,5 @@
+<?php
+add_action('wp_head',static function(){
+ $id=get_queried_object_id();$route='m3u8-segment-viewer';$f='vf_theme_public_route_contract_find_exact_published_post_id_for_route_language';
+ $d=['id'=>$id,'language'=>function_exists('pll_get_post_language')?pll_get_post_language($id):'','global_id'=>(int)($GLOBALS['post']->ID??0),'meta'=>get_post_meta($id,'rank_math_description',true),'context'=>$GLOBALS['vf_toolsite_static_route_context']??'missing','request_language'=>function_exists('vf_toolsite_multilingual_request_language_code')?vf_toolsite_multilingual_request_language_code():'missing','route'=>function_exists('vf_toolsite_static_route_for_context')?vf_toolsite_static_route_for_context():'missing','resolved_en'=>function_exists($f)?$f($route,'en'):-1,'resolved_zh'=>function_exists($f)?$f($route,'zh'):-1,'existing'=>function_exists('vf_toolsite_static_route_existing_post')?(int)(vf_toolsite_static_route_existing_post($route)->ID??0):-1,'virtual'=>function_exists('vf_toolsite_static_route_virtual_post')?(int)(vf_toolsite_static_route_virtual_post($route)->ID??0):-1];echo '<meta name="fixture-observation" content="'.esc_attr(wp_json_encode($d)).'">';
+},1);

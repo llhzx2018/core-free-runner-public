@@ -4,6 +4,7 @@ const control=await browser.newPage();await control.goto('http://127.0.0.1:18880
 for(const lang of ['en','zh'])for(const width of [1024,1440]){
 const page=await browser.newPage({viewport:{width,height:1000},acceptDownloads:true});
 await page.goto('http://127.0.0.1:18880'+(lang==='zh'?'/zh/m3u8-segment-viewer/':'/m3u8-segment-viewer/'),{waitUntil:'networkidle'});
+console.log(JSON.stringify({requested:lang,url:page.url(),obs:await page.locator('meta[name="fixture-observation"]').getAttribute('content'),pair:JSON.parse(fs.readFileSync('proof/seo-seed.json','utf8'))}));
 const meta=await page.locator('meta[name="description"]').getAttribute('content');assert.equal(meta,lang==='zh'?'自定义中文检测页面描述。':'Custom English checker page description.');
 const root=page.locator('.vf-segment-viewer[data-vf-tool-id]').first();await root.waitFor();
 assert.equal(await page.locator('h1').count(),1);
