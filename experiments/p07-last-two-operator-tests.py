@@ -560,4 +560,136 @@ class CandidateWww3SchemaTests(unittest.TestCase):
                           "engine.cutover_migration(", "engine.save_state("):
             self.assertNotIn(forbidden,source)
 
+
+class IsolatedWww3ScratchTests(unittest.TestCase):
+    def module(self):
+        path=Path(__file__).with_name("p07-www3-isolated-stage.py")
+        spec=importlib.util.spec_from_file_location("p07_www3_scratch_test",path)
+        m=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+
+    def test_helper_is_pinned_and_no_target_destructive_primitives(self):
+        m=self.module()
+        self.assertEqual(m.load_helper().TAIL,"pull-20261102T005644Z-7178c7d5")
+        src=Path(__file__).with_name("p07-www3-isolated-stage.py").read_text()
+        self.assertIn('"--stage-new-www3-scratch-only"',src)
+        self.assertIn("SCRATCH_DB=CREATED_NOT_ACTIVATED",src)
+        self.assertIn("SCRATCH_PARITY=UNPROVEN",src)
+        self.assertIn("SOURCE_TEMP_CLEANUP=",src)
+        self.assertIn("CUTOVER_ALLOWED=NO",src)
+        self.assertIn("os.O_EXCL",src)
+        for banned in ("cloudpanel.delete_database(", "cloudpanel.delete_site(",
+                       "engine.cutover_migration(", "engine.save_state(",
+                       "engine.resume_prepare_migration(", "engine.prepare_migration(",
+                       "engine.activate_target_runtime(", "engine.freeze_old_server(",
+                       "subprocess.run(shell=True", "shell=True"):
+            self.assertNotIn(banned,src)
+
+    def test_scratch_marker_is_private_exclusive_and_never_reused(self):
+        import types
+        m=self.module()
+        with tempfile.TemporaryDirectory() as folder:
+            base=types.SimpleNamespace(BASE=Path(folder),TAIL="pull-test",DOMAIN="www3.m3u8.one")
+            root=Path(folder)/"pull-test"/"target-transactions"
+            root.mkdir(parents=True,mode=0o700)
+            root.chmod(0o700)
+            p=m.receipt_path(base,"p07safescratch1")
+            self.assertTrue(str(p).startswith(str(root)))
+            with mock.patch.dict(sys.modules,{"server_migration":type("L",(),{
+                 "atomic_private_json":staticmethod(lambda path,entry:None)})}):
+                m.save(p,{"status":"INTENT_RESERVED"},first=True)
+                self.assertEqual(p.stat().st_mode&0o777,0o600)
+                self.assertEqual(json.loads(p.read_text())["status"],"INTENT_RESERVED")
+                with self.assertRaises(m.Stop):
+                    m.receipt_path(base,"p07safescratch1")
+                with self.assertRaises(FileExistsError):
+                    m.save(p,{"status":"OVERWRITE"},first=True)
+                self.assertEqual(json.loads(p.read_text())["status"],"INTENT_RESERVED")
+
+    def test_catalog_absence_requires_independent_zero(self):
+        import subprocess as real_sub
+        m=self.module()
+        with mock.patch.object(m.shutil,"which",side_effect=lambda name:"/usr/bin/mysql"),\
+             mock.patch.object(m.subprocess,"run",
+               return_value=real_sub.CompletedProcess([],0,b"0\n",b"")) as call:
+            self.assertEqual(m.absent_sql("p07safescratch1"),"/usr/bin/mysql")
+            self.assertIn("information_schema.SCHEMATA",call.call_args.args[0][-1])
+            self.assertNotIn("DROP",call.call_args.args[0][-1])
+        with mock.patch.object(m.shutil,"which",return_value="/usr/bin/mysql"),\
+             mock.patch.object(m.subprocess,"run",
+               return_value=real_sub.CompletedProcess([],0,b"1\n",b"")):
+            with self.assertRaises(m.Stop):
+                m.absent_sql("p07safescratch1")
+
+    def test_only_new_database_scoped_grants_are_accepted(self):
+        import subprocess as real_sub
+        m=self.module()
+        db="p07safescratch1"
+        ok=(f"GRANT USAGE ON *.* TO 'u'@'127.0.0.1'\n"
+            f"GRANT ALL PRIVILEGES ON {db}.* TO 'u'@'127.0.0.1'\n").encode()
+        with mock.patch.object(m.subprocess,"run",
+             return_value=real_sub.CompletedProcess([],0,ok,b"")):
+            args,env=m.restricted_user("/usr/bin/mysql",db,"u","fixture-secret")
+            self.assertIn("--user=u",args)
+            self.assertNotIn("fixture-secret"," ".join(args))
+            self.assertEqual(env["MYSQL_PWD"],"fixture-secret")
+        wrong=b"GRANT ALL PRIVILEGES ON *.* TO 'u'@'127.0.0.1'\n"
+        with mock.patch.object(m.subprocess,"run",
+             return_value=real_sub.CompletedProcess([],0,wrong,b"")):
+            with self.assertRaises(m.Stop):
+                m.restricted_user("/usr/bin/mysql",db,"u","fixture-secret")
+        elevated=(f"GRANT ALL PRIVILEGES ON {db}.* TO 'u'@'localhost' WITH GRANT OPTION\n").encode()
+        with mock.patch.object(m.subprocess,"run",
+             return_value=real_sub.CompletedProcess([],0,elevated,b"")):
+            with self.assertRaises(m.Stop):
+                m.restricted_user("/usr/bin/mysql",db,"u","fixture-secret")
+
+    def test_restricted_import_writes_only_to_selected_new_scratch(self):
+        import gzip,io
+        m=self.module()
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/"input.sql.gz"
+            original=b"CREATE TABLE checked (v BLOB);\nINSERT INTO checked VALUES (0xFF);\n"
+            with gzip.open(path,"wb") as out:out.write(original)
+            commands=[]
+            class Process:
+                def __init__(self):
+                    self.stdin=io.BytesIO()
+                def poll(self):
+                    return 0
+                def wait(self,timeout):
+                    self.stdin_content=self.stdin.getvalue() if not self.stdin.closed else b""
+                    return 0
+                def kill(self):
+                    raise AssertionError("unexpected kill")
+            proc=Process()
+            class Sink(io.BytesIO):
+                def close(self):
+                    self.seen=self.getvalue()
+                    super().close()
+            proc.stdin=Sink()
+            with mock.patch.object(m.subprocess,"Popen",
+               side_effect=lambda argv,**kwargs:(commands.append((argv,kwargs)) or proc)):
+                m.import_only_scratch(
+                    ["/usr/bin/mysql","--user=u"],{"MYSQL_PWD":"secret"},
+                    "p07safescratch1",path
+                )
+            self.assertEqual(proc.stdin.seen,original)
+            self.assertIn("--database=p07safescratch1",commands[0][0])
+            self.assertNotIn("secret"," ".join(commands[0][0]))
+
+    def test_preflight_sql_denies_database_escape(self):
+        import gzip,sys
+        m=self.module()
+        overlay=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay/lib"
+        sys.path.insert(0,str(overlay))
+        with tempfile.TemporaryDirectory() as folder:
+            path=Path(folder)/"source.sql.gz"
+            with gzip.open(path,"wb") as out:
+                out.write(b"CREATE DATABASE external;\nCREATE TABLE demo (id INT);\n")
+            with self.assertRaises(m.Stop):
+                m.strict_scope(path)
+
+
 if __name__=="__main__":unittest.main()
