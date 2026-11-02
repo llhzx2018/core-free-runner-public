@@ -862,7 +862,7 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                 (b"CREATE TABLE sample (id INT);\nINSERT INTO sample VALUES (1);\n",False),
                 (b"UPDATE sample SET id=2;\n",True),
                 (b"CREATE TABLE sample (id INT); DROP TABLE other;\n",True),
-                (b"/*!50100 UNKNOWN_STMT something */;\n",True),
+                (b"/*!50100 PREPARE fixture */;\n",True),
                 (b"SET GLOBAL sql_log_bin=0;\n",True),
             )
             for value,expected in cases:
