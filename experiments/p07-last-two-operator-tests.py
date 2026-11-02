@@ -870,6 +870,10 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
             self.assertEqual(len(proved),13)
             self.assertFalse(m.standalone_sql_unproven_side_effects(
                 dump,verify,known_safe_lines=proved))
+            with mock.patch.object(
+                    sql_diff_evidence,"require_nonempty_source_schema",
+                    return_value=157):
+                self.assertIsNone(m.strict_scope(dump))
             self.assertEqual(verify._cross_engine_known_dynamic_guard_lines(dump),set())
             with gzip.open(dump,"wt",encoding="utf-8") as f:
                 f.write(safe.replace("SET @@SESSION.SQL_MODE = @old_mode;",
