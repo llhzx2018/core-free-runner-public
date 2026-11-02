@@ -370,7 +370,6 @@ _ATTR_TOKENS = re.compile(
     r"\`(?:\`\`|[^\`])*\`|[A-Za-z_][A-Za-z_0-9$]*|"
     r"[-+]?[0-9]+(?:\.[0-9]+)?|[^\s]", re.S,
 )
-_ATTR_TYPE = re.compile(r"^[A-Za-z]+\s*(?:\([^)]*\))?", re.I | re.S)
 _ATTR_GROUPS = (
     "NULLABILITY", "DEFAULT", "COLLATION", "CHARSET",
     "COMMENT", "ON_UPDATE", "AUTO_INCREMENT", "UNSIGNED_ZEROFILL",
@@ -378,175 +377,136 @@ _ATTR_GROUPS = (
 )
 
 
-def _column_attribute_delta_groups(source: str, target: str) -> set[str]:
-    """Conservative quote-aware attribute categories; not a compatibility gate."""
-    def parse(definition: str):
-        typ = _ATTR_TYPE.match(definition)
-        if typ is None:
-            return None
-        tokens = _ATTR_TOKENS.findall(definition[typ.end():])
-        groups = {name: [] for name in _ATTR_GROUPS if name != "OTHER_OR_UNPARSED"}
+def _attribute_scan(definition):
+    """Lossless token grouping for evidence; never execute or rewrite SQL."""
+    tokens = _ATTR_TOKENS.findall(definition)
+    if not tokens or not re.fullmatch(r"[A-Za-z]+", tokens[0]):
+        return None
+    if any(t in ("'", '"', "`") for t in tokens):
+        return None
+
+    def parens(pos):
+        depth = 0
+        for end in range(pos, len(tokens)):
+            if tokens[end] == "(": depth += 1
+            elif tokens[end] == ")": depth -= 1
+            if depth == 0: return end + 1
+        raise ValueError("UNBALANCED_ATTRIBUTE")
+
+    try:
+        start = 1
+        if tokens[0].upper() == "DOUBLE" and len(tokens) > 1 and tokens[1].upper() == "PRECISION":
+            start = 2
+        if start < len(tokens) and tokens[start] == "(": start = parens(start)
+        typ = tuple(t.upper() if re.fullmatch(r"[A-Za-z]+", t) else t
+                    for t in tokens[:start])
+        groups = {k: [] for k in _ATTR_GROUPS if k != "OTHER_OR_UNPARSED"}
         unknown = []
 
-        def consume_value(pos):
-            if pos >= len(tokens):
-                return pos
-            if tokens[pos] == "(":
-                depth = 0
-                while pos < len(tokens):
-                    if tokens[pos] == "(":
-                        depth += 1
-                    if tokens[pos] == ")":
-                        depth -= 1
-                    pos += 1
-                    if depth == 0:
-                        break
-                return pos
-            pos += 1
-            if pos < len(tokens) and tokens[pos] == "(":
-                return consume_value(pos)
-            return pos
+        def value(pos):
+            if pos >= len(tokens): raise ValueError("MISSING_ATTRIBUTE_VALUE")
+            if tokens[pos] == "(": return parens(pos)
+            end = pos + 1
+            # Charset, national, hex and bit introducers belong to the literal.
+            if (re.fullmatch(r"_[A-Za-z][A-Za-z0-9_]*|[nNbBxX]", tokens[pos])
+                    and end < len(tokens) and tokens[end].startswith("'")):
+                return end + 1
+            if end < len(tokens) and tokens[end] == "(": return parens(end)
+            return end
 
-        i = 0
+        i = start
         while i < len(tokens):
             word = tokens[i].upper()
-            next_word = tokens[i + 1].upper() if i + 1 < len(tokens) else ""
-            category = None
-            end = i + 1
-            if word == "NOT" and next_word == "NULL":
-                category, end = "NULLABILITY", i + 2
-            elif word == "NULL":
-                category = "NULLABILITY"
+            nxt = tokens[i+1].upper() if i+1 < len(tokens) else ""
+            category, end = None, i+1
+            if word == "NOT" and nxt == "NULL": category, end = "NULLABILITY", i+2
+            elif word == "NULL": category = "NULLABILITY"
             elif word in ("DEFAULT", "COLLATE", "COMMENT", "CHARSET"):
-                category = {"COLLATE": "COLLATION", "CHARSET": "CHARSET"}.get(word, word)
-                end = consume_value(i + 1) if word == "DEFAULT" else min(i + 2, len(tokens))
-            elif word == "CHARACTER" and next_word == "SET":
-                category, end = "CHARSET", min(i + 3, len(tokens))
-            elif word == "ON" and next_word == "UPDATE":
-                category, end = "ON_UPDATE", consume_value(i + 2)
-            elif word == "AUTO_INCREMENT":
-                category = "AUTO_INCREMENT"
-            elif word in ("UNSIGNED", "ZEROFILL"):
-                category = "UNSIGNED_ZEROFILL"
-            if category is None:
-                unknown.append(tokens[i])
-            else:
-                groups[category].append(tuple(tokens[i:end]))
-            i = max(end, i + 1)
-        return groups, tuple(unknown)
+                category = {"COLLATE": "COLLATION"}.get(word, word)
+                end = value(i+1)
+            elif word == "CHARACTER" and nxt == "SET":
+                category, end = "CHARSET", value(i+2)
+            elif word == "ON" and nxt == "UPDATE":
+                category, end = "ON_UPDATE", value(i+2)
+            elif word == "AUTO_INCREMENT": category = "AUTO_INCREMENT"
+            elif word in ("SIGNED", "UNSIGNED", "ZEROFILL"): category = "UNSIGNED_ZEROFILL"
+            if category: groups[category].append(tuple(tokens[i:end]))
+            else: unknown.append(tokens[i])
+            i = end
+        return typ, groups, tuple(unknown)
+    except ValueError:
+        return None
 
-    a, b = parse(source), parse(target)
-    if a is None or b is None:
-        return {"OTHER_OR_UNPARSED"}
-    changed = {name for name in a[0] if a[0][name] != b[0][name]}
-    if a[1] != b[1] or not changed:
-        changed.add("OTHER_OR_UNPARSED")
+
+def _column_attribute_delta_groups(source, target):
+    a, b = _attribute_scan(source), _attribute_scan(target)
+    if a is None or b is None or a[0] != b[0]: return {"OTHER_OR_UNPARSED"}
+    changed = {k for k in a[1] if a[1][k] != b[1][k]}
+    if a[2] != b[2] or not changed: changed.add("OTHER_OR_UNPARSED")
     return changed
 
 
+def _time_default_key(expr):
+    text = "".join(expr).upper()
+    match = re.fullmatch(r"(CURRENT_TIMESTAMP|LOCALTIME|LOCALTIMESTAMP)(?:\(([0-6]?)\))?", text)
+    if match: return int(match.group(2) or 0)
+    match = re.fullmatch(r"NOW\(([0-6]?)\)", text)
+    return int(match.group(1) or 0) if match else None
 
-def _attribute_detail_categories(source: str, target: str) -> set[str]:
-    """More granular risk classification. Never proves SQL compatibility.
 
-    Parsing is deliberately conservative. Unknown SQL, syntactic ambiguity,
-    and different evaluated expressions remain unapproved; no values leak.
-    """
-    def scan(value):
-        typ = _ATTR_TYPE.match(value)
-        if not typ:
-            return None
-        tokens = _ATTR_TOKENS.findall(value[typ.end():])
-        known = {key: [] for key in _ATTR_GROUPS if key != "OTHER_OR_UNPARSED"}
-        unknown = []
-        i = 0
-        while i < len(tokens):
-            head = tokens[i].upper()
-            following = tokens[i + 1].upper() if i + 1 < len(tokens) else ""
-            category = None
-            end = i + 1
-            if head == "NOT" and following == "NULL":
-                category, end = "NULLABILITY", i + 2
-            elif head == "NULL":
-                category = "NULLABILITY"
-            elif head == "DEFAULT" or head == "ON" and following == "UPDATE":
-                category = "DEFAULT" if head == "DEFAULT" else "ON_UPDATE"
-                j = i + (1 if head == "DEFAULT" else 2)
-                if j < len(tokens):
-                    if tokens[j] == "(":
-                        depth = 0
-                        while j < len(tokens):
-                            if tokens[j] == "(":
-                                depth += 1
-                            elif tokens[j] == ")":
-                                depth -= 1
-                            j += 1
-                            if depth == 0:
-                                break
-                    else:
-                        j += 1
-                        if j < len(tokens) and tokens[j] == "(":
-                            depth = 0
-                            while j < len(tokens):
-                                if tokens[j] == "(":
-                                    depth += 1
-                                elif tokens[j] == ")":
-                                    depth -= 1
-                                j += 1
-                                if depth == 0:
-                                    break
-                end = j
-            elif head in ("COLLATE", "CHARSET", "COMMENT"):
-                category = {"COLLATE": "COLLATION"}.get(head, head)
-                end = min(i + 2, len(tokens))
-            elif head == "CHARACTER" and following == "SET":
-                category, end = "CHARSET", min(i + 3, len(tokens))
-            elif head == "AUTO_INCREMENT":
-                category = "AUTO_INCREMENT"
-            elif head in ("UNSIGNED", "ZEROFILL"):
-                category = "UNSIGNED_ZEROFILL"
-            if category:
-                known[category].append(tuple(tokens[i:end]))
-            else:
-                unknown.append(tokens[i])
-            i = max(i + 1, end)
-        return known, tuple(unknown)
+def _literal_parts(expr):
+    if len(expr) == 1 and re.fullmatch(r"'(?:\\.|''|[^'\\])*'", expr[0], re.S):
+        return "", expr[0]
+    if (len(expr) == 2 and re.fullmatch(r"_[A-Za-z][A-Za-z0-9_]*|[nNbBxX]", expr[0])
+            and re.fullmatch(r"'(?:\\.|''|[^'\\])*'", expr[1], re.S)):
+        return expr[0].lower(), expr[1]
+    return None
 
-    left = scan(source)
-    right = scan(target)
-    if left is None or right is None:
-        return {"PARSER_UNPROVEN"}
-    l_groups, l_other = left
-    r_groups, r_other = right
+
+def _attribute_detail_categories(source, target):
+    left, right = _attribute_scan(source), _attribute_scan(target)
+    if left is None or right is None or left[0] != right[0]: return {"PARSER_UNPROVEN"}
     result = set()
-    if l_other != r_other:
-        result.add("UNRECOGNIZED_TOKENS_CHANGED")
-    for key in l_groups:
-        before = l_groups[key]
-        after = r_groups[key]
-        if before == after:
-            continue
+    if left[2] != right[2]: result.add("UNRECOGNIZED_TOKENS_CHANGED")
+    for key in left[1]:
+        before, after = left[1][key], right[1][key]
+        if before == after: continue
         if len(before) != 1 or len(after) != 1:
-            result.add(key + "_PRESENCE_OR_MULTIPLE")
+            nullable_lob = (left[0][0] in ("TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT",
+                            "TINYBLOB", "BLOB", "MEDIUMBLOB", "LONGBLOB")
+                and not left[2] and not right[2]
+                and all(not any("NOT" in (t.upper() for t in item) for item in side[1]["NULLABILITY"])
+                        and not side[1]["AUTO_INCREMENT"] for side in (left, right)))
+            normalized = [tuple(t.upper() for t in entry) for entry in (before or after)]
+            if key == "DEFAULT" and nullable_lob and (not before or not after) and normalized == [("DEFAULT", "NULL")]:
+                result.add("DEFAULT_NULLABLE_LOB_NULL_PRESENTATION")
+            else: result.add(key + "_PRESENCE_OR_MULTIPLE")
             continue
-        a = before[0]
-        b = after[0]
-        if key in ("DEFAULT", "ON_UPDATE"):
-            expr_a, expr_b = a[1 if key == "DEFAULT" else 2:], b[1 if key == "DEFAULT" else 2:]
-            if len(expr_a) == len(expr_b) == 1:
-                xa, xb = expr_a[0], expr_b[0]
-                # Same digits, different quote syntax: not automatically safe.
-                numeric = re.compile(r"[-+]?(?:[0-9]+|[0-9]*\.[0-9]+)")
-                qa = xa[1:-1] if len(xa) > 1 and xa[0] == xa[-1] == "'" else xa
-                qb = xb[1:-1] if len(xb) > 1 and xb[0] == xb[-1] == "'" else xb
-                if qa == qb and numeric.fullmatch(qa) and xa != xb:
-                    result.add(key + "_NUMERIC_QUOTING_UNPROVEN")
-                    continue
-            result.add(key + "_EXPRESSION_OR_LITERAL_CHANGED")
-        else:
+        if key not in ("DEFAULT", "ON_UPDATE"):
             result.add(key + "_CHANGED")
-    if not result and source != target:
-        result.add("PRESENTATION_OR_CASE_UNPROVEN")
+            continue
+        offset = 1 if key == "DEFAULT" else 2
+        a, b = before[0][offset:], after[0][offset:]
+        if left[0][0] in ("TIMESTAMP", "DATETIME"):
+            ta, tb = _time_default_key(a), _time_default_key(b)
+            if ta is not None and tb is not None and ta == tb:
+                result.add(key + "_TIMESTAMP_SYNTAX_ONLY")
+                continue
+        la, lb = _literal_parts(a), _literal_parts(b)
+        if la and lb and la[1] == lb[1] and la[0] != lb[0]:
+            result.add(key + "_LITERAL_INTRODUCER_REQUIRES_CHARSET_PROOF")
+            continue
+        if len(a) == len(b) == 1:
+            xa, xb = a[0], b[0]
+            qa = xa[1:-1] if len(xa)>1 and xa[0]==xa[-1]=="'" else xa
+            qb = xb[1:-1] if len(xb)>1 and xb[0]==xb[-1]=="'" else xb
+            if qa == qb and re.fullmatch(r"[-+]?(?:[0-9]+|[0-9]*\.[0-9]+)", qa) and xa != xb:
+                result.add(key + "_NUMERIC_QUOTING_UNPROVEN")
+                continue
+        result.add(key + "_EXPRESSION_OR_LITERAL_CHANGED")
+    if not result and source != target: result.add("PRESENTATION_OR_CASE_UNPROVEN")
     return result
+
 
 
 _COLLATION_TOKEN = re.compile(
@@ -603,6 +563,7 @@ def explain_collation_risk(source, target, evidence):
         if len(l) != 157 or set(l) != set(r):
             raise ValueError("TABLE_SCOPE_UNPROVEN")
         count = Counter()
+        target_defaults = Counter()
         ordinals = []
         for index, name in enumerate(sorted(l), 1):
             aa = evidence._split_create_table(l[name])
@@ -615,10 +576,21 @@ def explain_collation_risk(source, target, evidence):
             if "COLLATION" not in option_classes:
                 continue
             count[_collation_risk_class(aa[2], bb[2])] += 1
+            # Only known public collation names may leave this process.
+            known = {"utf8mb4_general_ci", "utf8mb4_unicode_ci", "utf8mb4_bin",
+                     "utf8mb4_0900_ai_ci", "utf8mb4_0900_as_cs", "utf8mb4_0900_bin",
+                     "utf8mb4_uca1400_ai_ci", "utf8mb4_uca1400_nopad_ai_ci",
+                     "utf8mb3_general_ci", "utf8_general_ci", "latin1_swedish_ci"}
+            target_value = _COLLATION_TOKEN.findall(bb[2])
+            label = target_value[0].lower() if len(target_value) == 1 else ""
+            target_defaults[label if label in known else "OTHER_UNPROVEN"] += 1
             ordinals.append(index)
         print("ADVISORY_COLLATION_RISK=CLASSIFIED_NOT_APPROVED", flush=True)
         for label in _COLLATION_RISK_GROUPS:
             print("ADVISORY_COLLATION_" + label + "_TABLES=" + str(count[label]), flush=True)
+        for label in sorted(target_defaults):
+            print("ADVISORY_COLLATION_TARGET_NAME_" + label.upper() + "_TABLES=" +
+                  str(target_defaults[label]), flush=True)
         print("ADVISORY_COLLATION_CHANGED_TABLE_ORDINALS=" +
               (",".join(map(str, ordinals[:40])) if ordinals else "NONE"), flush=True)
     except Exception:
@@ -633,6 +605,7 @@ def explain_column_change_classes(source,target,evidence):
     attribute_classes=Counter()
     detail_classes=Counter()
     ordinals=[]
+    detail_records=[]
     try:
         left=evidence._schema_statements(source)[0]
         right=evidence._schema_statements(target)[0]
@@ -640,10 +613,6 @@ def explain_column_change_classes(source,target,evidence):
             raise ValueError("COLUMN_SCHEMA_IDENTITY_UNPROVEN")
         name_rx=re.compile(
             r"^(?:\x60(?P<q>(?:\x60\x60|[^\x60])+)\x60|(?P<n>[A-Za-z_][A-Za-z0-9_$]*))\s+(?P<rest>.+)$",
-            re.I|re.S
-        )
-        type_rx=re.compile(
-            r"^(?P<base>[A-Za-z]+)\s*(?:\((?P<args>[^)]*)\))?",
             re.I|re.S
         )
         def index(statement):
@@ -666,19 +635,22 @@ def explain_column_change_classes(source,target,evidence):
             detail_categories=set()
             if set(a)!=set(b):
                 categories.add("NAME_SET_CHANGED")
-            for col in a.keys() & b.keys():
+            for column_ordinal,col in enumerate(a,1):
+                if col not in b:continue
                 if a[col]==b[col]:continue
-                x=type_rx.match(a[col]);y=type_rx.match(b[col])
+                x=_attribute_scan(a[col]);y=_attribute_scan(b[col])
                 if not x or not y:
                     categories.add("UNPARSED_COLUMN")
-                elif x.group("base").upper()!=y.group("base").upper():
+                elif x[0][0]!=y[0][0]:
                     categories.add("TYPE_FAMILY_CHANGED")
-                elif (x.group("args") or "")!=(y.group("args") or ""):
+                elif x[0]!=y[0]:
                     categories.add("TYPE_PARAMETER_CHANGED")
                 else:
                     categories.add("ATTRIBUTES_CHANGED")
                     attribute_categories.update(_column_attribute_delta_groups(a[col],b[col]))
-                    detail_categories.update(_attribute_detail_categories(a[col],b[col]))
+                    delta=_attribute_detail_categories(a[col],b[col])
+                    detail_categories.update(delta)
+                    detail_records.append((ordinal,column_ordinal,sorted(delta)))
             if categories:
                 ordinals.append(ordinal)
                 for kind in categories:classes[kind]+=1
@@ -692,6 +664,10 @@ def explain_column_change_classes(source,target,evidence):
         for name in _ATTR_GROUPS:
             print("ADVISORY_ATTRIBUTE_"+name+"_TABLES="+str(attribute_classes[name]),flush=True)
         for key in (
+            "DEFAULT_TIMESTAMP_SYNTAX_ONLY",
+            "ON_UPDATE_TIMESTAMP_SYNTAX_ONLY",
+            "DEFAULT_NULLABLE_LOB_NULL_PRESENTATION",
+            "DEFAULT_LITERAL_INTRODUCER_REQUIRES_CHARSET_PROOF",
             "DEFAULT_NUMERIC_QUOTING_UNPROVEN",
             "DEFAULT_EXPRESSION_OR_LITERAL_CHANGED",
             "DEFAULT_PRESENCE_OR_MULTIPLE",
@@ -705,11 +681,171 @@ def explain_column_change_classes(source,target,evidence):
         print("ADVISORY_COLUMN_CHANGED_TABLE_ORDINALS="+
               (",".join(str(i) for i in ordinals[:40]) if ordinals else "NONE"),
               flush=True)
+        for i,(table,column,details) in enumerate(detail_records[:100],1):
+            print("ADVISORY_COLUMN_DETAIL_"+str(i)+"="+str(table)+":"+str(column)+":"+
+                  ",".join(details),flush=True)
+        print("ADVISORY_COLUMN_DETAIL_TRUNCATED="+
+              ("YES" if len(detail_records)>100 else "NO"),flush=True)
     except Exception:
         print("ADVISORY_COLUMN_CLASSES=UNPROVEN",flush=True)
 
 
-def explain_advisory(source,target):
+def _pk_literal_identity_report(source, target):
+    """Separate SQL-literal evidence across attribute drift; never a gate.
+
+    Keep the installed strict PK diagnostic unchanged. Require identical
+    ordered columns, explicit full PK, types, signedness and index definitions.
+    DEFAULT/ON UPDATE differences remain independent schema blockers.
+    """
+    from collections import Counter
+    import sql_diff_evidence as schema
+    import sql_pk_conflict_evidence as pk
+    try:
+        ls, _ = schema._schema_statements(source)
+        rs, _ = schema._schema_statements(target)
+        if not ls or set(ls) != set(rs): raise ValueError("SCOPE")
+        eligible, denied = {}, Counter()
+        drift = 0
+        for name in sorted(ls):
+            a, b = schema._split_create_table(ls[name]), schema._split_create_table(rs[name])
+            if not a or not b or a[1] != b[1]:
+                denied["INDEX_OR_PARSE"] += 1
+                continue
+            ka, kb = pk._pk_schema(ls[name]), pk._pk_schema(rs[name])
+            if ka is None or kb is None or ka != kb:
+                denied["PK_OR_COLUMN_IDENTITY"] += 1
+                continue
+            def signatures(columns):
+                out = []
+                for column, count in columns.items():
+                    head = pk._DEF.match(column)
+                    if count != 1 or head is None: raise ValueError("COLUMN")
+                    parsed = _attribute_scan(column[head.end():])
+                    if parsed is None: raise ValueError("TYPE")
+                    out.append((parsed[0], parsed[1]["UNSIGNED_ZEROFILL"]))
+                return out
+            if signatures(a[0]) != signatures(b[0]):
+                denied["TYPE_OR_SIGNEDNESS"] += 1
+                continue
+            eligible[name] = ka
+            drift += a[0] != b[0] or a[2] != b[2]
+        left, right = pk._rows(source, eligible), pk._rows(target, eligible)
+        totals = Counter()
+        for name in eligible:
+            a, b = left[name], right[name]
+            shared = a.keys() & b.keys()
+            changed = sum(a[k] != b[k] for k in shared)
+            only_a, only_b = len(a.keys()-b.keys()), len(b.keys()-a.keys())
+            totals["SOURCE_ONLY_KEYS"] += only_a
+            totals["TARGET_ONLY_KEYS"] += only_b
+            totals["SAME_KEY_CHANGED_LITERALS"] += changed
+            totals["IDENTICAL_ROWS"] += len(shared)-changed
+            totals["DIFFERING_TABLES"] += bool(changed or only_a or only_b)
+        return {"STATUS": "LITERAL_DIFFER" if totals["DIFFERING_TABLES"] else
+                "LITERAL_EQUAL_NOT_VERIFIED" if eligible else "UNPROVEN",
+                "TABLES_EXAMINED": len(ls), "TABLES_EVALUABLE": len(eligible),
+                "TABLES_UNAVAILABLE": sum(denied.values()),
+                "SCHEMA_DRIFT_TABLES_STILL_BLOCKED": drift,
+                **{k: totals[k] for k in ("SOURCE_ONLY_KEYS", "TARGET_ONLY_KEYS",
+                   "SAME_KEY_CHANGED_LITERALS", "IDENTICAL_ROWS", "DIFFERING_TABLES")},
+                **{"DENIED_"+k: denied[k] for k in
+                   ("INDEX_OR_PARSE", "PK_OR_COLUMN_IDENTITY", "TYPE_OR_SIGNEDNESS")}}
+    except Exception:
+        return {"STATUS": "UNPROVEN"}
+
+
+def explain_pk_literal_identity(source, target):
+    for key, value in _pk_literal_identity_report(source, target).items():
+        print("ADVISORY_PK_IDENTITY_"+key+"="+str(value), flush=True)
+    print("ADVISORY_PK_IDENTITY_SEMANTICS=DUMP_LITERALS_ONLY_NO_SCHEMA_APPROVAL", flush=True)
+
+
+def explain_conditional_ddl(source, target):
+    """Expose the exact known key-toggle shape, never waive conditional DDL."""
+    from collections import Counter
+    import sql_diff_evidence as evidence
+    rx = re.compile(r"/\*!40000\s+ALTER\s+TABLE\s+`(?P<table>[A-Za-z0-9_$.-]+)`\s+"
+                    r"(?P<action>DISABLE|ENABLE)\s+KEYS\s*\*/;", re.I)
+    summaries = []
+    try:
+        for label, path in (("SOURCE", source), ("TARGET", target)):
+            toggles, unknown = Counter(), 0
+            tables = set(evidence._schema_statements(path)[0])
+            for raw in evidence._read_lines(path):
+                line = raw.strip()
+                if not line.startswith(("/*!", "/*M!")): continue
+                match = rx.fullmatch(line)
+                if match and match.group("table") in tables:
+                    toggles[(match.group("table"), match.group("action").upper())] += 1
+                elif re.search(r"\b(?:CREATE|ALTER|DROP|RENAME|TRUNCATE|TRIGGER|INDEX|EVENT|PROCEDURE|FUNCTION|VIEW)\b", line, re.I):
+                    unknown += 1
+            paired = sum(toggles[(t,"DISABLE")] == toggles[(t,"ENABLE")] == 1 for t in tables)
+            unmatched = sum(toggles.values()) - paired*2
+            summaries.append((toggles, unknown))
+            for key, value in (("KEY_TOGGLE_PAIRS", paired), ("UNPAIRED_TOGGLES", unmatched),
+                               ("OTHER_DDL_LINES", unknown)):
+                print("ADVISORY_CONDITIONAL_"+label+"_"+key+"="+str(value), flush=True)
+        print("ADVISORY_CONDITIONAL_TOGGLE_IDENTITY="+
+              ("UNKNOWN_DDL_PRESENT" if any(item[1] for item in summaries) else
+               "MATCH_NOT_APPROVED" if summaries[0][0] == summaries[1][0] else "DIFFER"), flush=True)
+    except Exception:
+        print("ADVISORY_CONDITIONAL_CLASS=UNPROVEN", flush=True)
+
+
+def _redacted_branch_shape(literal):
+    """Fixed vocabulary only: never emit literals, identifiers or variable names."""
+    if not isinstance(literal,str) or len(literal)>4096: return "UNPROVEN"
+    body = literal[1:-1].replace("''", "'")
+    tokens = _ATTR_TOKENS.findall(body)
+    words = set("SET SELECT SESSION GLOBAL PERSIST PERSIST_ONLY NAMES COLLATE FROM DUAL COUNT INTO WHERE AND OR IF NULL TRUE FALSE ON OFF SQL_MODE SQL_NOTES TIME_ZONE CHARACTER_SET_CLIENT CHARACTER_SET_RESULTS COLLATION_CONNECTION FOREIGN_KEY_CHECKS UNIQUE_CHECKS AUTOCOMMIT SQL_SAFE_UPDATES MAX_EXECUTION_TIME SQL_LOG_BIN GTID_PURGED INFORMATION_SCHEMA TABLES TABLE_SCHEMA TABLE_NAME INNODB_TABLES INNODB_TABLESPACES".split())
+    parts = []
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if t == "@":
+            is_system = i+1 < len(tokens) and tokens[i+1] == "@"
+            i += 2 if is_system else 1
+            label = "SYSTEM_VAR" if is_system else "USER_VAR"
+            if i < len(tokens):
+                word = tokens[i].upper()
+                if is_system and word in words: label += "_"+word
+                i += 1
+            parts.append(label)
+            continue
+        if t.upper() in words: parts.append(t.upper())
+        elif t[:1] in ("'", '"'): parts.append("LITERAL")
+        elif re.fullmatch(r"[-+]?[0-9]+(?:\.[0-9]+)?",t): parts.append("NUMBER")
+        elif t in ("=", ";", ",", "(", ")", ".", "*", "+", "-"): parts.append(t)
+        else: parts.append("IDENTIFIER")
+        i += 1
+    if len(parts)>64: return "SHAPE_LIMIT_UNPROVEN"
+    return "+".join(parts) or "UNPROVEN"
+
+
+def explain_quarantined_dynamic(original):
+    import sql_diff_evidence as evidence
+    import verify
+    try:
+        groups = []
+        for raw in evidence._read_lines(original):
+            guard = evidence._GUARD_RE.fullmatch(raw.strip())
+            if not guard or not 40000 <= int(guard.group(1)) < 80000: continue
+            assignment = verify._CROSS_ENGINE_DYNAMIC_IF_RE.fullmatch(guard.group(2).strip())
+            if assignment:
+                if len(groups) >= 3: raise ValueError("GROUP_COUNT")
+                groups.append(assignment)
+        if len(groups) != 3: raise ValueError("GROUP_COUNT")
+        for ordinal, group in enumerate(groups, 1):
+            for side in ("yes", "no"):
+                print("ADVISORY_DYNAMIC_"+str(ordinal)+"_"+side.upper()+"_SHAPE="+
+                      _redacted_branch_shape(group.group(side)), flush=True)
+        print("ADVISORY_DYNAMIC_EFFECTS=NOT_PROVEN_NO_EXECUTION", flush=True)
+    except Exception:
+        print("ADVISORY_DYNAMIC_CLASS=UNPROVEN", flush=True)
+
+
+
+def explain_advisory(source,target, *, compatibility_only=False):
     """Read-only release113 diagnostics; counts are never acceptance proof."""
     import sql_diff_evidence as evidence
     values=None
@@ -773,6 +909,12 @@ def explain_advisory(source,target):
         print("ADVISORY_SCHEMA_DIFF_IS_NOT_COMPATIBILITY_APPROVAL=YES",flush=True)
         explain_column_change_classes(source,target,evidence)
         explain_collation_risk(source,target,evidence)
+    if compatibility_only:
+        explain_conditional_ddl(source,target)
+        explain_pk_literal_identity(source,target)
+        print("ADVISORY_PREVIOUS_ROW_MULTISET_RESULT=NOT_RERUN",flush=True)
+        print("ADVISORY_NOT_A_MIGRATION_PASS_GATE=YES",flush=True)
+        return
     try:
         results=evidence.data_content_evidence(source,target)
         value=results.get("comparison")
@@ -817,9 +959,11 @@ def explain_advisory(source,target):
 
 
 def run():
-    need(os.geteuid()==0 and sys.argv[1:]==[
-        "--read-only-existing-www3-scratch-parity"
-    ],"EXPLICIT_EXISTING_SCRATCH_READONLY_REQUIRED")
+    allowed = ("--read-only-existing-www3-scratch-parity",
+               "--read-only-existing-www3-compatibility-closure")
+    need(os.geteuid()==0 and len(sys.argv)==2 and sys.argv[1] in allowed,
+         "EXPLICIT_EXISTING_SCRATCH_READONLY_REQUIRED")
+    compatibility_only = sys.argv[1] == allowed[1]
     os.umask(0o077)
     base=load(HELPER_NAME,HELPER_BLOB)
     stage=load(STAGE_NAME,STAGE_BLOB)
@@ -832,7 +976,8 @@ def run():
          "TARGET_IDENTITY_CHANGED")
     base.inspect_existing_site(base.DOMAIN,source_db)
     record=load_receipt(base,stage,tail["target_server_identity"],source_db)
-    print("MODE=WWW3_EXISTING_QUARANTINE_READ_ONLY_PARITY",flush=True)
+    print("MODE="+("WWW3_EXISTING_COMPATIBILITY_READ_ONLY" if compatibility_only else
+                   "WWW3_EXISTING_QUARANTINE_READ_ONLY_PARITY"),flush=True)
     print("SCRATCH_RECEIPT=PARITY_UNPROVEN_RETAIN_SCRATCH",flush=True)
     print("DATABASE_CREATE_IMPORT_ALTER_DELETE=NONE",flush=True)
     print("RECEIPT_AND_MIGRATION_STATE_WRITES=NONE",flush=True)
@@ -850,6 +995,8 @@ def run():
         sha=stage.import_existing_verified_source(engine,tail,source_db,base,original)
         need(sha==record["source_snapshot_sha256"],
              "SOURCE_ARCHIVE_RECEIPT_MISMATCH")
+        if compatibility_only:
+            explain_quarantined_dynamic(original)
         imported=root/"quarantined.sql.gz"
         transformed_sha=stage.make_quarantined_sql(original,imported)
         print("QUARANTINE_COMPRESSED_RECEIPT_HASH="+(
@@ -864,49 +1011,68 @@ def run():
             stage,original,imported,root
         )
         stage.strict_scope(imported,quarantined=True)
-        target=root/"target-export.sql.gz"
-        try:
-            cloudpanel.export_database(db,target)
-        except Exception:
-            print("SCRATCH_EXPORT_READONLY=FAILED",flush=True)
-            print("SCRATCH_PARITY_CLASS=EXPORT_UNAVAILABLE",flush=True)
-            return 13
-        print("SCRATCH_EXPORT_READONLY=COMPLETE",flush=True)
-        format_name,compare_path=read_copy_format(target)
-        print("SCRATCH_EXPORT_FORMAT="+format_name,flush=True)
-        stream_status,utf8_status,uncompressed_bytes=inspect_target_export_bytes(
-            compare_path,format_name
-        )
-        print("TARGET_EXPORT_STREAM_INTEGRITY="+stream_status,flush=True)
-        print("TARGET_EXPORT_UTF8="+utf8_status,flush=True)
-        print("TARGET_EXPORT_SQL_BYTES="+str(uncompressed_bytes),flush=True)
-        if stream_status!="PASS" or utf8_status!="VALID":
-            print("NATIVE_SCRATCH_FALLBACK=READONLY_HEX_BLOB",flush=True)
-            alternative=root/"scratch-native-readonly.sql"
-            native_status=native_readonly_scratch_dump(record,stage,alternative)
+        if compatibility_only:
+            # Prior CP2 readback proved the CloudPanel dump contains raw binary.
+            # Use the existing restricted HEX dumper once; do not repeat that
+            # known-invalid export before collecting the missing PK evidence.
+            compare_path=root/"scratch-native-readonly.sql"
+            native_status=native_readonly_scratch_dump(record,stage,compare_path)
             print("NATIVE_SCRATCH_EXPORT="+native_status,flush=True)
-            if native_status=="COMPLETE":
-                normalized_status,native_utf8,native_bytes=inspect_target_export_bytes(
-                    alternative,"PLAIN_SQL"
-                )
-                print("NATIVE_SCRATCH_UTF8="+native_utf8,flush=True)
-                print("NATIVE_SCRATCH_SQL_BYTES="+str(native_bytes),flush=True)
-                if normalized_status=="PASS" and native_utf8=="VALID":
-                    compare_path=alternative
-                    print("TARGET_COMPARE_INPUT=NATIVE_SCRATCH_READONLY_DUMP",flush=True)
+            need(native_status=="COMPLETE","NATIVE_READONLY_EXPORT_UNAVAILABLE")
+            stream_status,native_utf8,native_bytes=inspect_target_export_bytes(compare_path,"PLAIN_SQL")
+            print("NATIVE_SCRATCH_UTF8="+native_utf8,flush=True)
+            print("NATIVE_SCRATCH_SQL_BYTES="+str(native_bytes),flush=True)
+            need(stream_status=="PASS" and native_utf8=="VALID","NATIVE_EXPORT_ENCODING_UNPROVEN")
+            print("TARGET_COMPARE_INPUT=NATIVE_SCRATCH_READONLY_DUMP",flush=True)
+        else:
+            target=root/"target-export.sql.gz"
+            try:
+                cloudpanel.export_database(db,target)
+            except Exception:
+                print("SCRATCH_EXPORT_READONLY=FAILED",flush=True)
+                print("SCRATCH_PARITY_CLASS=EXPORT_UNAVAILABLE",flush=True)
+                return 13
+            print("SCRATCH_EXPORT_READONLY=COMPLETE",flush=True)
+            format_name,compare_path=read_copy_format(target)
+            print("SCRATCH_EXPORT_FORMAT="+format_name,flush=True)
+            stream_status,utf8_status,uncompressed_bytes=inspect_target_export_bytes(
+                compare_path,format_name
+            )
+            print("TARGET_EXPORT_STREAM_INTEGRITY="+stream_status,flush=True)
+            print("TARGET_EXPORT_UTF8="+utf8_status,flush=True)
+            print("TARGET_EXPORT_SQL_BYTES="+str(uncompressed_bytes),flush=True)
+            if stream_status!="PASS" or utf8_status!="VALID":
+                print("NATIVE_SCRATCH_FALLBACK=READONLY_HEX_BLOB",flush=True)
+                alternative=root/"scratch-native-readonly.sql"
+                native_status=native_readonly_scratch_dump(record,stage,alternative)
+                print("NATIVE_SCRATCH_EXPORT="+native_status,flush=True)
+                if native_status=="COMPLETE":
+                    normalized_status,native_utf8,native_bytes=inspect_target_export_bytes(
+                        alternative,"PLAIN_SQL"
+                    )
+                    print("NATIVE_SCRATCH_UTF8="+native_utf8,flush=True)
+                    print("NATIVE_SCRATCH_SQL_BYTES="+str(native_bytes),flush=True)
+                    if normalized_status=="PASS" and native_utf8=="VALID":
+                        compare_path=alternative
+                        print("TARGET_COMPARE_INPUT=NATIVE_SCRATCH_READONLY_DUMP",flush=True)
+                    else:
+                        print("SCRATCH_PARITY_CLASS=NATIVE_EXPORT_ENCODING_UNPROVEN",flush=True)
+                        print("SCRATCH_STATIC_COPY_PARITY=NOT_PROVEN",flush=True)
+                        return 13
                 else:
-                    print("SCRATCH_PARITY_CLASS=NATIVE_EXPORT_ENCODING_UNPROVEN",flush=True)
+                    print("SCRATCH_PARITY_CLASS="+(
+                        "TARGET_EXPORT_BINARY_UNPROVEN" if stream_status!="PASS"
+                        else "TARGET_EXPORT_UTF8_UNPROVEN"),flush=True)
                     print("SCRATCH_STATIC_COPY_PARITY=NOT_PROVEN",flush=True)
                     return 13
             else:
-                print("SCRATCH_PARITY_CLASS="+(
-                    "TARGET_EXPORT_BINARY_UNPROVEN" if stream_status!="PASS"
-                    else "TARGET_EXPORT_UTF8_UNPROVEN"),flush=True)
-                print("SCRATCH_STATIC_COPY_PARITY=NOT_PROVEN",flush=True)
-                return 13
-        else:
-            print("TARGET_COMPARE_INPUT=CLOUDPANEL_GZIP",flush=True)
-        explain_advisory(imported,compare_path)
+                print("TARGET_COMPARE_INPUT=CLOUDPANEL_GZIP",flush=True)
+        explain_advisory(imported,compare_path,compatibility_only=compatibility_only)
+        if compatibility_only:
+            print("SCRATCH_STATIC_COPY_PARITY=NOT_PROVEN",flush=True)
+            print("SCRATCH_PARITY_CLASS=COMPATIBILITY_EVIDENCE_ONLY",flush=True)
+            print("SCRATCH_FULL_SOURCE_EQUIVALENCE=NOT_PROVEN",flush=True)
+            return 13
         for label,fun in (
             ("STRUCTURE","sql_structure_fingerprint"),
             ("DATA","sql_data_fingerprint"),
