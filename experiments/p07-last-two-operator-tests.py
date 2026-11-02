@@ -810,6 +810,89 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
             with self.assertRaises(verify.RestoreVerifyError):
                 m.standalone_sql_unproven_side_effects(path,verify)
 
+    def test_bounded_dynamic_literal_grammar_disallows_unsafe_and_stacked(self):
+        m=self.module()
+        allowed=(
+            "'SELECT 1;'","'SELECT 0'","'SELECT @flag;'",
+            "'SET SESSION SQL_NOTES = 1;'",
+            "'SET @@SESSION.SQL_MODE = @old_mode;'",
+            "'SET @flag = 0;'","'SET NAMES utf8mb4;'",
+            "'SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE "
+            "TABLE_SCHEMA='' AND TABLE_NAME='' ;'",
+        )
+        for literal in allowed:
+            with self.subTest(literal=literal):
+                self.assertTrue(m.safe_session_or_read_branch(literal))
+        rejected=(
+            "'SELECT 1; DROP TABLE x'","'SELECT 1; -- secretly'",
+            "'SET GLOBAL sql_mode=0'","'SET @@GLOBAL.SQL_MODE=0'",
+            "'SET SESSION sql_mode=CONCAT(@x,'abc')'",
+            "'SET SESSION sql_mode = 1; DROP TABLE users'",
+            "'UPDATE users SET secret=0'","'SELECT SLEEP(10)'",
+            "'SELECT 1 /* bad */'","'SET @x=@@GLOBAL.SQL_MODE'",
+            "'SELECT @@version'","'SELECT DATABASE()'",
+            "'SET SESSION sql_mode = 1\\nDROP TABLE x'",
+            "'SET @x = 'DROP TABLE z''",
+        )
+        for literal in rejected:
+            with self.subTest(literal=literal):
+                self.assertFalse(m.safe_session_or_read_branch(literal))
+
+    def test_three_complete_versioned_safe_groups_are_proven_without_global_patch(self):
+        import gzip,sys
+        m=self.module()
+        overlay=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay/lib"
+        sys.path.insert(0,str(overlay))
+        import verify,sql_diff_evidence
+        prefix=(
+            "/*!50003 SELECT COUNT(*) INTO @flag FROM INFORMATION_SCHEMA.TABLES "
+            "WHERE TABLE_SCHEMA='db' AND TABLE_NAME='t' */;\n"
+        )
+        def group(i,yes,no="'SELECT 0'"):
+            return (
+                "/*!50003 SET @q"+str(i)+"=IF(@flag, '"+yes+"', "+no+") */;\n"
+                "/*!50003 PREPARE stmt"+str(i)+" FROM @q"+str(i)+" */;\n"
+                "/*!50003 EXECUTE stmt"+str(i)+" */;\n"
+                "/*!50003 DEALLOCATE PREPARE stmt"+str(i)+" */;\n"
+            )
+        safe=(
+            prefix+group(1,"SELECT 1;")+
+            group(2,"SET SESSION SQL_NOTES=1;")+
+            group(3,"SET @@SESSION.SQL_MODE = @old_mode;")
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            dump=Path(directory)/"source.sql.gz"
+            with gzip.open(dump,"wt",encoding="utf-8") as f:
+                f.write(safe)
+            originals=verify._cross_engine_known_dynamic_guard_lines(dump)
+            self.assertEqual(originals,set())
+            proved=m.prove_legacy_mysql_dynamic_groups(
+                dump,verify,sql_diff_evidence)
+            self.assertEqual(len(proved),13)
+            self.assertFalse(m.standalone_sql_unproven_side_effects(
+                dump,verify,known_safe_lines=proved))
+            self.assertEqual(verify._cross_engine_known_dynamic_guard_lines(dump),set())
+            with gzip.open(dump,"wt",encoding="utf-8") as f:
+                f.write(safe.replace("SET @@SESSION.SQL_MODE = @old_mode;",
+                                     "SET GLOBAL SQL_MODE = 0;"))
+            with self.assertRaisesRegex(m.Stop,"DYNAMIC_BRANCH_STILL_UNSAFE"):
+                m.prove_legacy_mysql_dynamic_groups(dump,verify,sql_diff_evidence)
+            with gzip.open(dump,"wt",encoding="utf-8") as f:
+                f.write(safe.replace("SELECT 1;", "SELECT 1; DROP TABLE x"))
+            with self.assertRaisesRegex(m.Stop,"DYNAMIC_BRANCH_STILL_UNSAFE"):
+                m.prove_legacy_mysql_dynamic_groups(dump,verify,sql_diff_evidence)
+            with gzip.open(dump,"wt",encoding="utf-8") as f:
+                f.write(safe.replace(
+                    "/*!50003 EXECUTE stmt1 */;\n",""))
+            with self.assertRaisesRegex(m.Stop,"DYNAMIC_GROUP_SEQUENCE_UNPROVEN"):
+                m.prove_legacy_mysql_dynamic_groups(dump,verify,sql_diff_evidence)
+            with gzip.open(dump,"wt",encoding="utf-8") as f:
+                f.write(safe+"UPDATE extra_table SET v=1;\n")
+            with mock.patch.object(sql_diff_evidence,
+                    "require_nonempty_source_schema",return_value=157):
+                with self.assertRaisesRegex(m.Stop,"SOURCE_UNPROVEN_SIDE_EFFECTS"):
+                    m.strict_scope(dump)
+
     def test_release113_strict_scope_accepts_safe_and_rejects_unsafe(self):
         import gzip,sys
         m=self.module()
@@ -820,7 +903,9 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/"real.sql.gz"
             with mock.patch.object(sql_diff_evidence,
-                   "require_nonempty_source_schema",return_value=157):
+                   "require_nonempty_source_schema",return_value=157),\
+                 mock.patch.object(m,"prove_legacy_mysql_dynamic_groups",
+                                   return_value=set()):
                 with gzip.open(path,"wb") as f:
                     f.write(b"CREATE TABLE sample (id INT);"+bytes([10])+
                             b"INSERT INTO sample VALUES(1);"+bytes([10]))
