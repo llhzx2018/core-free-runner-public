@@ -27,6 +27,6 @@ for name in ['vf-tools-theme_V1.35.223.zip','vf-tools-m3u8_V1.25.98.zip']:
     with zipfile.ZipFile(p('proof')/name) as z: count=sum(not x.is_dir() for x in z.infolist())
     report[name]={'sha256':hashlib.sha256(data).hexdigest(),'bytes':len(data),'files':count}
 assert report['vf-tools-theme_V1.35.223.zip']['files']==476
-assert report['vf-tools-m3u8_V1.25.98.zip']['files']==569
+assert report['vf-tools-m3u8_V1.25.98.zip']['files']==570
 p('proof/candidate-package-proof.json').write_text(json.dumps(report,indent=2))
 print(json.dumps(report))
