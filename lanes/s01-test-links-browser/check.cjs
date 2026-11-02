@@ -18,6 +18,7 @@ for(const lang of ['en','zh'])for(const width of [1024,1440]){
  await root.locator('[data-vf-test-links-fav-row]').first().click();await root.locator('[data-vf-test-links-tab-button="favorites"]').click();
  if(await rows.count()<1)throw Error('favorite filter failed');await root.locator('[data-vf-test-links-tab-button="library"]').click();
  await root.locator('[data-vf-test-links-sample]').click();if(!await root.locator('[data-vf-test-links-current]').inputValue())throw Error('sample selection did not populate URL'); if(!await root.locator('.vf-tl-selection').isVisible())throw Error('selected details panel missing');
+ const chosen=await root.locator('[data-vf-test-links-current]').inputValue(),counter=await root.locator('[data-vf-test-links-input-count]').innerText();if(!counter.startsWith(chosen.length+' / '))throw Error('sample input count incorrect: '+counter+' vs '+chosen.length);
  await root.locator('[data-vf-test-links-verify-selected]').click();await root.locator('[data-vf-test-links-result]').waitFor({state:'visible',timeout:15000});
  if(manifests<1)throw Error('test did not make manifest request');
  await p.screenshot({path:'proof/test-links-'+lang+'-'+width+'-result.png',fullPage:true});
