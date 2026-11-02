@@ -949,7 +949,7 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                 strict_hex_export_utf8=lambda path:True,
             )
             def import_existing(engine,tail,db,baseobj,local):
-                local.write_bytes(b"private SQL not for logs")
+                local.write_bytes(__import__("gzip").compress(b"-- private SQL not for logs\\n"))
             def detect(path,verifier,**kwargs):
                 if "findings" in kwargs:
                     kwargs["findings"].append(("MULTI_STATEMENT",123))
