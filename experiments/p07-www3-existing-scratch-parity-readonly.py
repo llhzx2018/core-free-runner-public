@@ -364,6 +364,68 @@ def explain_row_multisets(source,target,schema):
             print("ADVISORY_"+name+"_STATUS=UNPROVEN",flush=True)
 
 
+def explain_column_change_classes(source,target,evidence):
+    """Classify parsed column changes; never approve type/attribute deltas."""
+    from collections import Counter
+    classes=Counter()
+    ordinals=[]
+    try:
+        left=evidence._schema_statements(source)[0]
+        right=evidence._schema_statements(target)[0]
+        if len(left)!=157 or set(left)!=set(right):
+            raise ValueError("COLUMN_SCHEMA_IDENTITY_UNPROVEN")
+        name_rx=re.compile(
+            r"^(?:\x60(?P<q>(?:\x60\x60|[^\x60])+)\x60|(?P<n>[A-Za-z_][A-Za-z0-9_$]*))\s+(?P<rest>.+)$",
+            re.I|re.S
+        )
+        type_rx=re.compile(
+            r"^(?P<base>[A-Za-z]+)\s*(?:\((?P<args>[^)]*)\))?",
+            re.I|re.S
+        )
+        def index(statement):
+            parts=evidence._split_create_table(statement)
+            if parts is None:raise ValueError("COLUMN_SPLIT_UNPROVEN")
+            columns={}
+            for definition,multiplicity in parts[0].items():
+                if multiplicity!=1:raise ValueError("COLUMN_DUPLICATE")
+                match=name_rx.match(definition)
+                if not match:raise ValueError("COLUMN_NAME_UNPROVEN")
+                name=(match.group("q") or match.group("n")).replace("\x60\x60","\x60")
+                if name in columns:raise ValueError("COLUMN_DUPLICATE_NAME")
+                columns[name]=match.group("rest")
+            return columns
+        for ordinal,table in enumerate(sorted(left),1):
+            if left[table]==right[table]:continue
+            a=index(left[table]);b=index(right[table])
+            categories=set()
+            if set(a)!=set(b):
+                categories.add("NAME_SET_CHANGED")
+            for col in a.keys() & b.keys():
+                if a[col]==b[col]:continue
+                x=type_rx.match(a[col]);y=type_rx.match(b[col])
+                if not x or not y:
+                    categories.add("UNPARSED_COLUMN")
+                elif x.group("base").upper()!=y.group("base").upper():
+                    categories.add("TYPE_FAMILY_CHANGED")
+                elif (x.group("args") or "")!=(y.group("args") or ""):
+                    categories.add("TYPE_PARAMETER_CHANGED")
+                else:
+                    categories.add("ATTRIBUTES_CHANGED")
+            if categories:
+                ordinals.append(ordinal)
+                for kind in categories:classes[kind]+=1
+        print("ADVISORY_COLUMN_CLASSES=CLASSIFIED_NOT_APPROVED",flush=True)
+        for name in ("NAME_SET_CHANGED","TYPE_FAMILY_CHANGED",
+                     "TYPE_PARAMETER_CHANGED","ATTRIBUTES_CHANGED",
+                     "UNPARSED_COLUMN"):
+            print("ADVISORY_COLUMN_"+name+"="+str(classes[name]),flush=True)
+        print("ADVISORY_COLUMN_CHANGED_TABLE_ORDINALS="+
+              (",".join(str(i) for i in ordinals[:40]) if ordinals else "NONE"),
+              flush=True)
+    except Exception:
+        print("ADVISORY_COLUMN_CLASSES=UNPROVEN",flush=True)
+
+
 def explain_advisory(source,target):
     """Read-only release113 diagnostics; counts are never acceptance proof."""
     import sql_diff_evidence as evidence
@@ -426,6 +488,7 @@ def explain_advisory(source,target):
             if type(n) is int and 0<=n<=157:
                 print("ADVISORY_AUTO_INCREMENT_"+name+"="+str(n),flush=True)
         print("ADVISORY_SCHEMA_DIFF_IS_NOT_COMPATIBILITY_APPROVAL=YES",flush=True)
+        explain_column_change_classes(source,target,evidence)
     try:
         results=evidence.data_content_evidence(source,target)
         value=results.get("comparison")
