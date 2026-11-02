@@ -219,6 +219,12 @@ def run():
                 after=Path(folder)/"target.sql.gz"
                 cloudpanel.export_database(name,after)
                 mode=engine.compare_database_dumps(before,after)
+                need(mode in {
+                    "CANONICAL_SQL_EXACT",
+                    "CROSS_ENGINE_GUARDED_SESSION_SQL_EXACT",
+                    "CROSS_ENGINE_KNOWN_DUMP_FORMAT_SQL_EXACT",
+                    "CROSS_ENGINE_LOGICAL_CONTENT",
+                },"SCRATCH_PARITY_MODE_UNRECOGNIZED")
             except Exception:
                 record["status"]="PARITY_UNPROVEN_RETAIN_SCRATCH";save(marker,record)
                 print("SCRATCH_PARITY=UNPROVEN",flush=True)
