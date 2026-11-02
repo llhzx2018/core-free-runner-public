@@ -97,6 +97,21 @@ def verify_state():
     need(child.get("partial_parent_migration_id")==PARENT
          and tail.get("partial_parent_migration_id")==PARENT,
          "MIGRATION_LINEAGE_CHANGED")
+    need(all(
+        isinstance(row.get("last_sql_guard_failure"),dict)
+        and row["last_sql_guard_failure"].get("reason")=="CONDITIONAL_DDL"
+        for row in (parent,child)
+    ),"UPSTREAM_SQL_GUARD_CHANGED")
+    ps=parent.get("sites")
+    cs=child.get("sites")
+    need(isinstance(ps,list) and len(ps)==17
+         and isinstance(cs,list) and len(cs)==9
+         and all(isinstance(x,dict) for x in ps+cs)
+         and all(x.get("stage_status")=="PULLED_STAGED" for x in ps[:7])
+         and all(x.get("stage_status")=="PENDING" for x in ps[7:])
+         and all(x.get("stage_status")=="PULLED_STAGED" for x in cs[:6])
+         and all(x.get("stage_status")=="PENDING" for x in cs[6:]),
+         "UPSTREAM_STAGED_BOUNDARY_CHANGED")
     need(tail.get("cutover_prohibited") is True
          and child.get("cutover_prohibited") is True,
          "CHILD_CUTOVER_BOUNDARY_CHANGED")
