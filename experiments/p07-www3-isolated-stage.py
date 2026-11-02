@@ -185,13 +185,110 @@ def absent_sql(name):
     raise Stop("TARGET_CATALOG_QUERY_AMBIGUOUS")
 
 
+# Local fail-closed side-effect scan backported from the product PR #282.
+# Public release113 `verify` has the dynamic guards but NOT this function.
+# Keep this independent until the fully-tested candidate is released.
+_SQL_SIDE_EFFECT_HEAD_RE = re.compile(
+    r"^(?:GRANT|REVOKE|FLUSH|RESET|SHUTDOWN|CALL|DO|"
+    r"PREPARE|EXECUTE|DEALLOCATE|UPDATE|DELETE|TRUNCATE|"
+    r"LOAD\s+(?:DATA|XML)|"
+    r"(?:CREATE|ALTER|DROP|RENAME)\s+(?:USER|ROLE)\b|"
+    r"SET\s+(?:GLOBAL\b|PERSIST(?:_ONLY)?\b|"
+    r"@@\s*(?:GLOBAL|PERSIST(?:_ONLY)?)\s*\.)|"
+    r"SELECT\b[^\r\n]*\bINTO\s+(?:OUTFILE|DUMPFILE)\b)",
+    re.I,
+)
+_SQL_VERSIONED_HEAD_RE = re.compile(r"^/\*(?:!|M!)[0-9]{5,6}\s+(.+?)\s*\*/;?$", re.I)
+
+
+def _sql_line_stacks_commands(line: str) -> bool:
+    """Detect an unquoted terminal semicolon followed by more SQL tokens."""
+    quote = ""
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                if index + 1 < len(line) and line[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = ""
+        elif char in ("'", '"', chr(96)):
+            quote = char
+        elif char == ";" and line[index + 1:].strip():
+            return True
+        index += 1
+    return False
+
+
+def standalone_sql_unproven_side_effects(path: Path, verifier) -> bool:
+    """Reject privileged and stacked SQL before exact or logical parity.
+
+    Known session-only dynamic guard flows are exempt. Normal comments,
+    literals and the exact MariaDB sandbox banner are not SQL commands.
+    """
+    known_dynamic = verifier._cross_engine_known_dynamic_guard_lines(path)
+    opener = gzip.open if path.name.endswith(".gz") else open
+    try:
+        with opener(path, "rt", encoding="utf-8", errors="strict") as handle:
+            in_comment = False
+            for number, raw in enumerate(handle, 1):
+                if number in known_dynamic:
+                    continue
+                line = raw.strip()
+                if not line:
+                    continue
+                if in_comment:
+                    if "*/" not in line:
+                        continue
+                    line = line.split("*/", 1)[1].strip()
+                    in_comment = False
+                if not line or line.startswith(("--", "#")):
+                    continue
+                if line == r"/*M!999999\- enable the sandbox mode */":
+                    continue
+                while line.startswith("/*") and not re.match(r"^/\*(?:!|M!)", line, re.I):
+                    if "*/" not in line:
+                        in_comment = True
+                        line = ""
+                        break
+                    line = line.split("*/", 1)[1].strip()
+                if not line:
+                    continue
+                match = _SQL_VERSIONED_HEAD_RE.fullmatch(line)
+                if match:
+                    line = match.group(1).strip()
+                elif re.match(r"^/\*(?:!|M!)[0-9]{5,6}\s+CREATE\s+TRIGGER\b", line, re.I):
+                    # A mysqldump multiline CREATE TRIGGER is verified by the
+                    # existing exact guarded DDL fingerprint, including its
+                    # body. Reject privileged lines inside it independently.
+                    continue
+                elif re.match(r"^/\*(?:!|M!)", line, re.I):
+                    return True
+                if _SQL_SIDE_EFFECT_HEAD_RE.match(line):
+                    return True
+                if re.match(
+                    r"^(?:SET|SELECT|INSERT|REPLACE|UPDATE|DELETE|"
+                    r"CREATE|ALTER|DROP|GRANT|REVOKE)\b",
+                    line, re.I,
+                ) and _sql_line_stacks_commands(line):
+                    return True
+        return in_comment
+    except (OSError, EOFError, UnicodeError) as exc:
+        raise verifier.RestoreVerifyError("SQL side-effect scan cannot be read") from exc
+
+
+
 def strict_scope(sql):
     """No target DB exists before the whole source SQL passes these gates."""
     import sql_diff_evidence,verify
     try:
         need(sql_diff_evidence.require_nonempty_source_schema(sql)==157,
              "SOURCE_TABLE_COUNT_DRIFT")
-        need(not verify.sql_unproven_side_effects(sql),
+        need(not standalone_sql_unproven_side_effects(sql,verify),
              "SOURCE_UNPROVEN_SIDE_EFFECTS")
         v=sql_diff_evidence.dynamic_guard_syntax_counts(sql)
         need(not any(v.get(k,0) for k in
