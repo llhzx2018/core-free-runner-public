@@ -711,7 +711,10 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
             with self.subTest(fail_import=fail_import),tempfile.TemporaryDirectory() as td:
                 root=Path(td)
                 marker=root/"private.json"
-                raw=b"CREATE TABLE demo (v BLOB);\nINSERT INTO demo VALUES (0xFF);\n"
+                raw=(b"CREATE TABLE demo (v BLOB);\n" + b"".join(
+                    b"INSERT INTO demo VALUES (0x" +
+                    __import__("hashlib").sha256(str(i).encode()).hexdigest().encode() +
+                    b");\n" for i in range(200)))
                 state={"source":{"host":"old.example"},
                        "target_server_identity":"target-identity",
                        "source_runtime_path":"/tmp/staged-runtime",
