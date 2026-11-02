@@ -391,8 +391,10 @@ class CandidateWww3SchemaTests(unittest.TestCase):
             data=base/n.TAIL/"data"
             data.mkdir(parents=True)
             output=data/"www3-hex-safe.sql.gz"
-            raw=(b"CREATE TABLE sample (payload BLOB);\n"
-                 b"INSERT INTO sample VALUES (0xFF);\n")*30
+            raw=(b"CREATE TABLE sample (payload BLOB);\n" +
+                 b"".join(b"INSERT INTO sample VALUES (0x" +
+                     __import__("hashlib").sha256(str(i).encode()).hexdigest().encode() +
+                     b");\n" for i in range(100)))
             inventory=types.ModuleType("inventory")
             inventory.build_manifest=lambda root:{"sites":[{
                 "domain":n.DOMAIN,"mysql_databases":["dbfixture"]}]}
