@@ -1050,7 +1050,10 @@ class SourceLinkReadOnlyTests(unittest.TestCase):
                     "SOURCE_HEX_TEMP_FILES=1\nSOURCE_HEX_TEMP_UNSAFE=0\n")
             return subprocess.CompletedProcess([],0,result,"")
         engine.source_remote=ok
-        with mock.patch.dict(sys.modules,{"server_migration_pull":engine}),\
+        engine.ssh_rsync_command=lambda src:"ssh -p 22 -o BatchMode=yes"
+        with mock.patch.object(m.subprocess,"run",
+                return_value=subprocess.CompletedProcess([],0,b"VERSION",b"")) as rsync,\
+             mock.patch.dict(sys.modules,{"server_migration_pull":engine}),\
              mock.patch.object(m,"load_helper",return_value=base),\
              mock.patch.object(m.os,"geteuid",return_value=0),\
              mock.patch.object(sys,"argv",["script","--read-only-source-ssh-and-temp-audit"]),\
@@ -1059,6 +1062,9 @@ class SourceLinkReadOnlyTests(unittest.TestCase):
         self.assertIn("SOURCE_HEX_TEMP_FILES=1",output.getvalue())
         self.assertIn("SOURCE_HEX_TEMP_AUDIT=PASS",output.getvalue())
         self.assertIn("SOURCE_TEMP_CLEANUP=NOT_ATTEMPTED",output.getvalue())
+        self.assertIn("SOURCE_RSYNC_READONLY=PASS",output.getvalue())
+        self.assertIn("--list-only",rsync.call_args.args[0])
+        self.assertNotIn("--delete",rsync.call_args.args[0])
         self.assertEqual(len(calls),2)
         self.assertIn("python3 -B",calls[1])
 
