@@ -169,7 +169,8 @@ class Tests(unittest.TestCase):
 
     def test_snapshot_has_guarded_private_directory_initialization(self):
         text=p.read_text()
-        self.assertIn("    ensure_private_recovery_dir()\\n    p = RECOVERY_DIR",text)
+        self.assertIn("    ensure_private_recovery_dir()",text)
+        self.assertIn("    p = RECOVERY_DIR /",text)
         self.assertIn("flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY",text)
         self.assertIn("os.fsync(f.fileno())",text)
 
