@@ -83,6 +83,54 @@ def bounded_dynamic_flow_shape(path, verifier):
     return summary, totals, probes, assigns
 
 
+def bounded_branch_proof(path, verifier, evidence):
+    """Use exact release113 grammar; print only fixed unsafe categories.
+
+    The full branch SQL strings and conditional variable/table names remain
+    entirely in the local private process. No statement is ever authorized
+    by this diagnostic, including otherwise harmless SET/SELECT statements.
+    """
+    expected=evidence.dynamic_guard_syntax_counts(path)
+    permitted_classes=set(evidence._UNSAFE_BRANCH_CLASSES)
+    permitted_reasons={
+        "CONTROL_OR_MULTISTATEMENT","GLOBAL_OR_PERSIST",
+        "SIDE_EFFECT_OR_CONTROL_KEYWORD","SESSION_GRAMMAR_UNPROVEN",
+        "READ_GRAMMAR_UNPROVEN","UNKNOWN_GRAMMAR"
+    }
+    findings=[]
+    assignments=0
+    try:
+        with gzip.open(path,"rt",encoding="utf-8",errors="strict") as dump:
+            for lineno,raw in enumerate(dump,1):
+                match=evidence._GUARD_RE.fullmatch(raw.strip())
+                if not match or not 40000<=int(match.group(1))<=89999:
+                    continue
+                body=re.sub(r"\s+"," ",match.group(2).strip())
+                assign=verifier._CROSS_ENGINE_DYNAMIC_IF_RE.fullmatch(body)
+                if not assign:
+                    continue
+                assignments+=1
+                for branch in ("yes","no"):
+                    literal=assign.group(branch)
+                    if verifier._cross_engine_safe_dynamic_branch(literal):
+                        continue
+                    kind=evidence._unsafe_branch_category(literal)
+                    reason=evidence._unsafe_branch_reason(literal)
+                    need(kind in permitted_classes and reason in permitted_reasons,
+                         "BRANCH_CLASS_OUT_OF_CONTRACT")
+                    need(len(findings)<12 and lineno<1000000000,
+                         "BRANCH_EVIDENCE_LIMIT_EXCEEDED")
+                    findings.append((lineno,branch.upper(),kind,reason))
+    except (OSError,EOFError,UnicodeError):
+        raise Block("SOURCE_DYNAMIC_BRANCH_UNAVAILABLE") from None
+    need(assignments==expected["recognized_safe"]+expected["recognized_unsafe"]
+         and len(findings)==expected["unsafe_yes_branches"]+
+                            expected["unsafe_no_branches"],
+         "BRANCH_CLASSIFICATION_MISMATCH")
+    need(expected["recognized_unsafe"]>0,"NO_UNSAFE_DYNAMIC_BRANCH_REPRODUCED")
+    return expected,findings
+
+
 def execute():
     need(os.geteuid()==0 and sys.argv[1:]==["--audit-existing-www3-side-effects-only"],
          "EXPLICIT_READONLY_GUARD_AUDIT_REQUIRED")
@@ -125,6 +173,19 @@ def execute():
         for label in ("RAW","MYSQL_4_TO_7","MYSQL_8_PLUS","MARIADB"):
             print("DYNAMIC_PROBE_"+label+"="+str(probes[label]),flush=True)
             print("DYNAMIC_ASSIGN_"+label+"="+str(assignments[label]),flush=True)
+        import sql_diff_evidence
+        evidence,branch_findings=bounded_branch_proof(
+            sql,verify,sql_diff_evidence
+        )
+        print("DYNAMIC_UNSAFE_ASSIGNMENTS="+str(evidence["recognized_unsafe"]),flush=True)
+        print("DYNAMIC_UNSAFE_YES="+str(evidence["unsafe_yes_branches"]),flush=True)
+        print("DYNAMIC_UNSAFE_NO="+str(evidence["unsafe_no_branches"]),flush=True)
+        print("DYNAMIC_UNSAFE_BRANCH_COUNT="+str(len(branch_findings)),flush=True)
+        for i,(line,side,kind,reason) in enumerate(branch_findings,1):
+            print("DYNAMIC_BRANCH_"+str(i)+"_LINE="+str(line),flush=True)
+            print("DYNAMIC_BRANCH_"+str(i)+"_SIDE="+side,flush=True)
+            print("DYNAMIC_BRANCH_"+str(i)+"_CLASS="+kind,flush=True)
+            print("DYNAMIC_BRANCH_"+str(i)+"_REASON="+reason,flush=True)
         print("SIDE_EFFECT_GUARD=BLOCKED_REPRODUCED",flush=True)
         print("SIDE_EFFECT_FINDINGS_REPORTED="+str(len(results)),flush=True)
         for index,(reason,line_number) in enumerate(results,1):
