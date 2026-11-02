@@ -224,13 +224,14 @@ def _sql_line_stacks_commands(line: str) -> bool:
     return False
 
 
-def standalone_sql_unproven_side_effects(path: Path, verifier, *, findings=None) -> bool:
+def standalone_sql_unproven_side_effects(path: Path, verifier, *, findings=None, known_safe_lines=None) -> bool:
     """Reject privileged and stacked SQL before exact or logical parity.
 
     Known session-only dynamic guard flows are exempt. Normal comments,
     literals and the exact MariaDB sandbox banner are not SQL commands.
     """
-    known_dynamic = verifier._cross_engine_known_dynamic_guard_lines(path)
+    known_dynamic = (verifier._cross_engine_known_dynamic_guard_lines(path)
+                     if known_safe_lines is None else known_safe_lines)
     flagged = False
     def record(kind: str, line_number: int) -> bool:
         nonlocal flagged
@@ -308,18 +309,131 @@ def standalone_sql_unproven_side_effects(path: Path, verifier, *, findings=None)
 
 
 
+# A deliberately narrow, non-general SQL session/read literal grammar for
+# versioned IF + PREPARE + EXECUTE + DEALLOCATE. Nothing here allows DDL, DML,
+# global/persist settings, SQL control, functions, external files or stacked
+# statements. Keep the original source dump byte-identical on disk.
+_SAFE_SQL_IDENT=r"[A-Za-z_][A-Za-z_0-9$]*"
+_SAFE_SQL_SCALAR=(
+    r"(?:-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?|NULL|TRUE|FALSE|ON|OFF|"
+    r"@[A-Za-z_][A-Za-z_0-9$]*|@@SESSION\.[A-Za-z_][A-Za-z_0-9$]*|"
+    r"'(?:''|[^'\\])*')"
+)
+_SAFE_SESSION_KEY=(
+    r"(?:SQL_MODE|SQL_NOTES|TIME_ZONE|CHARACTER_SET_CLIENT|"
+    r"CHARACTER_SET_RESULTS|COLLATION_CONNECTION|FOREIGN_KEY_CHECKS|"
+    r"UNIQUE_CHECKS|AUTOCOMMIT|SQL_SAFE_UPDATES|"
+    r"MAX_EXECUTION_TIME)"
+)
+_SAFE_SET_VALUE_RE=re.compile(
+    r"^SET\s+(?:@"+_SAFE_SQL_IDENT+
+    r"|(?:(?:SESSION\s+|@@SESSION\.)?"+_SAFE_SESSION_KEY+
+    r"))\s*=\s*"+_SAFE_SQL_SCALAR+r"$",re.I
+)
+_SAFE_SET_NAMES_RE=re.compile(
+    r"^SET\s+NAMES\s+(?:utf8|utf8mb4|'utf8'|'utf8mb4')"
+    r"(?:\s+COLLATE\s+(?:utf8_general_ci|utf8mb4_general_ci|"
+    r"utf8mb4_unicode_ci|utf8mb4_bin))?$",re.I
+)
+_SAFE_SELECT_RE=re.compile(
+    r"^SELECT\s+(?:0|1|NULL|@"+_SAFE_SQL_IDENT+
+    r"|@@SESSION\."+_SAFE_SQL_IDENT+r")"
+    r"(?:\s+FROM\s+DUAL)?$",re.I
+)
+_SAFE_SELECT_METADATA_RE=re.compile(
+    r"^SELECT\s+COUNT\s*\(\s*\*\s*\)\s+FROM\s+"
+    r"INFORMATION_SCHEMA\.TABLES\s+WHERE\s+TABLE_SCHEMA"
+    r"\s*=\s*'(?:''|[^'\\])*'\s+AND\s+TABLE_NAME\s*="
+    r"\s*'(?:''|[^'\\])*'$",re.I
+)
+
+
+def safe_session_or_read_branch(literal):
+    """True only for a single provably local SET or trivial SELECT command."""
+    if not isinstance(literal,str) or not re.fullmatch(
+        r"'(?:''|[^'\\])*'",literal,re.S
+    ):
+        return False
+    statement=literal[1:-1].replace("''","'").strip()
+    if not statement or len(statement)>1024:
+        return False
+    # Permit exactly ONE terminal statement delimiter, not a compound,
+    # quoted, escaped, comment, hidden-control or multiline command.
+    if statement.endswith(";"):
+        statement=statement[:-1].strip()
+    if not statement or any(
+        mark in statement for mark in (";","\\","/*","*/","--","#","\r","\n")
+    ):
+        return False
+    if re.search(
+        r"\b(?:GLOBAL|PERSIST|PERSIST_ONLY|CREATE|ALTER|DROP|TRUNCATE|"
+        r"RENAME|INSERT|UPDATE|DELETE|REPLACE|LOAD|OUTFILE|DUMPFILE|"
+        r"PREPARE|EXECUTE|DEALLOCATE|CALL|DO|GRANT|REVOKE|"
+        r"SHUTDOWN|SLEEP|BENCHMARK)\b",statement,re.I
+    ):
+        return False
+    return bool(
+        _SAFE_SET_VALUE_RE.fullmatch(statement)
+        or _SAFE_SET_NAMES_RE.fullmatch(statement)
+        or _SAFE_SELECT_RE.fullmatch(statement)
+        or _SAFE_SELECT_METADATA_RE.fullmatch(statement)
+    )
+
+
+def prove_legacy_mysql_dynamic_groups(sql,verifier,sql_evidence):
+    """Accept exactly this one previously blocked source's bounded groups.
+
+    Do NOT monkeypatch installed verifier globally; run its exact source
+    implementation with an isolated function globals dictionary, replacing
+    only the literal grammar callback after all independent checks.
+    """
+    import types
+    original=sql_evidence.dynamic_guard_syntax_counts(sql)
+    need(original["recognized_unsafe"]==3
+         and original["recognized_safe"]==0
+         and original["double_quoted_if"]==0
+         and original["other_unknown_set"]==0,
+         "DYNAMIC_SOURCE_ASSIGNMENT_IDENTITY_CHANGED")
+    groups=[]
+    try:
+        with gzip.open(sql,"rt",encoding="utf-8",errors="strict") as dump:
+            for lineno,raw in enumerate(dump,1):
+                match=sql_evidence._GUARD_RE.fullmatch(raw.strip())
+                if not match or not 40000<=int(match.group(1))<80000:
+                    continue
+                body=re.sub(r"\s+"," ",match.group(2).strip())
+                setting=verifier._CROSS_ENGINE_DYNAMIC_IF_RE.fullmatch(body)
+                if setting:
+                    groups.append((lineno,setting))
+    except (OSError,UnicodeError,EOFError):
+        raise Stop("DYNAMIC_SOURCE_INPUT_UNREADABLE") from None
+    need(len(groups)==3,"DYNAMIC_SOURCE_GROUP_COUNT_CHANGED")
+    need(all(safe_session_or_read_branch(match.group(side))
+             for _,match in groups for side in ("yes","no")),
+         "DYNAMIC_BRANCH_STILL_UNSAFE")
+    old=verifier._cross_engine_known_dynamic_guard_lines
+    local_env=dict(old.__globals__)
+    local_env["_cross_engine_safe_dynamic_branch"]=safe_session_or_read_branch
+    clone=types.FunctionType(old.__code__,local_env,old.__name__,
+                             old.__defaults__,old.__closure__)
+    known=clone(sql)
+    need(len(known)==13 and all(line in known for line,_ in groups),
+         "DYNAMIC_GROUP_SEQUENCE_UNPROVEN")
+    return known
+
+
 def strict_scope(sql):
     """No target DB exists before the whole source SQL passes these gates."""
     import sql_diff_evidence,verify
     try:
         need(sql_diff_evidence.require_nonempty_source_schema(sql)==157,
              "SOURCE_TABLE_COUNT_DRIFT")
-        need(not standalone_sql_unproven_side_effects(sql,verify),
+        proven=prove_legacy_mysql_dynamic_groups(sql,verify,sql_diff_evidence)
+        need(not standalone_sql_unproven_side_effects(
+                sql,verify,known_safe_lines=proven),
              "SOURCE_UNPROVEN_SIDE_EFFECTS")
-        v=sql_diff_evidence.dynamic_guard_syntax_counts(sql)
-        need(not any(v.get(k,0) for k in
-            ("recognized_unsafe","other_unknown_set","double_quoted_if")),
-             "SOURCE_DYNAMIC_SQL_UNPROVEN")
+        print("DYNAMIC_SQL_SAFE_GROUPS=3",flush=True)
+        print("DYNAMIC_SQL_GUARD=EXACT_PROOF_PASS",flush=True)
     except (sql_diff_evidence.AdvisoryDiagnosticUnavailable,
             verify.RestoreVerifyError):
         raise Stop("SOURCE_SQL_UNPROVEN") from None
