@@ -252,6 +252,10 @@ def scan_schema_adapter(parser,archive):
         if not tables:
             raise parser.AdvisoryDiagnosticUnavailable(
                 "SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA")
+    except parser.verify.RestoreVerifyError:
+        print("SCHEMA_PRESENCE_RESULT=BLOCKED",flush=True)
+        print("SCHEMA_PRESENCE_REASON=SQL_SCHEMA_GRAMMAR_UNPROVEN",flush=True)
+        return False
     except parser.AdvisoryDiagnosticUnavailable as exc:
         reason=str(exc)
         allowed={
