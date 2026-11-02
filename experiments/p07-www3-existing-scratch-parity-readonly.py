@@ -183,6 +183,52 @@ def diagnostic_reason(exc):
         if ("["+reason+"]") in text:return reason
     return "COMPARISON_UNCLASSIFIED"
 
+def explain_row_multisets(source,target,schema):
+    import sql_row_evidence as tuples
+    import sql_multiset_evidence as multiset
+    try:
+        source_tables=set(schema._schema_statements(source)[0])
+        target_tables=set(schema._schema_statements(target)[0])
+        if len(source_tables)!=157 or source_tables!=target_tables:
+            print("ADVISORY_ROW_SCOPE=UNPROVEN",flush=True)
+            return
+    except Exception:
+        print("ADVISORY_ROW_SCOPE=UNPROVEN",flush=True)
+        return
+    print("ADVISORY_ROW_SCOPE=157_MATCHING_NAMES",flush=True)
+    for name,func,allowed,fields in (
+        ("TUPLES",tuples.diagnostic,
+         ("ROW_TUPLES_DIFFER","ROW_TUPLES_EQUAL_NOT_VERIFIED",
+          "NO_INSERT_ROWS","UNAVAILABLE"),
+         ("source_row_tuples","target_row_tuples",
+          "row_count_drift_tables","same_count_content_drift_tables")),
+        ("MULTISET",multiset.diagnostic,
+         ("ROW_MULTISET_DIFFER","ROW_MULTISET_EQUAL_NOT_VERIFIED",
+          "NO_INSERT_ROWS","UNAVAILABLE"),
+         ("shared_tuple_instances","source_only_tuple_instances",
+          "target_only_tuple_instances","differing_tables")),
+    ):
+        try:
+            result=func(source,target,source_tables,target_tables)
+            status=result.get("comparison")
+            if status not in allowed: status="UNPROVEN"
+            print("ADVISORY_"+name+"_STATUS="+status,flush=True)
+            for key in fields:
+                n=result.get(key)
+                if type(n) is int and 0<=n<=5000000:
+                    print("ADVISORY_"+name+"_"+key.upper()+"="+str(n),flush=True)
+            changed=result.get("differing_table_ordinals",[])
+            if isinstance(changed,list):
+                ordinals=[str(item["table_ordinal"]) for item in changed[:20]
+                          if isinstance(item,dict)
+                          and type(item.get("table_ordinal")) is int
+                          and 1<=item["table_ordinal"]<=157]
+                print("ADVISORY_"+name+"_DIFFERING_ORDINALS="+
+                      (",".join(ordinals) if ordinals else "NONE"),flush=True)
+        except Exception:
+            print("ADVISORY_"+name+"_STATUS=UNPROVEN",flush=True)
+
+
 def explain_advisory(source,target):
     """Read-only release113 diagnostics; counts are never acceptance proof."""
     import sql_diff_evidence as evidence
@@ -212,6 +258,7 @@ def explain_advisory(source,target):
                 print("ADVISORY_DATA_"+name.upper()+"="+str(n),flush=True)
     except Exception:
         print("ADVISORY_DATA_STATUS=UNPROVEN",flush=True)
+    explain_row_multisets(source,target,evidence)
     print("ADVISORY_NOT_A_MIGRATION_PASS_GATE=YES",flush=True)
 
 
