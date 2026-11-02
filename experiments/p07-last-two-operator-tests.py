@@ -1519,6 +1519,195 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
 
 
 
+
+class ExistingQuarantineScratchParityTests(unittest.TestCase):
+    def module(self):
+        name="p07-www3-existing-scratch-parity-readonly.py"
+        path=Path(__file__).with_name(name)
+        spec=importlib.util.spec_from_file_location("p07_existing_scratch_parity_test",path)
+        obj=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(obj)
+        return obj
+
+    def test_readonly_guard_never_creates_imports_or_cleans_database(self):
+        module=self.module()
+        code=Path(__file__).with_name(
+            "p07-www3-existing-scratch-parity-readonly.py").read_text()
+        for forbidden in (
+            "cloudpanel.add_database(", "cloudpanel.delete_database(",
+            "cloudpanel.import_database(", "import_only_scratch(",
+            "engine.resume_prepare_migration(", "engine.save_state(",
+            "engine.cutover_migration(", "rm -f", "unlink(",
+            "stage.save(", "DROP DATABASE", "CREATE DATABASE",
+        ):
+            self.assertNotIn(forbidden,code)
+        self.assertIn("PARITY_UNPROVEN_RETAIN_SCRATCH",code)
+        self.assertIn("QUARANTINED_DYNAMIC_EFFECTS=NOT_PROVEN",code)
+        self.assertIn("SCRATCH_FULL_SOURCE_EQUIVALENCE=NOT_PROVEN",code)
+        self.assertEqual(
+            module.diagnostic_reason(Exception(
+                "MySQL verification failed [CONDITIONAL_DDL] [private data]")),
+            "CONDITIONAL_DDL")
+        self.assertEqual(
+            module.diagnostic_reason(Exception(
+                "MySQL logical-content verification failed [SCHEMA_OR_DATA_MISMATCH]")),
+            "SCHEMA_OR_DATA_MISMATCH")
+        self.assertEqual(
+            module.diagnostic_reason(Exception("mysql connection to secret host")),
+            "COMPARISON_UNCLASSIFIED")
+
+    def test_receipt_requires_original_created_scratch_status(self):
+        import json,os,types
+        m=self.module()
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            tail="pull-synthetic"
+            transactions=root/tail/"target-transactions"
+            transactions.mkdir(parents=True)
+            transactions.chmod(0o700)
+            base=types.SimpleNamespace(BASE=root,TAIL=tail,DOMAIN="www3.m3u8.one")
+            stage=types.SimpleNamespace(
+                scratch_name=lambda base,quarantined:("p07test","p07u","unused"))
+            marker=transactions/("www3-hex-scratch-"+__import__("hashlib").sha256(
+                (tail+":www3.m3u8.one:p07test").encode()
+            ).hexdigest()[:20]+".json")
+            receipt={
+                "schema":"p07.www3.quarantined-static-copy.v1",
+                "migration_id":tail,"domain":base.DOMAIN,
+                "source_database":"original","scratch_database":"p07test",
+                "username":"p07u","password":"receipt-only-secret-123456",
+                "target_server_identity":"cp2",
+                "source_snapshot_sha256":"a"*64,
+                "input_transform_sha256":"b"*64,
+                "status":"PARITY_UNPROVEN_RETAIN_SCRATCH",
+                "quarantined_dynamic_groups":3,
+                "quarantined_dynamic_statement_effects":"UNVERIFIED",
+                "website_activated":False,"original_database_modified":False,
+                "source_runtime_frozen":False,
+            }
+            def write():
+                marker.write_text(json.dumps(receipt))
+                marker.chmod(0o600)
+            write()
+            self.assertEqual(m.load_receipt(base,stage,"cp2","original"),receipt)
+            for change in (
+                ("status","VERIFIED_NOT_ACTIVATED"),
+                ("status","PARITY_UNPROVEN_RETAIN_SCRATCH"),
+                ("website_activated",True),
+                ("source_snapshot_sha256","INVALID"),
+                ("target_server_identity","different"),
+            ):
+                updated=receipt.copy()
+                updated[change[0]]=change[1]
+                if updated==receipt:
+                    continue
+                marker.write_text(json.dumps(updated))
+                with self.assertRaises(m.Block):
+                    m.load_receipt(base,stage,"cp2","original")
+            marker.write_text(json.dumps(receipt))
+            marker.chmod(0o644)
+            with self.assertRaises(m.Block):
+                m.load_receipt(base,stage,"cp2","original")
+
+    def test_readonly_existing_import_parity_modes_preserve_receipt(self):
+        import contextlib,gzip,io,json,stat,sys,subprocess,types
+        m=self.module()
+        for outcome in ("mismatch","match","export-fail"):
+            with self.subTest(outcome=outcome),tempfile.TemporaryDirectory() as folder:
+                root=Path(folder)
+                tailid="pull-synthetic"
+                scratch="p07test"
+                transactions=root/tailid/"target-transactions"
+                transactions.mkdir(parents=True,mode=0o700)
+                transactions.chmod(0o700)
+                source=b"CREATE TABLE sample (id INT);\nINSERT INTO sample VALUES(1);\n"
+                archived=gzip.compress(source,mtime=0)
+                sha=__import__("hashlib").sha256(archived).hexdigest()
+                transform=gzip.compress(source,mtime=0)
+                transformsha=__import__("hashlib").sha256(transform).hexdigest()
+                meta={
+                    "schema":"p07.www3.quarantined-static-copy.v1",
+                    "migration_id":tailid,"domain":"www3.m3u8.one",
+                    "source_database":"original","scratch_database":scratch,
+                    "username":"p07u","password":"receipt-only-secret-123456",
+                    "target_server_identity":"cp2",
+                    "source_snapshot_sha256":sha,
+                    "input_transform_sha256":transformsha,
+                    "status":"PARITY_UNPROVEN_RETAIN_SCRATCH",
+                    "quarantined_dynamic_groups":3,
+                    "quarantined_dynamic_statement_effects":"UNVERIFIED",
+                    "website_activated":False,"original_database_modified":False,
+                    "source_runtime_frozen":False}
+                marker=transactions/("www3-hex-scratch-"+__import__("hashlib").sha256(
+                    (tailid+":www3.m3u8.one:"+scratch).encode()
+                ).hexdigest()[:20]+".json")
+                marker.write_text(json.dumps(meta))
+                marker.chmod(0o600)
+                initial=marker.read_bytes()
+                tail={"target_server_identity":"cp2"}
+                helper=types.SimpleNamespace(
+                    BASE=root,TAIL=tailid,DOMAIN="www3.m3u8.one",RUNTIME=root,
+                    verify_state=lambda:(tail,"original"),
+                    verify_current_runtime=lambda:None,
+                    inspect_existing_site=lambda *args:None,
+                )
+                stage=types.SimpleNamespace(
+                    scratch_name=lambda base,quarantined:(scratch,"p07u","RANDOM-NEW"),
+                    import_existing_verified_source=lambda engine,tail,db,base,path:(
+                        path.write_bytes(archived) and sha),
+                    make_quarantined_sql=lambda original,converted:(
+                        converted.write_bytes(transform) and transformsha),
+                    strict_scope=lambda *args,**kwargs:None,
+                )
+                engine=types.ModuleType("server_migration_pull")
+                engine.target_identity=lambda:"cp2"
+                class PullMigrationError(Exception):pass
+                engine.PullMigrationError=PullMigrationError
+                def cmp(a,b):
+                    if outcome=="match":return "CROSS_ENGINE_LOGICAL_CONTENT"
+                    raise PullMigrationError(
+                        "MySQL logical-content verification failed "
+                        "[SCHEMA_OR_DATA_MISMATCH] [PRIVATE]")
+                engine.compare_database_dumps=cmp
+                cp=types.ModuleType("cloudpanel")
+                def exporter(db,path):
+                    if outcome=="export-fail":raise RuntimeError("PRIVATE-SQL")
+                    Path(path).write_bytes(transform)
+                cp.export_database=exporter
+                verify=types.ModuleType("verify")
+                verify.sql_structure_fingerprint=lambda path:"structure"
+                verify.sql_data_fingerprint=lambda path:"data"
+                verify.sql_fingerprint=lambda path:"exact"
+                real_temp=tempfile.TemporaryDirectory
+                def redirected(*args,**kwargs):
+                    kwargs["dir"]=root
+                    return real_temp(*args,**kwargs)
+                import_calls=[]
+                with mock.patch.object(m,"load",side_effect=[helper,stage]),\
+                     mock.patch.object(m,"count_scratch_metadata",return_value=(157,1848)),\
+                     mock.patch.object(m.os,"geteuid",return_value=0),\
+                     mock.patch.object(m.tempfile,"TemporaryDirectory",side_effect=redirected),\
+                     mock.patch.object(sys,"argv",["audit",
+                         "--read-only-existing-www3-scratch-parity"]),\
+                     mock.patch.dict(sys.modules,{
+                         "server_migration_pull":engine,"cloudpanel":cp,
+                         "verify":verify}),\
+                     contextlib.redirect_stdout(io.StringIO()) as captured:
+                    code=m.run()
+                text=captured.getvalue()
+                self.assertEqual(code,0 if outcome=="match" else 13)
+                self.assertEqual(marker.read_bytes(),initial)
+                self.assertIn("DATABASE_CREATE_IMPORT_ALTER_DELETE=NONE",text)
+                self.assertNotIn("PRIVATE-SQL",text)
+                self.assertIn("SCRATCH_READONLY_TABLES=157",text)
+                if outcome=="match":
+                    self.assertIn("SCRATCH_STATIC_COPY_PARITY=READONLY_MATCH",text)
+                    self.assertNotIn("SCRATCH_PARITY=PASS",text)
+                if outcome=="mismatch":
+                    self.assertIn("SCRATCH_PARITY_CLASS=SCHEMA_OR_DATA_MISMATCH",text)
+                if outcome=="export-fail":
+                    self.assertIn("SCRATCH_PARITY_CLASS=EXPORT_UNAVAILABLE",text)
+
 class SourceLinkReadOnlyTests(unittest.TestCase):
     def module(self):
         script=Path(__file__).with_name("p07-www3-source-link-readonly.py")
