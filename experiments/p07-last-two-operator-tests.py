@@ -881,6 +881,39 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                         self.assertIsInstance(line,int)
                         self.assertGreater(line,0)
 
+    def test_guard_flow_version_bins_are_readonly_and_redacted(self):
+        import gzip,sys
+        script=Path(__file__).with_name("p07-www3-existing-sql-guard-audit.py")
+        spec=importlib.util.spec_from_file_location("p07_www3_flow_bin_test",script)
+        audit=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(audit)
+        overlay=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay/lib"
+        sys.path.insert(0,str(overlay))
+        import verify
+        with tempfile.TemporaryDirectory() as folder:
+            source=Path(folder)/"source.sql.gz"
+            raw=(
+                b"/*!40101 PREPARE p1 FROM @a */;\n"
+                b"/*!50101 EXECUTE p1 */;\n"
+                b"/*!80000 DEALLOCATE PREPARE p1 */;\n"
+                b"PREPARE p2 FROM @a;\n"
+                b"/*!M!100000 EXECUTE p2 */;\n"
+                b"/*!80000 SELECT COUNT(*) INTO @flag FROM information_schema.tables */;\n"
+                b"/*!80000 SET @q=IF(@flag,'SELECT 1','SELECT 0') */;\n"
+            )
+            with gzip.open(source,"wb") as out:out.write(raw)
+            summary,controls,probes,assign=audit.bounded_dynamic_flow_shape(
+                source,verify
+            )
+            self.assertIn("SQL_GUARD_FLOW_V1 ",summary)
+            self.assertEqual(controls["MYSQL_4_TO_7"],2)
+            self.assertEqual(controls["MYSQL_8_PLUS"],1)
+            self.assertEqual(controls["RAW"],1)
+            self.assertEqual(probes["MYSQL_8_PLUS"],1)
+            self.assertEqual(assign["MYSQL_8_PLUS"],1)
+            self.assertNotIn("p1",summary)
+            self.assertNotIn("flag",summary)
+
     def test_sql_guard_audit_has_no_business_database_or_cleanup_calls(self):
         code=Path(__file__).with_name(
             "p07-www3-existing-sql-guard-audit.py").read_text()
@@ -928,6 +961,10 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
             fake_engine=types.ModuleType("server_migration_pull")
             fake_engine.target_identity=lambda:"target-id"
             fake_verify=types.ModuleType("verify")
+            fake_verify.sql_dynamic_guard_flow_diagnostic=lambda path:(
+                "SQL_GUARD_FLOW_V1 probe=0 assignment=0 safe_assignment=0 "
+                "prepare=0 execute=0 deallocate=0 unknown_set=0 "
+                "unknown_control=0 recognized=0 outcome=NO_COMPLETE_DYNAMIC_GROUP")
             real_temp=tempfile.TemporaryDirectory
             def redirected(*args,**kwargs):
                 kwargs["dir"]=root
