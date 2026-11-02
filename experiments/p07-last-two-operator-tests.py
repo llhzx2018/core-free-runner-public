@@ -786,6 +786,30 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
             self.assertIn("--database=p07safescratch1",commands[0][0])
             self.assertNotIn("secret"," ".join(commands[0][0]))
 
+    def test_release113_side_effect_guard_actual_api(self):
+        import gzip,sys
+        m=self.module()
+        overlay=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay/lib"
+        sys.path.insert(0,str(overlay))
+        import verify
+        self.assertFalse(hasattr(verify,"sql_unproven_side_effects"))
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/"case.sql.gz"
+            with gzip.open(path,"wb") as f:
+                f.write(b"CREATE TABLE sample (id INT);\\nINSERT INTO sample VALUES(1);\\n")
+            self.assertFalse(m.standalone_sql_unproven_side_effects(path,verify))
+            for payload in (
+                b"UPDATE sample SET id=2;\\n",
+                b"DELETE FROM sample;\\n",
+                b"SET GLOBAL sql_log_bin=0;\\n",
+                b"CREATE TABLE a(id INT); DROP TABLE b;\\n",
+            ):
+                with gzip.open(path,"wb") as f:f.write(payload)
+                self.assertTrue(m.standalone_sql_unproven_side_effects(path,verify))
+            path.write_bytes(b"corrupt-gzip")
+            with self.assertRaises(verify.RestoreVerifyError):
+                m.standalone_sql_unproven_side_effects(path,verify)
+
     def test_preflight_sql_denies_database_escape(self):
         import gzip,sys
         m=self.module()
