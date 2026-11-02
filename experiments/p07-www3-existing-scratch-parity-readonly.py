@@ -241,6 +241,7 @@ def run():
         print("SCRATCH_EXPORT_READONLY=COMPLETE",flush=True)
         format_name,compare_path=read_copy_format(target)
         print("SCRATCH_EXPORT_FORMAT="+format_name,flush=True)
+        explain_advisory(imported,compare_path)
         for label,fun in (
             ("STRUCTURE","sql_structure_fingerprint"),
             ("DATA","sql_data_fingerprint"),
