@@ -1763,7 +1763,7 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
     def test_readonly_existing_import_parity_modes_preserve_receipt(self):
         import contextlib,gzip,io,json,stat,sys,subprocess,types
         m=self.module()
-        for outcome in ("mismatch","match","export-fail","header-drift","sql-copy-drift","target-crc","target-invalid-utf8"):
+        for outcome in ("mismatch","match","export-fail","header-drift","sql-copy-drift","target-crc","target-invalid-utf8","native-rescue"):
             with self.subTest(outcome=outcome),tempfile.TemporaryDirectory() as folder:
                 root=Path(folder)
                 tailid="pull-synthetic"
@@ -1829,7 +1829,7 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
                 class PullMigrationError(Exception):pass
                 engine.PullMigrationError=PullMigrationError
                 def cmp(a,b):
-                    if outcome in ("match","header-drift"):return "CROSS_ENGINE_LOGICAL_CONTENT"
+                    if outcome in ("match","header-drift","native-rescue"):return "CROSS_ENGINE_LOGICAL_CONTENT"
                     raise PullMigrationError(
                         "MySQL logical-content verification failed "
                         "[SCHEMA_OR_DATA_MISMATCH] [PRIVATE]")
@@ -1837,7 +1837,7 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
                 cp=types.ModuleType("cloudpanel")
                 def exporter(db,path):
                     if outcome=="export-fail":raise RuntimeError("PRIVATE-SQL")
-                    if outcome=="target-invalid-utf8":
+                    if outcome in ("target-invalid-utf8","native-rescue"):
                         Path(path).write_bytes(
                             gzip.compress(source+b"-- invalid\xff\n",mtime=0)
                         )
@@ -1851,6 +1851,10 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
                 verify.sql_structure_fingerprint=lambda path:"structure"
                 verify.sql_data_fingerprint=lambda path:"data"
                 verify.sql_fingerprint=lambda path:"exact"
+                def fallback(record,st,target):
+                    if outcome!="native-rescue":return "CLIENT_UNAVAILABLE"
+                    Path(target).write_bytes(source)
+                    return "COMPLETE"
                 real_temp=tempfile.TemporaryDirectory
                 def redirected(*args,**kwargs):
                     kwargs["dir"]=root
@@ -1859,7 +1863,7 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
                 with mock.patch.object(m,"load",side_effect=[helper,stage]),\
                      mock.patch.object(m,"count_scratch_metadata",return_value=(157,1848)),\
                      mock.patch.object(m,"native_readonly_scratch_dump",
-                        return_value="CLIENT_UNAVAILABLE"),\
+                        side_effect=fallback),\
                      mock.patch.object(m.os,"geteuid",return_value=0),\
                      mock.patch.object(m.tempfile,"TemporaryDirectory",side_effect=redirected),\
                      mock.patch.object(sys,"argv",["audit",
@@ -1877,12 +1881,12 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
                     else:
                         code=m.run()
                 text=captured.getvalue()
-                self.assertEqual(code,0 if outcome in ("match","header-drift") else 13)
+                self.assertEqual(code,0 if outcome in ("match","header-drift","native-rescue") else 13)
                 self.assertEqual(marker.read_bytes(),initial)
                 self.assertIn("DATABASE_CREATE_IMPORT_ALTER_DELETE=NONE",text)
                 self.assertNotIn("PRIVATE-SQL",text)
                 self.assertIn("SCRATCH_READONLY_TABLES=157",text)
-                if outcome in ("match","header-drift"):
+                if outcome in ("match","header-drift","native-rescue"):
                     self.assertIn("SCRATCH_STATIC_COPY_PARITY=READONLY_MATCH",text)
                     self.assertNotIn("SCRATCH_PARITY=PASS",text)
                 if outcome=="header-drift":
@@ -1902,6 +1906,11 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
                     self.assertIn("TARGET_EXPORT_STREAM_INTEGRITY=CRC_FAILED",text)
                     self.assertIn("SCRATCH_PARITY_CLASS=TARGET_EXPORT_BINARY_UNPROVEN",text)
                     self.assertNotIn("ADVISORY_SCHEMA=",text)
+                if outcome=="native-rescue":
+                    self.assertIn("NATIVE_SCRATCH_EXPORT=COMPLETE",text)
+                    self.assertIn("TARGET_COMPARE_INPUT=NATIVE_SCRATCH_READONLY_DUMP",text)
+                    self.assertIn("NATIVE_SCRATCH_UTF8=VALID",text)
+                    self.assertIn("SCRATCH_FULL_SOURCE_EQUIVALENCE=NOT_PROVEN",text)
                 if outcome=="target-invalid-utf8":
                     self.assertIn("NATIVE_SCRATCH_EXPORT=CLIENT_UNAVAILABLE",text)
                     self.assertIn("TARGET_EXPORT_STREAM_INTEGRITY=PASS",text)
