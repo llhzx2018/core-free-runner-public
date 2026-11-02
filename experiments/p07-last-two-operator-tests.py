@@ -879,22 +879,26 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                     scan_schema_adapter=lambda *args,**kw:True,
                 )
                 recorded=[]
+                source_archive=gzip.compress(raw,mtime=0)
+                source_sha=__import__("hashlib").sha256(source_archive).hexdigest()
                 fake_engine=types.ModuleType("server_migration_pull")
                 fake_engine.target_identity=lambda:"target-identity"
+                class PullMigrationError(Exception):pass
+                fake_engine.PullMigrationError=PullMigrationError
                 def remote_fn(*args,**kwargs):
-                    if "rm -f" in args[1]:
-                        recorded.append("cleanup")
-                        return subprocess.CompletedProcess([],0,"","")
-                    recorded.append("source-export")
+                    recorded.append("source-readonly-identity")
+                    name="www3-hex-"+"e"*32+".sql.gz"
                     return subprocess.CompletedProcess(
                         [],0,
-                        "HEX_EXPORT_AUTH=READ_ONLY_CONNECTION_PASS\n"
-                        "HEX_SOURCE_EXPORT=CREATED_UNVERIFIED\n",""
+                        "EXISTING_HEX=OWNER_SCOPED\n"
+                        +"HEX_NAME="+name+"\n"
+                        +"HEX_BYTES="+str(len(source_archive))+"\n"
+                        +"HEX_SHA256="+source_sha+"\n",""
                     )
                 fake_engine.source_remote=remote_fn
                 def transfer_fn(_source,_remote,local):
-                    with gzip.open(local,"wb") as g:
-                        g.write(raw)
+                    recorded.append("source-rsync-readonly")
+                    Path(local).write_bytes(source_archive)
                 fake_engine.pull_path=transfer_fn
                 fake_engine.compare_database_dumps=lambda *args:"CANONICAL_SQL_EXACT"
                 fake_panel=types.ModuleType("cloudpanel")
@@ -954,7 +958,10 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                                 recorded.index("create-db"))
                 self.assertLess(recorded.index("create-db"),
                                 recorded.index("import"))
-                self.assertEqual(recorded[-1],"cleanup")
+                self.assertEqual(recorded.count("source-readonly-identity"),2)
+                self.assertEqual(recorded.count("source-rsync-readonly"),1)
+                self.assertNotIn("source-export",recorded)
+                self.assertNotIn("cleanup",recorded)
                 self.assertEqual(json.loads(marker.read_text())["status"],
                                  "IMPORT_UNPROVEN" if fail_import else
                                  "VERIFIED_NOT_ACTIVATED")
