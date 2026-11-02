@@ -767,8 +767,11 @@ def import_existing_verified_source(engine,tail,source_db,base,local):
 
 
 def run():
-    need(os.geteuid()==0 and sys.argv[1:]==["--stage-new-www3-scratch-only"],
+    need(os.geteuid()==0 and sys.argv[1:] in (
+            ["--stage-new-www3-scratch-only"],
+            ["--stage-www3-quarantine-scratch-only"]),
          "EXPLICIT_CP2_SCRATCH_STAGE_REQUIRED")
+    quarantined=sys.argv[1]=="--stage-www3-quarantine-scratch-only"
     os.umask(0o077)
     base=load_helper()
     tail,source_db=base.verify_state()
@@ -779,7 +782,7 @@ def run():
     need(engine.target_identity()==tail["target_server_identity"],
          "TARGET_SERVER_IDENTITY_CHANGED")
     base.inspect_existing_site(base.DOMAIN,source_db)
-    name,user,password=scratch_name(base)
+    name,user,password=scratch_name(base,quarantined=quarantined)
     need(name!=source_db,"SCRATCH_DB_NAME_COLLISION")
     inv=inventory.build_manifest(Path("/")).get("sites",[])
     need(isinstance(inv,list) and not any(
@@ -788,7 +791,11 @@ def run():
     client=absent_sql(name)
     marker=receipt_path(base,name)
     parser=base.load_release113_schema_adapter()
-    print("MODE=WWW3_EXISTING_SOURCE_HEX_TO_NEW_SCRATCH_ONLY",flush=True)
+    print("MODE="+("WWW3_QUARANTINED_STATIC_ONLY_SCRATCH" if quarantined
+          else "WWW3_EXISTING_SOURCE_HEX_TO_NEW_SCRATCH_ONLY"),flush=True)
+    if quarantined:
+        print("QUARANTINE_EXCLUDED_DYNAMIC_SQL_EFFECTS=UNVERIFIED",flush=True)
+        print("QUARANTINE_WEBSITE_ACTIVATION_ALLOWED=NO",flush=True)
     print("SOURCE_NEW_EXPORT=NO",flush=True)
     print("SOURCE_TEMP_CLEANUP=NOT_ATTEMPTED_RETAINED",flush=True)
     print("EXISTING_WEBSITE_CONFIG_MODIFIED=NO",flush=True)
@@ -804,17 +811,31 @@ def run():
             need(base.strict_hex_export_utf8(before) and
                  base.scan_schema_adapter(parser,before,expected_tables=157),
                  "SOURCE_HEX_PROOF_FAILED")
-            strict_scope(before)
+            if quarantined:
+                imported=Path(folder)/"quarantined.sql.gz"
+                modified_sha=make_quarantined_sql(before,imported)
+                need(base.strict_hex_export_utf8(imported) and
+                     base.scan_schema_adapter(parser,imported,expected_tables=157),
+                     "QUARANTINE_STATIC_SCHEMA_UNPROVEN")
+                strict_scope(imported,quarantined=True)
+            else:
+                imported=before
+                modified_sha=source_digest
+                strict_scope(before)
             absent_sql(name)
-            record={"schema":"p07.www3.isolated-hex-scratch.v1",
+            record={"schema":("p07.www3.quarantined-static-copy.v1"
+                              if quarantined else "p07.www3.isolated-hex-scratch.v1"),
                     "migration_id":base.TAIL,"domain":base.DOMAIN,
                     "scratch_database":name,"username":user,"password":password,
                     "source_database":source_db,
                     "target_server_identity":tail["target_server_identity"],
                     "source_snapshot_sha256":source_digest,
+                    "input_transform_sha256":modified_sha,
+                    "quarantined_dynamic_groups":3 if quarantined else 0,
+                    "quarantined_dynamic_statement_effects":"UNVERIFIED" if quarantined else "NONE",
                     "source_snapshot_kind":"EXISTING_PRIVATE_HEX_ADVISORY",
                     "source_runtime_frozen":False,
-                    "status":"INTENT_RESERVED",
+                    "status":"QUARANTINE_INTENT_RESERVED" if quarantined else "INTENT_RESERVED",
                     "website_activated":False,"original_database_modified":False}
             save(marker,record,first=True)
             try:cloudpanel.add_database(base.DOMAIN,name,user,password)
@@ -824,7 +845,7 @@ def run():
             record["status"]="CREATED_NOT_IMPORTED";save(marker,record)
             print("SCRATCH_DB=CREATED_NOT_ACTIVATED",flush=True)
             args,env=restricted_user(client,name,user,password)
-            try:import_only_scratch(args,env,name,before)
+            try:import_only_scratch(args,env,name,imported)
             except Stop:
                 record["status"]="IMPORT_UNPROVEN";save(marker,record)
                 raise
@@ -833,7 +854,7 @@ def run():
             try:
                 after=Path(folder)/"target.sql.gz"
                 cloudpanel.export_database(name,after)
-                mode=engine.compare_database_dumps(before,after)
+                mode=engine.compare_database_dumps(imported,after)
                 need(mode in {
                     "CANONICAL_SQL_EXACT",
                     "CROSS_ENGINE_GUARDED_SESSION_SQL_EXACT",
@@ -844,11 +865,18 @@ def run():
                 record["status"]="PARITY_UNPROVEN_RETAIN_SCRATCH";save(marker,record)
                 print("SCRATCH_PARITY=UNPROVEN",flush=True)
                 raise Stop("SCRATCH_PARITY_NOT_PROVEN") from None
-            record["status"]="VERIFIED_NOT_ACTIVATED"
             record["verification_mode"]=mode
-            save(marker,record)
-            print("SCRATCH_PARITY=PASS",flush=True)
-            print("SCRATCH_STATUS=VERIFIED_NOT_ACTIVATED",flush=True)
+            if quarantined:
+                record["status"]="QUARANTINED_ADVISORY_NOT_ACTIVATED"
+                save(marker,record)
+                print("QUARANTINE_STATIC_COPY_PARITY=ADVISORY_MATCH",flush=True)
+                print("QUARANTINE_ORIGINAL_SQL_EQUIVALENCE=NOT_PROVEN",flush=True)
+                print("SCRATCH_STATUS=QUARANTINED_ADVISORY_NOT_ACTIVATED",flush=True)
+            else:
+                record["status"]="VERIFIED_NOT_ACTIVATED"
+                save(marker,record)
+                print("SCRATCH_PARITY=PASS",flush=True)
+                print("SCRATCH_STATUS=VERIFIED_NOT_ACTIVATED",flush=True)
     finally:
         # Preserve the previous source snapshot after any result, even a
         # verified scratch. A separate owner-scoped retention/cleanup step
