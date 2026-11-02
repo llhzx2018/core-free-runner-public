@@ -16,14 +16,18 @@ import stat
 import subprocess
 import sys
 
-ORIGINAL = "pull-20261028T103425Z-98050c76"
-NINE_CHILD = "pull-20261031T094144Z-d045fa5a"
+ORIGINAL = "pull-20261101T045943Z-923729a1"
+NINE_CHILD = "pull-20261101T052411Z-35663c25"
 DOMAINS = ("updates.kewaro.com", "www3.m3u8.one")
-NINE_DOMAINS = (
+PARENT_DOMAINS = (
+    "123.kewaro.com", "123.m3u8.one", "assetbox.kewaro.com",
+    "doc.kewaro.com", "domain.kewaro.com", "example.cloudpanel.io",
+    "forge.kewaro.com", "ilovem3u8.kewaro.com",
     "infra.kewaro.com", "lib.kewaro.com", "press.kewaro.com",
     "seo.kewaro.com", "start.kewaro.com", "textbox.kewaro.com",
     "unzip.kewaro.com", *DOMAINS,
 )
+NINE_DOMAINS = PARENT_DOMAINS[8:]
 ROOT = Path("/opt/vf-server-ops")
 STATES = Path("/var/lib/vf-server-ops/server-migrations")
 ORIGINAL_FILE = STATES / ORIGINAL / "state.json"
@@ -80,11 +84,20 @@ def verify_runtime() -> None:
 
 
 def prove_original_and_child(parent: dict, child: dict) -> list[dict]:
+    original_sites = parent.get("sites")
+    parent_guard = parent.get("last_sql_guard_failure")
     require(parent.get("status") == "PREPARE_FAILED"
-            and parent.get("last_sql_guard_failure") is None
-            and len(parent.get("sites", [])) == 17
-            and parent["sites"][7].get("domain") == "ilovem3u8.kewaro.com",
-            "ORIGINAL_PARENT_LEGACY_SCOPE_DRIFT")
+            and isinstance(parent_guard, dict)
+            and parent_guard.get("reason") == "CONDITIONAL_DDL"
+            and isinstance(original_sites, list)
+            and len(original_sites) == 17
+            and all(type(row) is dict for row in original_sites)
+            and tuple(row.get("domain") for row in original_sites) == PARENT_DOMAINS
+            and all(row.get("stage_status") == "PULLED_STAGED"
+                    for row in original_sites[:7])
+            and all(row.get("stage_status") == "PENDING"
+                    for row in original_sites[7:]),
+            "ORIGINAL_PARENT_GUARDED_SCOPE_DRIFT")
     require(child.get("status") == "PREPARE_FAILED"
             and child.get("partial_parent_migration_id") == ORIGINAL
             and child.get("cutover_prohibited") is True
