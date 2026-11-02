@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""P07 www3: inspect a CREATED, existing quarantine scratch; NO DB writes.
+
+Only create private temporary CP2 copies of source SQL and an export of the
+already-existing scratch. Never create/import/overwrite/alter/delete any DB,
+site, migration state, receipt, old-VPS source artifact, or DNS.
+"""
+from __future__ import annotations
+
+import gzip,hashlib,importlib.util,json,os,re,stat,subprocess,sys,tempfile
+from pathlib import Path
+
+HELPER_NAME="p07-www3-candidate-schema-probe.py"
+STAGE_NAME="p07-www3-isolated-stage.py"
+HELPER_BLOB="8f640e7505c5b49ad5a7574d82c0030eb6e7b884"
+STAGE_BLOB="8939ff6bd08442a26459a6878d1f94a5c34d000b"
+
+class Block(Exception):pass
+
+def need(ok,why):
+    if not ok:raise Block(why)
+
+def load(name,pinned):
+    path=Path(__file__).with_name(name)
+    need(path.is_file() and not path.is_symlink(),"PINNED_CODE_MISSING")
+    data=path.read_bytes()
+    digest=hashlib.sha1(b"blob "+str(len(data)).encode()+b"\0"+data).hexdigest()
+    need(digest==pinned,"PINNED_CODE_DRIFT")
+    spec=importlib.util.spec_from_file_location(
+        "p07_existing_scratch_"+name.replace("-","_").replace(".","_"),path
+    )
+    need(spec is not None and spec.loader is not None,"PINNED_CODE_UNLOADABLE")
+    module=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+def load_receipt(base,stage,target_server_identity,source_db):
+    db,user,_UNUSED_RANDOM_PASSWORD=stage.scratch_name(base,quarantined=True)
+    need(db!=source_db,"SCRATCH_COLLIDES_WITH_SOURCE_DB")
+    folder=base.BASE/base.TAIL/"target-transactions"
+    need(folder.is_dir() and not folder.is_symlink(),
+         "SCRATCH_RECEIPT_PARENT_UNPROVEN")
+    info=folder.lstat()
+    need(stat.S_ISDIR(info.st_mode) and info.st_uid==0
+         and not(info.st_mode&0o077),
+         "SCRATCH_RECEIPT_PARENT_UNSAFE")
+    identifier=hashlib.sha256(
+        (base.TAIL+":"+base.DOMAIN+":"+db).encode()
+    ).hexdigest()[:20]
+    marker=folder/("www3-hex-scratch-"+identifier+".json")
+    need(not marker.is_symlink(),"SCRATCH_RECEIPT_SYMLINK")
+    try:
+        record_stat=marker.lstat()
+        need(stat.S_ISREG(record_stat.st_mode) and record_stat.st_uid==0
+             and not(record_stat.st_mode&0o077)
+             and record_stat.st_nlink==1 and 0<record_stat.st_size<65536,
+             "SCRATCH_RECEIPT_UNSAFE")
+        record=json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError,ValueError,UnicodeError):
+        raise Block("SCRATCH_RECEIPT_UNAVAILABLE") from None
+    need(isinstance(record,dict)
+         and record.get("schema")=="p07.www3.quarantined-static-copy.v1"
+         and record.get("migration_id")==base.TAIL
+         and record.get("domain")==base.DOMAIN
+         and record.get("source_database")==source_db
+         and record.get("scratch_database")==db
+         and record.get("username")==user
+         and record.get("target_server_identity")==target_server_identity
+         and record.get("status")=="PARITY_UNPROVEN_RETAIN_SCRATCH"
+         and record.get("website_activated") is False
+         and record.get("original_database_modified") is False
+         and record.get("source_runtime_frozen") is False
+         and record.get("quarantined_dynamic_groups")==3
+         and record.get("quarantined_dynamic_statement_effects")=="UNVERIFIED"
+         and isinstance(record.get("password"),str)
+         and 16<=len(record["password"])<=1024
+         and all(re.fullmatch(r"[a-f0-9]{64}",record.get(k,""))
+                 for k in ("source_snapshot_sha256","input_transform_sha256")),
+         "SCRATCH_RECEIPT_IDENTITY_OR_STATUS_CHANGED")
+    return record
+
+def count_scratch_metadata(stage,record):
+    import shutil
+    binary=shutil.which("mysql") or shutil.which("mariadb")
+    need(binary is not None,"SCRATCH_READONLY_SQL_CLIENT_MISSING")
+    db=record["scratch_database"]
+    args,env=stage.restricted_user(binary,db,record["username"],record["password"])
+    sql=(
+        "SELECT "
+        "(SELECT COUNT(*) FROM information_schema.TABLES "
+        "WHERE TABLE_SCHEMA='"+db+"' AND TABLE_TYPE='BASE TABLE'),"
+        "(SELECT COUNT(*) FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA='"+db+"')"
+    )
+    try:
+        result=subprocess.run(args+[
+             "--batch","--skip-column-names","--execute="+sql
+        ],env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+           stderr=subprocess.DEVNULL,timeout=60,check=False)
+    except (OSError,subprocess.SubprocessError):
+        raise Block("SCRATCH_METADATA_READ_UNAVAILABLE") from None
+    need(result.returncode==0 and len(result.stdout)<128,
+         "SCRATCH_METADATA_READ_UNAVAILABLE")
+    match=re.fullmatch(rb"([0-9]{1,7})\t([0-9]{1,8})\r?\n?",
+                       result.stdout.strip()+b"\n")
+    need(match is not None,"SCRATCH_METADATA_FORMAT_UNPROVEN")
+    return int(match.group(1)),int(match.group(2))
+
+def read_copy_format(path):
+    need(path.is_file() and not path.is_symlink() and path.stat().st_size>0,
+         "TARGET_SCRATCH_EXPORT_EMPTY")
+    with path.open("rb") as file:
+        first=file.read(64)
+    if first.startswith(b"\x1f\x8b"):
+        return "GZIP",path
+    # The CloudPanel CLI may export plain SQL even if the requested filename
+    # ends with .gz. Point the read-only verifier at an actual .sql copy.
+    if first.lstrip().startswith((b"--",b"/*",b"CREATE ",b"SET ")):
+        plain=path.with_suffix(".sql")
+        need(not os.path.lexists(plain),"EXPORT_FORMAT_COPY_COLLISION")
+        import shutil
+        shutil.copyfile(path,plain)
+        return "PLAIN_SQL",plain
+    raise Block("TARGET_SCRATCH_EXPORT_FORMAT_UNPROVEN")
+
+def try_fingerprint(module,name,a,b):
+    fun=getattr(module,name,None)
+    if not callable(fun):return "UNAVAILABLE"
+    try:
+        before=fun(a)
+        after=fun(b)
+    except Exception:
+        return "UNPROVEN"
+    return "MATCH" if before==after else "DIFFER"
+
+def diagnostic_reason(exc):
+    # Never print exception str: it may carry file, DB or private SQL content.
+    text=str(exc)
+    allowed=(
+        "SQL_DUMP_UNREADABLE","NO_COMPARABLE_STATEMENTS",
+        "SQL_SCHEMA_UNREADABLE","NO_COMPARABLE_SCHEMA",
+        "UNTERMINATED_SCHEMA","CUSTOM_DELIMITER","CONDITIONAL_DDL",
+        "MULTILINE_DATA","UNRECOGNIZED_DATA_COMMAND",
+        "SQL_CONTENT_UNREADABLE","NO_COMPARABLE_LOGICAL_CONTENT",
+        "UNCLASSIFIED_SQL_VERIFICATION","SCHEMA_OR_DATA_MISMATCH",
+    )
+    for reason in allowed:
+        if ("["+reason+"]") in text:return reason
+    return "COMPARISON_UNCLASSIFIED"
+
+def run():
+    need(os.geteuid()==0 and sys.argv[1:]==[
+        "--read-only-existing-www3-scratch-parity"
+    ],"EXPLICIT_EXISTING_SCRATCH_READONLY_REQUIRED")
+    os.umask(0o077)
+    base=load(HELPER_NAME,HELPER_BLOB)
+    stage=load(STAGE_NAME,STAGE_BLOB)
+    tail,source_db=base.verify_state()
+    base.verify_current_runtime()
+    sys.path.insert(0,str(base.RUNTIME/"lib"))
+    import server_migration_pull as engine
+    import cloudpanel,verify
+    need(engine.target_identity()==tail["target_server_identity"],
+         "TARGET_IDENTITY_CHANGED")
+    base.inspect_existing_site(base.DOMAIN,source_db)
+    record=load_receipt(base,stage,tail["target_server_identity"],source_db)
+    print("MODE=WWW3_EXISTING_QUARANTINE_READ_ONLY_PARITY",flush=True)
+    print("SCRATCH_RECEIPT=PARITY_UNPROVEN_RETAIN_SCRATCH",flush=True)
+    print("DATABASE_CREATE_IMPORT_ALTER_DELETE=NONE",flush=True)
+    print("RECEIPT_AND_MIGRATION_STATE_WRITES=NONE",flush=True)
+    print("SOURCE_NEW_EXPORT_OR_CLEANUP=NONE",flush=True)
+    print("QUARANTINED_DYNAMIC_EFFECTS=NOT_PROVEN",flush=True)
+    print("WEBSITE_ACTIVATION=PROHIBITED",flush=True)
+    print("CUTOVER_ALLOWED=NO",flush=True)
+    db=record["scratch_database"]
+    tables,columns=count_scratch_metadata(stage,record)
+    print("SCRATCH_READONLY_TABLES="+str(tables),flush=True)
+    print("SCRATCH_READONLY_COLUMNS="+str(columns),flush=True)
+    with tempfile.TemporaryDirectory(prefix="p07-www3-existing-parity-",dir="/root") as td:
+        root=Path(td)
+        original=root/"old.sql.gz"
+        sha=stage.import_existing_verified_source(engine,tail,source_db,base,original)
+        need(sha==record["source_snapshot_sha256"],
+             "SOURCE_ARCHIVE_RECEIPT_MISMATCH")
+        imported=root/"quarantined.sql.gz"
+        transformed_sha=stage.make_quarantined_sql(original,imported)
+        need(transformed_sha==record["input_transform_sha256"],
+             "QUARANTINE_INPUT_RECEIPT_MISMATCH")
+        stage.strict_scope(imported,quarantined=True)
+        target=root/"target-export.sql.gz"
+        try:
+            cloudpanel.export_database(db,target)
+        except Exception:
+            print("SCRATCH_EXPORT_READONLY=FAILED",flush=True)
+            print("SCRATCH_PARITY_CLASS=EXPORT_UNAVAILABLE",flush=True)
+            return 13
+        print("SCRATCH_EXPORT_READONLY=COMPLETE",flush=True)
+        format_name,compare_path=read_copy_format(target)
+        print("SCRATCH_EXPORT_FORMAT="+format_name,flush=True)
+        for label,fun in (
+            ("STRUCTURE","sql_structure_fingerprint"),
+            ("DATA","sql_data_fingerprint"),
+            ("EXACT_SQL","sql_fingerprint"),
+        ):
+            print("SCRATCH_"+label+"_FINGERPRINT="+
+                  try_fingerprint(verify,fun,imported,compare_path),flush=True)
+        try:
+            mode=engine.compare_database_dumps(imported,compare_path)
+        except Exception as error:
+            print("SCRATCH_PARITY_CLASS="+diagnostic_reason(error),flush=True)
+            print("SCRATCH_STATIC_COPY_PARITY=NOT_PROVEN",flush=True)
+            return 13
+        allowed={
+            "CANONICAL_SQL_EXACT","CROSS_ENGINE_GUARDED_SESSION_SQL_EXACT",
+            "CROSS_ENGINE_KNOWN_DUMP_FORMAT_SQL_EXACT","CROSS_ENGINE_LOGICAL_CONTENT"
+        }
+        need(mode in allowed,"SCRATCH_PARITY_MODE_UNRECOGNIZED")
+        print("SCRATCH_STATIC_COPY_PARITY=READONLY_MATCH",flush=True)
+        print("SCRATCH_FULL_SOURCE_EQUIVALENCE=NOT_PROVEN",flush=True)
+        return 0
+
+if __name__=="__main__":
+    try:raise SystemExit(run())
+    except Exception as exc:
+        value=str(exc) if type(exc) is Block else "READONLY_PARITY_DIAGNOSTIC_UNPROVEN"
+        print("BLOCKED="+value,flush=True)
+        print("DATABASE_CREATE_IMPORT_ALTER_DELETE=NONE",flush=True)
+        print("CUTOVER_ALLOWED=NO",flush=True)
+        raise SystemExit(13) from None
