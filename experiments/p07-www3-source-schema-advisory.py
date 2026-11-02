@@ -7,8 +7,8 @@ import shlex
 import stat
 import sys
 
-MID="pull-20261031T095604Z-edae3c44"
-PARENT="pull-20261031T094144Z-d045fa5a"
+MID="pull-20261102T005644Z-7178c7d5"
+PARENT="pull-20261101T045943Z-923729a1"
 SOURCE_RUNTIME=f"/var/lib/vf-server-ops/pull-source/{MID}/runtime"
 STATE=Path("/var/lib/vf-server-ops/server-migrations")/MID/"state.json"
 
@@ -224,7 +224,12 @@ def main():
             and sites[0].get("domain")=="updates.kewaro.com"
             and sites[0].get("stage_status")=="PULLED_STAGED"
             and sites[1].get("domain")=="www3.m3u8.one"
-            and sites[1].get("stage_status")=="PENDING"):
+            and sites[1].get("stage_status")=="PENDING"
+            and s.get("source_runtime_frozen") is False
+            and s.get("target_runtime_activated") is False
+            and s.get("dns_changed_by_p07") is False
+            and s.get("source_delete_allowed") is False
+            and s.get("existing_target_overwrite_allowed") is False):
         print("BLOCKED=CHILD_SCOPE_DRIFT");return 13
     dbs=sites[1].get("mysql_databases")
     if not (type(dbs) is list and len(dbs)==1 and type(dbs[0]) is str
