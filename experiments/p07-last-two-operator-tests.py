@@ -969,6 +969,82 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                     m.make_quarantined_sql(before,output)
                 self.assertFalse(output.exists())
 
+    def test_quarantine_interleaved_prepare_groups_keep_static_bytes(self):
+        import gzip,sys
+        m=self.module()
+        overlay=Path(__file__).resolve().parents[1]/"dist/p07/0.1.0/overlay/lib"
+        sys.path.insert(0,str(overlay))
+        import sql_diff_evidence
+        probe=("/*!50003 SELECT COUNT(*) INTO @found FROM INFORMATION_SCHEMA.TABLES "
+               "WHERE TABLE_SCHEMA='db' AND TABLE_NAME='t' */;\n")
+        def line(action,i):
+            if action=="ASSIGN":
+                yes=("SELECT 1; SELECT 2" if i==1
+                     else "SET SESSION SQL_BIG_SELECTS=1" if i==2
+                     else "SET @session := @old + 1")
+                body=f"SET @q{i}=IF(@found, '{yes}', 'SELECT 0')"
+            elif action=="PREPARE":
+                body=f"PREPARE p{i} FROM @q{i}"
+            elif action=="EXECUTE":
+                body=f"EXECUTE p{i}"
+            else:
+                body=f"DEALLOCATE PREPARE p{i}"
+            return f"/*!50003 {body} */;\n"
+        # A real dump may prepare several statements before executing them.
+        # Each logical group is ordered, though the groups are interleaved.
+        order=[
+            ("ASSIGN",1),("ASSIGN",2),("PREPARE",2),
+            ("PREPARE",1),("EXECUTE",1),("ASSIGN",3),
+            ("PREPARE",3),("EXECUTE",2),("DEALLOCATE",2),
+            ("EXECUTE",3),("DEALLOCATE",1),("DEALLOCATE",3),
+        ]
+        static=b"CREATE TABLE real (id INT);\nINSERT INTO real VALUES (27);\n"
+        source=(static.decode()+probe+
+                "".join(line(action,i) for action,i in order)+
+                "INSERT INTO real VALUES (28);\n")
+        with tempfile.TemporaryDirectory() as td:
+            path=Path(td)/"original.sql.gz"
+            copy=Path(td)/"clean.sql.gz"
+            with gzip.open(path,"wt",encoding="utf-8") as file:
+                file.write(source)
+            self.assertEqual(
+                sql_diff_evidence.dynamic_guard_syntax_counts(path)
+                    ["recognized_unsafe"],3
+            )
+            m.make_quarantined_sql(path,copy)
+            with gzip.open(copy,"rt",encoding="utf-8") as file:
+                remaining=file.read()
+            self.assertEqual(remaining,
+                static.decode()+"INSERT INTO real VALUES (28);\n")
+            for modified in (
+                # Execute before prepare (no shortcut).
+                [("ASSIGN",1),("ASSIGN",2),("EXECUTE",1),
+                 ("PREPARE",1),("PREPARE",2),("EXECUTE",2),
+                 ("DEALLOCATE",1),("DEALLOCATE",2),
+                 ("ASSIGN",3),("PREPARE",3),("EXECUTE",3),
+                 ("DEALLOCATE",3)],
+                # Repeated execute is not an allowed lifecycle.
+                [("ASSIGN",1),("ASSIGN",2),("PREPARE",1),
+                 ("PREPARE",2),("EXECUTE",1),("EXECUTE",1),
+                 ("DEALLOCATE",1),("DEALLOCATE",2),
+                 ("ASSIGN",3),("PREPARE",3),("EXECUTE",3)],
+                # Wrong reference to the assigned SQL variable.
+                [("ASSIGN",1),("ASSIGN",2),("PREPARE",1),
+                 ("PREPARE",2),("EXECUTE",1),("EXECUTE",2),
+                 ("DEALLOCATE",1),("DEALLOCATE",2),
+                 ("ASSIGN",3),("PREPARE",3),("EXECUTE",3),
+                 ("DEALLOCATE",3)],
+            ):
+                text=(static.decode()+probe+
+                      "".join(line(action,i) for action,i in modified)+
+                      "INSERT INTO real VALUES (28);\n")
+                with gzip.open(path,"wt",encoding="utf-8") as file:
+                    file.write(text)
+                copy.unlink()
+                with self.assertRaises(m.Stop):
+                    m.make_quarantined_sql(path,copy)
+                self.assertFalse(copy.exists())
+
     def test_quarantined_scratch_mode_has_distinct_identity_and_no_full_parity(self):
         import contextlib,gzip,io,sys,subprocess,types
         m=self.module()
