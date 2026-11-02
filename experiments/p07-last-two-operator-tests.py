@@ -199,4 +199,112 @@ class Tests(unittest.TestCase):
         self.assertNotIn("engine.resume_prepare_migration(",s)
         self.assertNotIn("engine.freeze_old_server(",s)
 
+
+class CandidateWww3SchemaTests(unittest.TestCase):
+    def module(self):
+        script=Path(__file__).with_name("p07-www3-candidate-schema-probe.py")
+        spec=importlib.util.spec_from_file_location("p07_www3_exact",script)
+        module=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_actual_tail_and_sql_revision_are_pinned(self):
+        n=self.module()
+        self.assertEqual(n.PARENT,"pull-20261101T045943Z-923729a1")
+        self.assertEqual(n.CHILD,"pull-20261101T052411Z-35663c25")
+        self.assertEqual(n.TAIL,"pull-20261102T005644Z-7178c7d5")
+        self.assertEqual(n.CANDIDATE_HEAD,"06038930003114ad4223f1d03784c5338e371af3")
+        self.assertEqual(n.CANDIDATE_BLOB,"29062b76d6b1fba65014e2a89b9566c3f93cdede")
+        self.assertEqual(n.DOMAIN,"www3.m3u8.one")
+        self.assertEqual(n.ENGINE_BLOB,m.ENGINE_BLOB)
+
+    def test_no_target_database_create_import_or_resume_callsite(self):
+        code=Path(__file__).with_name("p07-www3-candidate-schema-probe.py").read_text()
+        for forbidden in ("engine.resume_prepare_migration(", "engine.prepare_migration(",
+                          "engine.cutover_migration(", "engine.create_target_site(",
+                          "engine.sync_site_databases(", "cloudpanel.add_database(",
+                          "cloudpanel.import_database(", "mysql:import",
+                          "chmod(0o777", "shutil.rmtree("):
+            self.assertNotIn(forbidden,code)
+        self.assertIn('engine.pull_path(tail["source"],remote_file,archive)',code)
+        self.assertIn("candidate=fetch_pinned_candidate()",code)
+        self.assertIn("SOURCE_TEMP_CLEANUP=",code)
+        self.assertIn("CUTOVER_ALLOWED=NO",code)
+
+    def test_wrong_tail_stage_or_parent_rejected_before_network(self):
+        n=self.module()
+        a,b=state_pair()
+        a["sites"]=copy.deepcopy(a["sites"])
+        t=copy.deepcopy(a)
+        t.update(migration_id=n.TAIL,
+                 partial_parent_migration_id=n.PARENT,
+                 cutover_prohibited=True,
+                 sites=[copy.deepcopy(a["sites"][15]),copy.deepcopy(a["sites"][16])])
+        t["sites"][0]["stage_status"]="PULLED_STAGED"
+        t["sites"][1]["stage_status"]="PENDING"
+        t["sites"][1]["mysql_prepare_count"]=None
+        t["source_runtime_path"]=f"/var/lib/vf-server-ops/pull-source/{n.TAIL}/runtime"
+        mapping={n.PARENT:a,n.CHILD:b,n.TAIL:t}
+        with mock.patch.object(n,"private_state",side_effect=lambda mid:mapping[mid]):
+            for changed in ("status","parent","stage","db_count","source_frozen"):
+                c=copy.deepcopy(t)
+                if changed=="status":c["status"]="PREPARED"
+                if changed=="parent":c["partial_parent_migration_id"]=n.CHILD
+                if changed=="stage":c["sites"][1]["stage_status"]="PULLED_STAGED"
+                if changed=="db_count":c["sites"][1]["mysql_databases"]=[]
+                if changed=="source_frozen":c["source_runtime_frozen"]=True
+                mapping[n.TAIL]=c
+                with self.subTest(changed=changed),self.assertRaises(n.Block):
+                    n.verify_state()
+
+    def test_remote_source_export_synthetic_only_exact_site_and_no_overwrite(self):
+        import contextlib,io,sys,types
+        n=self.module()
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            mid=n.TAIL
+            data=root/mid/"data"
+            data.mkdir(parents=True,mode=0o700)
+            out=data/"www3-schema-aabbcc.sql.gz"
+            inv=types.ModuleType("inventory")
+            inv.build_manifest=lambda _root:{"sites":[
+                {"domain":n.DOMAIN,"mysql_databases":["fixture_db"]}]}
+            clp=types.ModuleType("cloudpanel")
+            clp.CloudPanelError=type("CloudPanelError",(Exception,),{})
+            calls=[]
+            def export(db,path,*,clpctl):
+                calls.append((db,clpctl))
+                Path(path).write_bytes(b"x"*1100)
+            clp.export_database=export
+            remote=n.REMOTE.replace(
+                'Path("/var/lib/vf-server-ops/pull-source")',
+                f"Path({str(root)!r})",
+            )
+            env={"inventory":inv,"cloudpanel":clp}
+            args=["-c",n.DOMAIN,"fixture_db",str(out),mid]
+            with mock.patch.dict(sys.modules,env),mock.patch.object(sys,"argv",args):
+                buf=io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    exec(compile(remote,"<isolated-source>","exec"),
+                         {"__name__":"__main__"})
+                self.assertEqual(buf.getvalue().strip(),"SOURCE_EXPORT_CREATED=YES")
+                self.assertEqual(calls,[("fixture_db","clpctl")])
+                self.assertEqual(out.read_bytes(),b"x"*1100)
+                # Existing output is retained and never overwritten.
+                with self.assertRaises(SystemExit) as caught:
+                    exec(compile(remote,"<isolated-source>","exec"),
+                         {"__name__":"__main__"})
+                self.assertEqual(caught.exception.code,24)
+                self.assertEqual(len(calls),1)
+            out.unlink()
+            inv.build_manifest=lambda _root:{"sites":[
+                {"domain":n.DOMAIN,"mysql_databases":["unrelated"]}]}
+            with mock.patch.dict(sys.modules,env),mock.patch.object(sys,"argv",args):
+                with self.assertRaises(SystemExit) as caught:
+                    exec(compile(remote,"<isolated-source>","exec"),
+                         {"__name__":"__main__"})
+                self.assertEqual(caught.exception.code,23)
+                self.assertEqual(len(calls),1)
+                self.assertFalse(out.exists())
+
 if __name__=="__main__":unittest.main()
