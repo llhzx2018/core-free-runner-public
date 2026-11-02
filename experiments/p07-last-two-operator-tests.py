@@ -100,13 +100,21 @@ class Tests(unittest.TestCase):
         import tempfile
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
-            for name,parent in [("nine",m.ORIGINAL),("two",m.NINE_CHILD)]:
+            for name,parent in [("nine",m.ORIGINAL),("two",m.NINE_CHILD),
+                                ("sibling",m.ORIGINAL)]:
                 x=root/name;x.mkdir()
                 (x/"state.json").write_text(json.dumps({
                     "partial_parent_migration_id":parent,
-                    "migration_id":m.NINE_CHILD if name=="nine" else "child2"}))
+                    "migration_id":m.NINE_CHILD if name=="nine" else "tail2"}))
             with mock.patch.object(m,"STATES",root),self.assertRaises(m.Stop):
                 m.ensure_no_duplicate_child()
+
+    def test_sibling_tail_lineage_is_not_child_of_child(self):
+        source=p.read_text()
+        self.assertIn("remainder_parent=ORIGINAL",source)
+        self.assertIn('descendant.get("partial_parent_migration_id") == ORIGINAL',source)
+        self.assertIn('entry.get("migration_id")!=NINE_CHILD',source)
+        self.assertNotIn("remainder_parent=NINE_CHILD",source)
 
     def test_existing_website_prevents_write(self):
         import sys
@@ -120,7 +128,7 @@ class Tests(unittest.TestCase):
 
     def test_code_does_not_invoke_cutover_or_retry(self):
         s=p.read_text()
-        self.assertIn("remainder_parent=NINE_CHILD",s)
+        self.assertIn("remainder_parent=ORIGINAL",s)
         self.assertIn("expected_remainder_sites=[dict(row) for row in last_two]",s)
         self.assertIn('descendant.get("cutover_prohibited") is True',s)
         self.assertNotIn("engine.cutover_migration(",s)
