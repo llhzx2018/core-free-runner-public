@@ -202,6 +202,59 @@ def inspect_target_export_bytes(path,format_name):
     return ("PASS","INVALID" if invalid else "VALID",bytes_seen)
 
 
+def native_readonly_scratch_dump(record,stage,destination):
+    """Single read-only MariaDB dump of the existing scratch, with HEX blobs.
+
+    The existing CloudPanel gzip may contain raw non-UTF8 binary data. Never
+    change/export from old VPS, never invoke an import, or write into the DB.
+    SELECT/transaction only with the root-private receipt's scoped user.
+    """
+    import shutil
+    from pathlib import Path
+    db=record["scratch_database"]
+    need(re.fullmatch(r"p07[A-Za-z0-9]{11}",db) is not None,
+         "NATIVE_DUMP_IDENTITY_UNPROVEN")
+    client=shutil.which("mysql") or shutil.which("mariadb")
+    dumper=shutil.which("mariadb-dump") or shutil.which("mysqldump")
+    if client is None or dumper is None:
+        return "CLIENT_UNAVAILABLE"
+    # Reuse pre-existing restricted SQL user and its verified database-only
+    # SHOW GRANTS; no root SQL account, server admin, or cross-DB privilege.
+    try:
+        _args,env=stage.restricted_user(
+            client,db,record["username"],record["password"]
+        )
+    except Exception:
+        return "RESTRICTED_USER_UNPROVEN"
+    need(not os.path.lexists(destination)
+         and destination.parent.is_dir()
+         and destination.name=="scratch-native-readonly.sql",
+         "NATIVE_OUTPUT_PATH_UNSAFE")
+    args=[
+        dumper,"--no-defaults","--protocol=tcp","--host=127.0.0.1",
+        "--user="+record["username"],"--default-character-set=utf8mb4",
+        "--single-transaction","--skip-lock-tables","--quick",
+        "--hex-blob","--no-tablespaces","--skip-extended-insert",
+        "--skip-comments","--skip-dump-date",
+        db,
+    ]
+    # Private plain SQL is ephemeral; only fixed status codes are printed.
+    try:
+        fd=os.open(destination,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+        with os.fdopen(fd,"wb") as stream:
+            result=subprocess.run(
+                args,env=env,stdin=subprocess.DEVNULL,stdout=stream,
+                stderr=subprocess.DEVNULL,timeout=1800,check=False
+            )
+        if result.returncode!=0:return "EXPORT_REJECTED"
+        if destination.stat().st_size==0:return "EMPTY_EXPORT"
+    except subprocess.TimeoutExpired:
+        return "EXPORT_TIMEOUT"
+    except (OSError,subprocess.SubprocessError):
+        return "EXPORT_UNAVAILABLE"
+    return "COMPLETE"
+
+
 def try_fingerprint(module,name,a,b):
     fun=getattr(module,name,None)
     if not callable(fun):return "UNAVAILABLE"
@@ -462,14 +515,32 @@ def run():
         print("TARGET_EXPORT_STREAM_INTEGRITY="+stream_status,flush=True)
         print("TARGET_EXPORT_UTF8="+utf8_status,flush=True)
         print("TARGET_EXPORT_SQL_BYTES="+str(uncompressed_bytes),flush=True)
-        if stream_status!="PASS":
-            print("SCRATCH_PARITY_CLASS=TARGET_EXPORT_BINARY_UNPROVEN",flush=True)
-            print("SCRATCH_STATIC_COPY_PARITY=NOT_PROVEN",flush=True)
-            return 13
-        if utf8_status!="VALID":
-            print("SCRATCH_PARITY_CLASS=TARGET_EXPORT_UTF8_UNPROVEN",flush=True)
-            print("SCRATCH_STATIC_COPY_PARITY=NOT_PROVEN",flush=True)
-            return 13
+        if stream_status!="PASS" or utf8_status!="VALID":
+            print("NATIVE_SCRATCH_FALLBACK=READONLY_HEX_BLOB",flush=True)
+            alternative=root/"scratch-native-readonly.sql"
+            native_status=native_readonly_scratch_dump(record,stage,alternative)
+            print("NATIVE_SCRATCH_EXPORT="+native_status,flush=True)
+            if native_status=="COMPLETE":
+                normalized_status,native_utf8,native_bytes=inspect_target_export_bytes(
+                    alternative,"PLAIN_SQL"
+                )
+                print("NATIVE_SCRATCH_UTF8="+native_utf8,flush=True)
+                print("NATIVE_SCRATCH_SQL_BYTES="+str(native_bytes),flush=True)
+                if normalized_status=="PASS" and native_utf8=="VALID":
+                    compare_path=alternative
+                    print("TARGET_COMPARE_INPUT=NATIVE_SCRATCH_READONLY_DUMP",flush=True)
+                else:
+                    print("SCRATCH_PARITY_CLASS=NATIVE_EXPORT_ENCODING_UNPROVEN",flush=True)
+                    print("SCRATCH_STATIC_COPY_PARITY=NOT_PROVEN",flush=True)
+                    return 13
+            else:
+                print("SCRATCH_PARITY_CLASS="+(
+                    "TARGET_EXPORT_BINARY_UNPROVEN" if stream_status!="PASS"
+                    else "TARGET_EXPORT_UTF8_UNPROVEN"),flush=True)
+                print("SCRATCH_STATIC_COPY_PARITY=NOT_PROVEN",flush=True)
+                return 13
+        else:
+            print("TARGET_COMPARE_INPUT=CLOUDPANEL_GZIP",flush=True)
         explain_advisory(imported,compare_path)
         for label,fun in (
             ("STRUCTURE","sql_structure_fingerprint"),
