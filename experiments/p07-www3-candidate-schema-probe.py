@@ -43,7 +43,7 @@ root=Path("/var/lib/vf-server-ops/pull-source")/mid/"data"
 if not root.is_dir() or root.is_symlink():
     raise SystemExit(21)
 p=Path(out)
-if p.parent!=root or not p.name.startswith("www3-schema-") or p.suffix!="gz":
+if p.parent!=root or not p.name.startswith("www3-schema-") or p.suffix!=".gz":
     raise SystemExit(22)
 rows=[x for x in inventory.build_manifest(Path("/")).get("sites",[])
       if isinstance(x,dict) and x.get("domain")==domain]
