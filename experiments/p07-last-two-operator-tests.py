@@ -995,8 +995,9 @@ class SourceLinkReadOnlyTests(unittest.TestCase):
     def test_ssh_transport_failure_is_read_only_and_never_claims_cleanup(self):
         import contextlib,io,sys,subprocess,types
         m=self.module()
-        source={"identity_file":None,"ssh_user":"root"}
-        tail={"target_server_identity":"cp2","source":source}
+        source={"identity_file":None,"ssh_user":"root","host":"old.example"}
+        tail={"target_server_identity":"cp2","source":source,
+              "source_runtime_path":"/var/lib/vf-server-ops/pull-source/pull-synthetic/runtime"}
         base=types.SimpleNamespace(
             verify_state=lambda:(tail,"legacy_db"),
             verify_current_runtime=lambda:None,
@@ -1029,8 +1030,9 @@ class SourceLinkReadOnlyTests(unittest.TestCase):
     def test_ssh_success_reports_only_bounded_temp_counts(self):
         import contextlib,io,sys,subprocess,types
         m=self.module()
-        source={"identity_file":None,"ssh_user":"root"}
-        tail={"target_server_identity":"cp2","source":source}
+        source={"identity_file":None,"ssh_user":"root","host":"old.example"}
+        tail={"target_server_identity":"cp2","source":source,
+              "source_runtime_path":"/var/lib/vf-server-ops/pull-source/pull-synthetic/runtime"}
         base=types.SimpleNamespace(
             verify_state=lambda:(tail,"legacy_db"),
             verify_current_runtime=lambda:None,
