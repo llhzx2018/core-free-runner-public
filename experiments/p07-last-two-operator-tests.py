@@ -1724,7 +1724,7 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
     def test_readonly_existing_import_parity_modes_preserve_receipt(self):
         import contextlib,gzip,io,json,stat,sys,subprocess,types
         m=self.module()
-        for outcome in ("mismatch","match","export-fail","header-drift","sql-copy-drift"):
+        for outcome in ("mismatch","match","export-fail","header-drift","sql-copy-drift","target-crc","target-invalid-utf8"):
             with self.subTest(outcome=outcome),tempfile.TemporaryDirectory() as folder:
                 root=Path(folder)
                 tailid="pull-synthetic"
@@ -1798,7 +1798,15 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
                 cp=types.ModuleType("cloudpanel")
                 def exporter(db,path):
                     if outcome=="export-fail":raise RuntimeError("PRIVATE-SQL")
-                    Path(path).write_bytes(transform)
+                    if outcome=="target-invalid-utf8":
+                        Path(path).write_bytes(
+                            gzip.compress(source+b"-- invalid\xff\n",mtime=0)
+                        )
+                    elif outcome=="target-crc":
+                        broken=bytearray(transform)
+                        broken[-8]^=0xFF
+                        Path(path).write_bytes(broken)
+                    else:Path(path).write_bytes(transform)
                 cp.export_database=exporter
                 verify=types.ModuleType("verify")
                 verify.sql_structure_fingerprint=lambda path:"structure"
@@ -1848,6 +1856,15 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
                     self.assertIn("SCRATCH_PARITY_CLASS=SCHEMA_OR_DATA_MISMATCH",text)
                 if outcome=="export-fail":
                     self.assertIn("SCRATCH_PARITY_CLASS=EXPORT_UNAVAILABLE",text)
+                if outcome=="target-crc":
+                    self.assertIn("TARGET_EXPORT_STREAM_INTEGRITY=CRC_FAILED",text)
+                    self.assertIn("SCRATCH_PARITY_CLASS=TARGET_EXPORT_BINARY_UNPROVEN",text)
+                    self.assertNotIn("ADVISORY_SCHEMA=",text)
+                if outcome=="target-invalid-utf8":
+                    self.assertIn("TARGET_EXPORT_STREAM_INTEGRITY=PASS",text)
+                    self.assertIn("TARGET_EXPORT_UTF8=INVALID",text)
+                    self.assertIn("SCRATCH_PARITY_CLASS=TARGET_EXPORT_UTF8_UNPROVEN",text)
+                    self.assertNotIn("ADVISORY_SCHEMA=",text)
 
 class SourceLinkReadOnlyTests(unittest.TestCase):
     def module(self):
