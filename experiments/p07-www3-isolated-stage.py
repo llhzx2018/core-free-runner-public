@@ -20,10 +20,10 @@ def load_helper():
     spec.loader.exec_module(module)
     return module
 
-def scratch_name(base):
+def scratch_name(base, *, quarantined=False):
     import site_lifecycle
-    return site_lifecycle.derive_database_identity(
-        base.DOMAIN,base.TAIL+":isolated-hex-first-pass",1)
+    purpose=":quarantine-static-copy" if quarantined else ":isolated-hex-first-pass"
+    return site_lifecycle.derive_database_identity(base.DOMAIN,base.TAIL+purpose,1)
 
 def _target_master_credentials():
     """Read CP2's existing CloudPanel master connection, never print secrets.
@@ -422,18 +422,143 @@ def prove_legacy_mysql_dynamic_groups(sql,verifier,sql_evidence):
     return known
 
 
-def strict_scope(sql):
+
+def make_quarantined_sql(original,quarantined):
+    """Remove EXACTLY 13 opaque old-source control lines from a COPY.
+
+    No unknown PREPARE body can execute on CP2. Their effects remain
+    UNVERIFIED forever by this mode; original SQL and source archive remain
+    unchanged, and no acceptance status is granted.
+    """
+    import sql_diff_evidence,verify
+    original_counts=sql_diff_evidence.dynamic_guard_syntax_counts(original)
+    need(original_counts["recognized_unsafe"]==3
+         and original_counts["recognized_safe"]==0
+         and original_counts["unsafe_yes_branches"]==3
+         and original_counts["unsafe_no_branches"]==0
+         and original_counts["double_quoted_if"]==0
+         and original_counts["other_unknown_set"]==0
+         and original_counts["unsafe_branch_classes"]["READ_UNPROVEN"]==1
+         and original_counts["unsafe_branch_classes"]["SESSION_UNPROVEN"]==2
+         and sum(original_counts["unsafe_branch_classes"].values())==3,
+         "QUARANTINE_SOURCE_SHAPE_CHANGED")
+    events=[]
+    removed=set()
+    pattern=re.compile(r"^/\*!([0-9]{5,6})\s+(.+?)\s*\*/;?$",re.I)
+    try:
+        with gzip.open(original,"rt",encoding="utf-8",errors="strict") as file:
+            for number,raw in enumerate(file,1):
+                line=raw.strip()
+                match=pattern.fullmatch(line)
+                if not match or not 40000<=int(match.group(1))<80000:
+                    continue
+                body=re.sub(r"\s+"," ",match.group(2).strip())
+                flagged=verify._CROSS_ENGINE_TABLE_COUNT_RE.fullmatch(body)
+                assigned=verify._CROSS_ENGINE_DYNAMIC_IF_RE.fullmatch(body)
+                prepared=verify._CROSS_ENGINE_PREPARE_RE.fullmatch(body)
+                executed=verify._CROSS_ENGINE_EXECUTE_RE.fullmatch(body)
+                dealloc=verify._CROSS_ENGINE_DEALLOCATE_RE.fullmatch(body)
+                if flagged:
+                    events.append((number,"PROBE",flagged.group("flag").upper(),""))
+                elif assigned:
+                    yes=assigned.group("yes")
+                    no=assigned.group("no")
+                    need(verify._cross_engine_safe_dynamic_branch(no),
+                         "QUARANTINE_ELSE_BRANCH_UNPROVEN")
+                    events.append((number,"ASSIGN",assigned.group("stmt").upper(),
+                                   assigned.group("flag").upper()))
+                elif prepared:
+                    events.append((number,"PREPARE",prepared.group(1).upper(),
+                                   prepared.group(2).upper()))
+                elif executed:
+                    events.append((number,"EXECUTE",executed.group(1).upper(),""))
+                elif dealloc:
+                    events.append((number,"DEALLOCATE",dealloc.group(1).upper(),""))
+    except (OSError,UnicodeError,EOFError):
+        raise Stop("QUARANTINE_SOURCE_SQL_UNREADABLE") from None
+    need(len(events)==13,"QUARANTINE_CONTROL_COUNT_CHANGED")
+    seen_probe=None
+    state="PROBE"
+    variable=None
+    statement=None
+    groups=0
+    for number,kind,identity,related in events:
+        if state=="PROBE":
+            need(kind=="PROBE" and seen_probe is None,
+                 "QUARANTINE_CONTROL_ORDER_UNPROVEN")
+            seen_probe=identity
+            state="ASSIGN"
+        elif state=="ASSIGN":
+            need(kind=="ASSIGN" and related==seen_probe,
+                 "QUARANTINE_CONTROL_ORDER_UNPROVEN")
+            variable=identity
+            state="PREPARE"
+        elif state=="PREPARE":
+            need(kind=="PREPARE" and related==variable,
+                 "QUARANTINE_CONTROL_BINDING_UNPROVEN")
+            statement=identity
+            state="EXECUTE"
+        elif state=="EXECUTE":
+            need(kind=="EXECUTE" and identity==statement,
+                 "QUARANTINE_CONTROL_BINDING_UNPROVEN")
+            state="DEALLOCATE"
+        elif state=="DEALLOCATE":
+            need(kind=="DEALLOCATE" and identity==statement,
+                 "QUARANTINE_CONTROL_BINDING_UNPROVEN")
+            groups+=1
+            state="ASSIGN"
+        removed.add(number)
+    need(groups==3 and state=="ASSIGN" and len(removed)==13,
+         "QUARANTINE_CONTROL_SEQUENCE_UNPROVEN")
+    need(quarantined.parent==original.parent and quarantined!=original
+         and not os.path.lexists(quarantined),
+         "QUARANTINE_OUTPUT_PATH_UNSAFE")
+    count=0
+    with gzip.open(original,"rb") as source, gzip.open(
+        quarantined,"xb",compresslevel=6
+    ) as dest:
+        for count,line in enumerate(source,1):
+            if count not in removed:
+                dest.write(line)
+    need(count>=max(removed),"QUARANTINE_SOURCE_LINE_COUNT_CHANGED")
+    with gzip.open(original,"rb") as source, gzip.open(
+        quarantined,"rb"
+    ) as modified:
+        for count,line in enumerate(source,1):
+            if count not in removed:
+                need(modified.readline()==line,
+                     "QUARANTINE_PRESERVED_BYTES_CHANGED")
+        need(modified.read(1)==b"","QUARANTINE_EXTRA_SQL_UNPROVEN")
+    print("QUARANTINE_DYNAMIC_GROUPS_EXCLUDED=3",flush=True)
+    print("QUARANTINE_CONTROL_LINES_EXCLUDED=13",flush=True)
+    print("QUARANTINE_ORIGINAL_SQL_RETAINED=YES",flush=True)
+    print("QUARANTINE_FULL_MIGRATION_PROOF=NO",flush=True)
+    return hashlib.sha256(quarantined.read_bytes()).hexdigest()
+
+
+
+def strict_scope(sql, *, quarantined=False):
     """No target DB exists before the whole source SQL passes these gates."""
     import sql_diff_evidence,verify
     try:
         need(sql_diff_evidence.require_nonempty_source_schema(sql)==157,
              "SOURCE_TABLE_COUNT_DRIFT")
-        proven=prove_legacy_mysql_dynamic_groups(sql,verify,sql_diff_evidence)
-        need(not standalone_sql_unproven_side_effects(
-                sql,verify,known_safe_lines=proven),
-             "SOURCE_UNPROVEN_SIDE_EFFECTS")
-        print("DYNAMIC_SQL_SAFE_GROUPS=3",flush=True)
-        print("DYNAMIC_SQL_GUARD=EXACT_PROOF_PASS",flush=True)
+        if quarantined:
+            counts=sql_diff_evidence.dynamic_guard_syntax_counts(sql)
+            need(not any(counts.get(k,0) for k in (
+                "recognized_unsafe","recognized_safe",
+                "double_quoted_if","other_unknown_set"
+            )),"QUARANTINE_DYNAMIC_SQL_REMAINS")
+            need(not standalone_sql_unproven_side_effects(sql,verify),
+                 "QUARANTINE_STATIC_SQL_UNPROVEN")
+            print("QUARANTINE_REMAINING_SQL_GUARD=PASS",flush=True)
+        else:
+            proven=prove_legacy_mysql_dynamic_groups(sql,verify,sql_diff_evidence)
+            need(not standalone_sql_unproven_side_effects(
+                    sql,verify,known_safe_lines=proven),
+                 "SOURCE_UNPROVEN_SIDE_EFFECTS")
+            print("DYNAMIC_SQL_SAFE_GROUPS=3",flush=True)
+            print("DYNAMIC_SQL_GUARD=EXACT_PROOF_PASS",flush=True)
     except (sql_diff_evidence.AdvisoryDiagnosticUnavailable,
             verify.RestoreVerifyError):
         raise Stop("SOURCE_SQL_UNPROVEN") from None
