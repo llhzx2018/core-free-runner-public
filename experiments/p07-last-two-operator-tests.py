@@ -1707,7 +1707,14 @@ class ExistingQuarantineScratchParityTests(unittest.TestCase):
                          "server_migration_pull":engine,"cloudpanel":cp,
                          "verify":verify}),\
                      contextlib.redirect_stdout(io.StringIO()) as captured:
-                    code=m.run()
+                    if outcome=="sql-copy-drift":
+                        with self.assertRaisesRegex(
+                            m.Block,"QUARANTINE_REGENERATED_SQL_CONTENT_DRIFT"
+                        ):
+                            m.run()
+                        code=13
+                    else:
+                        code=m.run()
                 text=captured.getvalue()
                 self.assertEqual(code,0 if outcome in ("match","header-drift") else 13)
                 self.assertEqual(marker.read_bytes(),initial)
