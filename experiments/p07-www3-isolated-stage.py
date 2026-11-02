@@ -533,7 +533,11 @@ def make_quarantined_sql(original,quarantined):
     print("QUARANTINE_CONTROL_LINES_EXCLUDED=13",flush=True)
     print("QUARANTINE_ORIGINAL_SQL_RETAINED=YES",flush=True)
     print("QUARANTINE_FULL_MIGRATION_PROOF=NO",flush=True)
-    return hashlib.sha256(quarantined.read_bytes()).hexdigest()
+    digest=hashlib.sha256()
+    with quarantined.open("rb") as copied:
+        for block in iter(lambda:copied.read(1024*1024),b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 
