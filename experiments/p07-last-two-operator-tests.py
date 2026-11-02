@@ -116,6 +116,12 @@ class Tests(unittest.TestCase):
         self.assertIn('entry.get("migration_id")!=NINE_CHILD',source)
         self.assertNotIn("remainder_parent=NINE_CHILD",source)
 
+    def test_default_receipt_path_is_root_private_not_shared_vf_state(self):
+        self.assertEqual(m.RECOVERY_DIR, Path("/root/p07-last-two-recovery"))
+        self.assertNotIn("/var/lib/vf-server-ops/operator-recovery", p.read_text())
+        self.assertNotIn("chmod(", p.read_text())
+        self.assertNotIn("chown(", p.read_text())
+
     def test_missing_recovery_directory_initialized_privately(self):
         with tempfile.TemporaryDirectory() as directory:
             parent=Path(directory)/"vf-server-ops"
