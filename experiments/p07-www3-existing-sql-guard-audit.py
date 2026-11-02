@@ -74,7 +74,10 @@ def execute():
 
 if __name__=="__main__":
     try:raise SystemExit(execute())
-    except (Block,OSError,ValueError,RuntimeError,UnicodeError) as exc:
-        print("BLOCKED="+(str(exc) if type(exc) is Block else type(exc).__name__),flush=True)
+    except Exception as exc:
+        # A remote error or an unanticipated client exception must never
+        # dump an SQL-bearing traceback, host or filesystem path.
+        fixed=str(exc) if type(exc) is Block else "READONLY_GUARD_AUDIT_UNPROVEN"
+        print("BLOCKED="+fixed,flush=True)
         print("CUTOVER_ALLOWED=NO",flush=True)
         raise SystemExit(13) from None
