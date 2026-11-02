@@ -899,6 +899,59 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
         self.assertNotIn("print(sql)",code)
         self.assertNotIn("print(line)",code)
 
+    def test_readonly_audit_exposes_only_fixed_guard_classes_not_sql(self):
+        import contextlib,io,sys,types
+        script=Path(__file__).with_name("p07-www3-existing-sql-guard-audit.py")
+        spec=importlib.util.spec_from_file_location("p07_guard_audit_test",script)
+        audit=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(audit)
+        with tempfile.TemporaryDirectory() as rootdir:
+            root=Path(rootdir)
+            base=types.SimpleNamespace(
+                RUNTIME=root,DOMAIN="www3.m3u8.one",
+                verify_state=lambda:({"source":{"host":"old.example"},
+                   "target_server_identity":"target-id"},"source-db"),
+                verify_current_runtime=lambda:None,
+                inspect_existing_site=lambda *args:None,
+                strict_hex_export_utf8=lambda path:True,
+            )
+            def import_existing(engine,tail,db,baseobj,local):
+                local.write_bytes(b"private SQL not for logs")
+            def detect(path,verifier,**kwargs):
+                if "findings" in kwargs:
+                    kwargs["findings"].append(("MULTI_STATEMENT",123))
+                return True
+            stage=types.SimpleNamespace(
+                import_existing_verified_source=import_existing,
+                standalone_sql_unproven_side_effects=detect,
+            )
+            fake_engine=types.ModuleType("server_migration_pull")
+            fake_engine.target_identity=lambda:"target-id"
+            fake_verify=types.ModuleType("verify")
+            real_temp=tempfile.TemporaryDirectory
+            def redirected(*args,**kwargs):
+                kwargs["dir"]=root
+                return real_temp(*args,**kwargs)
+            def modules(*args,**kwargs):
+                return base if args[2]=="HELPER" else stage
+            with mock.patch.object(audit,"module_from_pinned",side_effect=modules),\
+                 mock.patch.object(audit.os,"geteuid",return_value=0),\
+                 mock.patch.dict(sys.modules,{"server_migration_pull":fake_engine,
+                                              "verify":fake_verify}),\
+                 mock.patch.object(audit.tempfile,"TemporaryDirectory",
+                                   side_effect=redirected),\
+                 mock.patch.object(sys,"argv",["auditor",
+                     "--audit-existing-www3-side-effects-only"]),\
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(audit.execute(),0)
+            text=output.getvalue()
+            self.assertIn("SIDE_EFFECT_GUARD=BLOCKED_REPRODUCED",text)
+            self.assertIn("GUARD_FINDING_1=MULTI_STATEMENT",text)
+            self.assertIn("GUARD_LINE_1=123",text)
+            self.assertIn("CP2_DATABASE_CREATE_IMPORT_MODIFY=NO",text)
+            self.assertNotIn("private SQL",text)
+            self.assertNotIn("old.example",text)
+
     def test_existing_source_snapshot_transport_mismatch_is_blocked(self):
         import hashlib,subprocess,types
         m=self.module()
