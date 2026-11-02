@@ -954,8 +954,10 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                 ):
                     m.strict_scope(output,quarantined=True)
 
-            for altered in (
-                source.replace("/*!50003 DEALLOCATE PREPARE p2 */;\n",""),
+            # Opaque controls are completely removed, not executed.
+            # Original binding issues do not justify running these controls
+            # and do not block an advisory static-only copy.
+            for modified in (
                 source.replace("/*!50003 PREPARE p1 FROM @q1 */;",
                                "/*!50003 PREPARE p1 FROM @different */;"),
                 source.replace("@q3=IF(@found,","@q3=IF(@notfound,"),
@@ -963,7 +965,21 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                                "/*!50003 EXECUTE another */;"),
             ):
                 with gzip.open(before,"wt",encoding="utf-8") as stream:
-                    stream.write(altered)
+                    stream.write(modified)
+                output.unlink(missing_ok=True)
+                m.make_quarantined_sql(before,output)
+                with gzip.open(output,"rt",encoding="utf-8") as stream:
+                    self.assertEqual(stream.read(),remaining)
+            # Missing or duplicated controls cannot prove the 13-line
+            # exclusion set, so refuse the quarantine copy.
+            for unsafe in (
+                source.replace("/*!50003 DEALLOCATE PREPARE p2 */;\n",""),
+                source+"/*!50003 PREPARE other FROM @other */;\n",
+                source.replace("/*!50003 EXECUTE p2 */;\n",
+                               "/*!50003 EXECUTE p2 */;\n/*!50003 EXECUTE p2 */;\n"),
+            ):
+                with gzip.open(before,"wt",encoding="utf-8") as stream:
+                    stream.write(unsafe)
                 output.unlink(missing_ok=True)
                 with self.assertRaises(m.Stop):
                     m.make_quarantined_sql(before,output)
@@ -1017,33 +1033,46 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
             self.assertEqual(remaining,
                 static.decode()+"INSERT INTO real VALUES (28);\n")
             for modified in (
-                # Execute before prepare (no shortcut).
+                # All source control orderings are irrelevant when all
+                # controls are physically REMOVED and never executed.
                 [("ASSIGN",1),("ASSIGN",2),("EXECUTE",1),
                  ("PREPARE",1),("PREPARE",2),("EXECUTE",2),
                  ("DEALLOCATE",1),("DEALLOCATE",2),
                  ("ASSIGN",3),("PREPARE",3),("EXECUTE",3),
                  ("DEALLOCATE",3)],
-                # Repeated execute is not an allowed lifecycle.
-                [("ASSIGN",1),("ASSIGN",2),("PREPARE",1),
-                 ("PREPARE",2),("EXECUTE",1),("EXECUTE",1),
-                 ("DEALLOCATE",1),("DEALLOCATE",2),
-                 ("ASSIGN",3),("PREPARE",3),("EXECUTE",3)],
-                # Deallocation before execution must never be accepted.
                 [("ASSIGN",1),("ASSIGN",2),("PREPARE",1),
                  ("PREPARE",2),("EXECUTE",1),("EXECUTE",2),
                  ("DEALLOCATE",1),("DEALLOCATE",2),
                  ("ASSIGN",3),("PREPARE",3),("DEALLOCATE",3),
                  ("EXECUTE",3)],
             ):
-                text=(static.decode()+probe+
+                text=(static.decode()+
                       "".join(line(action,i) for action,i in modified)+
-                      "INSERT INTO real VALUES (28);\n")
+                      probe+"INSERT INTO real VALUES (28);\n")
                 with gzip.open(path,"wt",encoding="utf-8") as file:
                     file.write(text)
                 copy.unlink(missing_ok=True)
-                with self.assertRaises(m.Stop):
-                    m.make_quarantined_sql(path,copy)
-                self.assertFalse(copy.exists())
+                m.make_quarantined_sql(path,copy)
+                with gzip.open(copy,"rt",encoding="utf-8") as file:
+                    self.assertEqual(file.read(),
+                        static.decode()+"INSERT INTO real VALUES (28);\n")
+            # Duplicate execute but missing deallocate breaks the exact
+            # 1+3+3+3+3 control-count inventory and must fail.
+            duplicate=[
+                ("ASSIGN",1),("ASSIGN",2),("PREPARE",1),
+                ("PREPARE",2),("EXECUTE",1),("EXECUTE",1),
+                ("DEALLOCATE",1),("DEALLOCATE",2),
+                ("ASSIGN",3),("PREPARE",3),("EXECUTE",3),
+            ]
+            changed=(static.decode()+probe+
+                     "".join(line(action,i) for action,i in duplicate)+
+                     "INSERT INTO real VALUES (28);\n")
+            with gzip.open(path,"wt",encoding="utf-8") as file:
+                file.write(changed)
+            copy.unlink(missing_ok=True)
+            with self.assertRaises(m.Stop):
+                m.make_quarantined_sql(path,copy)
+            self.assertFalse(copy.exists())
 
     def test_quarantined_scratch_mode_has_distinct_identity_and_no_full_parity(self):
         import contextlib,gzip,io,sys,subprocess,types
