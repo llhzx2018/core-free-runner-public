@@ -964,7 +964,7 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
             ):
                 with gzip.open(before,"wt",encoding="utf-8") as stream:
                     stream.write(altered)
-                output.unlink()
+                output.unlink(missing_ok=True)
                 with self.assertRaises(m.Stop):
                     m.make_quarantined_sql(before,output)
                 self.assertFalse(output.exists())
