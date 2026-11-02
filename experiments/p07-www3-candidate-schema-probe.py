@@ -384,6 +384,50 @@ def parse_master_command(text):
     return values
 
 
+def parse_master_fields(text):
+    # Support the documented CLI's plain labeled and Symfony table outputs.
+    # No generic shell parsing, credential printing, or remote host fallback.
+    if not isinstance(text,str) or len(text)>32768:
+        return None
+    labels={"host":"host","user":"user","username":"user",
+            "password":"password","port":"port"}
+    values={}
+    for row in text.splitlines():
+        body=row.strip()
+        if body.startswith("|"):
+            cells=[x.strip() for x in body.strip("|").split("|")]
+            if len(cells)!=2:
+                continue
+            label,value=cells
+        elif ":" in body:
+            label,value=body.split(":",1)
+            value=value.strip()
+        else:
+            continue
+        normalized=re.sub(r"[\s_-]+","",label).lower()
+        if normalized not in labels:
+            continue
+        label=labels[normalized]
+        if label in values or not value:
+            return None
+        values[label]=value
+    if set(values)!={"host","port","user","password"}:
+        return None
+    if values["host"] not in ("127.0.0.1","localhost","::1"):
+        return None
+    if not re.fullmatch(r"[0-9]{1,5}",values["port"]):
+        return None
+    if not 1<=int(values["port"])<=65535:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}",values["user"]):
+        return None
+    if len(values["password"])>1024 or any(
+        ch in values["password"] for ch in ("\x00","\r","\n")
+    ):
+        return None
+    return values
+
+
 def managed_master_credentials():
     env=os.environ.copy()
     env.setdefault("SUDO_USER","root")
@@ -401,7 +445,8 @@ def managed_master_credentials():
         return None
     # Password and connection command stay entirely in old-server memory.
     # No raw stdout/stderr, SQL or connection parameters leave this process.
-    info=parse_master_command(result.stdout.decode("utf-8","replace"))
+    raw=result.stdout.decode("utf-8","replace")
+    info=parse_master_command(raw) or parse_master_fields(raw)
     if not info:
         print("HEX_EXPORT_AUTH=MASTER_COMMAND_FORMAT_UNPROVEN",flush=True)
     return info
