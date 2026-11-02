@@ -78,6 +78,28 @@ def classify(stderr,rc):
         return "SSH_REMOTE_PRIVILEGE_UNPROVEN"
     return "SSH_REMOTE_EXIT_UNCLASSIFIED" if rc else "NONE"
 
+def rsync_probe(engine,source,tail):
+    """List one pinned, existing old-server helper file; never transfer."""
+    spec=(source["ssh_user"]+"@"+source["host"]+":"+
+          tail["source_runtime_path"]+"/VERSION")
+    command=["rsync","--list-only","--protect-args",
+             "-e",engine.ssh_rsync_command(source),spec]
+    try:
+        result=subprocess.run(command,stdin=subprocess.DEVNULL,
+                              stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                              timeout=90,check=False)
+    except (OSError,subprocess.SubprocessError):
+        print("SOURCE_RSYNC_READONLY=UNAVAILABLE",flush=True)
+        return False
+    if result.returncode!=0:
+        message=result.stderr.decode("utf-8","replace") if isinstance(result.stderr,bytes) else result.stderr
+        print("SOURCE_RSYNC_READONLY=BLOCKED",flush=True)
+        print("SOURCE_RSYNC_REASON="+classify(message,result.returncode),flush=True)
+        return False
+    print("SOURCE_RSYNC_READONLY=PASS",flush=True)
+    return True
+
+
 def run():
     guard(os.geteuid()==0 and sys.argv[1:]==["--read-only-source-ssh-and-temp-audit"],
           "EXPLICIT_READONLY_AUDIT_REQUIRED")
@@ -115,6 +137,7 @@ def run():
         print("SOURCE_HEX_TEMP_AUDIT=UNPROVEN",flush=True)
         return 13
     print("SOURCE_SSH_HEALTH=PASS",flush=True)
+    rsync_ok=rsync_probe(engine,source,tail)
     command=shlex.join(["python3","-B","-c",REMOTE,base.TAIL])
     try:
         remote=engine.source_remote(source,command,timeout=60,check=False)
@@ -143,7 +166,7 @@ def run():
     print("SOURCE_HEX_TEMP_UNSAFE="+str(numbers[1]),flush=True)
     print("SOURCE_TEMP_CLEANUP=NOT_ATTEMPTED",flush=True)
     print("MIGRATION_STATE_MUTATED=NO",flush=True)
-    return 0
+    return 0 if rsync_ok else 13
 
 if __name__=="__main__":
     try:raise SystemExit(run())
