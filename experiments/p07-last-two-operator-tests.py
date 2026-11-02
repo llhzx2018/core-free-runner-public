@@ -12,21 +12,21 @@ spec.loader.exec_module(m)
 def state_pair():
     sites=[]
     for i in range(17):
-        domain=("ilovem3u8.kewaro.com" if i==7 else
-                m.NINE_DOMAINS[i-8] if i>=8 else f"prior{i}.invalid")
+        domain=m.PARENT_DOMAINS[i]
         sites.append(dict(domain=domain,site_user=f"user{i}",
                           site_root=f"/home/user{i}",document_root=f"/home/user{i}/htdocs",
                           runtime={"type":"php","version":"8.3"},
                           mysql_databases=[f"db{i}"] if i in (14,16) else [],
                           stage_status="PENDING"))
     a=dict(schema=m.SCHEMA,migration_id=m.ORIGINAL,status="PREPARE_FAILED",
-           last_sql_guard_failure=None,
+           last_sql_guard_failure={"reason":"CONDITIONAL_DDL"},
            source=dict(host="192.0.2.1",ip="192.0.2.1",ssh_user="root",ssh_port=22),
            source_server_identity="sha256:synthetic-source",
            target_server_identity="sha256:synthetic-target",
            source_runtime_frozen=False,target_runtime_activated=False,
            dns_changed_by_p07=False,source_delete_allowed=False,
            existing_target_overwrite_allowed=False,sites=sites)
+    for row in a["sites"][:7]: row["stage_status"]="PULLED_STAGED"
     b=copy.deepcopy(a)
     b.update(migration_id=m.NINE_CHILD,partial_parent_migration_id=m.ORIGINAL,
              cutover_prohibited=True,last_sql_guard_failure={"reason":"CONDITIONAL_DDL"},
@@ -45,6 +45,8 @@ class Tests(unittest.TestCase):
         for which,key,value in [
             ("a","status","PREPARED"),("b","status","PREPARED"),
             ("b","cutover_prohibited",False),
+            ("a","last_sql_guard_failure",None),
+            ("a","last_sql_guard_failure",{"reason":"OTHER"}),
             ("b","last_sql_guard_failure",None),
             ("b","source_runtime_frozen",True),
             ("b","dns_changed_by_p07",True),
@@ -55,6 +57,28 @@ class Tests(unittest.TestCase):
                 a,b=state_pair()
                 (a if which=="a" else b)[key]=value
                 with self.assertRaises(m.Stop):m.prove_original_and_child(a,b)
+
+    def test_real_november_1_identity_and_order(self):
+        self.assertEqual(m.ORIGINAL, "pull-20261101T045943Z-923729a1")
+        self.assertEqual(m.NINE_CHILD, "pull-20261101T052411Z-35663c25")
+        self.assertEqual(m.PARENT_DOMAINS[7], "ilovem3u8.kewaro.com")
+        self.assertEqual(m.NINE_DOMAINS[6], "unzip.kewaro.com")
+        self.assertEqual(list(m.DOMAINS), list(m.PARENT_DOMAINS[-2:]))
+
+    def test_parent_prefix_and_pending_tail_are_immutable(self):
+        for index, changed in ((0,"PENDING"),(6,"PENDING"),(7,"PULLED_STAGED"),
+                               (14,"PULLED_STAGED"),(15,"PULLED_STAGED"),(16,"PULLED_STAGED")):
+            a,b=state_pair()
+            a["sites"][index]["stage_status"]=changed
+            with self.subTest(index=index), self.assertRaises(m.Stop):
+                m.prove_original_and_child(a,b)
+
+    def test_parent_site_order_and_original_guard_are_required(self):
+        for index in (0,7,14,16):
+            a,b=state_pair()
+            a["sites"][index]["domain"]="modified.example.test"
+            with self.subTest(index=index), self.assertRaises(m.Stop):
+                m.prove_original_and_child(a,b)
 
     def test_no_restage_unzip_or_six_or_last_two(self):
         for index,stage in [(0,"PENDING"),(6,"PULLED_STAGED"),(7,"PULLED_STAGED"),(8,"PULLED_STAGED")]:
