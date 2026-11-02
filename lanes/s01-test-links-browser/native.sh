@@ -19,6 +19,7 @@ docker exec "$WP" mkdir -p /var/www/html/wp-content/themes/vf-tools-theme /var/w
 docker cp target/src/. "$WP:/var/www/html/wp-content/themes/vf-tools-theme/"
 docker cp provider/vf-tools-m3u8_V1.25.98.zip "$WP:/tmp/provider.zip"
 cli plugin install /tmp/provider.zip --activate >/dev/null
+docker cp plugin-source/src/includes/v510-copy.php "$WP:/var/www/html/wp-content/plugins/vf-tool-m3u8/includes/v510-copy.php"
 docker cp plugin-source/src/public/js/modules/test-links.js "$WP:/var/www/html/wp-content/plugins/vf-tool-m3u8/public/js/modules/test-links.js"
 docker cp plugin-source/src/public/dist/test-links.js "$WP:/var/www/html/wp-content/plugins/vf-tool-m3u8/public/dist/test-links.js"
 docker cp lane/fixture.php "$WP:/var/www/html/wp-content/mu-plugins/progress-fixture.php"

@@ -8,6 +8,7 @@ for(const lang of ['en','zh'])for(const width of [1024,1440]){
  const root=p.locator('[data-vf-test-links-productized]').first();await root.waitFor();
  if(await root.locator('.vf-tl-selection').isVisible())throw Error('empty selection panel visible');
  if(manifests!==0)throw Error('page made unsolicited manifest request');
+ const action=await root.locator('[data-vf-test-links-verify-selected]').innerText(),label=await root.locator('.vf-tl-url>span').innerText(),selected=await root.locator('[data-vf-test-links-selected]').innerText();if(action!==(lang==='zh'?'测试当前链接':'Test selected link'))throw Error('generic test action: '+action);if(label!==(lang==='zh'?'M3U8 链接':'M3U8 URL'))throw Error('generic source label: '+label);if(selected!==(lang==='zh'?'尚未选择链接':'No link selected'))throw Error('misleading selection status: '+selected);
  if(await p.locator('.vf-tool-breadcrumb').isVisible()||await p.locator('.vf-m3u8-launchbar__steps').isVisible())throw Error('duplicate navigation visible');
  const dims=await p.evaluate(()=>({scroll:document.documentElement.scrollWidth,client:document.documentElement.clientWidth}));if(dims.scroll>dims.client+1)throw Error('overflow '+JSON.stringify(dims));
  const rows=root.locator('[data-vf-test-links-list] article');if(await rows.count()<3)throw Error('built-in examples missing');
