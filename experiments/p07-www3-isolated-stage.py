@@ -387,6 +387,120 @@ def import_only_scratch(args,env,db,source):
         if proc is not None and proc.poll() is None:
             proc.kill();proc.wait()
 
+# Only consider an earlier exact-scope, root-private hex export.  The
+# previous operator's remote transport failed after export; never create a
+# second source snapshot or delete a first-party forensic artifact as a retry.
+# This does not establish a live-source freeze or permission to cut over.
+REMOTE_REUSE_HEX=r'''
+import hashlib,inventory,os,re,stat,sys,time
+from pathlib import Path
+domain,db,mid=sys.argv[1:]
+if not re.fullmatch(r"pull-[0-9]{8}T[0-9]{6}Z-[a-z0-9]{8}",mid):
+    raise SystemExit(21)
+root=Path("/var/lib/vf-server-ops/pull-source")/mid/"data"
+if root.is_symlink() or not root.is_dir():
+    raise SystemExit(22)
+st=root.lstat()
+if not stat.S_ISDIR(st.st_mode) or st.st_uid!=0 or st.st_mode & 0o077:
+    raise SystemExit(23)
+sites=[x for x in inventory.build_manifest(Path("/")).get("sites",[])
+       if isinstance(x,dict) and x.get("domain")==domain]
+if len(sites)!=1 or sites[0].get("mysql_databases")!=[db]:
+    raise SystemExit(24)
+paths=list(root.glob("www3-hex-*.sql.gz"))
+if len(paths)!=1:
+    raise SystemExit(25)
+entry=paths[0]
+if not re.fullmatch(r"www3-hex-[a-f0-9]{32}\.sql\.gz",entry.name):
+    raise SystemExit(26)
+info=entry.lstat()
+if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or \
+   info.st_mode & 0o077 or info.st_nlink!=1 or not \
+   1024<info.st_size<350*1024*1024 or not \
+   0<=time.time()-info.st_mtime<72*3600:
+    raise SystemExit(27)
+digest=hashlib.sha256()
+with entry.open("rb") as source:
+    if source.read(2)!=b"\x1f\x8b":
+        raise SystemExit(28)
+    source.seek(0)
+    while True:
+        data=source.read(1024*1024)
+        if not data:
+            break
+        digest.update(data)
+after=entry.lstat()
+if (not stat.S_ISREG(after.st_mode) or after.st_ino!=info.st_ino
+    or after.st_size!=info.st_size or after.st_mtime_ns!=info.st_mtime_ns):
+    raise SystemExit(29)
+print("EXISTING_HEX=OWNER_SCOPED")
+print("HEX_NAME="+entry.name)
+print("HEX_BYTES="+str(info.st_size))
+print("HEX_SHA256="+digest.hexdigest())
+'''
+
+
+def source_hex_identity(engine,tail,source_db,base):
+    """Read-only source record; no raw database data or path in stdout."""
+    command=shlex.join([
+        "env","PYTHONPATH="+tail["source_runtime_path"]+"/lib",
+        "PYTHONDONTWRITEBYTECODE=1","python3","-B","-c",
+        REMOTE_REUSE_HEX,base.DOMAIN,source_db,base.TAIL
+    ])
+    try:
+        result=engine.source_remote(tail["source"],command,
+                                    timeout=180,check=False)
+    except engine.PullMigrationError:
+        raise Stop("SOURCE_HEX_READONLY_SSH_UNAVAILABLE") from None
+    need(result.returncode==0,"SOURCE_HEX_SCOPE_OR_FILE_UNVERIFIED")
+    lines=(result.stdout or "").splitlines()
+    need(len(lines)==4 and lines[0]=="EXISTING_HEX=OWNER_SCOPED",
+         "SOURCE_HEX_IDENTITY_REPLY_UNVERIFIED")
+    need(lines[1].startswith("HEX_NAME=")
+         and lines[2].startswith("HEX_BYTES=")
+         and lines[3].startswith("HEX_SHA256="),
+         "SOURCE_HEX_IDENTITY_REPLY_UNVERIFIED")
+    name=lines[1][len("HEX_NAME="):]
+    size=lines[2][len("HEX_BYTES="):]
+    sha=lines[3][len("HEX_SHA256="):]
+    need(re.fullmatch(r"www3-hex-[a-f0-9]{32}\.sql\.gz",name)
+         and re.fullmatch(r"[0-9]{4,9}",size)
+         and 1024<int(size)<350*1024*1024
+         and re.fullmatch(r"[a-f0-9]{64}",sha),
+         "SOURCE_HEX_IDENTITY_REPLY_UNVERIFIED")
+    return name,int(size),sha
+
+
+def import_existing_verified_source(engine,tail,source_db,base,local):
+    """Retrieve one already-owned file; verify same source bytes before+after.
+
+    This file remains on old VPS. A new source snapshot is neither created
+    nor deleted and this stage does not assert that the live DB is frozen.
+    """
+    first=source_hex_identity(engine,tail,source_db,base)
+    name,size,digest=first
+    remote=(f"/var/lib/vf-server-ops/pull-source/{base.TAIL}/data/"+name)
+    try:
+        engine.pull_path(tail["source"],remote,local)
+    except engine.PullMigrationError:
+        raise Stop("SOURCE_HEX_RSYNC_UNAVAILABLE") from None
+    need(local.is_file() and not local.is_symlink()
+         and local.stat().st_size==size,
+         "SOURCE_HEX_TRANSFER_SIZE_UNVERIFIED")
+    actual=hashlib.sha256()
+    with local.open("rb") as source:
+        for data in iter(lambda:source.read(1024*1024),b""):
+            actual.update(data)
+    need(actual.hexdigest()==digest,
+         "SOURCE_HEX_TRANSFER_DIGEST_MISMATCH")
+    second=source_hex_identity(engine,tail,source_db,base)
+    need(first==second,"SOURCE_HEX_CHANGED_DURING_TRANSFER")
+    print("SOURCE_HEX_EXISTING_REUSE=PASS",flush=True)
+    print("SOURCE_HEX_TRANSFER_SHA256=PASS",flush=True)
+    print("SOURCE_TEMP_CLEANUP=NOT_ATTEMPTED_RETAINED",flush=True)
+    return digest
+
+
 def run():
     need(os.geteuid()==0 and sys.argv[1:]==["--stage-new-www3-scratch-only"],
          "EXPLICIT_CP2_SCRATCH_STAGE_REQUIRED")
@@ -409,26 +523,19 @@ def run():
     client=absent_sql(name)
     marker=receipt_path(base,name)
     parser=base.load_release113_schema_adapter()
-    remote=f"/var/lib/vf-server-ops/pull-source/{base.TAIL}/data/www3-hex-{os.urandom(16).hex()}.sql.gz"
-    cmd=shlex.join(["env","PYTHONPATH="+tail["source_runtime_path"]+"/lib",
-          "PYTHONDONTWRITEBYTECODE=1","python3","-B","-c",
-          base.REMOTE_HEX,base.DOMAIN,source_db,remote,base.TAIL])
-    print("MODE=WWW3_NEW_SCRATCH_ONLY",flush=True)
+    print("MODE=WWW3_EXISTING_SOURCE_HEX_TO_NEW_SCRATCH_ONLY",flush=True)
+    print("SOURCE_NEW_EXPORT=NO",flush=True)
+    print("SOURCE_TEMP_CLEANUP=NOT_ATTEMPTED_RETAINED",flush=True)
     print("EXISTING_WEBSITE_CONFIG_MODIFIED=NO",flush=True)
     print("EXISTING_DATABASE_OVERWRITE=NO",flush=True)
     print("MIGRATION_RETRY=NO",flush=True)
     print("CUTOVER_ALLOWED=NO",flush=True)
     try:
-        p=engine.source_remote(tail["source"],cmd,timeout=1800,check=False)
-        need(p.returncode==0 and
-             (p.stdout or "").strip().endswith("HEX_SOURCE_EXPORT=CREATED_UNVERIFIED") and
-             "HEX_EXPORT_AUTH=READ_ONLY_CONNECTION_PASS" in p.stdout,
-             "SOURCE_HEX_EXPORT_FAILED")
         with tempfile.TemporaryDirectory(prefix="p07-www3-scratch-",dir="/root") as folder:
             before=Path(folder)/"original.sql.gz"
-            engine.pull_path(tail["source"],remote,before)
-            need(before.is_file() and before.stat().st_size>1024,
-                 "SOURCE_HEX_TRANSFER_UNVERIFIED")
+            source_digest=import_existing_verified_source(
+                engine,tail,source_db,base,before
+            )
             need(base.strict_hex_export_utf8(before) and
                  base.scan_schema_adapter(parser,before,expected_tables=157),
                  "SOURCE_HEX_PROOF_FAILED")
@@ -439,7 +546,9 @@ def run():
                     "scratch_database":name,"username":user,"password":password,
                     "source_database":source_db,
                     "target_server_identity":tail["target_server_identity"],
-                    "source_snapshot_sha256":hashlib.sha256(before.read_bytes()).hexdigest(),
+                    "source_snapshot_sha256":source_digest,
+                    "source_snapshot_kind":"EXISTING_PRIVATE_HEX_ADVISORY",
+                    "source_runtime_frozen":False,
                     "status":"INTENT_RESERVED",
                     "website_activated":False,"original_database_modified":False}
             save(marker,record,first=True)
@@ -476,14 +585,11 @@ def run():
             print("SCRATCH_PARITY=PASS",flush=True)
             print("SCRATCH_STATUS=VERIFIED_NOT_ACTIVATED",flush=True)
     finally:
-        try:
-            gone=engine.source_remote(tail["source"],
-                "rm -f -- "+shlex.quote(remote),timeout=60,check=False)
-            clean=gone.returncode==0
-        except Exception:clean=False
-        print("SOURCE_TEMP_CLEANUP="+("PASS" if clean else "UNPROVEN"),flush=True)
+        # Preserve the previous source snapshot after any result, even a
+        # verified scratch. A separate owner-scoped retention/cleanup step
+        # must independently confirm identity and permission before deletion.
+        print("SOURCE_TEMP_CLEANUP=NOT_ATTEMPTED_RETAINED",flush=True)
         print("CUTOVER_ALLOWED=NO",flush=True)
-    need(clean,"SOURCE_TEMP_CLEANUP_UNPROVEN")
     return 0
 
 if __name__=="__main__":
