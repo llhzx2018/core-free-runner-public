@@ -288,7 +288,7 @@ def scan_schema_adapter(parser,archive,expected_tables=None):
 # Optional source-only re-export path. It never talks to a target DB.
 # A hex-blob export is not a data-integrity proof or database-import approval.
 REMOTE_HEX=r'''
-import gzip,inventory,os,shutil,subprocess,sys
+import gzip,inventory,os,shutil,subprocess,sys,shlex,re
 from pathlib import Path
 domain,db,out,mid=sys.argv[1:]
 root=Path("/var/lib/vf-server-ops/pull-source")/mid/"data"
@@ -316,8 +316,132 @@ needed=("--hex-blob","--single-transaction","--quick","--default-character-set")
 if help_result.returncode or any(flag not in help_text for flag in needed):
     print("HEX_SOURCE_EXPORT=FLAGS_UNVERIFIED",flush=True)
     raise SystemExit(13)
-options=[
-    "--protocol=socket","--user=root","--single-transaction",
+
+def parse_master_command(text):
+    # The documented CloudPanel Connect Command is the only supported
+    # credential carrier. Never echo it or arbitrary CloudPanel stdout.
+    if not isinstance(text,str) or len(text)>32768:
+        return None
+    lines=[row for row in text.splitlines()
+           if re.search(r"Connect\s+Command",row,re.I)]
+    if len(lines)!=1:
+        return None
+    tail=re.split(r"Connect\s+Command",lines[0],maxsplit=1,flags=re.I)[1]
+    tail=tail.strip(" \t:|")
+    try:
+        parts=shlex.split(tail)
+    except ValueError:
+        return None
+    if not parts or Path(parts[0]).name not in ("mysql","mariadb"):
+        return None
+    # CloudPanel CLI output may use -h127.0.0.1 / -P3306 / -uroot / -p'pwd'
+    # or explicit --host=..., etc. Everything else fails closed.
+    values={}
+    prefixes={"-h":"host","-P":"port","-u":"user","-p":"password"}
+    expanded={"--host":"host","--port":"port",
+              "--user":"user","--password":"password"}
+    rest=parts[1:]
+    i=0
+    while i<len(rest):
+        token=rest[i]
+        name=None
+        val=None
+        for prefix,key in expanded.items():
+            if token.startswith(prefix+"="):
+                name=key
+                val=token[len(prefix)+1:]
+                break
+        if name is None:
+            for prefix,key in prefixes.items():
+                if token.startswith(prefix):
+                    name=key
+                    val=token[len(prefix):]
+                    if not val:
+                        if i+1>=len(rest):
+                            return None
+                        i+=1
+                        val=rest[i]
+                    break
+        if name is None or name in values or not val:
+            return None
+        values[name]=val
+        i+=1
+    if set(values)!={"host","port","user","password"}:
+        return None
+    if values["host"] not in ("127.0.0.1","localhost","::1"):
+        return None
+    if not re.fullmatch(r"[0-9]{1,5}",values["port"]):
+        return None
+    port=int(values["port"])
+    if not 1<=port<=65535:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}",values["user"]):
+        return None
+    if len(values["password"])>1024 or any(
+        char in values["password"] for char in ("\x00","\r","\n")
+    ):
+        return None
+    return values
+
+
+def managed_master_credentials():
+    env=os.environ.copy()
+    env.setdefault("SUDO_USER","root")
+    try:
+        result=subprocess.run(
+            ["clpctl","db:show:master-credentials"],
+            capture_output=True,stdin=subprocess.DEVNULL,timeout=30,
+            check=False,env=env,
+        )
+    except (OSError,subprocess.SubprocessError):
+        print("HEX_EXPORT_AUTH=MASTER_COMMAND_UNAVAILABLE",flush=True)
+        return None
+    if result.returncode!=0 or len(result.stdout)>32768:
+        print("HEX_EXPORT_AUTH=MASTER_COMMAND_UNAVAILABLE",flush=True)
+        return None
+    # Password and connection command stay entirely in old-server memory.
+    # No raw stdout/stderr, SQL or connection parameters leave this process.
+    info=parse_master_command(result.stdout.decode("utf-8","replace"))
+    if not info:
+        print("HEX_EXPORT_AUTH=MASTER_COMMAND_FORMAT_UNPROVEN",flush=True)
+    return info
+
+
+def verify_master_readonly(info):
+    env=os.environ.copy()
+    env["MYSQL_PWD"]=info["password"]
+    opts=["--protocol=tcp","--host="+info["host"],
+          "--port="+info["port"],"--user="+info["user"]]
+    client=shutil.which("mysql") or shutil.which("mariadb")
+    if not client:
+        print("HEX_EXPORT_AUTH=SQL_CLIENT_MISSING",flush=True)
+        return None
+    try:
+        probe=subprocess.run(
+            [client,*opts,"--batch","--skip-column-names",
+             "--execute=SELECT 1"],
+            stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,timeout=25,check=False,env=env,
+        )
+    except (OSError,subprocess.SubprocessError):
+        print("HEX_EXPORT_AUTH=READ_ONLY_CONNECTION_FAILED",flush=True)
+        return None
+    if probe.returncode!=0 or probe.stdout.strip()!=b"1":
+        print("HEX_EXPORT_AUTH=READ_ONLY_CONNECTION_FAILED",flush=True)
+        return None
+    print("HEX_EXPORT_AUTH=READ_ONLY_CONNECTION_PASS",flush=True)
+    return env,opts
+
+
+master=managed_master_credentials()
+if master is None:
+    raise SystemExit(13)
+verified=verify_master_readonly(master)
+if verified is None:
+    raise SystemExit(13)
+client_env,connection_opts=verified
+options=[*connection_opts,
+    "--single-transaction",
     "--quick","--hex-blob","--skip-lock-tables",
     "--default-character-set=utf8mb4",
 ]
@@ -336,7 +460,7 @@ try:
     with target.open("xb") as archive:
         os.chmod(target,0o600)
         proc=subprocess.Popen(command,stdout=subprocess.PIPE,
-             stderr=subprocess.DEVNULL,stdin=subprocess.DEVNULL)
+             stderr=subprocess.DEVNULL,stdin=subprocess.DEVNULL,env=client_env)
         with gzip.GzipFile(fileobj=archive,mode="wb",compresslevel=4) as zipped:
             while True:
                 block=proc.stdout.read(1024*1024)
@@ -358,7 +482,7 @@ finally:
     if not complete:
         target.unlink(missing_ok=True)
 if not complete:
-    print("HEX_SOURCE_EXPORT=SOCKET_AUTH_OR_EXPORT_UNPROVEN",flush=True)
+    print("HEX_SOURCE_EXPORT=MASTER_DUMP_UNPROVEN",flush=True)
     raise SystemExit(13)
 print("HEX_SOURCE_EXPORT=CREATED_UNVERIFIED",flush=True)
 '''
@@ -422,14 +546,20 @@ def probe_hex_source_only():
         safe_markers={
             "HEX_SOURCE_EXPORT=CLIENT_UNAVAILABLE",
             "HEX_SOURCE_EXPORT=FLAGS_UNVERIFIED",
-            "HEX_SOURCE_EXPORT=SOCKET_AUTH_OR_EXPORT_UNPROVEN",
+            "HEX_SOURCE_EXPORT=MASTER_DUMP_UNPROVEN",
+            "HEX_EXPORT_AUTH=MASTER_COMMAND_UNAVAILABLE",
+            "HEX_EXPORT_AUTH=MASTER_COMMAND_FORMAT_UNPROVEN",
+            "HEX_EXPORT_AUTH=SQL_CLIENT_MISSING",
+            "HEX_EXPORT_AUTH=READ_ONLY_CONNECTION_FAILED",
         }
         if result.returncode:
             message=(result.stdout or "").strip()
-            if message in safe_markers:
-                print(message,flush=True)
+            for line in message.splitlines():
+                if line in safe_markers or line=="HEX_EXPORT_AUTH=READ_ONLY_CONNECTION_PASS":
+                    print(line,flush=True)
             raise Block("HEX_SOURCE_EXPORT_UNAVAILABLE_NO_TARGET_WRITES")
-        need((result.stdout or "").strip()=="HEX_SOURCE_EXPORT=CREATED_UNVERIFIED",
+        need((result.stdout or "").strip().endswith("HEX_SOURCE_EXPORT=CREATED_UNVERIFIED")
+             and "HEX_EXPORT_AUTH=READ_ONLY_CONNECTION_PASS" in (result.stdout or ""),
              "HEX_SOURCE_EXPORT_STATUS_UNVERIFIED")
         with tempfile.TemporaryDirectory(
             prefix="p07-www3-hex-review-",dir="/root",
