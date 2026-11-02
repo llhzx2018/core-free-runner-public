@@ -703,4 +703,114 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
                 m.strict_scope(path)
 
 
+
+    def test_isolated_staging_full_synthetic_success_and_failed_import_preservation(self):
+        import contextlib,gzip,io,subprocess,sys,types
+        m=self.module()
+        for fail_import in (False,True):
+            with self.subTest(fail_import=fail_import),tempfile.TemporaryDirectory() as td:
+                root=Path(td)
+                marker=root/"private.json"
+                raw=b"CREATE TABLE demo (v BLOB);\nINSERT INTO demo VALUES (0xFF);\n"
+                state={"source":{"host":"old.example"},
+                       "target_server_identity":"target-identity",
+                       "source_runtime_path":"/tmp/staged-runtime",
+                       "sites":[{"domain":"updates.kewaro.com"},
+                                {"domain":"www3.m3u8.one","mysql_databases":["original"]}]}
+                helper=types.SimpleNamespace(
+                    verify_state=lambda:(state,"original"),
+                    verify_current_runtime=lambda:None,
+                    RUNTIME=root,
+                    DOMAIN="www3.m3u8.one",
+                    TAIL="pull-simulated",
+                    REMOTE_HEX="source-export-helper",
+                    load_release113_schema_adapter=lambda:object(),
+                    inspect_existing_site=lambda *args:None,
+                    strict_hex_export_utf8=lambda path:True,
+                    scan_schema_adapter=lambda *args,**kw:True,
+                )
+                recorded=[]
+                fake_engine=types.ModuleType("server_migration_pull")
+                fake_engine.target_identity=lambda:"target-identity"
+                def remote_fn(*args,**kwargs):
+                    if "rm -f" in args[1]:
+                        recorded.append("cleanup")
+                        return subprocess.CompletedProcess([],0,"","")
+                    recorded.append("source-export")
+                    return subprocess.CompletedProcess(
+                        [],0,
+                        "HEX_EXPORT_AUTH=READ_ONLY_CONNECTION_PASS\n"
+                        "HEX_SOURCE_EXPORT=CREATED_UNVERIFIED\n",""
+                    )
+                fake_engine.source_remote=remote_fn
+                def transfer_fn(_source,_remote,local):
+                    with gzip.open(local,"wb") as g:
+                        g.write(raw)
+                fake_engine.pull_path=transfer_fn
+                fake_engine.compare_database_dumps=lambda *args:"CANONICAL_SQL_EXACT"
+                fake_panel=types.ModuleType("cloudpanel")
+                fake_panel.CloudPanelError=type("CloudPanelError",(Exception,),{})
+                def add_db(*args):
+                    recorded.append("create-db")
+                    self.assertEqual(marker.exists(),True)
+                    self.assertEqual(json.loads(marker.read_text())["status"],
+                                     "INTENT_RESERVED")
+                fake_panel.add_database=add_db
+                fake_panel.export_database=lambda name,after:Path(after).write_bytes(b"safe")
+                fake_inventory=types.ModuleType("inventory")
+                fake_inventory.build_manifest=lambda root:{"sites":[{
+                    "domain":"www3.m3u8.one","mysql_databases":[]}]}
+                def persist(path,entry,first=False):
+                    if first:
+                        self.assertFalse(marker.exists())
+                        with marker.open("x") as out:json.dump(entry,out)
+                    else:
+                        self.assertTrue(marker.exists())
+                        marker.write_text(json.dumps(entry))
+                    recorded.append("receipt:"+entry["status"])
+                def import_fn(*args):
+                    recorded.append("import")
+                    if fail_import:raise m.Stop("SCRATCH_IMPORT_FAILED")
+                keep_temp=tempfile.TemporaryDirectory
+                def sandbox_temp(*args,**kwargs):
+                    kwargs["dir"]=root
+                    return keep_temp(*args,**kwargs)
+                fake_site_lifecycle=types.ModuleType("site_lifecycle")
+                with mock.patch.dict(sys.modules,{
+                       "server_migration_pull":fake_engine,
+                       "cloudpanel":fake_panel,"inventory":fake_inventory,
+                       "site_lifecycle":fake_site_lifecycle
+                     }),mock.patch.object(m,"load_helper",return_value=helper),\
+                     mock.patch.object(m.os,"geteuid",return_value=0),\
+                     mock.patch.object(sys,"argv",["script","--stage-new-www3-scratch-only"]),\
+                     mock.patch.object(m,"scratch_name",
+                          return_value=("p07safescratch","user","password")),\
+                     mock.patch.object(m,"absent_sql",return_value="/usr/bin/mysql"),\
+                     mock.patch.object(m,"receipt_path",return_value=marker),\
+                     mock.patch.object(m,"save",side_effect=persist),\
+                     mock.patch.object(m,"strict_scope"),\
+                     mock.patch.object(m,"restricted_user",
+                          return_value=(["/usr/bin/mysql"],{"MYSQL_PWD":"secret"})),\
+                     mock.patch.object(m,"import_only_scratch",side_effect=import_fn),\
+                     mock.patch.object(m.tempfile,"TemporaryDirectory",
+                          side_effect=sandbox_temp):
+                    if fail_import:
+                        with contextlib.redirect_stdout(io.StringIO()),\
+                             self.assertRaisesRegex(m.Stop,"SCRATCH_IMPORT_FAILED"):
+                            m.run()
+                    else:
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            self.assertEqual(m.run(),0)
+                self.assertLess(recorded.index("receipt:INTENT_RESERVED"),
+                                recorded.index("create-db"))
+                self.assertLess(recorded.index("create-db"),
+                                recorded.index("import"))
+                self.assertEqual(recorded[-1],"cleanup")
+                self.assertEqual(json.loads(marker.read_text())["status"],
+                                 "IMPORT_UNPROVEN" if fail_import else
+                                 "VERIFIED_NOT_ACTIVATED")
+                self.assertNotIn("delete",json.dumps(recorded))
+                self.assertNotIn("app-config",json.dumps(recorded))
+
+
 if __name__=="__main__":unittest.main()
