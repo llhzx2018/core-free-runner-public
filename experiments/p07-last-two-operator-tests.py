@@ -479,6 +479,21 @@ class CandidateWww3SchemaTests(unittest.TestCase):
                   Path=Path)
         exec(compile(part,"<auth-test>","exec"),ns)
         parse=ns["parse_master_command"]
+        fields=ns["parse_master_fields"]
+        fixture=("Host: 127.0.0.1\nUser Name: root\n"
+                 "Password: fixture-secret\nPort: 3306\n")
+        self.assertEqual(fields(fixture)["password"],"fixture-secret")
+        self.assertEqual(fields(
+            "| Host | localhost |\n| User Name | root |\n"
+            "| Password | fixture-secret |\n| Port | 3306 |\n"
+        )["user"],"root")
+        for bad in (
+            "Host: remote.example\nUser Name: root\n"
+            "Password: secret\nPort: 3306\n",
+            "Host: localhost\nUser Name: root\n"
+            "Password: secret\nPort: 3306\nPassword: other",
+        ):
+            self.assertIsNone(fields(bad))
         cred=parse("Connect Command: mysql -h127.0.0.1 -P3306 "
                    "-uroot -p'fixture-private-password'")
         self.assertIsNotNone(cred)
