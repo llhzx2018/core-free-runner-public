@@ -38,8 +38,8 @@ SCHEMA="vf-server-ops.server-migration.target-pull.v1"
 REMOTE=r'''
 import inventory,cloudpanel,os,sys
 from pathlib import Path
-domain,db,out=sys.argv[1:]
-root=Path("/var/lib/vf-server-ops/pull-source")/sys.argv[4]/"data"
+domain,db,out,mid=sys.argv[1:]
+root=Path("/var/lib/vf-server-ops/pull-source")/mid/"data"
 if not root.is_dir() or root.is_symlink():
     raise SystemExit(21)
 p=Path(out)
