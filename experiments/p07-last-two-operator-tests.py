@@ -817,8 +817,7 @@ class IsolatedWww3ScratchTests(unittest.TestCase):
             "'SET SESSION SQL_NOTES = 1;'",
             "'SET @@SESSION.SQL_MODE = @old_mode;'",
             "'SET @flag = 0;'","'SET NAMES utf8mb4;'",
-            "'SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES WHERE "
-            "TABLE_SCHEMA='' AND TABLE_NAME='' ;'",
+            "'SELECT 1 FROM DUAL;'",
         )
         for literal in allowed:
             with self.subTest(literal=literal):
