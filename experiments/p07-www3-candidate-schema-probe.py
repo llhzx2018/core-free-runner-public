@@ -347,6 +347,8 @@ try:
                     raise RuntimeError("LIMIT")
                 zipped.write(block)
         status=proc.wait(timeout=60)
+        archive.flush()
+        os.fsync(archive.fileno())
         if status==0 and written>1024 and target.stat().st_size>1024:
             complete=True
 finally:
