@@ -131,19 +131,20 @@ def preflight(migration,inventory,domain,mid,expected_count,idx,expected_tables)
          "TARGET_DATABASE_IDENTITY_UNVERIFIED")
     return record,src_db[0],dst_db[0],origin_runtime
 
-def parsed(raw,mode):
+def parsed(raw,mode,*,with_labels=False):
     need(type(raw) is str and 0<len(raw)<=900000,
          "WORKER_OUTPUT_SIZE_UNVERIFIED")
     fields={}
     allowed={"MODE","SCANNED_TABLES","SCANNED_COLUMNS","SCANNED_ROWS",
-             "ROW_FINGERPRINTS","IDENTITY_NAMES","READ_ONLY_TRANSACTION",
+             "ROW_FINGERPRINTS","READ_ONLY_TRANSACTION",
              "CONTENT_FINGERPRINT_NOT_SNAPSHOT_PARITY"}
+    optional_names={"IDENTITY_NAMES"}
     for line in raw.splitlines():
         need("=" in line,"WORKER_OUTPUT_INVALID")
         k,v=line.split("=",1)
-        need(k in allowed and k not in fields,"WORKER_OUTPUT_KEY_INVALID")
+        need(k in allowed|optional_names and k not in fields,"WORKER_OUTPUT_KEY_INVALID")
         fields[k]=v
-    need(set(fields)==allowed and fields["MODE"]==mode
+    need(set(fields) in (allowed,allowed|optional_names) and fields["MODE"]==mode
          and fields["READ_ONLY_TRANSACTION"]=="YES"
          and fields["CONTENT_FINGERPRINT_NOT_SNAPSHOT_PARITY"]=="YES",
          "WORKER_OUTPUT_BOUNDARY_UNVERIFIED")
@@ -154,7 +155,8 @@ def parsed(raw,mode):
         nums[key]=int(fields[key])
     try:
         mp=json.loads(fields["ROW_FINGERPRINTS"])
-        labels=json.loads(fields["IDENTITY_NAMES"])
+        labels=(json.loads(fields["IDENTITY_NAMES"])
+                if "IDENTITY_NAMES" in fields else None)
     except (ValueError,TypeError):raise Block("WORKER_HASH_MAP_INVALID") from None
     need(type(mp) is dict and 0<len(mp)<=1000 and len(mp)==nums["SCANNED_TABLES"]
          and nums["SCANNED_COLUMNS"]>=len(mp),"WORKER_TABLE_COUNT_INVALID")
@@ -173,9 +175,12 @@ def parsed(raw,mode):
          "WORKER_ROW_TOTAL_INVALID")
     # Only allow bounded, independently SHA-256-matching ASCII SQL identifiers.
     # Do not print database names, credentials, primary keys, row data, or SQL.
-    need(type(labels) is dict and set(labels)==set(mp),
-         "WORKER_IDENTIFIER_MAP_INVALID")
-    for table_hash,identity in labels.items():
+    if with_labels:
+        need(labels is not None,"WORKER_IDENTIFIER_MAP_REQUIRED")
+    if labels is not None:
+        need(type(labels) is dict and set(labels)==set(mp),
+             "WORKER_IDENTIFIER_MAP_INVALID")
+    for table_hash,identity in (labels or {}).items():
         need(type(identity) is list and len(identity)==2
              and type(identity[0]) is str
              and re.fullmatch("[A-Za-z0-9_]{1,64}",identity[0]) is not None
@@ -188,7 +193,7 @@ def parsed(raw,mode):
                  and re.fullmatch("[A-Za-z0-9_]{1,64}",column_name) is not None
                  and hashlib.sha256(column_name.encode("ascii")).hexdigest()==column_hash,
                  "WORKER_IDENTIFIER_COLUMN_UNVERIFIED")
-    return nums,mp,labels
+    return (nums,mp,labels) if with_labels else (nums,mp)
 
 def compare_one(migration,inventory,domain,mid,total,idx,expected_tables):
     state,source_db,target_db,remote_runtime=preflight(
@@ -209,7 +214,7 @@ def compare_one(migration,inventory,domain,mid,total,idx,expected_tables):
     except (OSError,subprocess.SubprocessError,UnicodeError):
         raise Block("CP2_READONLY_WORKER_UNAVAILABLE") from None
     need(local.returncode==0,"CP2_READONLY_WORKER_FAILED")
-    target,tmap,tlabels=parsed(local.stdout,"TARGET")
+    target,tmap,tlabels=parsed(local.stdout,"TARGET",with_labels=True)
     need(target["SCANNED_TABLES"]==expected_tables,
          "TARGET_EXPECTED_TABLE_SCOPE_NOT_RESTORED")
     cmd=shlex.join(["env","PYTHONDONTWRITEBYTECODE=1",
@@ -220,7 +225,7 @@ def compare_one(migration,inventory,domain,mid,total,idx,expected_tables):
                                        check=False)
     except Exception:raise Block("SOURCE_READONLY_WORKER_UNAVAILABLE") from None
     need(result.returncode==0,"SOURCE_READONLY_WORKER_FAILED")
-    source,smap,slabels=parsed(result.stdout,"SOURCE")
+    source,smap,slabels=parsed(result.stdout,"SOURCE",with_labels=True)
     need(source["SCANNED_TABLES"]==expected_tables,
          "SOURCE_EXPECTED_TABLE_SCOPE_CHANGED")
     names=set(smap)&set(tmap)
