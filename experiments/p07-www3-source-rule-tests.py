@@ -25,17 +25,18 @@ def controls():
     text+=group("restore","has_rocks","SET SESSION rocksdb_bulk_load=@saved","SET @dummy = 0")
     return text
 
-def fixture(count=157):
+def fixture(count=157, *, memory=False):
     text=controls();tables=[];cols=[]
     for i in range(count):
         name=f"fixture_{i:03d}"
+        engine="MEMORY" if memory and i==count-1 else "InnoDB"
         text+=f"DROP TABLE IF EXISTS `{name}`;\nCREATE TABLE `{name}` (\n  `id` int NOT NULL,\n  `v` varchar(20) DEFAULT '0',\n"
         if i<10:text+="  `b` varbinary(20) DEFAULT 'abc',\n"
-        text+="  PRIMARY KEY (`id`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb3"
+        text+="  PRIMARY KEY (`id`)\n) ENGINE="+engine+" DEFAULT CHARSET=utf8mb3"
         if i>=25:text+=" COLLATE=utf8mb3_general_ci"
         text+=";\n"
         text+=f"INSERT INTO `{name}` VALUES (1,'value'"+(",0x616263" if i<10 else "")+");\n"
-        tables.append({"name":name,"engine":"InnoDB","collation":"utf8mb3_general_ci"})
+        tables.append({"name":name,"engine":engine,"collation":"utf8mb3_general_ci"})
         cols.append({"table":name,"column":"v","charset":"utf8mb3","collation":"utf8mb3_general_ci"})
     return text,{"server":[{"version":"fixture"}],"tables":tables,"columns":cols,
         "collations":[{"name":"utf8mb3_general_ci","charset":"utf8mb3"}]}
@@ -86,14 +87,31 @@ class SourceRuleTests(unittest.TestCase):
             with self.assertRaises((candidate.Block,ro.Block)):candidate.source_rule_plan(source,catalog,ro)
 
     def test_engine_readback_distinguishes_policy_gap_from_actual_drift(self):
-        for snapshot,current,expected in (("MEMORY","MEMORY",(0,1)),("InnoDB","MyISAM",(1,0)),("ROCKSDB","ROCKSDB",(0,1)),("private_engine","private_engine",(0,1))):
+        for snapshot,current,expected in (("MEMORY","MEMORY",(0,0)),("InnoDB","MyISAM",(1,0)),("ROCKSDB","ROCKSDB",(0,1)),("private_engine","private_engine",(0,1))):
             text,catalog=fixture();text=text.replace("ENGINE=InnoDB","ENGINE="+snapshot,1)
             root,source,_=self.files(text);catalog["tables"][0]["engine"]=current
             with contextlib.redirect_stdout(io.StringIO()) as out:
                 self.assertEqual(candidate.source_engine_evidence(source,catalog,ro),expected)
             self.assertNotIn("fixture_",out.getvalue());self.assertNotIn("private_engine",out.getvalue())
-            with self.assertRaisesRegex(candidate.Block,"SOURCE_SNAPSHOT_LIVE_ENGINE_DIFFER" if snapshot!=current else "SOURCE_ENGINE_OUTSIDE_CURRENT_COPY_POLICY"):
-                candidate.source_rule_plan(source,catalog,ro)
+            if expected==(0,0):candidate.source_rule_plan(source,catalog,ro)
+            else:
+                with self.assertRaisesRegex(candidate.Block,"SOURCE_SNAPSHOT_LIVE_ENGINE_DIFFER" if snapshot!=current else "SOURCE_ENGINE_OUTSIDE_CURRENT_COPY_POLICY"):
+                    candidate.source_rule_plan(source,catalog,ro)
+
+    def test_memory_is_preserved_and_its_missing_rows_are_not_waived(self):
+        text,catalog=fixture(memory=True)
+        root,source,_=self.files(text);q=root/"q.gz";fixed=root/"fixed.gz"
+        with contextlib.redirect_stdout(io.StringIO()):candidate.prepare_copy(source,q,fixed,catalog,ro,stage)
+        data=gzip.decompress(fixed.read_bytes())
+        self.assertEqual(data.count(b"ENGINE=MEMORY"),1)
+        self.assertEqual(candidate.verify_copy(fixed,fixed,catalog,catalog,ro)[1],157)
+        missing=root/"missing.sql"
+        missing.write_bytes(data.replace(b"INSERT INTO `fixture_156` VALUES (1,'value');\n",b""))
+        with self.assertRaisesRegex(candidate.Block,"CANDIDATE_ROWS_UNPROVEN"):
+            candidate.verify_copy(fixed,missing,catalog,catalog,ro)
+        catalog["tables"][-1]["engine"]="InnoDB"
+        with self.assertRaisesRegex(candidate.Block,"SOURCE_SNAPSHOT_LIVE_ENGINE_DIFFER"):
+            candidate.source_rule_plan(source,catalog,ro)
 
     def test_readonly_engine_mode_cannot_reach_database_or_receipt_writes(self):
         import cloudpanel,server_migration_pull,site_lifecycle
@@ -180,7 +198,10 @@ class SourceRuleTests(unittest.TestCase):
                 self.assertNotIn("private_password",out.getvalue())
                 if failure in ("source","prior_attempt"):create.assert_not_called();self.assertEqual(saves,[])
                 elif failure:self.assertEqual(saves[-1][1]["status"],"CANDIDATE_UNPROVEN_RETAIN_NO_RETRY")
-                else:self.assertEqual(saves[-1][1]["status"],"VERIFIED_STATIC_COPY_NOT_ACTIVATED")
+                else:
+                    self.assertEqual(saves[-1][1]["status"],"VERIFIED_STATIC_COPY_NOT_ACTIVATED")
+                    self.assertTrue(saves[-1][1]["fresh_readback_required_before_activation"])
+                    self.assertTrue(saves[-1][1]["source_engines_preserved"])
 
 
 def real_engine():
@@ -200,7 +221,7 @@ def real_engine():
         version=mysql("SELECT VERSION();").decode().strip();assert version.startswith("11.8.")
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);source=root/"source.sql.gz";q=root/"q.gz";fixed=root/"fixed.gz"
-            text,catalog=fixture()
+            text,catalog=fixture(memory=True)
             with gzip.open(source,"wb") as f:f.write(text.encode())
             candidate.prepare_copy(source,q,fixed,catalog,ro,stage)
             mysql("CREATE DATABASE original_copy; CREATE DATABASE corrected_copy;")
@@ -215,6 +236,9 @@ def real_engine():
             target={key:[json.loads(line) for line in mysql(query).decode().splitlines()] for key,query in ro._metadata_queries("corrected_copy").items()}
             result=candidate.verify_copy(fixed,readback,catalog,target,ro)
             assert result[1]==157,result
+            engine_counts=mysql("SELECT ENGINE,COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='corrected_copy' GROUP BY ENGINE ORDER BY ENGINE;").decode().strip().splitlines()
+            assert engine_counts==["InnoDB\t156","MEMORY\t1"],engine_counts
+            assert mysql("SELECT COUNT(*) FROM corrected_copy.fixture_156;").strip()==b"1"
             assert mysql("SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='original_copy' AND TABLE_COLLATION='utf8mb3_uca1400_ai_ci';").strip()==b"25"
             # Real changed bytes must still fail the verifier.
             mysql("UPDATE corrected_copy.fixture_000 SET v='changed' WHERE id=1;")
@@ -223,10 +247,19 @@ def real_engine():
             try:candidate.verify_copy(fixed,readback,catalog,target,ro)
             except candidate.Block as exc:assert str(exc)=="CANDIDATE_ROWS_UNPROVEN",str(exc)
             else:raise AssertionError("changed row incorrectly accepted")
+            # Loss of a volatile MEMORY row must invalidate the new readback.
+            mysql("UPDATE corrected_copy.fixture_000 SET v='value' WHERE id=1; DELETE FROM corrected_copy.fixture_156;")
+            missing=subprocess.run(["docker","exec",container,"mariadb-dump","--no-defaults","-uroot","--hex-blob","--skip-extended-insert","--skip-comments","--skip-dump-date","corrected_copy"],stdout=subprocess.PIPE,check=True)
+            readback.write_bytes(missing.stdout)
+            try:candidate.verify_copy(fixed,readback,catalog,target,ro)
+            except candidate.Block as exc:assert str(exc)=="CANDIDATE_ROWS_UNPROVEN",str(exc)
+            else:raise AssertionError("missing MEMORY row incorrectly accepted")
             print("P07_SOURCE_RULE_REAL_MARIADB_11_8=PASS",flush=True)
             print("P07_SOURCE_RULE_EXISTING_DATABASE_RETAINED=PASS",flush=True)
             print("P07_SOURCE_RULE_TRUE_ROW_DIFFERENCE_DENIED=PASS",flush=True)
             print("P07_SOURCE_RULE_REAL_HEX_DEFAULTS="+str(result[0]),flush=True)
+            print("P07_SOURCE_RULE_REAL_ENGINES=INNODB:156,MEMORY:1",flush=True)
+            print("P07_SOURCE_RULE_MEMORY_ROW_LOSS_DENIED=PASS",flush=True)
     finally:
         subprocess.run(["docker","rm","-f",container],check=False,stdout=subprocess.DEVNULL)
 

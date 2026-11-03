@@ -11,6 +11,9 @@ from pathlib import Path
 
 READONLY_NAME="p07-www3-existing-scratch-parity-readonly.py"
 READONLY_BLOB="a6285fd4fb44865849d31fd00d368b7af1f00bac"
+# These engines remain unchanged in the new copy. MEMORY is volatile on both
+# sides; its rows are verified now, never treated as durable activation proof.
+COPY_ENGINES=frozenset({"INNODB","MYISAM","MEMORY"})
 
 class Block(Exception):pass
 def need(ok,why):
@@ -75,7 +78,7 @@ def source_engine_evidence(source,catalog,ro,expected_tables=157):
         pairs[(snapshot if snapshot in public else "OTHER_UNPROVEN",
                current if current in public else "OTHER_UNPROVEN")]+=1
         differing+=snapshot!=current
-        unsupported+=snapshot not in {"INNODB","MYISAM"}
+        unsupported+=snapshot not in COPY_ENGINES
     for ordinal,((snapshot,current),count) in enumerate(sorted(pairs.items()),1):
         print("SOURCE_ENGINE_PAIR_"+str(ordinal)+"="+snapshot+":"+current+":"+str(count),flush=True)
     print("SOURCE_ENGINE_SNAPSHOT_LIVE_DIFFERING="+str(differing),flush=True)
@@ -95,7 +98,7 @@ def source_rule_plan(source,catalog,ro,expected_tables=157):
         need(parts is not None,"SOURCE_RULE_SCHEMA_PARSE")
         opts=options(parts[2],ro)
         need(opts["ENGINE"].lower()==str(engines[name]).lower(),"SOURCE_SNAPSHOT_LIVE_ENGINE_DIFFER")
-        need(opts["ENGINE"].upper() in {"INNODB","MYISAM"},"SOURCE_ENGINE_OUTSIDE_CURRENT_COPY_POLICY")
+        need(opts["ENGINE"].upper() in COPY_ENGINES,"SOURCE_ENGINE_OUTSIDE_CURRENT_COPY_POLICY")
         charset=opts["CHARSET"];rule=tables[name]
         need(known[rule]==charset,"SOURCE_RULE_CHARSET_MISMATCH")
         if "COLLATE" in opts:need(opts["COLLATE"]==rule,"SOURCE_RULE_EXPLICIT_DRIFT")
@@ -260,6 +263,7 @@ def run():
         source_catalog=ro.live_source_catalog(engine,tail,source_db,base,stage)
         plan,column_count=prepare_copy(original,quarantined,repaired,source_catalog,ro,stage)
         need(column_count==1848,"SOURCE_COLUMN_COUNT_CHANGED")
+        memory_tables=sum(str(row["engine"]).upper()=="MEMORY" for row in source_catalog["tables"])
         # All preparation and source-rule checks precede the first DB write.
         fresh=ro.live_source_catalog(engine,tail,source_db,base,stage)
         candidate_collations(source_catalog,fresh,ro)
@@ -270,6 +274,8 @@ def run():
             "target_server_identity":tail["target_server_identity"],"previous_scratch_retained":True,"source_runtime_frozen":False,
             "website_activated":False,"original_database_modified":False,"status":"INTENT_RESERVED",
             "table_collations_explicit":len(plan),"dynamic_groups_omitted":3,"cutover_allowed":False,
+            "memory_table_count":memory_tables,"source_engines_preserved":True,
+            "fresh_readback_required_before_activation":True,
             "candidate_sql_sha256":hashlib.sha256(repaired.read_bytes()).hexdigest()}
         stage.save(marker,record,first=True)
         try:
@@ -292,6 +298,9 @@ def run():
     print("CANDIDATE_ASCII_HEX_DEFAULTS_EQUAL="+str(hex_defaults),flush=True)
     print("CANDIDATE_VERIFIED_ROWS="+str(rows),flush=True)
     print("CANDIDATE_DYNAMIC_SQL_EXECUTED=NONE",flush=True)
+    print("CANDIDATE_MEMORY_TABLES="+str(memory_tables),flush=True)
+    print("CANDIDATE_ENGINE_CONVERSION=NONE",flush=True)
+    print("FRESH_READBACK_REQUIRED_BEFORE_ACTIVATION=YES",flush=True)
     print("SOURCE_COLLATION_BASIS=LIVE_METADATA_NOT_FROZEN_SNAPSHOT",flush=True)
     print("CANDIDATE_NEW_RECEIPT="+str(marker),flush=True)
     print("LIVE_SOURCE_FINAL_CONSISTENCY=NOT_PROVEN",flush=True)
