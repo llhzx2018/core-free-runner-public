@@ -54,8 +54,17 @@ class Inventory:
                {"domain":"ilovem3u8.kewaro.com","site_user":"user1","mysql_databases":["db3"]}]}
 class Tests(unittest.TestCase):
     def test_parsed_defensive_worker_output(self):
-        values, mp, labels=m.parsed(payload("SOURCE"),"SOURCE")
+        values, mp, labels=m.parsed(payload("SOURCE"),"SOURCE",with_labels=True)
         self.assertEqual(labels[sha("a")],["a",{sha("col"):"col"}])
+        # Existing PK-classifier consumers still use the original 2-tuple API.
+        old_nums,old_rows=m.parsed(payload("SOURCE"),"SOURCE")
+        self.assertEqual(old_nums["SCANNED_ROWS"],2)
+        self.assertEqual(set(old_rows),{sha("a")})
+        with self.assertRaisesRegex(m.Block,"WORKER_IDENTIFIER_MAP_REQUIRED"):
+            m.parsed(payload("SOURCE").replace(
+                next(line for line in payload("SOURCE").splitlines()
+                     if line.startswith("IDENTITY_NAMES="))+"\\n",""),
+                "SOURCE",with_labels=True)
         self.assertEqual(values["SCANNED_ROWS"],2)
         self.assertEqual(len(mp),1)
         for text in (payload("SOURCE")+"password=secret\n",
@@ -248,8 +257,8 @@ class Tests(unittest.TestCase):
     def test_parse_distinct_missing_columns(self):
         p=payload("SOURCE")
         other=payload("SOURCE",tablename="other")
-        a,mp,labels=m.parsed(p,"SOURCE")
-        b,mp2,labels2=m.parsed(other,"SOURCE")
+        a,mp,labels=m.parsed(p,"SOURCE",with_labels=True)
+        b,mp2,labels2=m.parsed(other,"SOURCE",with_labels=True)
         self.assertEqual(labels[sha("a")][0],"a")
         self.assertEqual(labels2[sha("other")][0],"other")
         self.assertEqual(len(set(mp)-set(mp2)),1)
