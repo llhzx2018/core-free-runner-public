@@ -266,6 +266,47 @@ class ConnectionTests(unittest.TestCase):
                 with self.assertRaisesRegex(connect.Block,"CANDIDATE_PRECONNECT_CONTENT_CHANGED"):
                     connect.fresh_proof(candidate,ro,base,stage,object(),{},"source",{"source_snapshot_sha256":"digest"})
 
+    def test_fresh_proof_runs_real_native_export_path_guard(self):
+        # Keep the pinned export function real: replacing it with a Mock had
+        # concealed the caller's invalid target.sql basename.
+        ro=connect.load_candidate().load_readonly()
+        record=dict(RECORD,scratch_database="p07fixture0001",source_snapshot_sha256="digest")
+        for result_code in (0,1):
+            with self.subTest(result_code=result_code),tempfile.TemporaryDirectory() as td,contextlib.ExitStack() as stack:
+                stage=SimpleNamespace(import_existing_verified_source=Mock(return_value="digest"),restricted_user=Mock(return_value=(["mysql"],{})))
+                candidate=SimpleNamespace(prepare_copy=Mock(return_value=({str(i):"rule" for i in range(25)},1848)),verify_copy=Mock(return_value=(10,198750)))
+                temp=tempfile.TemporaryDirectory
+                stack.enter_context(patch.object(connect.tempfile,"TemporaryDirectory",side_effect=lambda **kw:temp(dir=td)))
+                stack.enter_context(patch.object(ro,"live_source_catalog",return_value={}))
+                catalog=stack.enter_context(patch.object(ro,"live_target_catalog",return_value={}))
+                stack.enter_context(patch.object(shutil,"which",side_effect=lambda name:"/synthetic/"+name))
+                def export(args,**kw):
+                    self.assertIn("--single-transaction",args);self.assertIn("--skip-lock-tables",args)
+                    self.assertIn("--hex-blob",args);self.assertEqual(args[-1],record["scratch_database"])
+                    self.assertEqual(os.fstat(kw["stdout"].fileno()).st_mode&0o777,0o600)
+                    kw["stdout"].write(b"-- synthetic nonempty export\n")
+                    return SimpleNamespace(returncode=result_code)
+                process=stack.enter_context(patch.object(ro.subprocess,"run",side_effect=export))
+                with contextlib.redirect_stdout(__import__('io').StringIO()):
+                    if result_code:
+                        with self.assertRaisesRegex(connect.Block,"CANDIDATE_READBACK_FAILED"):
+                            connect.fresh_proof(candidate,ro,object(),stage,object(),{},"source",record)
+                        catalog.assert_not_called();candidate.verify_copy.assert_not_called()
+                    else:
+                        connect.fresh_proof(candidate,ro,object(),stage,object(),{},"source",record)
+                        candidate.verify_copy.assert_called_once()
+                process.assert_called_once()
+
+    def test_preconnect_companion_failures_keep_phase_without_private_exception_text(self):
+        ro=connect.load_candidate().load_readonly()
+        for exception,expected in ((ro.Block("NATIVE_OUTPUT_PATH_UNSAFE"),"NATIVE_OUTPUT_PATH_UNSAFE"),
+                                   (RuntimeError("private-password private SQL"),"CANDIDATE_PRECONNECT_TARGET_EXPORT_UNPROVEN")):
+            out=__import__('io').StringIO()
+            with contextlib.redirect_stdout(out),self.assertRaisesRegex(connect.Block,expected) as caught:
+                with connect.preconnect_step("TARGET_EXPORT"):raise exception
+            self.assertNotIn("private",out.getvalue()+str(caught.exception))
+            self.assertIn("CANDIDATE_PRECONNECT_PHASE=TARGET_EXPORT",out.getvalue())
+
     def test_receipt_identity_proof_and_private_file_security(self):
         import site_lifecycle
         root,_,_,_=self.files();base=SimpleNamespace(BASE=root,TAIL="fixture-tail",DOMAIN="fixture.example")
@@ -317,7 +358,30 @@ class ConnectionTests(unittest.TestCase):
                         site.assert_called_once_with(base,tail,require_php=False)
                 self.assertEqual(path.read_bytes(),before)
 
+def real_native_preconnect_export(container,mysql,root):
+    """Real pinned dump/grants/catalog/parser; only transport is Docker exec."""
+    import gzip
+    candidate=connect.load_candidate();ro=candidate.load_readonly();stage=ro.load(ro.STAGE_NAME,ro.STAGE_BLOB)
+    db="p07fixture0001";user="preconnect_fixture";password="synthetic_preconnect_password"
+    mysql("CREATE DATABASE "+db+"; CREATE USER '"+user+"'@'127.0.0.1' IDENTIFIED BY '"+password+"'; GRANT ALL ON "+db+".* TO '"+user+"'@'127.0.0.1'; USE "+db+";\n"+gzip.decompress((root/"fixed.gz").read_bytes()).decode())
+    record={"scratch_database":db,"username":user,"password":password}
+    real_run=subprocess.run
+    def docker_transport(args,**kwargs):
+        binary=Path(args[0]).name
+        assert binary in {"mysql","mariadb","mariadb-dump","mysqldump"},args[0]
+        binary="mariadb" if binary in {"mysql","mariadb"} else "mariadb-dump"
+        return real_run(["docker","exec","-e","MYSQL_PWD",container,binary,*args[1:]],**kwargs)
+    output=root/"scratch-native-readonly.sql"
+    with patch.object(shutil,"which",side_effect=lambda name:"/synthetic-bin/"+name),patch.object(subprocess,"run",side_effect=docker_transport):
+        assert ro.native_readonly_scratch_dump(record,stage,output)=="COMPLETE"
+        catalog=ro.live_target_catalog(record,stage)
+    suite=load("p07-www3-source-rule-tests.py","preconnect_source_fixture")
+    assert candidate.verify_copy(root/"fixed.gz",output,suite.fixture(memory=True)[1],catalog,ro)==(10,157)
+    assert mysql("SELECT COUNT(*) FROM "+db+".fixture_156;").strip()==b"1"
+    print("P07_WWW3_REAL_NATIVE_PRECONNECT_EXPORT_AND_COMPARE=PASS",flush=True)
+
 def real_mapping_proof(container,mysql,root):
+    real_native_preconnect_export(container,mysql,root)
     # A disposable, dedicated account: Ubuntu's nobody/nogroup is shared by
     # unrelated system users and correctly fails the isolation policy.
     name="p07_cfg_"+str(os.getpid())

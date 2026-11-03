@@ -335,17 +335,39 @@ def connection_check(record,stage):
     r=subprocess.run(args+["--batch","--skip-column-names","--database="+record["scratch_database"],"--execute=SELECT DATABASE(), 1"],env=env,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=30,check=False)
     need(r.returncode==0 and r.stdout.strip()==(record["scratch_database"]+"\t1").encode(),"CANDIDATE_DB_CONNECTION_FAILED")
 
+@contextlib.contextmanager
+def preconnect_step(name):
+    print("CANDIDATE_PRECONNECT_PHASE="+name,flush=True)
+    try:yield
+    except Block:raise
+    except Exception as exc:
+        # Companion modules have distinct exception classes. Only these fixed
+        # public codes may cross that boundary; SQL/credentials never do.
+        allowed={"NATIVE_OUTPUT_PATH_UNSAFE","NATIVE_DUMP_IDENTITY_UNPROVEN",
+                 "CANDIDATE_SCHEMA_SCOPE","CANDIDATE_INDEX_OR_OPTIONS_DIFFER",
+                 "CANDIDATE_COLUMNS_DIFFER","CANDIDATE_COLUMN_SEMANTICS_DIFFER",
+                 "CANDIDATE_LIVE_COLLATION_DIFFER","CANDIDATE_ROWS_UNPROVEN"}
+        code=str(exc)
+        raise Block(code if code in allowed else "CANDIDATE_PRECONNECT_"+name+"_UNPROVEN") from None
+
 def fresh_proof(candidate,ro,base,stage,engine,tail,source_db,record):
     with tempfile.TemporaryDirectory(prefix="p07-www3-before-connect-",dir="/root") as td:
-        root=Path(td);original=root/"source.sql.gz";q=root/"q.sql.gz";fixed=root/"fixed.sql.gz";dump=root/"target.sql"
-        actual=stage.import_existing_verified_source(engine,tail,source_db,base,original)
-        need(actual==record["source_snapshot_sha256"],"CANDIDATE_SOURCE_ARCHIVE_CHANGED")
-        catalog=ro.live_source_catalog(engine,tail,source_db,base,stage)
-        plan,columns=candidate.prepare_copy(original,q,fixed,catalog,ro,stage)
-        need(len(plan)==25 and columns==1848,"CANDIDATE_PRECONNECT_SCOPE_CHANGED")
-        need(ro.native_readonly_scratch_dump(record,stage,dump)=="COMPLETE","CANDIDATE_READBACK_FAILED")
-        defaults,rows=candidate.verify_copy(fixed,dump,catalog,ro.live_target_catalog(record,stage),ro)
-        need((defaults,rows)==(10,198750),"CANDIDATE_PRECONNECT_CONTENT_CHANGED")
+        root=Path(td);original=root/"source.sql.gz";q=root/"q.sql.gz";fixed=root/"fixed.sql.gz";dump=root/"scratch-native-readonly.sql"
+        with preconnect_step("SOURCE_ARCHIVE"):
+            actual=stage.import_existing_verified_source(engine,tail,source_db,base,original)
+            need(actual==record["source_snapshot_sha256"],"CANDIDATE_SOURCE_ARCHIVE_CHANGED")
+        with preconnect_step("SOURCE_CATALOG"):
+            catalog=ro.live_source_catalog(engine,tail,source_db,base,stage)
+        with preconnect_step("SOURCE_RULES"):
+            plan,columns=candidate.prepare_copy(original,q,fixed,catalog,ro,stage)
+            need(len(plan)==25 and columns==1848,"CANDIDATE_PRECONNECT_SCOPE_CHANGED")
+        with preconnect_step("TARGET_EXPORT"):
+            need(ro.native_readonly_scratch_dump(record,stage,dump)=="COMPLETE","CANDIDATE_READBACK_FAILED")
+        with preconnect_step("TARGET_CATALOG"):
+            target_catalog=ro.live_target_catalog(record,stage)
+        with preconnect_step("COPY_COMPARE"):
+            defaults,rows=candidate.verify_copy(fixed,dump,catalog,target_catalog,ro)
+            need((defaults,rows)==(10,198750),"CANDIDATE_PRECONNECT_CONTENT_CHANGED")
     print("CANDIDATE_PRECONNECT_FRESH_READBACK=PASS",flush=True)
 
 def run():
