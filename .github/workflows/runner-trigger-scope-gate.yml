@@ -10,6 +10,15 @@ on:
       - 'scripts/check_estate_anti_drift.py'
       - 'tests/test_estate_anti_drift.py'
   workflow_dispatch:
+    inputs:
+      entry_check:
+        description: 'Verify live VF repository entry coverage (read-only)'
+        type: boolean
+        default: false
+      gov_source_sha:
+        description: 'main or an approved exact GOV-DOC commit SHA'
+        type: string
+        default: main
 
 permissions:
   contents: read
@@ -37,3 +46,82 @@ jobs:
         env:
           VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
         run: python scripts/check_estate_anti_drift.py --live
+
+  entry-coverage:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.entry_check) ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.user.login == 'llhzx2018' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       startsWith(github.head_ref, 'maintenance/gov-entry-'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GOV_REF: ${{ inputs.gov_source_sha || 'main' }}
+    steps:
+      - name: Validate read-only source selection
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          [[ "$GOV_REF" = main || "$GOV_REF" =~ ^[a-f0-9]{40}$ ]] || exit 78
+
+      - name: Checkout transient governance source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: ${{ env.GOV_REF }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: gov-entry-source
+
+      - name: Bind exact governance source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SOURCE_SHA="$(git -C gov-entry-source rev-parse HEAD)"
+          if [ "$GOV_REF" != main ]; then test "$SOURCE_SHA" = "$GOV_REF"; fi
+          echo "GOV_EXACT_SHA=$SOURCE_SHA" >> "$GITHUB_ENV"
+          echo "GOV_ENTRY_SOURCE_SHA=$SOURCE_SHA"
+
+      - name: Verify identity and coverage regressions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if python3 -m unittest discover -s gov-entry-source/governance/agent -p test_repository_entry.py > "$RUNNER_TEMP/entry-tests.log" 2>&1; then
+            echo 'GOV_ENTRY_REGRESSIONS=PASS'
+          else
+            echo 'GOV_ENTRY_REGRESSIONS=FAIL'
+            exit 1
+          fi
+
+      - name: Verify live declared sources and working refs
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -Euo pipefail
+          python3 gov-entry-source/governance/agent/validate_repository_entry.py --gov-ref "$GOV_EXACT_SHA" > "$RUNNER_TEMP/entry-result.json" 2> "$RUNNER_TEMP/entry-private.log"
+          CHECK_RC=$?
+          set -e
+          python3 - <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          try:
+              result = json.loads((Path(os.environ['RUNNER_TEMP']) / 'entry-result.json').read_text())
+              keys = ['result', 'coverage', 'gov_source_sha', 'projects', 'working_refs', 'infrastructure', 'fresh_window_behavior']
+              print(json.dumps({key: result.get(key) for key in keys}, sort_keys=True))
+              print('GOV_ENTRY_ERROR_CODES=' + ','.join(str(e).split(':', 1)[0] for e in result.get('errors', [])))
+              if result.get('result') != 'PASS' or result.get('gov_source_sha') != os.environ['GOV_EXACT_SHA']:
+                  sys.exit(1)
+          except (OSError, ValueError):
+              print('GOV_ENTRY_RESULT=NOT_PROVEN')
+              sys.exit(1)
+          PY
+          exit "$CHECK_RC"
+
+      - name: Cleanup transient private source and logs
+        if: always()
+        shell: bash
+        run: |
+          rm -rf gov-entry-source
+          rm -f "$RUNNER_TEMP/entry-tests.log" "$RUNNER_TEMP/entry-result.json" "$RUNNER_TEMP/entry-private.log"
