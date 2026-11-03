@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+WP=/tmp/s01-r8-upgrade-wp
+CLI=/tmp/s01-r8-upgrade-wpcli.phar
+PLUGIN="$WP/wp-content/plugins/vf-tools-m3u8"
+OWNER_HEAD=326fd22662500e6f37df997df1acbaa2931d3e70
+OLD_HEAD=fbe049dc18eb18eab21e9d8c3cededfe55b783e7
+test "$(git -C candidate rev-parse HEAD)" = "$OWNER_HEAD"
+test "$(git -C legacy rev-parse HEAD)" = "$OLD_HEAD"
+curl -fsSLo "$CLI" https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+wp(){ php "$CLI" "$@" --path="$WP"; }
+mkdir -p "$WP"
+wp core download --skip-content --quiet
+wp config create --dbname=wordpress --dbuser=wordpress --dbpass=synthetic-wp --dbhost=127.0.0.1:3306 --skip-check
+wp core install --url=http://127.0.0.1:18884 --title=R8-Synthetic-Upgrade --admin_user=synthetic --admin_password=synthetic-only-password --admin_email=synthetic@example.invalid --skip-email
+mkdir -p "$WP/wp-content/themes/vf-tools-theme" "$WP/wp-content/plugins/vf-tools-ops" "$PLUGIN"
+cp -a theme/src/. "$WP/wp-content/themes/vf-tools-theme/"
+cp -a ops/. "$WP/wp-content/plugins/vf-tools-ops/"
+cp -a legacy/src/. "$PLUGIN/"
+wp theme activate vf-tools-theme
+wp plugin activate vf-tools-ops/vf-ops.php vf-tools-m3u8/vf-tool-m3u8.php
+wp eval '
+  update_option("s01_r8_owner_canary",["origin"=>"before-upgrade","keep"=>["list",17]],false);
+  $pid=wp_insert_post(["post_type"=>"page","post_status"=>"publish","post_name"=>"s01-r8-owner-data","post_title"=>"Synthetic Owner Data","post_content"=>"Must survive candidate and rollback"]);
+  if(!$pid||is_wp_error($pid))throw new Exception("OWNER_FIXTURE_INIT_FAILED");
+  update_option("s01_r8_owner_post_id",$pid,false);
+  echo "S01_R8_OLD_PLUGIN_FIXTURE=PASS\n";
+'
+check_owner(){
+ wp eval '
+  if(get_option("s01_r8_owner_canary")!==["origin"=>"before-upgrade","keep"=>["list",17]])throw new Exception("OWNER_OPTION_CHANGED");
+  $post=get_post((int)get_option("s01_r8_owner_post_id"));
+  if(!$post||$post->post_content!=="Must survive candidate and rollback")throw new Exception("OWNER_POST_CHANGED");
+  global $wpdb;
+  if(!$wpdb->get_var($wpdb->prepare("SELECT ID FROM {$wpdb->posts} WHERE ID=%d",$post->ID)))throw new Exception("OWNER_POST_DB_MISSING");
+  echo "S01_R8_OWNER_DATA_READBACK=PASS\n";
+ '
+}
+replace_with(){
+ wp plugin deactivate vf-tools-m3u8/vf-tool-m3u8.php
+ rm -rf "$PLUGIN"
+ mkdir -p "$PLUGIN"
+ cp -a "$1/src/." "$PLUGIN/"
+ wp plugin activate vf-tools-m3u8/vf-tool-m3u8.php
+}
+check_owner
+replace_with candidate
+wp eval '
+  $r=vf_tools_m3u8_runtime_bundle();$m=vf_tools_m3u8_provider_manifest();
+  if(($r["version"]??null)!=="1.25.4"||($m["version"]??null)!=="1.25.4")throw new Exception("CANDIDATE_V6_NOT_LOADED");
+  if(!hash_equals($r["content_hash"],vf_tools_m3u8_contract_hash($r)))throw new Exception("RUNTIME_HASH_BAD");
+  if(!hash_equals($m["content_hash"],vf_tools_m3u8_contract_hash($m)))throw new Exception("MANIFEST_HASH_BAD");
+  $check=vf_tools_m3u8_validate_runtime_bundle_contract($r,true);
+  if(empty($check["ok"]))throw new Exception("CANDIDATE_ASSETS_BAD");
+  echo "S01_R8_CANDIDATE_UPGRADE_V6_1_25_4=PASS\n";
+'
+check_owner
+echo S01_R8_SYNTHETIC_UPGRADE=PASS
+replace_with legacy
+check_owner
+wp eval '
+  $r=vf_tools_m3u8_runtime_bundle();
+  if(($r["version"]??null)!=="1.25.0")throw new Exception("ROLLBACK_SOURCE_VERSION_BAD");
+  echo "S01_R8_PLUGIN_CODE_ROLLBACK=PASS\n";
+'
+replace_with candidate
+check_owner
+wp eval '
+  $r=vf_tools_m3u8_runtime_bundle();$m=vf_tools_m3u8_provider_manifest();
+  if(($r["version"]??null)!=="1.25.4"||($m["version"]??null)!=="1.25.4")throw new Exception("REUPGRADE_VERSION_BAD");
+  echo "S01_R8_CANDIDATE_REUPGRADE=PASS\n";
+'
+echo S01_R8_WP_MARIADB_OLD_CANDIDATE_ROLLBACK_REUPGRADE=PASS
