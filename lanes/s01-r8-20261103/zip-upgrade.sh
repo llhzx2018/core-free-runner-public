@@ -92,4 +92,8 @@ check_payload "$OUT/candidate-version-only-fixture"
 echo S01_R8_WP_PLUGIN_UPGRADER_REUPGRADE=PASS
 
 wp eval '$required=["vf_m3u8_converter_lite","vf_m3u8_playlist_checker","vf_m3u8_backup_restore"];foreach($required as $shortcode){if(!shortcode_exists($shortcode))throw new Exception("MISSING_SHORTCODE:".$shortcode);} echo "S01_R8_POST_UPGRADE_SHORTCODES=PASS\n";'
+php -l control/lanes/s01-r8-20261103/native-update-discovery.php
+wp eval-file control/lanes/s01-r8-20261103/native-update-discovery.php
+echo "S01_R8_WP_NATIVE_DISCOVERY_POSITIVE_AND_NEGATIVE=PASS"
+
 echo "S01_R8_SYNTHETIC_VERSION_ONLY_NOT_OFFICIAL_RELEASE=YES"
