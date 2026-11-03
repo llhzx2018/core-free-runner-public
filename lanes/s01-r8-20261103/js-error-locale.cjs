@@ -6,7 +6,10 @@ const assert=require('node:assert/strict');
 const base='http://127.0.0.1:18880/m3u8-playlist-checker/';
 const result={source:'S01 R8 M3U8 #178 3ab0992fb4788b8b9d15d0e338040189b6fcdd8f',checks:[],origin:'isolated WordPress/MariaDB only'};
 function setLocale(locale){
-  cp.execFileSync('php',['/tmp/wp-cli-r8.phar','option','update','WPLANG',locale,'--path=/tmp/s01-r8-business-wp'],{stdio:'pipe',timeout:30000});
+  cp.execFileSync('php',['/tmp/wp-cli-r8.phar','config','set','WPLANG',locale,'--path=/tmp/s01-r8-business-wp'],{stdio:'pipe',timeout:30000});
+  const actual=cp.execFileSync('php',['/tmp/wp-cli-r8.phar','eval','echo get_locale()."/".determine_locale();','--path=/tmp/s01-r8-business-wp'],{encoding:'utf8',timeout:30000}).trim();
+  assert.ok(actual.startsWith(locale+'/'), 'isolated WP locale not switched: '+actual);
+  console.log('S01_R8_FIXTURE_WP_LOCALE='+actual);
 }
 (async()=>{
  const browser=await chromium.launch({headless:true});
