@@ -237,7 +237,7 @@ class Tests(unittest.TestCase):
             return_value=(origin,"db1","db2",origin["source_runtime_path"])), \
              mock.patch.object(m.subprocess,"run",
                return_value=subprocess.CompletedProcess([],0,local,"")), \
-             mock.patch.object(m,"parsed",side_effect=lambda text,mode:
+             mock.patch.object(m,"parsed",side_effect=lambda text,mode,**kw:
                ({"SCANNED_TABLES":12,"SCANNED_COLUMNS":12,
                  "SCANNED_ROWS":3 if mode=="SOURCE" else 2},
                 {sha("a"):[3 if mode=="SOURCE" else 2,
