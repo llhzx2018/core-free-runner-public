@@ -1,0 +1,91 @@
+name: P01 IA6 manual Worker step real API and browser CAS gate
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-ia6-manual-worker-step-20261103.yml'
+permissions:
+  contents: read
+jobs:
+  focused:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor == 'llhzx2018' &&
+      startsWith(github.event.pull_request.title, 'test(P01):')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      PRODUCT_BRANCH: fix/p01-ia6-worker-manual-progress-parity-20261103
+      PRODUCT_SHA: 6a26fe56db0abb942bc7d9d9cf91dcdda13991eb
+      TARGET_VERSION: 2.47.491
+    steps:
+      - name: Checkout existing public runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Resolve exactly one private product source in disposable workspace
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          remote="$(git ls-remote "https://x-access-token:$READ_TOKEN@github.com/$PRODUCT_REPO.git" "refs/heads/$PRODUCT_BRANCH" | awk '{print $1}')"
+          test "$remote" = "$PRODUCT_SHA"
+          git clone -q --no-checkout "https://x-access-token:$READ_TOKEN@github.com/$PRODUCT_REPO.git" candidate
+          git -C candidate fetch -q --depth 1 origin "$PRODUCT_SHA"
+          git -C candidate checkout -q --detach FETCH_HEAD
+          test "$(git -C candidate rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$TARGET_VERSION"
+          echo P01_IA6_MANUAL_WORKER_EXACT_SOURCE=PASS
+      - name: Run native Worker step and legacy parity contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          command -v node
+          command -v php
+          node --check candidate/src/assets/frontstage-system-operations.js
+          php -l candidate/src/app/FunctionalWorkspaceShell.php >/dev/null
+          node candidate/tests/unit/p01_ia6_worker_manual_step_native_contract.cjs
+          node candidate/tests/unit/p01_ia6_system_jobs_r1_contract.cjs
+          node candidate/tests/unit/p01_ia6_worker_history_operation_parity.cjs
+          echo P01_IA6_MANUAL_WORKER_NATIVE=PASS
+      - name: Browser Owner/Guest real Worker step and CAS fail-closed flows
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip >/dev/null
+          npm install --no-audit --no-fund --no-save playwright@1.57.0 >/dev/null
+          npx playwright install chromium >/dev/null
+          ROOT=/tmp/p01-update-dialog-gate
+          mkdir -p "$ROOT"
+          cp -a candidate/src/. "$ROOT/"
+          php -S 127.0.0.1:19491 -t "$ROOT" >/tmp/p01-update-dialog-php.log 2>&1 &
+          echo $! >/tmp/p01-update-dialog-php.pid
+          for i in $(seq 1 40); do
+            if curl -fsS -c /tmp/p01-update-browser-cookies -b /tmp/p01-update-browser-cookies http://127.0.0.1:19491/setup.php -o /tmp/p01-update-setup.html >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          test -s /tmp/p01-update-setup.html
+          CSRF="$(python3 -c 'import re; s=open("/tmp/p01-update-setup.html",encoding="utf-8").read(); m=re.search(r"name=\"setup_csrf\"\s+value=\"([^\"]+)\"",s); assert m; print(m.group(1))')"
+          curl -fsS -c /tmp/p01-update-browser-cookies -b /tmp/p01-update-browser-cookies -X POST http://127.0.0.1:19491/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=IA6 One Click Browser Test' \
+            --data-urlencode 'admin_password=BrowserGate!2026' \
+            --data-urlencode 'admin_password_confirm=BrowserGate!2026' >/dev/null
+          (cd "$ROOT" && php cli/verify.php) | grep -Fx VERIFY_PASS=YES
+          P01_TEST_ORIGIN=http://127.0.0.1:19491 P01_TEST_PASSWORD='BrowserGate!2026' \
+            node candidate/tests/integration/p01_ia6_worker_manual_step_browser.mjs
+          echo P01_IA6_MANUAL_WORKER_BROWSER=PASS
+      - name: Erase private source and temporary request evidence
+        if: always()
+        shell: bash
+        run: |
+          if test -f /tmp/p01-update-dialog-php.pid; then kill "$(cat /tmp/p01-update-dialog-php.pid)" >/dev/null 2>&1 || true; fi
+          rm -rf /tmp/p01-update-dialog-gate
+          rm -f /tmp/p01-update-dialog-php.pid /tmp/p01-update-dialog-php.log /tmp/p01-update-browser-cookies /tmp/p01-update-setup.html
+          rm -rf candidate
+          echo P01_IA6_MANUAL_WORKER_PRIVATE_SOURCE_CLEANUP=PASS
