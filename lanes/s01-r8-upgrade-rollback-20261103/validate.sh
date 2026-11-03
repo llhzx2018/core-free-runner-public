@@ -52,6 +52,19 @@ php candidate/tests/skin-migration-snapshot-guard.php
 skin_db(){ S01_R8_SKIN_PHASE="$1" wp eval-file control/lanes/s01-r8-upgrade-rollback-20261103/skin-db-parity.php; }
 check_owner
 skin_db baseline
+# Create a complete MariaDB restore point BEFORE source handover in this
+# disposable fixture. Code-only ZIP rollback never substitutes for DB restore.
+if ! command -v mariadb-dump >/dev/null || ! command -v mariadb >/dev/null; then
+ sudo apt-get update -qq
+ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mariadb-client
+fi
+DB_DUMP=/tmp/s01-r8-full-wordpress-before-upgrade.sql
+MYSQL_PWD=synthetic-wp mariadb-dump --host=127.0.0.1 --port=3306 --user=wordpress \
+  --single-transaction --quick --skip-lock-tables wordpress > "$DB_DUMP"
+test -s "$DB_DUMP"
+DUMP_SHA="$(sha256sum "$DB_DUMP" | cut -d' ' -f1)"
+test "${#DUMP_SHA}" = 64
+echo S01_R8_FULL_MARIADB_PRE_UPGRADE_BACKUP=PASS
 replace_with candidate
 wp eval '
   $r=vf_tools_m3u8_runtime_bundle();$m=vf_tools_m3u8_provider_manifest();
@@ -67,15 +80,25 @@ skin_db verify
 echo S01_R8_SYNTHETIC_UPGRADE=PASS
 replace_with legacy
 check_owner
-skin_db verify
+skin_db inspect
 wp eval '
   $r=vf_tools_m3u8_runtime_bundle();
   if(($r["version"]??null)!=="1.25.0")throw new Exception("ROLLBACK_SOURCE_VERSION_BAD");
-  echo "S01_R8_PLUGIN_CODE_ROLLBACK=PASS\n";
+  echo "S01_R8_PLUGIN_CODE_ROLLBACK=PASS\\n";
 '
-replace_with candidate
+skin_db inspect
+echo S01_R8_LEGACY_CODE_ROLLBACK_DATA_PARITY=NOT_PROVEN
+# Full SQL restoration is performed without WordPress executing. Before
+# WordPress is loaded again, replace legacy PHP with the fixed candidate.
+test "$(sha256sum "$DB_DUMP" | cut -d' ' -f1)" = "$DUMP_SHA"
+MYSQL_PWD=synthetic-wp mariadb --host=127.0.0.1 --port=3306 \
+  --user=wordpress wordpress < "$DB_DUMP"
+rm -rf "$PLUGIN"
+mkdir -p "$PLUGIN"
+cp -a candidate/src/. "$PLUGIN/"
 check_owner
 skin_db verify
+echo S01_R8_FULL_DATABASE_RESTORE_4_RAW_OPTIONS=PASS
 wp eval '
   $r=vf_tools_m3u8_runtime_bundle();$m=vf_tools_m3u8_provider_manifest();
   if(($r["version"]??null)!=="1.25.4"||($m["version"]??null)!=="1.25.4")throw new Exception("REUPGRADE_VERSION_BAD");
