@@ -13,9 +13,11 @@ function locale(l){
 (async()=>{
  const b=await chromium.launch({headless:true});
  try{
- for(const [l,label] of [['zh_CN','zh']]){
+ for(const [l,label] of [['en_US','en'],['zh_CN','zh']]){
   locale(l);
-  for(const width of [1440]){
+  // WordPress config is rewritten between phases; avoid stale CLI-server opcode cache.
+  await new Promise(resolve=>setTimeout(resolve,3200));
+  for(const width of [768,1440]){
    const context=await b.newContext({viewport:{width,height:900},acceptDownloads:true});
    const p=await context.newPage(),errors=[];
    p.on('pageerror',e=>errors.push(e.message));
@@ -43,8 +45,10 @@ function locale(l){
      rootText:document.querySelector('[data-vf-module="backup-restore"]')?.innerText.slice(0,350),
      htmlStart:document.documentElement.outerHTML.slice(0,350)
    }));
-   console.log('S01_R8_ZH_LOCALE_DIAGNOSTIC='+JSON.stringify(diag));
+   console.log('S01_R8_LOCALE_DIAGNOSTIC_'+label.toUpperCase()+'_'+width+'='+JSON.stringify(diag));
    assert.ok(pageInfo.lang.toLowerCase().startsWith(label),'wrong page locale '+pageInfo.lang);
+   assert.equal(diag.toolLang,label,'backup runtime tool-language mismatch');
+   assert.equal(diag.moduleLocale,label,'backup runtime locale mismatch');
    const action=root.locator('[data-vf-backup-action="preview-workspace"]').first();
    await action.waitFor({timeout:12000});
    await action.click();
@@ -56,6 +60,7 @@ function locale(l){
   }
  }
  fs.writeFileSync('s01-r8-theme-merged-evidence.json',JSON.stringify(report,null,2));
+ assert.equal(report.results.length,4,'expected EN/ZH by 768/1440');
  console.log('S01_R8_THEME_BACKUP_EN_ZH_DESKTOP=PASS 4/4');
  }catch(e){fs.writeFileSync('s01-r8-theme-merged-evidence.json',JSON.stringify({...report,failed:String(e.stack||e)},null,2));throw e}finally{await b.close()}
 })().catch(e=>{console.error(e);process.exit(1)});
