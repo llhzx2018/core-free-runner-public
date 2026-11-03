@@ -40,6 +40,9 @@ check_owner(){
 }
 replace_with(){
  wp plugin deactivate vf-tools-m3u8/vf-tool-m3u8.php
+ # Read MariaDB after the OLD runtime has deactivated, before any replacement
+ # source can run; distinguishes legacy-side drift from new-code writes.
+ skin_db inspect
  rm -rf "$PLUGIN"
  mkdir -p "$PLUGIN"
  cp -a "$1/src/." "$PLUGIN/"
