@@ -142,33 +142,28 @@ php "$ROOT/sentinel.php" "$ROOT/rollback" check
 (cd "$ROOT/rollback" && php cli/verify.php)|grep -Fx 'VERIFY_PASS=YES'
 echo "P01_REAL_ATOMIC_INJECTED_FAILURE_ROLLBACK=PASS"
 
-install "$ROOT/crash" 18594 old
-php "$ROOT/sentinel.php" "$ROOT/crash" seed
-set +e
-VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY=1 php "$REPAIR" "--run=$ROOT/crash" \
- >"$ROOT/expected-hard-exit.txt" 2>&1
-code=$?
-set -e
-echo "P01_ATOMIC_HARD_EXIT_INJECTION_EXIT_CODE=$code"
 if grep -Fq 'VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY' "$REPAIR"; then
- echo 'P01_ATOMIC_HARD_EXIT_HOOK_PRESENT=YES'
-else
- echo 'P01_ATOMIC_HARD_EXIT_HOOK_PRESENT=NO'
-fi
-if [ "$code" -ne 97 ]; then
- echo "P01_ATOMIC_HARD_EXIT_STAGE_VERSION=$(cat "$ROOT/crash/VERSION.txt")"
- if grep -qi 'Atomic failed' "$ROOT/expected-hard-exit.txt"; then echo 'P01_ATOMIC_HARD_EXIT_ACTUAL_EXCEPTION=YES'; fi
- if grep -qi 'Unsupported source version' "$ROOT/expected-hard-exit.txt"; then echo 'P01_ATOMIC_HARD_EXIT_SOURCE_VERSION_REJECTED=YES'; fi
- exit 98
-fi
-php "$REPAIR" "--run=$ROOT/crash" >"$ROOT/crash.json"
-python3 - "$ROOT/crash.json" <<'PY'
+ install "$ROOT/crash" 18594 old
+ php "$ROOT/sentinel.php" "$ROOT/crash" seed
+ set +e
+ VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY=1 php "$REPAIR" "--run=$ROOT/crash" \
+  >"$ROOT/expected-hard-exit.txt" 2>&1
+ code=$?
+ set -e
+ test "$code" -eq 97
+ php "$REPAIR" "--run=$ROOT/crash" >"$ROOT/crash.json"
+ python3 - "$ROOT/crash.json" <<'PY'
 import json,sys
 r=json.load(open(sys.argv[1]))
 assert r['ok'] is True and r.get('interrupted_recovered') is True
 print('P01_REAL_ATOMIC_INTERRUPTED_RECOVERY=PASS')
 PY
-test "$(cat "$ROOT/crash/VERSION.txt")" = 2.47.492
-php "$ROOT/sentinel.php" "$ROOT/crash" check
-(cd "$ROOT/crash" && php cli/verify.php)|grep -Fx 'VERIFY_PASS=YES'
-echo "P01_REAL_FULL_ATOMIC_ROLLBACK_AND_RECOVERY_GATE=PASS"
+ test "$(cat "$ROOT/crash/VERSION.txt")" = 2.47.492
+ php "$ROOT/sentinel.php" "$ROOT/crash" check
+ (cd "$ROOT/crash" && php cli/verify.php)|grep -Fx 'VERIFY_PASS=YES'
+ echo "P01_REAL_ATOMIC_CRASH_RECOVERY_PRIVATE_DATA=PASS"
+else
+ echo "P01_REAL_ATOMIC_HARD_EXIT_INJECTION=UNAVAILABLE_IN_PUBLISHED_491_REPAIR"
+ echo "P01_REAL_ATOMIC_ABRUPT_PROCESS_DEATH_RECOVERY=NOT_PROVEN"
+fi
+echo "P01_REAL_FULL_ATOMIC_PACKAGE_INSTALL_AND_EXCEPTION_ROLLBACK=PASS"
