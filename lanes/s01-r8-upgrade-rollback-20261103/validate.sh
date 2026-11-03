@@ -3,7 +3,7 @@ set -Eeuo pipefail
 WP=/tmp/s01-r8-upgrade-wp
 CLI=/tmp/s01-r8-upgrade-wpcli.phar
 PLUGIN="$WP/wp-content/plugins/vf-tools-m3u8"
-OWNER_HEAD=326fd22662500e6f37df997df1acbaa2931d3e70
+OWNER_HEAD=7a1bca1deaf08148640812c9e465324442767d90
 OLD_HEAD=fbe049dc18eb18eab21e9d8c3cededfe55b783e7
 test "$(git -C candidate rev-parse HEAD)" = "$OWNER_HEAD"
 test "$(git -C legacy rev-parse HEAD)" = "$OLD_HEAD"
@@ -45,6 +45,7 @@ replace_with(){
  cp -a "$1/src/." "$PLUGIN/"
  wp plugin activate vf-tools-m3u8/vf-tool-m3u8.php
 }
+php candidate/tests/skin-migration-snapshot-guard.php
 skin_db(){ S01_R8_SKIN_PHASE="$1" wp eval-file control/lanes/s01-r8-upgrade-rollback-20261103/skin-db-parity.php; }
 check_owner
 skin_db baseline
