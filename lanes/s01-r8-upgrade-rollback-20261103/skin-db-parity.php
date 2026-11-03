@@ -7,7 +7,7 @@
 if (!defined('ABSPATH')) { throw new RuntimeException('WORDPRESS_REQUIRED'); }
 $phase = (string)getenv('S01_R8_SKIN_PHASE');
 $receipt = '/tmp/s01-r8-skin-raw-option-hashes.json';
-if (!in_array($phase, ['baseline', 'verify', 'guard'], true)) {
+if (!in_array($phase, ['baseline', 'verify', 'guard', 'inspect'], true)) {
     throw new RuntimeException('UNSUPPORTED_FIXTURE_PHASE');
 }
 $keys = [
@@ -34,6 +34,19 @@ $read = static function() use ($wpdb, $keys): array {
 $must = static function(bool $ok, string $message): void {
     if (!$ok) { throw new RuntimeException('S01_R8_SKIN_DB_' . $message); }
 };
+if ($phase === 'inspect') {
+    $must(is_file($receipt), 'BASELINE_REQUIRED_FOR_INSPECTION');
+    $prior = json_decode((string)file_get_contents($receipt), true, 512, JSON_THROW_ON_ERROR);
+    $actual = $read();
+    foreach ($prior as $key => $value) {
+        $row = $actual[$key] ?? [];
+        $same = $row === $value;
+        echo 'S01_R8_SKIN_HANDOFF_INSPECT=' . $key . ':' . ($same?'IDENTICAL':'CHANGED')
+          . ':before_size=' . ($value['length'] ?? 'missing')
+          . ':after_size=' . ($row['length'] ?? 'missing') . PHP_EOL;
+    }
+    return;
+}
 if (!function_exists('vf_m3u8_skin_seasonal_migrate_from_legacy_v12216')) {
     throw new RuntimeException('SKIN_MIGRATION_RUNTIME_MISSING');
 }
