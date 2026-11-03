@@ -20,13 +20,19 @@ import sys
 sys.dont_write_bytecode=True
 HERE=Path(__file__).resolve().parent
 WORKER=HERE/"p07-two-pending-live-db-worker.py"
-WORKER_BLOB="c63cd3513c773678a6162b50f8a93d35fe9160b6"
+WORKER_BLOB="654bcbdf80075c169d1e096375ecaf6608d48339"
 STATE_ROOT=Path("/var/lib/vf-server-ops/server-migrations")
 ORIGINAL17="pull-20261028T103425Z-98050c76"
 LEGACY9="pull-20261031T094144Z-d045fa5a"
 SITES=(
     ("unzip.kewaro.com",LEGACY9,9,6,12),
     ("ilovem3u8.kewaro.com",ORIGINAL17,17,7,42),
+)
+CURRENT_PARENT="pull-20261101T045943Z-923729a1"
+CURRENT_CHILD="pull-20261101T052411Z-35663c25"
+CURRENT_SITES=(
+    ("unzip.kewaro.com",CURRENT_CHILD,9,6,12),
+    ("ilovem3u8.kewaro.com",CURRENT_PARENT,17,7,42),
 )
 ENGINE_BLOB="71fb59ad7d005b88e39cbeed4b3302c7f313bd06"
 class Block(Exception):pass
@@ -62,10 +68,10 @@ def preflight(migration,inventory,domain,mid,expected_count,idx,expected_tables)
     # be False. All actual no-cutover/no-overwrite guards remain mandatory,
     # and this read-only tool can NEVER promote a migration.
     cutover_marker_ok=(
-        (mid==ORIGINAL17 and
+        (mid in (ORIGINAL17,CURRENT_PARENT) and
          ("cutover_prohibited" not in record or
           record.get("cutover_prohibited") is False))
-        or (mid==LEGACY9 and record.get("cutover_prohibited") is True)
+        or (mid in (LEGACY9,CURRENT_CHILD) and record.get("cutover_prohibited") is True)
     )
     checks=(
         ("MIGRATION_ID",record.get("migration_id")==mid),
@@ -94,10 +100,11 @@ def preflight(migration,inventory,domain,mid,expected_count,idx,expected_tables)
                             else "FALSE" if val is False else "OTHER")
             print("ORIGINAL_CUTOVER_MARKER="+classification,flush=True)
         raise Block("MIGRATION_SAFETY_OR_SITE_BOUNDARY_CHANGED")
-    if mid==ORIGINAL17 and "cutover_prohibited" not in record:
+    if mid in (ORIGINAL17,CURRENT_PARENT) and "cutover_prohibited" not in record:
         print("ORIGINAL17_LEGACY_MISSING_MARKER=ACCEPTED_READONLY_ONLY",flush=True)
-    if mid==LEGACY9:
-        need(record.get("partial_parent_migration_id")==ORIGINAL17,
+    if mid in (LEGACY9,CURRENT_CHILD):
+        expected_parent=ORIGINAL17 if mid==LEGACY9 else CURRENT_PARENT
+        need(record.get("partial_parent_migration_id")==expected_parent,
              "PARENT_MIGRATION_ID_CHANGED")
     site=sites[idx]
     src_db=site.get("mysql_databases")
@@ -231,6 +238,8 @@ def main():
     flags={
         "--compare-two-pending-site-databases-read-only":SITES,
         "--compare-ilovem3u8-only-read-only":SITES[1:],
+        "--compare-current-unzip-only-read-only":CURRENT_SITES[:1],
+        "--compare-current-two-pending-site-databases-read-only":CURRENT_SITES,
     }
     need(len(sys.argv)==2 and sys.argv[1] in flags,
          "EXPLICIT_SCOPED_READONLY_ARG_REQUIRED")
