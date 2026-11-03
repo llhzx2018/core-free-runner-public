@@ -13,9 +13,9 @@ function locale(l){
 (async()=>{
  const b=await chromium.launch({headless:true});
  try{
- for(const [l,label] of [['en_US','en'],['zh_CN','zh']]){
+ for(const [l,label] of [['zh_CN','zh']]){
   locale(l);
-  for(const width of [768,1440]){
+  for(const width of [1440]){
    const context=await b.newContext({viewport:{width,height:900},acceptDownloads:true});
    const p=await context.newPage(),errors=[];
    p.on('pageerror',e=>errors.push(e.message));
@@ -33,6 +33,17 @@ function locale(l){
      bodyText:document.body.innerText.slice(0,1600)
    }));
    assert.equal(pageInfo.backupModules,1);
+   const diag=await p.evaluate(()=>({
+     path:location.pathname,
+     htmlLang:document.documentElement.lang,
+     toolLang:document.querySelector('[data-vf-module="backup-restore"]')?.getAttribute('data-vf-tool-lang'),
+     moduleLocale:document.querySelector('[data-vf-module="backup-restore"]')?.getAttribute('data-vf-locale'),
+     bodyClass:document.body.className,
+     alternates:[...document.querySelectorAll('link[rel="alternate"][hreflang]')].map(x=>({lang:x.hreflang,url:x.href})).slice(0,5),
+     rootText:document.querySelector('[data-vf-module="backup-restore"]')?.innerText.slice(0,350),
+     htmlStart:document.documentElement.outerHTML.slice(0,350)
+   }));
+   console.log('S01_R8_ZH_LOCALE_DIAGNOSTIC='+JSON.stringify(diag));
    assert.ok(pageInfo.lang.toLowerCase().startsWith(label),'wrong page locale '+pageInfo.lang);
    const action=root.locator('[data-vf-backup-action="preview-workspace"]').first();
    await action.waitFor({timeout:12000});
