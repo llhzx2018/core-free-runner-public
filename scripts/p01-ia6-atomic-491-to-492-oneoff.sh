@@ -166,4 +166,24 @@ else
  echo "P01_REAL_ATOMIC_HARD_EXIT_INJECTION=UNAVAILABLE_IN_PUBLISHED_491_REPAIR"
  echo "P01_REAL_ATOMIC_ABRUPT_PROCESS_DEATH_RECOVERY=NOT_PROVEN"
 fi
+install "$ROOT/journal" 18595 old
+php "$ROOT/sentinel.php" "$ROOT/journal" seed
+python3 scripts/p01-ia6-atomic-crash-journal-oneoff.py "$ROOT/journal" "$REPAIR"
+php "$REPAIR" "--run=$ROOT/journal" >"$ROOT/journal-recovery.json"
+python3 - "$ROOT/journal-recovery.json" <<'PY'
+import json,sys
+r=json.load(open(sys.argv[1]))
+assert r['ok'] is True and r.get('interrupted_recovered') is True
+assert r.get('rollback_supported') is True
+print('P01_REAL_EXACT_REPAIR_INTERRUPTED_JOURNAL_RECOVERY=PASS')
+PY
+test "$(cat "$ROOT/journal/VERSION.txt")" = 2.47.492
+php "$REPAIR" "--verify-target=$ROOT/journal" >"$ROOT/journal-target.json"
+python3 - "$ROOT/journal-target.json" <<'PY'
+import json,sys
+assert json.load(open(sys.argv[1]))['ok'] is True
+PY
+php "$ROOT/sentinel.php" "$ROOT/journal" check
+(cd "$ROOT/journal" && php cli/verify.php)|grep -Fx 'VERIFY_PASS=YES'
+echo "P01_REAL_ATOMIC_JOURNAL_REPLAY_PRIVATE_DATA_AND_HASHES=PASS"
 echo "P01_REAL_FULL_ATOMIC_PACKAGE_INSTALL_AND_EXCEPTION_ROLLBACK=PASS"
