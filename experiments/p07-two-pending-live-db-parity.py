@@ -20,7 +20,7 @@ import sys
 sys.dont_write_bytecode=True
 HERE=Path(__file__).resolve().parent
 WORKER=HERE/"p07-two-pending-live-db-worker.py"
-WORKER_BLOB="0ebbe16b708f064bc21e20f92fcf1a3a487e5ee2"
+WORKER_BLOB="e1983a25dff3adca390b579a987345056ec8eb17"
 STATE_ROOT=Path("/var/lib/vf-server-ops/server-migrations")
 ORIGINAL17="pull-20261028T103425Z-98050c76"
 LEGACY9="pull-20261031T094144Z-d045fa5a"
@@ -136,7 +136,7 @@ def parsed(raw,mode):
          "WORKER_OUTPUT_SIZE_UNVERIFIED")
     fields={}
     allowed={"MODE","SCANNED_TABLES","SCANNED_COLUMNS","SCANNED_ROWS",
-             "ROW_FINGERPRINTS","READ_ONLY_TRANSACTION",
+             "ROW_FINGERPRINTS","IDENTITY_NAMES","READ_ONLY_TRANSACTION",
              "CONTENT_FINGERPRINT_NOT_SNAPSHOT_PARITY"}
     for line in raw.splitlines():
         need("=" in line,"WORKER_OUTPUT_INVALID")
@@ -152,7 +152,9 @@ def parsed(raw,mode):
         need(re.fullmatch("[0-9]{1,10}",fields[key]) is not None,
              "WORKER_NUMBER_UNVERIFIED")
         nums[key]=int(fields[key])
-    try:mp=json.loads(fields["ROW_FINGERPRINTS"])
+    try:
+        mp=json.loads(fields["ROW_FINGERPRINTS"])
+        labels=json.loads(fields["IDENTITY_NAMES"])
     except (ValueError,TypeError):raise Block("WORKER_HASH_MAP_INVALID") from None
     need(type(mp) is dict and 0<len(mp)<=1000 and len(mp)==nums["SCANNED_TABLES"]
          and nums["SCANNED_COLUMNS"]>=len(mp),"WORKER_TABLE_COUNT_INVALID")
@@ -169,7 +171,24 @@ def parsed(raw,mode):
                  for col,sig in row[3].items()),"WORKER_COLUMN_HASH_INVALID")
     need(sum(r[0] for r in mp.values())==nums["SCANNED_ROWS"],
          "WORKER_ROW_TOTAL_INVALID")
-    return nums,mp
+    # Only allow bounded, independently SHA-256-matching ASCII SQL identifiers.
+    # Do not print database names, credentials, primary keys, row data, or SQL.
+    need(type(labels) is dict and set(labels)==set(mp),
+         "WORKER_IDENTIFIER_MAP_INVALID")
+    for table_hash,identity in labels.items():
+        need(type(identity) is list and len(identity)==2
+             and type(identity[0]) is str
+             and re.fullmatch("[A-Za-z0-9_]{1,64}",identity[0]) is not None
+             and hashlib.sha256(identity[0].encode("ascii")).hexdigest()==table_hash
+             and type(identity[1]) is dict
+             and set(identity[1])==set(mp[table_hash][3]),
+             "WORKER_IDENTIFIER_TABLE_UNVERIFIED")
+        for column_hash,column_name in identity[1].items():
+            need(type(column_name) is str
+                 and re.fullmatch("[A-Za-z0-9_]{1,64}",column_name) is not None
+                 and hashlib.sha256(column_name.encode("ascii")).hexdigest()==column_hash,
+                 "WORKER_IDENTIFIER_COLUMN_UNVERIFIED")
+    return nums,mp,labels
 
 def compare_one(migration,inventory,domain,mid,total,idx,expected_tables):
     state,source_db,target_db,remote_runtime=preflight(
@@ -190,7 +209,7 @@ def compare_one(migration,inventory,domain,mid,total,idx,expected_tables):
     except (OSError,subprocess.SubprocessError,UnicodeError):
         raise Block("CP2_READONLY_WORKER_UNAVAILABLE") from None
     need(local.returncode==0,"CP2_READONLY_WORKER_FAILED")
-    target,tmap=parsed(local.stdout,"TARGET")
+    target,tmap,tlabels=parsed(local.stdout,"TARGET")
     need(target["SCANNED_TABLES"]==expected_tables,
          "TARGET_EXPECTED_TABLE_SCOPE_NOT_RESTORED")
     cmd=shlex.join(["env","PYTHONDONTWRITEBYTECODE=1",
@@ -201,10 +220,21 @@ def compare_one(migration,inventory,domain,mid,total,idx,expected_tables):
                                        check=False)
     except Exception:raise Block("SOURCE_READONLY_WORKER_UNAVAILABLE") from None
     need(result.returncode==0,"SOURCE_READONLY_WORKER_FAILED")
-    source,smap=parsed(result.stdout,"SOURCE")
+    source,smap,slabels=parsed(result.stdout,"SOURCE")
     need(source["SCANNED_TABLES"]==expected_tables,
          "SOURCE_EXPECTED_TABLE_SCOPE_CHANGED")
     names=set(smap)&set(tmap)
+    need(all(slabels[key][0]==tlabels[key][0]
+             and all(slabels[key][1][col]==tlabels[key][1][col]
+                     for col in set(smap[key][3])&set(tmap[key][3]))
+             for key in names), "SOURCE_TARGET_IDENTIFIER_DRIFT")
+    # Name only the differing schema identifiers; never reveal cell values.
+    different_tables=sorted(slabels[key][0] for key in names
+                            if smap[key][1]!=tmap[key][1])
+    different_columns=sorted(
+        slabels[key][0]+"."+slabels[key][1][col]
+        for key in names for col in set(smap[key][3])&set(tmap[key][3])
+        if smap[key][3][col]!=tmap[key][3][col])
     missing_src=len(set(tmap)-set(smap))
     missing_tgt=len(set(smap)-set(tmap))
     cols_diff=sum(smap[k][2]!=tmap[k][2] for k in names)
@@ -226,6 +256,8 @@ def compare_one(migration,inventory,domain,mid,total,idx,expected_tables):
       ("ROW_COUNT_DIFF_TABLES",count_diff),
       ("ROW_VALUE_DIFF_TABLES",val_diff),
       ("COLUMN_VALUE_DISTRIBUTION_DIFF_TABLES",cell_diff),
+      ("DIFFERING_TABLE_NAMES",",".join(different_tables)),
+      ("DIFFERING_COLUMN_NAMES",",".join(different_columns)),
       ("SOURCE_EXCESS_ROWS_IN_SHARED_TABLES",surplus_src),
       ("TARGET_EXCESS_ROWS_IN_SHARED_TABLES",surplus_dst),
       ("LIVE_SOURCE_VS_EXISTING_TARGET",("MATCH_ADVISORY_ONLY" if same else "DIFFER_ADVISORY")),
