@@ -20,7 +20,7 @@ import sys
 sys.dont_write_bytecode=True
 HERE=Path(__file__).resolve().parent
 WORKER=HERE/"p07-two-pending-live-db-worker.py"
-WORKER_BLOB="654bcbdf80075c169d1e096375ecaf6608d48339"
+WORKER_BLOB="0ebbe16b708f064bc21e20f92fcf1a3a487e5ee2"
 STATE_ROOT=Path("/var/lib/vf-server-ops/server-migrations")
 ORIGINAL17="pull-20261028T103425Z-98050c76"
 LEGACY9="pull-20261031T094144Z-d045fa5a"
