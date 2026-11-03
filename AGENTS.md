@@ -1,5 +1,12 @@
 # core-free-runner-public · Agent Bootstrap
 
+## GOV-DOC Infrastructure Entry · MUST
+
+VF/Kewaro 工程任务先 live-read [CURRENT.md](https://github.com/llhzx2018/gov-doc/blob/main/CURRENT.md) 及其 Current Runtime Entry，再核对本仓 `main/AGENTS.md`、owning Current 与 exact working source。执行 `GOV_DOC_LIVE_READ_RECEIPT_REQUIRED`：实际读过正文后输出完整 VF TASK HEADER 与一条读取依据；未验证先自动恢复，仍失败则 `RECOVERY_REQUIRED`。
+
+需要 Machine Proof、CI/权限阻断或准备交给 OWNER 处理时，按 [Shared Infra §3.2](https://github.com/llhzx2018/gov-doc/blob/main/governance/agent/VF_AGENT_INFRA_AUTHORITY.md) 发现并验证已登记路线。共享规则只在 GOV-DOC 维护；本仓保留专用 Guard，普通任务不自动启动 Runner / Durable / Release / Production。
+
+
 `core-free-runner-public` 是 VF 固定的 **Public-safe GitHub Hosted Runner + Evidence 基础设施**，不是产品仓、Release 仓或私人数据仓。
 
 ## 1. Authority First
