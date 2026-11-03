@@ -238,7 +238,7 @@ class ConnectionTests(unittest.TestCase):
 def real_mapping_proof(container,mysql,root):
     """Called inside the existing 157-table MariaDB restoration fixture."""
     assert PHP is not None and os.geteuid()==0
-    mysql("CREATE USER 'candidate_user'@'localhost' IDENTIFIED BY 'synthetic_candidate_password'; GRANT ALL ON corrected_copy.* TO 'candidate_user'@'localhost';")
+    mysql("CREATE USER 'candidate_user'@'127.0.0.1' IDENTIFIED BY 'synthetic_candidate_password'; GRANT ALL ON corrected_copy.* TO 'candidate_user'@'127.0.0.1';")
     mysql("CREATE USER 'olduser'@'localhost' IDENTIFIED BY 'oldpassword'; GRANT SELECT ON original_copy.* TO 'olduser'@'localhost';")
     path=root/"wp-config.php";path.write_bytes(CONFIG);path.chmod(0o640)
     before,meta=connect.read_file(path,owner=0);after=connect.render(before,RECORD,"original_copy",PHP)
@@ -249,8 +249,11 @@ def real_mapping_proof(container,mysql,root):
         db,user,password,host=json.loads(result.stdout)
         assert host==("127.0.0.1" if expected_db=="corrected_copy" else "localhost") and db==expected_db
         env=os.environ.copy();env["MYSQL_PWD"]=password
-        r=subprocess.run(["docker","exec","-e","MYSQL_PWD",container,"mariadb","--no-defaults","--protocol=tcp","--host="+host,"--user="+user,"--batch","--skip-column-names","--database="+db,"--execute=SELECT COUNT(*) FROM fixture_156"],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=True)
-        assert r.stdout.strip()==b"1"
+        protocol="socket" if host=="localhost" else "tcp"
+        r=subprocess.run(["docker","exec","-e","MYSQL_PWD",container,"mariadb","--no-defaults","--protocol="+protocol,"--host="+host,"--user="+user,"--batch","--skip-column-names","--database="+db,"--execute=SELECT COUNT(*) FROM fixture_156"],env=env,stdout=subprocess.PIPE,stderr=subprocess.PIPE,check=False)
+        # This disposable server contains synthetic users/data only.
+        assert r.returncode==0,r.stderr.decode()[:1024]
+        assert r.stdout.strip()==b"1",r.stdout[:128]
     folder=root/"connection-recovery"
     actual_config_readonly_connection("original_copy")
     connect.connect_transaction(folder,path,before,after,meta,"fixture-target",actual_config_readonly_connection)
