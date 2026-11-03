@@ -1,10 +1,12 @@
-name: P08 R15 Real Simple Kuma Isolated Synthetic Sandbox (one-off)
+name: P08 R16 Actual Published Static LP Chromium + Kuma (one-off)
 on:
   pull_request:
     branches: [main]
     paths:
       - '.github/workflows/p08-r15-simple-kuma-sandbox-oneoff.yml'
       - 'tests/p08-oneoff-kuma-sandbox.py'
+      - 'tests/p08-r16-publish-real-lp.php'
+      - 'tests/p08-r16-real-chromium.cjs'
 
 permissions:
   contents: read
@@ -59,7 +61,7 @@ jobs:
           set -Eeuo pipefail
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx
-          mkdir -p "$RUNNER_TEMP/p08-kuma"
+          mkdir -p "$RUNNER_TEMP/p08-kuma/p08-public"
           openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
             -keyout "$RUNNER_TEMP/p08-kuma/server.key" -out "$RUNNER_TEMP/p08-kuma/server.crt" \
             -subj '/CN=kuma.example.test' \
@@ -70,6 +72,7 @@ jobs:
           sudo update-ca-certificates >/dev/null 2>&1
           printf '%s\n' '127.0.0.1 kuma.example.test lander.example.test' | sudo tee -a /etc/hosts >/dev/null
           cat > "$RUNNER_TEMP/p08-kuma/nginx.conf" <<EOF
+          user $(id -un);
           worker_processes 1;
           pid $RUNNER_TEMP/p08-kuma/nginx.pid;
           error_log $RUNNER_TEMP/p08-kuma/nginx-error.log warn;
@@ -92,10 +95,11 @@ jobs:
               server_name lander.example.test;
               ssl_certificate $RUNNER_TEMP/p08-kuma/server.crt;
               ssl_certificate_key $RUNNER_TEMP/p08-kuma/server.key;
-              location /landing/r15 {
-                default_type text/html;
-                return 200 '<html><body>P08 SYNTHETIC LP</body></html>';
+              root $RUNNER_TEMP/p08-kuma/p08-public;
+              location = /landing/r15 {
+                try_files /landing/synthetic-lander/current/index.html =404;
               }
+              location /landing/ { return 404; }
             }
           }
           EOF
@@ -198,6 +202,57 @@ jobs:
           }
           PHP
 
+      - name: Publish a real immutable P08 page bound to the verified live Kuma campaign
+        shell: bash
+        env:
+          APP_ENV: testing
+          APP_DEBUG: 'false'
+          DB_CONNECTION: sqlite
+          SESSION_DRIVER: array
+          CACHE_STORE: array
+        run: |
+          set -Eeuo pipefail
+          php -l runner/tests/p08-r16-publish-real-lp.php >/dev/null
+          test "$(git -C lander rev-parse HEAD)" = f4171bb2da61df77adfd2ade669a36eec2992d50
+          export P08_R16_PUBLIC_ROOT="$RUNNER_TEMP/p08-kuma/p08-public"
+          export P08_R16_SQLITE="$RUNNER_TEMP/p08-kuma/p08-lander.sqlite"
+          export P08_R16_KUMA_TOKEN="$(cat "$RUNNER_TEMP/p08-kuma/key")"
+          (cd lander/backend && php "$GITHUB_WORKSPACE/runner/tests/p08-r16-publish-real-lp.php")
+          test -f "$RUNNER_TEMP/p08-kuma/p08-public/landing/synthetic-lander/current/index.html"
+          test -s "$RUNNER_TEMP/p08-kuma/tracking-url"
+          curl --noproxy '*' --silent --show-error --fail \
+            --cacert "$RUNNER_TEMP/p08-kuma/server.crt" \
+            https://lander.example.test/landing/r15 \
+            | grep -q 'Verified synthetic landing page'
+          echo P08_R16_ACTUAL_STATIC_HTML_OVER_NGINX_TLS_PASS
+
+      - name: Install disposable Chromium browser in the registered runner
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install isolated Playwright Chromium without publishing assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          node --check runner/tests/p08-r16-real-chromium.cjs
+          npm --prefix "$RUNNER_TEMP/p08-playwright" install --no-fund --no-audit \
+            --no-package-lock --no-save playwright@1.58.2 >/dev/null
+          "$RUNNER_TEMP/p08-playwright/node_modules/.bin/playwright" install --with-deps chromium >/dev/null
+          echo P08_R16_CHROMIUM_RUNTIME_READY
+
+      - name: Browser actual P08 generated LP via real Kuma click and synthetic Postback
+        shell: bash
+        env:
+          NO_PROXY: kuma.example.test,lander.example.test,offers.example.test,localhost,127.0.0.1
+          no_proxy: kuma.example.test,lander.example.test,offers.example.test,localhost,127.0.0.1
+        run: |
+          set -Eeuo pipefail
+          export P08_PLAYWRIGHT_ROOT="$RUNNER_TEMP/p08-playwright"
+          export P08_R16_TMP="$RUNNER_TEMP/p08-kuma"
+          node runner/tests/p08-r16-real-chromium.cjs
+          echo P08_R16_EXACT_P08_PUBLISHED_LP_TO_REAL_KUMA_CHROMIUM_PASS
+
       - name: Remove temporary containers, credentials, TLS and workspace
         shell: bash
         if: always()
@@ -209,7 +264,7 @@ jobs:
           if test -f kuma/docker-compose.yml; then
             docker compose -f kuma/docker-compose.yml down -v --remove-orphans --rmi local >/dev/null 2>&1
           fi
-          rm -rf -- "$RUNNER_TEMP/p08-kuma"
+          rm -rf -- "$RUNNER_TEMP/p08-kuma" "$RUNNER_TEMP/p08-playwright"
           find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
           echo KUMA_ONEOFF_SANDBOX_CLEANUP_ATTEMPTED
           echo KUMA_NO_REAL_PROVIDER_OR_PUBLIC_ARTIFACT_USED
