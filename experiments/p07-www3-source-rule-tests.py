@@ -214,7 +214,10 @@ def real_engine():
         return p.stdout
     try:
         for i in range(60):
-            check=subprocess.run(["docker","exec",container,"mariadb-admin","--no-defaults","-uroot","ping"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            # The image starts a temporary socket-only server during init.
+            # A socket ping can pass before that server shuts down, destroying
+            # MEMORY rows. Require a real query on final TCP loopback instead.
+            check=subprocess.run(["docker","exec",container,"mariadb","--no-defaults","--protocol=tcp","--host=127.0.0.1","-uroot","--execute=SELECT 1"],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
             if check.returncode==0:break
             time.sleep(1)
         else:raise AssertionError("synthetic DB not ready")
