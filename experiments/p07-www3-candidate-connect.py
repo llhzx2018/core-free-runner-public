@@ -7,7 +7,7 @@ and support crash recovery / exact rollback without rerunning source access.
 WordPress, HTTP, Cron and application code are never executed by this tool.
 """
 from __future__ import annotations
-import contextlib,fcntl,hashlib,importlib.util,json,os,pwd,re,shlex,shutil,stat,subprocess,sys,tempfile
+import contextlib,errno,fcntl,grp,hashlib,importlib.util,json,os,pwd,re,shlex,shutil,stat,subprocess,sys,tempfile
 from pathlib import Path
 
 CANDIDATE_NAME="p07-www3-source-rule-candidate.py"
@@ -32,21 +32,54 @@ def load_candidate():
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     return module
 
-def secure_dir(path,*,private=False):
+def isolated_site_group(gid,owner):
+    """A writable site's primary group must contain only that user or root.
+
+    Include supplementary and primary memberships; never trust the group name
+    alone. Private recovery paths do not use this exception.
+    """
+    try:
+        account=pwd.getpwuid(owner);group=grp.getgrgid(gid)
+        if account.pw_gid!=gid:return False
+        members=[pwd.getpwnam(name) for name in group.gr_mem]
+        members.extend(user for user in pwd.getpwall() if user.pw_gid==gid)
+        return all(user.pw_uid in {0,owner} for user in members)
+    except KeyError:return False
+
+def no_acl(path,name):
+    try:os.getxattr(path,"system.posix_acl_"+name,follow_symlinks=False)
+    except OSError as exc:
+        if exc.errno in {errno.ENODATA,errno.ENOTSUP}:return True
+        raise Block("ACL_READBACK_UNPROVEN") from None
+    return False
+
+def trusted_mode(info,path,owner):
+    if info.st_uid not in {0,owner} or info.st_mode&0o002:return False
+    if info.st_mode&0o020:
+        return owner is not None and isolated_site_group(info.st_gid,owner) and no_acl(path,"access")
+    return True
+
+def secure_dir(path,*,private=False,owner=None,role="DIRECTORY"):
     need(path.is_absolute() and path==path.resolve(),"DIRECTORY_PATH_UNSAFE")
     for part in (path,*path.parents):
         info=part.lstat()
         need(stat.S_ISDIR(info.st_mode) and not stat.S_ISLNK(info.st_mode),"DIRECTORY_KIND_UNSAFE")
     info=path.stat()
-    need(not info.st_mode&0o022,"DIRECTORY_WRITABLE_BY_OTHERS")
+    if owner is None or private:valid=not info.st_mode&0o022
+    else:valid=trusted_mode(info,path,owner)
+    if not valid:
+        print("PERMISSION_BLOCK_ROLE="+role,flush=True)
+        print("PERMISSION_BLOCK_METADATA="+f"{stat.S_IMODE(info.st_mode):04o}:{info.st_uid}:{info.st_gid}",flush=True)
+    need(valid,"DIRECTORY_WRITABLE_BY_OTHERS")
     if private:need(info.st_uid==0 and not info.st_mode&0o077,"PRIVATE_DIRECTORY_UNSAFE")
+    if owner is not None:need(no_acl(path,"default"),"SITE_DIRECTORY_DEFAULT_ACL_UNPROVEN")
 
 def read_file(path,*,private=False,owner=None):
     fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
     try:
         info=os.fstat(fd)
         need(stat.S_ISREG(info.st_mode) and info.st_nlink==1 and 0<info.st_size<=2*1024*1024,"FILE_KIND_OR_SIZE_UNSAFE")
-        need(not info.st_mode&0o022 and info.st_uid in ({0} if private else {0,owner}),"FILE_OWNER_OR_MODE_UNSAFE")
+        need((not info.st_mode&0o022 and info.st_uid==0) if private else trusted_mode(info,path,owner),"FILE_OWNER_OR_MODE_UNSAFE")
         if private:need(not info.st_mode&0o077,"PRIVATE_FILE_MODE_UNSAFE")
         with os.fdopen(os.dup(fd),"rb") as file:data=file.read(2*1024*1024+1)
         need(len(data)==info.st_size,"FILE_CHANGED_DURING_READ")
@@ -155,9 +188,10 @@ def render(data,record,source_db,php):
     need(check.returncode==0,"WP_PREPARED_CONFIG_SYNTAX_FAILED")
     return result
 
-def replace_config(path,before,after,meta):
-    secure_dir(path.parent)
-    current,actual=read_file(path,owner=meta["uid"])
+def replace_config(path,before,after,meta,*,owner=None):
+    if owner is None:owner=meta["uid"]
+    secure_dir(path.parent,owner=owner,role="CONFIG_PARENT")
+    current,actual=read_file(path,owner=owner)
     need(current==before and actual==meta,"WP_CONFIG_CHANGED_RETAIN_ALL")
     # Never leave a plain-text config temporary file readable in a Web root.
     # This fresh root-only directory keeps the same filesystem for rename.
@@ -168,16 +202,16 @@ def replace_config(path,before,after,meta):
         fd=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
         with os.fdopen(fd,"wb") as f:
             f.write(after);f.flush();os.fchown(f.fileno(),meta["uid"],meta["gid"]);os.fchmod(f.fileno(),meta["mode"]);os.fsync(f.fileno())
-        current,actual=read_file(path,owner=meta["uid"])
+        current,actual=read_file(path,owner=owner)
         need(current==before and actual==meta,"WP_CONFIG_CHANGED_RETAIN_ALL")
         os.replace(name,path);sync_dir(path.parent)
-        current,actual=read_file(path,owner=meta["uid"])
+        current,actual=read_file(path,owner=owner)
         need(current==after and actual==meta,"WP_CONFIG_READBACK_FAILED")
     finally:
         if os.path.lexists(name):os.unlink(name)
         os.rmdir(staging)
 
-def rollback(folder,identity,expected_path):
+def rollback(folder,identity,expected_path,*,owner=None):
     """Works after interruption/DB loss; never needs SQL or source access."""
     raw,_=read_file(folder/"journal.json",private=True);record=json.loads(raw)
     need(isinstance(record,dict) and record.get("schema")==SCHEMA and record.get("target_identity")==identity
@@ -185,10 +219,12 @@ def rollback(folder,identity,expected_path):
     before,_=read_file(folder/"original.php",private=True);after,_=read_file(folder/"candidate.php",private=True)
     need(digest(before)==record.get("original_sha256") and digest(after)==record.get("candidate_sha256"),"ROLLBACK_BACKUP_CHANGED")
     meta=record.get("metadata");need(isinstance(meta,dict) and set(meta)=={"uid","gid","mode"} and all(type(x) is int and x>=0 for x in meta.values()),"ROLLBACK_METADATA_UNPROVEN")
-    need(meta["mode"]<=0o777 and not meta["mode"]&0o022,"ROLLBACK_METADATA_UNPROVEN")
-    current,actual=read_file(expected_path,owner=meta["uid"])
+    need(meta["mode"]<=0o777 and not meta["mode"]&0o002,"ROLLBACK_METADATA_UNPROVEN")
+    if owner is None:owner=meta["uid"]
+    need(record.get("site_owner_uid",owner)==owner,"ROLLBACK_SITE_OWNER_CHANGED")
+    current,actual=read_file(expected_path,owner=owner)
     need(actual==meta,"ROLLBACK_CONFIG_METADATA_CHANGED")
-    if current==after:replace_config(expected_path,after,before,meta)
+    if current==after:replace_config(expected_path,after,before,meta,owner=owner)
     else:need(current==before,"ROLLBACK_CONFIG_CHANGED_RETAIN_ALL")
     record["status"]="ROLLED_BACK";save_journal(folder,record)
 
@@ -228,12 +264,13 @@ def recovery_bundle(candidate,ro):
         data=read_file(root/name,private=True)[0];need(gitblob(data)==sha,"RECOVERY_COMPANION_DRIFT");bundle[name]=data
     return bundle
 
-def connect_transaction(folder,path,before,after,meta,identity,postcheck,*,bundle=None):
+def connect_transaction(folder,path,before,after,meta,identity,postcheck,*,bundle=None,owner=None):
+    if owner is None:owner=meta["uid"]
     need(not os.path.lexists(folder),"PRIOR_CONNECTION_ATTEMPT_RETAINED")
     os.mkdir(folder,0o700);sync_dir(folder.parent)
     with lock_dir(folder):
         write_private(folder/"original.php",before);write_private(folder/"candidate.php",after)
-        record={"schema":SCHEMA,"target_identity":identity,"config_path":str(path),"metadata":meta,
+        record={"schema":SCHEMA,"target_identity":identity,"config_path":str(path),"metadata":meta,"site_owner_uid":owner,
                 "original_sha256":digest(before),"candidate_sha256":digest(after),"status":"INTENT_RESERVED",
                 "cutover_allowed":False,"database_writes":False,"migration_state_promoted":False}
         if bundle is not None:record["recovery_bundle_gitblobs"]=preserve_recovery_bundle(folder,bundle)
@@ -241,21 +278,21 @@ def connect_transaction(folder,path,before,after,meta,identity,postcheck,*,bundl
         # Read the durable recovery files back before the first config write.
         need(read_file(folder/"original.php",private=True)[0]==before and read_file(folder/"candidate.php",private=True)[0]==after,"RECOVERY_COPY_READBACK_FAILED")
         try:
-            replace_config(path,before,after,meta)
+            replace_config(path,before,after,meta,owner=owner)
             postcheck()
-            current,actual=read_file(path,owner=meta["uid"])
+            current,actual=read_file(path,owner=owner)
             need(current==after and actual==meta,"WP_CONFIG_CHANGED_AFTER_CONNECT")
             record["status"]="CONNECTED_NOT_CUTOVER_READY";save_journal(folder,record)
         except Exception:
             record["status"]="ROLLBACK_REQUIRED";save_journal(folder,record)
-            try:rollback(folder,identity,path)
+            try:rollback(folder,identity,path,owner=owner)
             except Exception:raise Block("CONFIG_ROLLBACK_UNPROVEN_RETAIN_ALL") from None
             raise Block("CONNECTION_FAILED_ORIGINAL_CONFIG_RESTORED") from None
 
 def candidate_receipt(base,identity,source_db):
     import site_lifecycle
     db,user,_=site_lifecycle.derive_database_identity(base.DOMAIN,base.TAIL+":source-rule-copy-v1",1)
-    folder=base.BASE/base.TAIL/"target-transactions";secure_dir(folder,private=True)
+    folder=base.BASE/base.TAIL/"target-transactions";secure_dir(folder,private=True,role="TRANSACTION_DIRECTORY")
     token=hashlib.sha256((base.TAIL+":"+base.DOMAIN+":"+db).encode()).hexdigest()[:20]
     raw,_=read_file(folder/("www3-hex-scratch-"+token+".json"),private=True);r=json.loads(raw)
     need(isinstance(r,dict),"CANDIDATE_RECEIPT_INVALID")
@@ -280,10 +317,11 @@ def site_config(base,tail,*,require_php=True):
         need(source[0].get(key)==target[0].get(key),"SITE_CONTRACT_CHANGED")
     site=target[0];user=site["site_user"];root=Path(site["site_root"])
     need(re.fullmatch(r"[a-z_][a-z0-9_-]{0,63}",user) and root==Path("/home")/user/"htdocs"/base.DOMAIN,"SITE_ROOT_UNPROVEN")
-    secure_dir(root);owner=pwd.getpwnam(user).pw_uid
+    owner=pwd.getpwnam(user).pw_uid
+    secure_dir(root,owner=owner,role="SITE_ROOT")
     paths=[p for p in (root/"wp-config.php",root/"public/wp-config.php") if os.path.lexists(p)]
     need(len(paths)==1,"WP_CONFIG_MISSING_OR_AMBIGUOUS")
-    secure_dir(paths[0].parent)
+    secure_dir(paths[0].parent,owner=owner,role="CONFIG_PARENT")
     php=None
     if require_php:
         runtime=site.get("runtime",{});version=str(runtime.get("version",""))
@@ -322,10 +360,10 @@ def run():
     tail=base.private_state(base.TAIL);identity=engine.target_identity()
     need(identity==tail.get("target_server_identity"),"TARGET_IDENTITY_CHANGED")
     path,owner,php=site_config(base,tail,require_php=sys.argv[1]!=ROLLBACK)
-    parent=base.BASE/base.TAIL/"target-transactions";secure_dir(parent,private=True)
+    parent=base.BASE/base.TAIL/"target-transactions";secure_dir(parent,private=True,role="TRANSACTION_DIRECTORY")
     folder=parent/JOURNAL_NAME
     if sys.argv[1]==ROLLBACK:
-        with lock_dir(folder):rollback(folder,identity,path)
+        with lock_dir(folder):rollback(folder,identity,path,owner=owner)
         print("WWW3_ORIGINAL_CONFIG_RESTORED=VERIFIED",flush=True)
     else:
         need(not os.path.lexists(folder),"PRIOR_CONNECTION_ATTEMPT_RETAINED")
@@ -337,8 +375,8 @@ def run():
         # Recheck target ownership after slow readback and immediately before
         # reserving the recovery transaction. No migration status promotion.
         need(engine.target_identity()==identity,"TARGET_IDENTITY_CHANGED")
-        base.verify_state();again,_,_=site_config(base,tail);need(again==path,"SITE_CONFIG_PATH_CHANGED")
-        connect_transaction(folder,path,before,after,meta,identity,lambda:connection_check(record,stage),bundle=recovery_bundle(candidate,ro))
+        base.verify_state();again,again_owner,_=site_config(base,tail);need(again==path and again_owner==owner,"SITE_CONFIG_PATH_CHANGED")
+        connect_transaction(folder,path,before,after,meta,identity,lambda:connection_check(record,stage),bundle=recovery_bundle(candidate,ro),owner=owner)
         print("WWW3_CANDIDATE_DB_CONFIG_CONNECTED=VERIFIED",flush=True)
         print("WWW3_CONFIG_ROLLBACK_READY=YES",flush=True)
         print("WWW3_CONNECTION_RECOVERY_PATH="+str(folder),flush=True)

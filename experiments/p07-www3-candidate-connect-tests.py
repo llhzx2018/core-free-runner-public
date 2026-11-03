@@ -12,6 +12,13 @@ def load(name,label):
     module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module);return module
 connect=load("p07-www3-candidate-connect.py","connect")
 PHP=shutil.which("php")
+def can_chown_fixture():
+    with tempfile.TemporaryDirectory() as td:
+        path=Path(td)/"probe";path.touch()
+        try:os.chown(path,61007,61007)
+        except OSError:return False
+        return path.stat().st_uid==path.stat().st_gid==61007
+CAN_CHOWN=can_chown_fixture()
 CONFIG=b'''<?php
 // A comment is not code: define('DB_PASSWORD', 'comment');
 define( 'DB_NAME', 'original_copy' );
@@ -139,6 +146,81 @@ class ConnectionTests(unittest.TestCase):
         link.unlink();path.chmod(0o666)
         with self.assertRaises(connect.Block):connect.read_file(path,owner=os.getuid())
 
+    @contextlib.contextmanager
+    def site_accounts(self,*,extra_primary=False,extra_supplementary=False):
+        root=SimpleNamespace(pw_name="root",pw_uid=0,pw_gid=0)
+        site=SimpleNamespace(pw_name="fixture_site",pw_uid=61007,pw_gid=61007)
+        other=SimpleNamespace(pw_name="other_site",pw_uid=61008,pw_gid=61007 if extra_primary else 61008)
+        accounts=[root,site,other]
+        group=SimpleNamespace(gr_gid=61007,gr_mem=["fixture_site"]+(["other_site"] if extra_supplementary else []))
+        with patch.object(connect.pwd,"getpwuid",side_effect=lambda uid:next(x for x in accounts if x.pw_uid==uid)), \
+             patch.object(connect.pwd,"getpwnam",side_effect=lambda name:next(x for x in accounts if x.pw_name==name)), \
+             patch.object(connect.pwd,"getpwall",return_value=accounts),patch.object(connect.grp,"getgrgid",return_value=group):
+            yield site
+
+    @unittest.skipUnless(CAN_CHOWN,"Non-root UID ownership requires hosted root gate")
+    def test_dedicated_group_775_and_664_preserved_through_connect_and_rollback(self):
+        for file_owner in (0,61007):
+            with self.subTest(file_owner=file_owner),self.site_accounts() as site:
+                root,path,before,_=self.files();web=root/"web";web.mkdir(mode=0o775);web.chmod(0o775)
+                os.chown(web,site.pw_uid,site.pw_gid);path.rename(web/"wp-config.php");path=web/"wp-config.php"
+                os.chown(path,file_owner,site.pw_gid);path.chmod(0o664)
+                connect.secure_dir(web,owner=site.pw_uid)
+                before,meta=connect.read_file(path,owner=site.pw_uid);after=before+b"\n"
+                folder=root/"recovery"
+                connect.connect_transaction(folder,path,before,after,meta,"target",lambda:None,owner=site.pw_uid)
+                self.assertEqual(connect.read_file(path,owner=site.pw_uid),(after,meta))
+                with connect.lock_dir(folder):connect.rollback(folder,"target",path,owner=site.pw_uid)
+                self.assertEqual(connect.read_file(path,owner=site.pw_uid),(before,meta))
+                self.assertEqual(web.stat().st_mode&0o777,0o775)
+
+    @unittest.skipUnless(CAN_CHOWN,"Non-root UID ownership requires hosted root gate")
+    def test_shared_primary_supplementary_wrong_group_and_world_write_stay_blocked(self):
+        for cause in ("primary","supplementary","wrong_group","world","owner"):
+            with self.subTest(cause=cause),self.site_accounts(extra_primary=cause=="primary",extra_supplementary=cause=="supplementary") as site:
+                root,path,_,_=self.files();web=root/"web";web.mkdir();web.chmod(0o777 if cause=="world" else 0o775)
+                uid=61008 if cause=="owner" else site.pw_uid;gid=61008 if cause=="wrong_group" else site.pw_gid
+                os.chown(web,uid,gid);os.chown(path,uid,gid);path.chmod(0o666 if cause=="world" else 0o664)
+                with self.assertRaisesRegex(connect.Block,"DIRECTORY_WRITABLE_BY_OTHERS"):connect.secure_dir(web,owner=site.pw_uid)
+                with self.assertRaisesRegex(connect.Block,"FILE_OWNER_OR_MODE_UNSAFE"):connect.read_file(path,owner=site.pw_uid)
+
+    @unittest.skipUnless(CAN_CHOWN,"Non-root UID ownership requires hosted root gate")
+    def test_private_paths_and_acl_permissions_do_not_get_site_group_exception(self):
+        with self.site_accounts() as site:
+            root,path,_,_=self.files();os.chown(root,0,site.pw_gid);root.chmod(0o770)
+            with self.assertRaises(connect.Block):connect.secure_dir(root,private=True,owner=site.pw_uid)
+            os.chown(path,0,site.pw_gid);path.chmod(0o660)
+            with self.assertRaises(connect.Block):connect.read_file(path,private=True)
+            with patch.object(connect.os,"getxattr",return_value=b"synthetic extended ACL"):
+                with self.assertRaises(connect.Block):connect.secure_dir(root,owner=site.pw_uid)
+                with self.assertRaises(connect.Block):connect.read_file(path,owner=site.pw_uid)
+                root.chmod(0o750)
+                with self.assertRaisesRegex(connect.Block,"SITE_DIRECTORY_DEFAULT_ACL_UNPROVEN"):connect.secure_dir(root,owner=site.pw_uid)
+
+    def test_group_policy_checks_primary_and_supplementary_members_and_acl(self):
+        for primary,supplementary,expected in ((False,False,True),(True,False,False),(False,True,False)):
+            with self.subTest(primary=primary,supplementary=supplementary),self.site_accounts(extra_primary=primary,extra_supplementary=supplementary) as site:
+                self.assertEqual(connect.isolated_site_group(site.pw_gid,site.pw_uid),expected)
+                self.assertFalse(connect.isolated_site_group(61008,site.pw_uid))
+                info=SimpleNamespace(st_uid=site.pw_uid,st_gid=site.pw_gid,st_mode=0o775)
+                with patch.object(connect.os,"getxattr",side_effect=OSError(connect.errno.ENODATA,"no ACL")):
+                    self.assertEqual(connect.trusted_mode(info,Path("/synthetic"),site.pw_uid),expected)
+                with patch.object(connect.os,"getxattr",return_value=b"ACL"):
+                    self.assertFalse(connect.trusted_mode(info,Path("/synthetic"),site.pw_uid))
+
+    def test_site_config_accepts_verified_site_group_and_denies_wrong_inventory(self):
+        import inventory
+        with self.site_accounts() as site:
+            root=Path("/home/fixture_site/htdocs/fixture.example");config=root/"wp-config.php"
+            manifest={"domain":"fixture.example","site_user":"fixture_site","site_root":str(root),"document_root":str(root),"runtime":{"type":"php","version":"8.3"}}
+            base=SimpleNamespace(DOMAIN="fixture.example");tail={"sites":[manifest]}
+            with patch.object(inventory,"build_manifest",return_value=tail),patch.object(connect,"secure_dir") as check,patch.object(connect.os.path,"lexists",side_effect=lambda p:p==config),patch.object(connect.shutil,"which",return_value="/usr/bin/php8.3"):
+                self.assertEqual(connect.site_config(base,tail),(config,site.pw_uid,"/usr/bin/php8.3"))
+                self.assertEqual(check.call_args_list[0].kwargs,{"owner":site.pw_uid,"role":"SITE_ROOT"})
+                self.assertEqual(check.call_args_list[1].kwargs,{"owner":site.pw_uid,"role":"CONFIG_PARENT"})
+                with self.assertRaisesRegex(connect.Block,"SITE_CONTRACT_CHANGED"):
+                    connect.site_config(base,{"sites":[dict(manifest,site_user="other_site")]})
+
     def test_transaction_lock_rejects_concurrent_access(self):
         root,_,_,_=self.files();folder=root/"recovery";folder.mkdir(mode=0o700)
         with connect.lock_dir(folder):
@@ -240,8 +322,13 @@ def real_mapping_proof(container,mysql,root):
     assert PHP is not None and os.geteuid()==0
     mysql("CREATE USER 'candidate_user'@'127.0.0.1' IDENTIFIED BY 'synthetic_candidate_password'; GRANT ALL ON corrected_copy.* TO 'candidate_user'@'127.0.0.1';")
     mysql("CREATE USER 'olduser'@'localhost' IDENTIFIED BY 'oldpassword'; GRANT SELECT ON original_copy.* TO 'olduser'@'localhost';")
-    path=root/"wp-config.php";path.write_bytes(CONFIG);path.chmod(0o640)
-    before,meta=connect.read_file(path,owner=0);after=connect.render(before,RECORD,"original_copy",PHP)
+    # Exercise real non-root dedicated group permissions, not just mocks.
+    site=connect.pwd.getpwnam("nobody")
+    assert site.pw_uid!=0 and connect.isolated_site_group(site.pw_gid,site.pw_uid)
+    web=root/"site";web.mkdir();os.chown(web,site.pw_uid,site.pw_gid);web.chmod(0o775)
+    path=web/"wp-config.php";path.write_bytes(CONFIG);os.chown(path,site.pw_uid,site.pw_gid);path.chmod(0o664)
+    connect.secure_dir(web,owner=site.pw_uid)
+    before,meta=connect.read_file(path,owner=site.pw_uid);after=connect.render(before,RECORD,"original_copy",PHP)
     def actual_config_readonly_connection(expected_db="corrected_copy"):
         # This config is wholly synthetic (four literals + a salt), so execute
         # it here to independently verify actual PHP literal interpretation.
@@ -256,15 +343,17 @@ def real_mapping_proof(container,mysql,root):
         assert r.stdout.strip()==b"1",r.stdout[:128]
     folder=root/"connection-recovery"
     actual_config_readonly_connection("original_copy")
-    connect.connect_transaction(folder,path,before,after,meta,"fixture-target",actual_config_readonly_connection)
+    connect.connect_transaction(folder,path,before,after,meta,"fixture-target",actual_config_readonly_connection,owner=site.pw_uid)
     actual_config_readonly_connection()
-    with connect.lock_dir(folder):connect.rollback(folder,"fixture-target",path)
-    assert connect.read_file(path,owner=0)==(before,meta)
+    with connect.lock_dir(folder):connect.rollback(folder,"fixture-target",path,owner=site.pw_uid)
+    assert connect.read_file(path,owner=site.pw_uid)==(before,meta)
+    assert web.stat().st_mode&0o777==0o775
     actual_config_readonly_connection("original_copy")
     assert mysql("SELECT COUNT(*) FROM corrected_copy.fixture_156;").strip()==b"1"
     assert mysql("SELECT COUNT(*) FROM original_copy.fixture_156;").strip()==b"1"
     print("P07_WWW3_REAL_PHP_CONFIG_AND_DB_CONNECTION=PASS",flush=True)
     print("P07_WWW3_REAL_CONFIG_ROLLBACK_AND_BOTH_DATABASES_RETAINED=PASS",flush=True)
+    print("P07_WWW3_DEDICATED_SITE_GROUP_775_664_RETAINED=PASS",flush=True)
 
 if __name__=="__main__":
     if sys.argv[1:]==["--real-engine"]:
@@ -273,5 +362,6 @@ if __name__=="__main__":
     else:
         if "--require-php" in sys.argv:
             if PHP is None:raise SystemExit("PHP_REQUIRED_FOR_MACHINE_GATE")
+            if not CAN_CHOWN:raise SystemExit("NONROOT_UID_OWNERSHIP_REQUIRED_FOR_MACHINE_GATE")
             sys.argv.remove("--require-php")
         unittest.main()
