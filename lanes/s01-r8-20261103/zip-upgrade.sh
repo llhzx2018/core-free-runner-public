@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 test "$(git -C baseline rev-parse HEAD)" = "fbe049dc18eb18eab21e9d8c3cededfe55b783e7"
-test "$(git -C candidate rev-parse HEAD)" = "3ab0992fb4788b8b9d15d0e338040189b6fcdd8f"
-test "$(git -C theme rev-parse HEAD)" = "d44b6b148bcdf67c3908ff95678ea3528c1bb265"
+test "$(git -C candidate rev-parse HEAD)" = "326fd22662500e6f37df997df1acbaa2931d3e70"
+test "$(git -C theme rev-parse HEAD)" = "3305e9447f936c3e2a63a15ac1fc9b2893f188e7"
 test "$(git -C ops rev-parse HEAD)" = "3f22e61339f7c76eea2c4524885819b10ee59057"
 echo S01_R8_ZIP_SOURCE_IDENTITIES=PASS
 
@@ -68,7 +68,7 @@ wp eval '$baseline=json_decode(file_get_contents("/tmp/s01-r8-before.json"),true
 }
 check_payload(){
 local source="$1"
-for file in public/dist/converter.js public/dist/playlist-checker.js public/dist/player.js public/dist/downloader.js includes/skin-seasonal.php includes/v510-copy.php;do
+for file in public/dist/converter.js public/dist/playlist-checker.js public/dist/player.js public/dist/downloader.js public/dist/backup-restore.js config/v6/runtime-bundle.json config/v6/provider-manifest.json includes/skin-seasonal.php includes/v510-copy.php;do
   cmp "$source/$file" "$WP/wp-content/plugins/vf-tool-m3u8/$file"
 done
 wp plugin is-active vf-tool-m3u8
