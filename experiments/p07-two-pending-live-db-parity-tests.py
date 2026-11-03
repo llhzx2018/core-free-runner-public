@@ -197,6 +197,8 @@ class Tests(unittest.TestCase):
             private.write(b"no-disk-synthetic-secret")
             private.flush()
             private.seek(0)
+            self.assertEqual(__import__("stat").S_IMODE(
+                __import__("os").fstat(private.fileno()).st_mode),0o600)
             self.assertEqual(private.read(),b"no-disk-synthetic-secret")
             self.assertIn("memfd:",__import__("os").readlink(
                 "/proc/self/fd/"+str(private.fileno())))
