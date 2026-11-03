@@ -58,9 +58,74 @@ jobs:
             node "candidate/tests/unit/$test"
           done
           echo P01_IA6_UPDATE_MODAL_ONECLICK_NATIVE=PASS
+      - name: Chromium verifies one-shot reopened global update task after reload
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip >/dev/null
+          npm install --no-audit --no-fund --no-save playwright@1.57.0 >/dev/null
+          npx playwright install chromium >/dev/null
+          ROOT=/tmp/p01-update-dialog-gate
+          mkdir -p "$ROOT"
+          cp -a candidate/src/. "$ROOT/"
+          php -S 127.0.0.1:19491 -t "$ROOT" >/tmp/p01-update-dialog-php.log 2>&1 &
+          echo $! >/tmp/p01-update-dialog-php.pid
+          for i in $(seq 1 40); do
+            if curl -fsS -c /tmp/p01-update-browser-cookies -b /tmp/p01-update-browser-cookies http://127.0.0.1:19491/setup.php -o /tmp/p01-update-setup.html >/dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          test -s /tmp/p01-update-setup.html
+          CSRF="$(python3 -c 'import re; s=open("/tmp/p01-update-setup.html",encoding="utf-8").read(); m=re.search(r"name=\"setup_csrf\"\s+value=\"([^\"]+)\"",s); assert m; print(m.group(1))')"
+          curl -fsS -c /tmp/p01-update-browser-cookies -b /tmp/p01-update-browser-cookies -X POST http://127.0.0.1:19491/setup.php \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=IA6 One Click Browser Test' \
+            --data-urlencode 'admin_password=BrowserGate!2026' \
+            --data-urlencode 'admin_password_confirm=BrowserGate!2026' >/dev/null
+          (cd "$ROOT" && php cli/verify.php) | grep -Fx VERIFY_PASS=YES
+          node --input-type=module <<'JS'
+          import assert from 'node:assert/strict';
+          import {chromium} from 'playwright';
+          const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+          try{
+            const context=await browser.newContext({viewport:{width:1440,height:900}});
+            const origin='http://127.0.0.1:19491';
+            const login=await context.request.post(origin+'/api.php?action=login',{data:{password:'BrowserGate!2026'}});
+            assert.equal(login.status(),200);
+            assert.equal((await login.json()).ok,true);
+            const page=await context.newPage();
+            await page.goto(origin+'/start.php',{waitUntil:'domcontentloaded'});
+            const opener=page.locator('[data-vf-global-manage-open]').first();
+            await opener.waitFor({state:'visible',timeout:15000});
+            await opener.click();
+            await page.locator('[data-vf-global-group="update"]').first().click();
+            await page.waitForFunction(()=>document.querySelector('[data-vf-local-management]')?.open &&
+              document.querySelector('[data-vf-global-group="update"]')?.getAttribute('aria-pressed')==='true');
+            const written=await page.evaluate(()=>{
+              window.dispatchEvent(new CustomEvent('vf:update-installed',{detail:{version:'2.47.490'}}));
+              return window.sessionStorage.getItem('vf-local-management-update-return-v1');
+            });
+            assert(written,'success event persists one-shot return location');
+            await page.reload({waitUntil:'domcontentloaded'});
+            await page.waitForFunction(()=>{
+              const dialog=document.querySelector('[data-vf-local-management]');
+              const selected=document.querySelector('[data-vf-global-group="update"]');
+              const updatePanel=document.querySelector('#updatePanel');
+              return !!(dialog?.open&&selected?.getAttribute('aria-pressed')==='true'&&
+                updatePanel&&!updatePanel.closest('[hidden]'));
+            },null,{timeout:15000});
+            assert.equal(await page.evaluate(()=>window.sessionStorage.getItem('vf-local-management-update-return-v1')),null,'one-time bookmark removed');
+            assert.equal(await page.locator('[data-vf-management-tab="global"]').getAttribute('aria-selected'),'true');
+            console.log('P01_IA6_UPDATE_CHROMIUM_ONE_DIALOG_REOPENS=PASS');
+            await context.close();
+          } finally {await browser.close();}
+          JS
       - name: Erase private source and temporary request evidence
         if: always()
         shell: bash
         run: |
+          if test -f /tmp/p01-update-dialog-php.pid; then kill "$(cat /tmp/p01-update-dialog-php.pid)" >/dev/null 2>&1 || true; fi
+          rm -rf /tmp/p01-update-dialog-gate
+          rm -f /tmp/p01-update-dialog-php.pid /tmp/p01-update-dialog-php.log /tmp/p01-update-browser-cookies /tmp/p01-update-setup.html
           rm -rf candidate
           echo P01_IA6_UPDATE_PRIVATE_SOURCE_CLEANUP=PASS
