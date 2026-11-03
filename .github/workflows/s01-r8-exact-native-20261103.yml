@@ -104,3 +104,130 @@ jobs:
           name: s01-r8-native-${{ github.run_id }}
           path: s01-r8-evidence.txt
           retention-days: 7
+
+  isolated-wp:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    services:
+      mariadb:
+        image: mariadb:11.4
+        env:
+          MARIADB_ROOT_PASSWORD: synthetic-root
+          MARIADB_DATABASE: wordpress
+          MARIADB_USER: wordpress
+          MARIADB_PASSWORD: synthetic-wp
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    steps:
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli,mbstring,intl,zip
+          coverage: none
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: 7deff508b541f579da78f911cae40d1768840c2b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: r2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: 94320d371675d52a5e1dd5be85d2b99910399022
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: r3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: 50a0c900c0e72d0286f056e301a44b2760f4768d
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: r8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-theme
+          ref: d44b6b148bcdf67c3908ff95678ea3528c1bb265
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: theme
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 3f22e61339f7c76eea2c4524885819b10ee59057
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: ops
+      - name: Build isolated non-release three-component working tree
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C r2 rev-parse HEAD)" = 7deff508b541f579da78f911cae40d1768840c2b
+          test "$(git -C r3 rev-parse HEAD)" = 94320d371675d52a5e1dd5be85d2b99910399022
+          test "$(git -C r8 rev-parse HEAD)" = 50a0c900c0e72d0286f056e301a44b2760f4768d
+          test "$(git -C theme rev-parse HEAD)" = d44b6b148bcdf67c3908ff95678ea3528c1bb265
+          test "$(git -C ops rev-parse HEAD)" = 3f22e61339f7c76eea2c4524885819b10ee59057
+          mkdir -p combined
+          cp -a r2/src combined/src
+          for file in converter-browser.js downloader.js player-manifest.js playlist-checker.js; do
+            cp "r3/src/public/js/modules/$file" "combined/src/public/js/modules/$file"
+          done
+          for file in live-record-runtime.js vod-download-runtime.js; do
+            cp "r3/src/public/js/product/$file" "combined/src/public/js/product/$file"
+          done
+          cp r8/src/includes/v510-copy.php combined/src/includes/v510-copy.php
+          echo "S01_SYNTHETIC_OVERLAY=R2+R3+R8; NOT A COMMITTED MERGE; NOT FINAL PRODUCT SOURCE"
+      - name: FULL fresh WordPress install and three-component activation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl -fsSLo /tmp/wp-cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          mkdir -p /tmp/s01-wp
+          wp(){ php /tmp/wp-cli.phar "$@" --path=/tmp/s01-wp; }
+          wp core download --skip-content --quiet
+          wp config create --dbname=wordpress --dbuser=wordpress --dbpass=synthetic-wp --dbhost=127.0.0.1:3306 --skip-check
+          wp core install --url=http://127.0.0.1:18880 --title="S01 Synthetic Gate" --admin_user=s01tester --admin_password="synthetic-only" --admin_email=test@example.invalid --skip-email
+          mkdir -p /tmp/s01-wp/wp-content/themes/vf-tools-theme /tmp/s01-wp/wp-content/plugins/vf-tools-ops /tmp/s01-wp/wp-content/plugins/vf-tools-m3u8
+          cp -a theme/src/. /tmp/s01-wp/wp-content/themes/vf-tools-theme/
+          cp -a ops/. /tmp/s01-wp/wp-content/plugins/vf-tools-ops/
+          cp -a combined/src/. /tmp/s01-wp/wp-content/plugins/vf-tools-m3u8/
+          wp theme activate vf-tools-theme
+          wp plugin activate vf-tools-ops/vf-ops.php vf-tools-m3u8/vf-tool-m3u8.php
+          wp plugin status
+          wp eval 'if(!function_exists("vf_m3u8_skin_seasonal_migrate_from_legacy_v12216")){throw new Exception("M3U8 provider missing");} echo "S01_WP_THREE_COMPONENT_ACTIVATION=PASS";'
+          wp eval-file "$GITHUB_WORKSPACE/r2/tests/seasonal-empty-retry-wordpress.php"
+          echo "S01_WP_ISOLATED_MARIADB=PASS"
+      - name: Browser 1440/768 responsive smoke (not full tool UX acceptance)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -S 127.0.0.1:18880 -t /tmp/s01-wp > /tmp/s01-wp-server.log 2>&1 &
+          for i in $(seq 1 30); do if curl -fsS http://127.0.0.1:18880/ >/dev/null; then break; fi; sleep 2; done
+          npm install --no-audit --no-fund --prefix /tmp/s01-browser playwright@1.62.1
+          /tmp/s01-browser/node_modules/.bin/playwright install chromium
+          NODE_PATH=/tmp/s01-browser/node_modules node - <<'NODE'
+          const {chromium}=require('playwright');
+          const assert=require('node:assert/strict');
+          (async()=>{
+            const browser=await chromium.launch({headless:true});
+            try {
+              for(const width of [768,1440]){
+                const page=await browser.newPage({viewport:{width,height:900}});
+                const response=await page.goto('http://127.0.0.1:18880/',{waitUntil:'domcontentloaded',timeout:30000});
+                assert.equal(response.status(),200,'homepage HTTP status');
+                const m=await page.evaluate(()=>({client:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth,title:document.title}));
+                assert.ok(m.title.length>0,'visible document title');
+                assert.ok(m.scroll<=m.client+1,'no horizontal overflow at '+width);
+                console.log('S01_BROWSER_HOME_'+width+'=PASS');
+                await page.close();
+              }
+            }finally{await browser.close();}
+          })().catch(e=>{console.error(e);process.exit(1)});
+          NODE
+      - name: Clean transient private checkout and WP fixture
+        if: always()
+        shell: bash
+        run: rm -rf r2 r3 r8 theme ops combined /tmp/s01-wp /tmp/s01-browser
