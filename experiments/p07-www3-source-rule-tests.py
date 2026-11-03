@@ -14,15 +14,15 @@ candidate=load("p07-www3-source-rule-candidate.py","candidate")
 ro=load("p07-www3-existing-scratch-parity-readonly.py","readonly")
 stage=load("p07-www3-isolated-stage.py","stage")
 
-def controls():
+def controls(*, otherwise=("SELECT 0","SET @dummy = 0","SET @dummy = 0")):
     def group(stmt,flag,yes,no):
         yes=yes.replace("'","\\'");no=no.replace("'","\\'")
         return "\n".join([f"/*!50603 SET @{stmt} = IF(@{flag}, '{yes}', '{no}') */;",
             f"/*!50603 PREPARE stmt FROM @{stmt} */;","/*!50603 EXECUTE stmt */;","/*!50603 DEALLOCATE PREPARE stmt */;"])+"\n"
     text="/*!50603 SELECT COUNT(*) INTO @have_pfs FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA='performance_schema' AND TABLE_NAME='session_variables' */;\n"
-    text+=group("probe","have_pfs","SELECT COUNT(*) INTO @has_rocks FROM performance_schema.session_variables WHERE VARIABLE_NAME='rocksdb_bulk_load'","SELECT 1")
-    text+=group("enable","has_rocks","SET SESSION rocksdb_bulk_load=1","SET @dummy = 0")
-    text+=group("restore","has_rocks","SET SESSION rocksdb_bulk_load=@saved","SET @dummy = 0")
+    text+=group("probe","have_pfs","SELECT COUNT(*) INTO @has_rocks FROM performance_schema.session_variables WHERE VARIABLE_NAME='rocksdb_bulk_load'",otherwise[0])
+    text+=group("enable","has_rocks","SET SESSION rocksdb_bulk_load=1",otherwise[1])
+    text+=group("restore","has_rocks","SET SESSION rocksdb_bulk_load=@saved",otherwise[2])
     return text
 
 def fixture(count=157, *, memory=False):
@@ -69,6 +69,48 @@ class SourceRuleTests(unittest.TestCase):
         for change in ("SET GLOBAL rocksdb_bulk_load=1","SET SESSION rocksdb_bulk_load=2","SET SESSION rocksdb_bulk_load=1; DROP TABLE x"):
             _,altered,_=self.files(fixture()[0].replace("SET SESSION rocksdb_bulk_load=1",change))
             with self.assertRaises(candidate.Block):candidate.prove_rocksdb_only(altered,ro)
+
+    def test_constant_else_variants_pass_complete_preparation_without_execution(self):
+        # The old candidate incorrectly required SELECT 1 and SET @dummy=0.
+        # Exercise the pinned quarantine and retained-SQL guard too, not just
+        # the candidate regex, using both accepted SELECT constants.
+        cases=(("SELECT 0","SET @dummy = 0","SET @dummy = 0"),
+               ("SELECT 1","SET @dummy = 1","SET @dummy = 2"),
+               ("select 0","SET @dummy$ = -17","set @other$ = +3.25"),
+               ("SELECT 1","SET @dummy = 99999999999999999999","SET @dummy = -0.125"))
+        for branches in cases:
+            with self.subTest(branches=branches):
+                text=fixture()[0].replace(controls(),controls(otherwise=branches),1)
+                if "$" in branches[1]:text=text.replace("@has_rocks","@has$rocks").replace("@saved","@saved$value")
+                root,source,catalog=self.files(text);original=source.read_bytes()
+                q=root/"q.gz";fixed=root/"fixed.gz"
+                with contextlib.redirect_stdout(io.StringIO()),patch.object(subprocess,"run",side_effect=AssertionError("no SQL execution during preparation")):
+                    self.assertEqual(candidate.prepare_copy(source,q,fixed,catalog,ro,stage)[1],324)
+                self.assertEqual(source.read_bytes(),original)
+                data=gzip.decompress(fixed.read_bytes())
+                for forbidden in (b"PREPARE",b"EXECUTE",b"rocksdb_bulk_load",b"@dummy"):
+                    self.assertNotIn(forbidden,data)
+                self.assertEqual(candidate.verify_copy(fixed,fixed,catalog,catalog,ro),(0,157))
+
+    def test_unsafe_or_nonconstant_else_stays_blocked(self):
+        rejects={0:("SELECT 2","SELECT @dummy","SELECT NULL","SELECT 0 FROM private_table",
+                    "SELECT SLEEP(1)","SELECT 0 INTO OUTFILE 'private'","SELECT 0; DROP TABLE x",
+                    "SELECT 0 /* comment */","SELECT 0 -- comment","SELECT 0 # comment"),
+                 1:("SET @@GLOBAL.sql_mode=0","SET SESSION rocksdb_bulk_load=0","SET @@session.sql_mode=0",
+                    "SET @dummy = SLEEP(1)","SET @dummy = (SELECT 0)","SET @dummy = @other",
+                    "SET @dummy = 0+1","SET @dummy = 0, @other = 1","SET @dummy = '0'",
+                    "SET @dummy = 0; DROP TABLE x","SET @dummy = 0 /* comment */",
+                    "SET @dummy = 0 -- comment","SET @dummy = 0 # comment",
+                    "SET @dummy = 0\\n","SET @dummy = "+"9"*21)}
+        rejects[2]=rejects[1]
+        for index,values in rejects.items():
+            for value in values:
+                with self.subTest(index=index,value=value):
+                    branches=["SELECT 0","SET @dummy = 0","SET @dummy = 0"];branches[index]=value
+                    text=fixture()[0].replace(controls(),controls(otherwise=branches),1)
+                    root,source,_=self.files(text)
+                    with self.assertRaisesRegex(candidate.Block,"ROCKSDB_ELSE_UNPROVEN"):
+                        candidate.prove_rocksdb_only(source,ro)
 
     def test_complete_transform_preserves_data_and_explicit_rules(self):
         root,source,catalog=self.files();q=root/"q.gz";fixed=root/"fixed.gz"
@@ -163,7 +205,7 @@ class SourceRuleTests(unittest.TestCase):
 
     def test_transaction_retains_old_receipt_and_failed_candidate(self):
         import cloudpanel,inventory,server_migration_pull,site_lifecycle
-        for failure in (None,"source","create","import","verify","prior_attempt"):
+        for failure in (None,"source","else","create","import","verify","prior_attempt"):
             with self.subTest(failure=failure),tempfile.TemporaryDirectory() as td,contextlib.ExitStack() as s:
                 base=SimpleNamespace(RUNTIME=Path(td),TAIL="tail",DOMAIN="fixture.example",verify_state=lambda:({"target_server_identity":"target"},"source_db"),verify_current_runtime=Mock(),inspect_existing_site=Mock())
                 old={"scratch_database":"old_scratch","source_snapshot_sha256":"digest"};old_copy=dict(old)
@@ -186,7 +228,9 @@ class SourceRuleTests(unittest.TestCase):
                 create=s.enter_context(patch.object(cloudpanel,"add_database",side_effect=RuntimeError("private create failure") if failure=="create" else None))
                 temp=tempfile.TemporaryDirectory
                 s.enter_context(patch.object(candidate.tempfile,"TemporaryDirectory",side_effect=lambda **kw:temp(dir=td)))
-                def prepare(original,q,repaired,*args):repaired.write_bytes(b"synthetic");return ({str(i):"rule" for i in range(25)},1848)
+                def prepare(original,q,repaired,*args):
+                    if failure=="else":raise candidate.Block("ROCKSDB_ELSE_UNPROVEN")
+                    repaired.write_bytes(b"synthetic");return ({str(i):"rule" for i in range(25)},1848)
                 s.enter_context(patch.object(candidate,"prepare_copy",side_effect=prepare))
                 s.enter_context(patch.object(candidate,"verify_copy",return_value=(10,157),side_effect=candidate.Block("CANDIDATE_ROWS_UNPROVEN") if failure=="verify" else None))
                 out=s.enter_context(contextlib.redirect_stdout(io.StringIO()))
@@ -196,7 +240,7 @@ class SourceRuleTests(unittest.TestCase):
                 self.assertEqual(old,old_copy)
                 self.assertTrue(all(path==marker for path,record in saves))
                 self.assertNotIn("private_password",out.getvalue())
-                if failure in ("source","prior_attempt"):create.assert_not_called();self.assertEqual(saves,[])
+                if failure in ("source","else","prior_attempt"):create.assert_not_called();self.assertEqual(saves,[])
                 elif failure:self.assertEqual(saves[-1][1]["status"],"CANDIDATE_UNPROVEN_RETAIN_NO_RETRY")
                 else:
                     self.assertEqual(saves[-1][1]["status"],"VERIFIED_STATIC_COPY_NOT_ACTIVATED")
@@ -258,6 +302,7 @@ def real_engine():
             except candidate.Block as exc:assert str(exc)=="CANDIDATE_ROWS_UNPROVEN",str(exc)
             else:raise AssertionError("missing MEMORY row incorrectly accepted")
             print("P07_SOURCE_RULE_REAL_MARIADB_11_8=PASS",flush=True)
+            print("P07_SOURCE_RULE_SELECT_ZERO_QUARANTINE_RESTORE=PASS",flush=True)
             print("P07_SOURCE_RULE_EXISTING_DATABASE_RETAINED=PASS",flush=True)
             print("P07_SOURCE_RULE_TRUE_ROW_DIFFERENCE_DENIED=PASS",flush=True)
             print("P07_SOURCE_RULE_REAL_HEX_DEFAULTS="+str(result[0]),flush=True)

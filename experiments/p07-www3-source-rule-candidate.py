@@ -127,7 +127,8 @@ def prove_rocksdb_only(source,ro):
     Engine checks and an independent guard on the retained SQL are required.
     """
     import sql_diff_evidence as schema,verify
-    variable=r"@[A-Za-z_][A-Za-z0-9_]*"
+    variable=r"@[A-Za-z_][A-Za-z0-9_$]*"
+    number=r"[+-]?[0-9]{1,20}(?:\.[0-9]{1,20})?"
     patterns=[
         r"SELECT\s+COUNT\s*\(\s*\*\s*\)\s+INTO\s+"+variable+r"\s+FROM\s+performance_schema\.session_variables\s+WHERE\s+VARIABLE_NAME\s*=\s*'rocksdb_bulk_load'",
         r"SET\s+SESSION\s+rocksdb_bulk_load\s*=\s*[01]",
@@ -147,8 +148,14 @@ def prove_rocksdb_only(source,ro):
         for public in ("performance_schema","session_variables","VARIABLE_NAME","rocksdb_bulk_load"):
             yes=re.sub("`"+public+"`",public,yes,flags=re.I)
         need(re.fullmatch(pattern,yes.strip(),re.I),"ROCKSDB_BRANCH_UNPROVEN")
-        otherwise=r"SELECT\s+1" if i==0 else r"SET\s+"+variable+r"\s*=\s*0"
-        need(re.fullmatch(otherwise,no.strip(),re.I),"ROCKSDB_ELSE_UNPROVEN")
+        # Dumps may use either SELECT 0 or SELECT 1 for the probe fallback.
+        # A dummy user-variable assignment may use another numeric constant;
+        # its value is not used because all three dynamic groups are omitted.
+        # Keep the pinned guard as well as this narrower constant-only grammar:
+        # no functions, expressions, queries, session/global SET or comments.
+        otherwise=r"SELECT\s+[01]" if i==0 else r"SET\s+"+variable+r"\s*=\s*"+number
+        need(verify._cross_engine_safe_dynamic_branch(group.group("no"))
+             and re.fullmatch(otherwise,no.strip(),re.I),"ROCKSDB_ELSE_UNPROVEN")
 
 def inject_source_rules(source,destination,plan,ro):
     """Modify only missing table-default COLLATE; keep every other byte."""
