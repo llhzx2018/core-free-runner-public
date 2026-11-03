@@ -31,7 +31,13 @@ def memory_file(name):
     if not hasattr(os,"memfd_create"):
         block("MEMORY_ONLY_FD_UNAVAILABLE")
     try:
-        return os.fdopen(os.memfd_create(name,flags=os.MFD_CLOEXEC),"w+b")
+        fd=os.memfd_create(name,flags=os.MFD_CLOEXEC)
+        try:
+            os.fchmod(fd,0o600)
+            return os.fdopen(fd,"w+b")
+        except OSError:
+            os.close(fd)
+            raise
     except OSError:
         block("MEMORY_ONLY_FD_UNAVAILABLE")
 
