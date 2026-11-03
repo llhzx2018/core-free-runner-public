@@ -163,46 +163,7 @@ PY
  (cd "$ROOT/crash" && php cli/verify.php)|grep -Fx 'VERIFY_PASS=YES'
  echo "P01_REAL_ATOMIC_CRASH_RECOVERY_PRIVATE_DATA=PASS"
 else
- echo "P01_REAL_ATOMIC_HARD_EXIT_INJECTION=UNAVAILABLE_IN_PUBLISHED_491_REPAIR"
- echo "P01_REAL_ATOMIC_ABRUPT_PROCESS_DEATH_RECOVERY=NOT_PROVEN"
+ echo "P01_REAL_ATOMIC_HARD_EXIT_RECOVERY_UNAVAILABLE=FAIL"
+ exit 99
 fi
-JOURNALED="$ROOT/journaled-test-only"
-python3 scripts/p01-ia6-journal-repair-variant-oneoff.py \
- --source-root "$OLD" --maintenance-repair "$REPAIR" --out "$JOURNALED"
-JREPAIR="$JOURNALED/repair-v2.47.492.php"
-php -l "$JREPAIR" >/dev/null
-php "$JREPAIR" --self-test >"$ROOT/journaled-selftest.json"
-python3 - "$ROOT/journaled-selftest.json" <<'PY'
-import json,sys
-r=json.load(open(sys.argv[1]))
-assert r['ok'] and r['source_files']>100 and r['target_files']>100
-print('P01_TEST_ONLY_JOURNALED_ATOMIC_SELFTEST=PASS')
-PY
-install "$ROOT/journal" 18595 old
-php "$ROOT/sentinel.php" "$ROOT/journal" seed
-set +e
-VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY=1 php "$JREPAIR" "--run=$ROOT/journal" \
- >"$ROOT/journaled-hard-exit.txt" 2>&1
-hard_code=$?
-set -e
-test "$hard_code" -eq 97
-echo "P01_TEST_ONLY_JOURNALED_ATOMIC_FORCED_PROCESS_EXIT=PASS"
-php "$JREPAIR" "--run=$ROOT/journal" >"$ROOT/journaled-resume.json"
-python3 - "$ROOT/journaled-resume.json" <<'PY'
-import json,sys
-r=json.load(open(sys.argv[1]))
-assert r['ok'] is True and r.get('interrupted_recovered') is True
-assert r.get('rollback_supported') is True
-print('P01_TEST_ONLY_JOURNALED_ATOMIC_CRASH_RECOVER_AND_INSTALL=PASS')
-PY
-test "$(cat "$ROOT/journal/VERSION.txt")" = 2.47.492
-php "$JREPAIR" "--verify-target=$ROOT/journal" >"$ROOT/journaled-target.json"
-python3 - "$ROOT/journaled-target.json" <<'PY'
-import json,sys
-assert json.load(open(sys.argv[1]))['ok'] is True
-PY
-php "$ROOT/sentinel.php" "$ROOT/journal" check
-(cd "$ROOT/journal" && php cli/verify.php)|grep -Fx 'VERIFY_PASS=YES'
-echo "P01_TEST_ONLY_JOURNALED_ATOMIC_PRIVATE_DATA_AND_RECOVERY=PASS"
-echo "P01_IA6_FORMAL_UPDATE_ABRUPT_EXIT_RECOVERY=NOT_PROVEN"
-echo "P01_REAL_FULL_ATOMIC_PACKAGE_INSTALL_AND_EXCEPTION_ROLLBACK=PASS"
+echo "P01_REAL_FULL_ATOMIC_PACKAGE_INSTALL_ROLLBACK_AND_CRASH_RECOVERY=PASS"

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import base64
 import hashlib
 import json
@@ -203,6 +204,7 @@ def main() -> None:
             "schema_unchanged": True,
             "migrations_unchanged": True,
             "updater_mechanism_unchanged": True,
+            "atomic_interruption_recovery": True,
             "builder": "core-free-runner-public/scripts/p01-maintenance-release.py",
         },
     })
@@ -214,7 +216,17 @@ def main() -> None:
     payload = {k: base64.b64encode(v).decode() for k, v in sorted(target_files.items())}
     removed = sorted(set(source_manifest) - set(target_manifest))
 
-    repair = old
+    # The published 2.47.491 repair is the source-file authority, but it is
+    # not a safe executable template for the next candidate: it lacks the
+    # interruption journal/recovery implementation. Build from the existing
+    # public journal-capable Atomic engine, never silently downgrade to old.
+    engine = Path(__file__).with_name("p01-build-release-v2.py")
+    spec = importlib.util.spec_from_file_location("p01_journal_atomic", engine)
+    if spec is None or spec.loader is None:
+        die("journal-capable Atomic engine unavailable")
+    atomic_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(atomic_module)
+    repair = atomic_module.build_repair(source_files, target_files, "")
     repair = replace_public(repair, "SOURCE_VERSION", args.source_version)
     repair = replace_public(repair, "TARGET_VERSION", args.version)
     repair = replace_public(repair, "TARGET_SCHEMA", old_schema)
@@ -226,6 +238,9 @@ def main() -> None:
         ("SOURCE_ALTERNATES", {}),
     ):
         repair = replace_private(repair, name, obj)
+    for guard in ("recoverInterrupted", "journalPath", "VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY"):
+        if guard not in repair:
+            die("Atomic interruption recovery engine missing: " + guard)
 
     repair_name = f"repair-v{args.version}.php"
     repair_bytes = repair.encode("utf-8")
