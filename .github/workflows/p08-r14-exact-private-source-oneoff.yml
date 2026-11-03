@@ -1,0 +1,109 @@
+name: P08 R14 Exact Private Source Full/HTTPS Proof (one-off)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p08-r14-exact-private-source-oneoff.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-private-source:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci_only_password
+          MARIADB_DATABASE: vf_lander_ci
+          MARIADB_USER: vf_lander_ci
+          MARIADB_PASSWORD: ci_only_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    env:
+      APP_ENV: testing
+      APP_DEBUG: 'false'
+      APP_KEY: 'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+      P08_SOURCE_SHA: 2e6d9c1c504b6e6aa1962013c376e9e5e873d647
+      P08_MARIADB_CI_ONLY: '1'
+    steps:
+      - name: Check registered private read capability without revealing secret
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$READ_TOKEN" || { echo BLOCKED_PRIVATE_READ_CAPABILITY; exit 78; }
+          echo REGISTERED_PRIVATE_READ_CAPABILITY_PRESENT
+
+      - name: Checkout exact private P08 source in transient runner workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-lander
+          ref: 2e6d9c1c504b6e6aa1962013c376e9e5e873d647
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify P08 exact source and changed-scope file identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P08_SOURCE_SHA"
+          test "$(cat VERSION)" = 0.1.0-dev
+          test "$(git hash-object backend/bin/cloudpanel-readonly-preflight.py)" = 3989d2bb48f63a2b11eb1cd95dd6c6ca5466839e
+          python3 -m py_compile backend/bin/cloudpanel-readonly-preflight.py
+          bash -n backend/tests/ops/https-site-proof.sh
+          echo P08_R14_EXACT_SOURCE_AND_SYNTAX_PASS
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          extensions: mbstring, dom, xml, curl, pdo_mysql, pdo_sqlite, sqlite3, fileinfo
+          tools: composer:v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build exact-source private FULL candidate in ephemeral folder
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! bash backend/tests/ops/build-full-candidate.sh >"$RUNNER_TEMP/p08-r14-build.log" 2>&1; then
+            echo P08_R14_FULL_BUILD_FAIL
+            grep -E '^(FULL_CANDIDATE|R14_)' "$RUNNER_TEMP/p08-r14-build.log" || true
+            exit 1
+          fi
+          grep -E '^FULL_CANDIDATE_.*PASS$' "$RUNNER_TEMP/p08-r14-build.log"
+          echo P08_R14_FULL_ARCHIVE_RETAINED_ONLY_IN_RUNNER_TEMP
+
+      - name: Real synthetic MariaDB / PHP-FPM / Nginx HTTPS and R14 preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! bash backend/tests/ops/full-runtime-install.sh >"$RUNNER_TEMP/p08-r14-real-http.log" 2>&1; then
+            echo P08_R14_REAL_RUNTIME_FAIL
+            grep -E '^(R1[0-9]_|FULL_CANDIDATE_|BLOCKED=)' "$RUNNER_TEMP/p08-r14-real-http.log" || true
+            exit 1
+          fi
+          grep -E '^(R1[0-9]_.*PASS|FULL_CANDIDATE_.*PASS)$' "$RUNNER_TEMP/p08-r14-real-http.log"
+          echo P08_R14_EXACT_SOURCE_REAL_SYNTHETIC_RUNTIME_PASS
+          echo P08_R14_CLOUDPANEL_REAL_INSTANCE_NOT_RUN
+          echo P08_R14_SIMPLE_KUMA_SANDBOX_NOT_RUN
+
+      - name: Cleanup private FULL, logs, and source from public runner workspace
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- "$RUNNER_TEMP/p08-artifacts" "$RUNNER_TEMP/p08-r14-build.log" "$RUNNER_TEMP/p08-r14-real-http.log"
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          echo P08_R14_PUBLIC_RUNNER_PRIVATE_SOURCE_CLEANUP_ATTEMPTED
+          echo P08_R14_NO_PUBLIC_ARTIFACT_UPLOAD
