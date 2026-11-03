@@ -73,6 +73,7 @@ if ($phase === 'baseline') {
     foreach ($expected as $key => $value) { $must($value === ($before[$key] ?? null), 'PRE_GUARD_DRIFT_' . $key); }
     $legacy = get_option('vf_tool_m3u8_settings', []);
     $must(is_array($legacy), 'LEGACY_NOT_ARRAY');
+    $legacyBefore = $legacy;
     try {
         $legacy['frontend_base_skin'] = 'r8_changed_after_baseline';
         update_option('vf_tool_m3u8_settings', $legacy, false);
@@ -84,14 +85,8 @@ if ($phase === 'baseline') {
         $must($after === $protected, 'CHANGED_LEGACY_WROTE_MIGRATION_OPTIONS');
         echo "S01_R8_SKIN_DB_CHANGED_LEGACY_FAIL_CLOSED=PASS\n";
     } finally {
-        // Restore the exact prior logical WordPress option and verify raw DB bytes.
-        $original = unserialize((string)$wpdb->get_var($wpdb->prepare(
-            "SELECT option_value FROM {$wpdb->options} WHERE option_name=%s LIMIT 1",
-            'vf_m3u8_skin_seasonal_migration_snapshot'
-        )));
-        $oldLegacy = $original['legacy']['globalFound'] ?? null;
-        // Actual original legacy fixture was set before first migration.
-        update_option('vf_tool_m3u8_settings', ['frontend_base_skin' => 'clean_utility'], false);
+        // Restore this isolated fixture's actual pre-test value, not a guessed constant.
+        update_option('vf_tool_m3u8_settings', $legacyBefore, false);
     }
     $after = $read();
     foreach ($expected as $key => $value) { $must($after[$key] === $value, 'AFTER_GUARD_RAW_DRIFT_' . $key); }
