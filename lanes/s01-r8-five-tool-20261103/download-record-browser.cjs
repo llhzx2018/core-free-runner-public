@@ -42,7 +42,7 @@ const url=base+'/m3u8-download-record/';
     await live.route('**/vf-r8-live.m3u8',async route=>{
       manifestRequests++;
       const entries=manifestRequests<=2?['100.ts']:['100.ts','101.ts','102.ts'];
-      const body=['#EXTM3U','#EXT-X-VERSION:3','#EXT-X-TARGETDURATION:1','#EXT-X-MEDIA-SEQUENCE:100',...entries.flatMap(x=>['#EXTINF:1,',x])].join('\n')+'\n';
+      const body=['#EXTM3U','#EXT-X-VERSION:3','#EXT-X-TARGETDURATION:1','#EXT-X-MEDIA-SEQUENCE:100',...entries.flatMap(x=>['#EXTINF:1,','vf-r8-live/'+x])].join('\n')+'\n';
       await route.fulfill({status:200,body,contentType:'application/vnd.apple.mpegurl',headers:{'access-control-allow-origin':'*'}});
     });
     await live.route('**/vf-r8-live/*',async route=>{fragmentRequests++;await route.fulfill({status:200,body:Buffer.from([0x47,0x41,0x42,0x43]),contentType:'video/mp2t',headers:{'access-control-allow-origin':'*'}});});
@@ -59,7 +59,8 @@ const url=base+'/m3u8-download-record/';
     await lr.locator('[data-vf-entry-record-stop]').click();
     const part=await liveDownload;
     const bytes=fs.readFileSync(await part.path());
-    assert.ok(bytes.length>=4&&bytes[0]===0x47,'live saved part includes actual synthetic segment bytes');
+    assert.ok(bytes.length>=4&&bytes.length%4===0&&bytes[0]===0x47,'live saved part includes actual synthetic segment bytes');
+    assert.ok(fragmentRequests>0 && manifestRequests>=3,'real live polling must retrieve new segments, not only initial baseline');
     mark('LIVE_REAL_PART_'+width,{filename:part.suggestedFilename(),bytes:bytes.length,manifestRequests,fragmentRequests});
     await live.close();
    }finally{await context.close();}
