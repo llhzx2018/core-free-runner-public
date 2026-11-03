@@ -43,6 +43,9 @@ replace_with(){
  # Read MariaDB after the OLD runtime has deactivated, before any replacement
  # source can run; distinguishes legacy-side drift from new-code writes.
  skin_db inspect
+ if [ "$1" = "candidate" ] && [ ! -f /tmp/s01-r8-skin-handoff-hashes.json ]; then
+   skin_db handoff
+ fi
  rm -rf "$PLUGIN"
  mkdir -p "$PLUGIN"
  cp -a "$1/src/." "$PLUGIN/"
@@ -76,7 +79,7 @@ wp eval '
   echo "S01_R8_CANDIDATE_UPGRADE_V6_1_25_4=PASS\n";
 '
 check_owner
-skin_db verify
+skin_db verify-handoff
 echo S01_R8_SYNTHETIC_UPGRADE=PASS
 replace_with legacy
 check_owner

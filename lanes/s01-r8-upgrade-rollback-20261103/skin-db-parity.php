@@ -7,7 +7,8 @@
 if (!defined('ABSPATH')) { throw new RuntimeException('WORDPRESS_REQUIRED'); }
 $phase = (string)getenv('S01_R8_SKIN_PHASE');
 $receipt = '/tmp/s01-r8-skin-raw-option-hashes.json';
-if (!in_array($phase, ['baseline', 'verify', 'guard', 'inspect'], true)) {
+$handoff = '/tmp/s01-r8-skin-handoff-hashes.json';
+if (!in_array($phase, ['baseline', 'verify', 'guard', 'inspect', 'handoff', 'verify-handoff'], true)) {
     throw new RuntimeException('UNSUPPORTED_FIXTURE_PHASE');
 }
 $keys = [
@@ -45,6 +46,25 @@ if ($phase === 'inspect') {
           . ':before_size=' . ($value['length'] ?? 'missing')
           . ':after_size=' . ($row['length'] ?? 'missing') . PHP_EOL;
     }
+    return;
+}
+if ($phase === 'handoff') {
+    $rows = $read();
+    foreach ($rows as $key => $value) { $must($value['present'], 'HANDOFF_MISSING_' . $key); }
+    if (file_put_contents($handoff, json_encode($rows, JSON_PRETTY_PRINT|JSON_THROW_ON_ERROR)) === false) {
+        throw new RuntimeException('HANDOFF_RECEIPT_WRITE_FAILED');
+    }
+    echo "S01_R8_SKIN_DB_POST_LEGACY_HANDOFF=PASS\n";
+    return;
+}
+if ($phase === 'verify-handoff') {
+    $must(is_file($handoff), 'HANDOFF_RECEIPT_MISSING');
+    $expected = json_decode((string)file_get_contents($handoff), true, 512, JSON_THROW_ON_ERROR);
+    $actual = $read();
+    foreach ($expected as $key => $value) {
+        $must($value === ($actual[$key] ?? null), 'CANDIDATE_HANDOFF_DRIFT_' . $key);
+    }
+    echo "S01_R8_SKIN_DB_CANDIDATE_HANDOFF_RAW_BYTES=PASS 4/4\n";
     return;
 }
 if (!function_exists('vf_m3u8_skin_seasonal_migrate_from_legacy_v12216')) {
