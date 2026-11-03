@@ -149,7 +149,18 @@ VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY=1 php "$REPAIR" "--run=$ROOT/crash" \
  >"$ROOT/expected-hard-exit.txt" 2>&1
 code=$?
 set -e
-test "$code" = 97
+echo "P01_ATOMIC_HARD_EXIT_INJECTION_EXIT_CODE=$code"
+if grep -Fq 'VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY' "$REPAIR"; then
+ echo 'P01_ATOMIC_HARD_EXIT_HOOK_PRESENT=YES'
+else
+ echo 'P01_ATOMIC_HARD_EXIT_HOOK_PRESENT=NO'
+fi
+if [ "$code" -ne 97 ]; then
+ echo "P01_ATOMIC_HARD_EXIT_STAGE_VERSION=$(cat "$ROOT/crash/VERSION.txt")"
+ if grep -qi 'Atomic failed' "$ROOT/expected-hard-exit.txt"; then echo 'P01_ATOMIC_HARD_EXIT_ACTUAL_EXCEPTION=YES'; fi
+ if grep -qi 'Unsupported source version' "$ROOT/expected-hard-exit.txt"; then echo 'P01_ATOMIC_HARD_EXIT_SOURCE_VERSION_REJECTED=YES'; fi
+ exit 98
+fi
 php "$REPAIR" "--run=$ROOT/crash" >"$ROOT/crash.json"
 python3 - "$ROOT/crash.json" <<'PY'
 import json,sys
