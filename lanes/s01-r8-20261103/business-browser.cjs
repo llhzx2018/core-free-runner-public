@@ -16,7 +16,12 @@ async function waitFor(p,fn,label,ms=12000){
    const context=await browser.newContext({viewport:{width,height:900},acceptDownloads:true});
    try {
     const check=await context.newPage();
+    const failures=[];check.on('pageerror',e=>failures.push('JS_ERROR '+e.message));
+    check.on('response',r=>{if(r.url().includes('vf-tools-m3u8')&&r.status()>=400)failures.push('HTTP '+r.status()+' '+r.url());});
+    check.on('requestfailed',r=>failures.push('FAILED '+r.url()+' '+(r.failure()?.errorText||'')));
     let res=await check.goto(base+'/m3u8-playlist-checker/',{waitUntil:'networkidle'});
+    const diag=await check.evaluate(()=>({scripts:[...document.querySelectorAll('script[src]')].map(x=>x.src).filter(x=>x.includes('m3u8')).slice(0,20),loaded:document.readyState,ready:document.querySelector('[data-vf-module="playlist-checker"]')?.dataset.vfPlaylistCheckerReady,global:Object.keys(window).filter(x=>x.startsWith('VFM3U8Playlist')).slice(0,15)}));
+    console.log('S01_R8_JS_BOOT_DIAGNOSTIC='+JSON.stringify({diag,failures}));
     assert.equal(res.status(),200);
     let r=rootFor(check,'playlist-checker');await r.waitFor({timeout:12000});
     await waitFor(check,()=>{let e=document.querySelector('[data-vf-module="playlist-checker"]');return e&&e.dataset.vfPlaylistCheckerReady},'checker-boot');
