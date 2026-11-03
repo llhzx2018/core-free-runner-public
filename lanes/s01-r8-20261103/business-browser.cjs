@@ -3,7 +3,7 @@ const {chromium}=require('playwright');
 const fs=require('node:fs');
 const assert=require('node:assert/strict');
 const base='http://127.0.0.1:18880';
-const report={scope:'S01 R8 exact merged source 55495428da43683f5e0bc6e6ec3d596a5c3e64e4',production:'UNTOUCHED',checks:[]};
+const report={scope:'S01 R8 exact merged source 3ab0992fb4788b8b9d15d0e338040189b6fcdd8f',production:'UNTOUCHED',checks:[]};
 const mark=(k,info)=>{report.checks.push({case:k,result:'PASS',info:info||''});console.log('S01_R8_BUSINESS_'+k+'=PASS');};
 const rootFor=(p,kind)=>p.locator('[data-vf-module="'+kind+'"]').first();
 async function waitFor(p,fn,label,ms=12000){
@@ -73,6 +73,18 @@ async function waitFor(p,fn,label,ms=12000){
     const convert=await context.newPage();res=await convert.goto(base+'/m3u8-to-mp4/',{waitUntil:'networkidle'});assert.equal(res.status(),200);
     r=rootFor(convert,'converter');await r.waitFor({timeout:12000});
     await convert.route('**/broken.m3u8',route=>route.fulfill({status:404,body:'not found',headers:{'content-type':'text/plain','access-control-allow-origin':'*'}}));
+    const shipped=await convert.evaluate(()=>{
+      const api=window.VFM3U8ConverterBrowser;
+      if(!api||typeof api.parsePlaylist!=='function') return {missingRuntime:true};
+      const base='https://fixture.example.invalid/master.m3u8';
+      const brokenMaster=api.parsePlaylist('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000\n#EXT-X-STREAM-INF:BANDWIDTH=1200000\nhigh.m3u8',base);
+      const brokenMedia=api.parsePlaylist('#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n#EXTINF:4,\n#EXT-X-ENDLIST',base);
+      return {variantMissing:brokenMaster.missingVariantUriCount,variants:brokenMaster.variants.length,mediaMissing:brokenMedia.missingSegmentUriCount};
+    });
+    assert.equal(shipped.variantMissing,1,'production bundle must reject missing rendition URI');
+    assert.equal(shipped.variants,1);
+    assert.equal(shipped.mediaMissing,1,'production bundle must reject missing segment URI');
+    mark('CONVERTER_SHIPPED_SECURITY_PARSER_'+width,shipped);
     await r.locator('[data-converter-url]').fill('https://fixture.example.invalid/broken.m3u8');
     await r.locator('[data-converter-generate]').first().click();
     await waitFor(convert,()=>{const e=document.querySelector('[data-vf-module="converter"]');return e && ['blocked','failed','completed'].includes(e.dataset.vfConverterTaskState)},'converter-invalid-url',25000);
