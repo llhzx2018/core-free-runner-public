@@ -1,0 +1,128 @@
+name: P01 IA V6 exact-source Worker candidate gate (one-off)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-ia6-worker-1907-oneoff.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-ia6-worker-1907-oneoff
+  cancel-in-progress: false
+
+jobs:
+  isolated-worker-proof:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'test/p01-ia6-worker-1907-a052ee61-20261103' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PRODUCT_REPOSITORY: llhzx2018/vf-start
+      EXPECTED_SHA: a052ee61839ac2b6937cad74976bf38adc76cbfe
+      CANDIDATE: /tmp/p01-ia6-worker-1907-candidate
+      RUNTIME: /tmp/p01-ia6-worker-1907-runtime
+      P01_TEST_ORIGIN: http://127.0.0.1:18091
+      P01_TEST_PASSWORD: SyntheticP01Worker!2026
+    steps:
+      - name: Checkout only public-safe runner workflow
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Fetch exact private source transiently
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "${READ_TOKEN:-}" || { echo 'PRIVATE_READ_TOKEN_UNAVAILABLE'; exit 40; }
+          rm -rf "$CANDIDATE" "$RUNTIME"
+          git clone -q --depth 1 --branch feat/p01-ia6-legacy-retirement-final-20261103 \
+            "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPOSITORY}.git" "$CANDIDATE" \
+            >/dev/null 2>&1 || { echo 'EXACT_PRIVATE_CHECKOUT_BLOCKED'; exit 41; }
+          test "$(git -C "$CANDIDATE" rev-parse HEAD)" = "$EXPECTED_SHA" || {
+            echo 'EXACT_SHA_DRIFT_BLOCKED'; exit 42;
+          }
+          test "$(tr -d '\r\n' <"$CANDIDATE/VERSION")" = '2.47.492'
+          test "$(tr -d '\r\n' <"$CANDIDATE/src/VERSION.txt")" = '2.47.492'
+          echo 'P01_IA6_PRIVATE_EXACT_SHA_AND_VERSION=PASS'
+
+      - name: Prepare ephemeral PHP and Playwright
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-xml php-gd >/dev/null
+          php -m | grep -qi pdo_sqlite
+          php -m | grep -qi sqlite3
+          cd "$CANDIDATE"
+          npm install --no-audit --no-fund --no-save playwright@1.57.0 >/dev/null
+          npx playwright install chromium >/dev/null
+          echo 'P01_IA6_ISOLATED_PHP_CHROMIUM=PASS'
+
+      - name: Exact-source focused unit contracts and syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$CANDIDATE"
+          php -l src/app/FunctionalWorkspaceShell.php >/dev/null
+          php -l src/jobs.php >/dev/null
+          node --check src/assets/frontstage-system-operations.js
+          for t in \
+            tests/unit/p01_ia6_worker_continuation_r7_contract.cjs \
+            tests/unit/p01_ia6_worker_manual_step_native_contract.cjs \
+            tests/unit/p01_ia6_worker_enqueue_scope_native_contract.cjs \
+            tests/unit/p01_ia6_worker_history_operation_parity.cjs \
+            tests/unit/p01_ia6_system_jobs_r1_contract.cjs; do
+            node "$t"
+          done
+          echo 'P01_IA6_WORKER_FOCUSED_CONTRACTS=PASS'
+
+      - name: FULL installation and real API plus Chromium browser tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cp -a "$CANDIDATE/src" "$RUNTIME"
+          cd "$RUNTIME"
+          php -S 127.0.0.1:18091 -t . >/tmp/p01-ia6-worker-server.log 2>&1 &
+          PHP_PID=$!
+          trap 'kill "$PHP_PID" 2>/dev/null || true' EXIT
+          for i in $(seq 1 40); do
+            if curl -fsS -c /tmp/p01-ia6-cookie -b /tmp/p01-ia6-cookie \
+              "$P01_TEST_ORIGIN/setup.php" -o /tmp/p01-ia6-setup.html; then break; fi
+            sleep 1
+          done
+          CSRF="$(python3 - <<'PY'
+          import re
+          text=open('/tmp/p01-ia6-setup.html',encoding='utf-8').read()
+          match=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert match,'No initial setup token'
+          print(match.group(1))
+          PY
+          )"
+          curl -fsS -c /tmp/p01-ia6-cookie -b /tmp/p01-ia6-cookie -X POST \
+            "$P01_TEST_ORIGIN/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode "site_title=P01 IA V6 Synthetic Test" \
+            --data-urlencode "admin_password=$P01_TEST_PASSWORD" \
+            --data-urlencode "admin_password_confirm=$P01_TEST_PASSWORD" \
+            -o /tmp/p01-ia6-setup-post.html
+          test -f app/.runtime.php
+          php cli/verify.php | grep -F 'VERIFY_PASS=YES'
+          cd "$CANDIDATE"
+          node tests/integration/p01_ia6_worker_manual_step_browser.mjs
+          node tests/integration/p01_ia6_worker_continuation_browser.mjs
+          echo 'P01_IA6_WORKER_FULL_FIXTURE_REAL_CHROMIUM=PASS'
+
+      - name: Clean ephemeral source and report public-safe receipt
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "$CANDIDATE" "$RUNTIME" /tmp/p01-ia6-cookie \
+            /tmp/p01-ia6-setup.html /tmp/p01-ia6-setup-post.html \
+            /tmp/p01-ia6-worker-server.log || true
+          echo 'P01_IA6_PUBLIC_RUNNER_PRIVATE_SOURCE_PERSISTED=NO'
+          echo 'P01_IA6_PUBLIC_RUNNER_PRODUCTION_MUTATION=NONE'
+          echo 'P01_IA6_PUBLIC_RUNNER_RELEASE=NONE'
