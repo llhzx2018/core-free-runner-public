@@ -248,7 +248,7 @@ class SourceRuleTests(unittest.TestCase):
                     self.assertTrue(saves[-1][1]["source_engines_preserved"])
 
 
-def real_engine():
+def real_engine(mapping_check=None):
     """No network/ports/host DB mounts; only this disposable synthetic server."""
     container="p07-rule-fixture-"+str(os.getpid())
     subprocess.run(["docker","run","-d","--name",container,"--network=none","--tmpfs","/var/lib/mysql:rw","-e","MARIADB_ALLOW_EMPTY_ROOT_PASSWORD=1","mariadb:11.8"],check=True,stdout=subprocess.DEVNULL)
@@ -283,6 +283,7 @@ def real_engine():
             target={key:[json.loads(line) for line in mysql(query).decode().splitlines()] for key,query in ro._metadata_queries("corrected_copy").items()}
             result=candidate.verify_copy(fixed,readback,catalog,target,ro)
             assert result[1]==157,result
+            if mapping_check is not None:mapping_check(container,mysql,root)
             engine_counts=mysql("SELECT ENGINE,COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='corrected_copy' GROUP BY ENGINE ORDER BY ENGINE;").decode().strip().splitlines()
             assert engine_counts==["InnoDB\t156","MEMORY\t1"],engine_counts
             assert mysql("SELECT COUNT(*) FROM corrected_copy.fixture_156;").strip()==b"1"
