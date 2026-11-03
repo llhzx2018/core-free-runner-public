@@ -492,6 +492,12 @@ def _scalar_default(expr):
         prefix=tokens[0].lower();tokens=tokens[1:]
     if len(tokens)!=1:return {"kind":"EXPRESSION","wrappers":wrappers,"prefix":prefix,"value":None}
     token=tokens[0];kind="UNKNOWN";value=None
+    if prefix=="x":
+        if re.fullmatch(r"'(?:[0-9A-Fa-f]{2})*'",token):
+            kind="HEX_STRING";value=bytes.fromhex(token[1:-1])
+        return {"kind":kind,"wrappers":wrappers,"prefix":prefix,"value":value}
+    if prefix=="b":
+        return {"kind":"BIT_LITERAL","wrappers":wrappers,"prefix":prefix,"value":None}
     if token.upper()=="NULL" and not prefix:kind="NULL";value="NULL"
     elif re.fullmatch(r"[-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][-+]?[0-9]+)?",token) and not prefix:
         from decimal import Decimal
@@ -516,7 +522,15 @@ def _default_resolution(source,target):
             "source_wrappers":x["wrappers"],"target_wrappers":y["wrappers"],
             "source_prefix":x["prefix"] if x["prefix"] in prefixes else "OTHER_UNPROVEN",
             "target_prefix":y["prefix"] if y["prefix"] in prefixes else "OTHER_UNPROVEN"}
-    if x["value"] is None or y["value"] is None:relation="EXPRESSION_UNPROVEN"
+    string_types={"CHAR","VARCHAR","BINARY","VARBINARY","TINYTEXT","TEXT","MEDIUMTEXT","LONGTEXT","TINYBLOB","BLOB","MEDIUMBLOB","LONGBLOB"}
+    if {x["kind"],y["kind"]}=={"STRING","HEX_STRING"}:
+        plain=x if x["kind"]=="STRING" else y
+        binary=y if y["kind"]=="HEX_STRING" else x
+        if a[0][0] not in string_types or plain["prefix"] not in ("","_ascii","_binary","_utf8","_utf8mb3","_utf8mb4") or not plain["value"].isascii():
+            relation="HEX_STRING_CHARSET_OR_TYPE_UNPROVEN"
+        else:
+            relation="EQUAL_ASCII_HEX_BYTES" if plain["value"].encode("ascii")==binary["value"] else "HEX_STRING_BYTES_DIFFER"
+    elif x["value"] is None or y["value"] is None:relation="EXPRESSION_UNPROVEN"
     elif x["kind"]!=y["kind"]:relation="KIND_CHANGED_UNPROVEN"
     elif x["value"]!=y["value"]:relation="LITERAL_VALUE_DIFFER"
     elif x["prefix"]!=y["prefix"]:relation="EQUAL_LITERAL_CHARSET_CONTEXT_REQUIRED"
