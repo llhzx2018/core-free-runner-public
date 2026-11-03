@@ -19,6 +19,16 @@ foreach($ids as $suffix=>$id){
  if((string)get_post_meta($id,'_vf_ops_workflow_status',true)!=='draft')throw new RuntimeException('Workflow rollback failed '.$suffix);
  if((string)get_post_meta($id,'_vf_ops_is_core',true)!=='')throw new RuntimeException('Core mutated unexpectedly '.$suffix);
  $actions=array_values(array_filter($audit,static fn($a)=>is_array($a)&&(int)($a['post_id']??0)===$id));
+ // WP initializes the content lifecycle exactly once on wp_insert_post in
+ // the ephemeral fixture. This legitimate seed audit is not a user write,
+ // and must be verified separately rather than counted as an extra mutation.
+ $initial=array_values(array_filter($actions,static fn($a)=>(string)($a['action']??'')==='initialize_draft'));
+ if(count($initial)!==1 || (string)($initial[0]['result']??'')!=='PASS'
+   || (int)($initial[0]['actor']??-1)!==0
+   || (string)($initial[0]['after']['workflow']??'')!=='draft'){
+  throw new RuntimeException('Unexpected seed initializer lifecycle audit '.$suffix);
+ }
+ $actions=array_values(array_filter($actions,static fn($a)=>(string)($a['action']??'')!=='initialize_draft'));
  if($suffix==='peer'){
   if($actions!==[])throw new RuntimeException('Peer lifecycle mutated');
   $report[$suffix]='UNCHANGED';
@@ -35,6 +45,14 @@ foreach($ids as $suffix=>$id){
  }
  if(!str_starts_with((string)($fails[0]['action']??''),'revision_conflict_')){
   throw new RuntimeException('Concurrent stale form was not rejected '.$suffix);
+ }
+ if((string)($passes[0]['before']['workflow']??'')!=='refining'
+   || (string)($passes[0]['after']['workflow']??'')!=='draft'
+   || (string)($passes[1]['before']['workflow']??'')!=='draft'
+   || (string)($passes[1]['after']['workflow']??'')!=='refining'
+   || (string)($fails[0]['before']['workflow']??'')!=='refining'
+   || (string)($fails[0]['after']['workflow']??'')!=='refining'){
+  throw new RuntimeException('Lifecycle transition or rejected writer altered wrong data '.$suffix);
  }
  $report[$suffix]='BULK_SAVED_CONFLICT_BLOCKED_ROLLBACK_PASS';
 }
