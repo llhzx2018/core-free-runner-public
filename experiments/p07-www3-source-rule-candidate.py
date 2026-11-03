@@ -55,6 +55,34 @@ def columns(parts):
         result[key]=item[match.end():]
     return result
 
+def source_engine_evidence(source,catalog,ro,expected_tables=157):
+    """Report public engine pairs; never reveal table names or SQL literals."""
+    from collections import Counter
+    import sql_diff_evidence as schema
+    tables,_,_=ro._catalog_maps(catalog)
+    definitions,_=schema._schema_statements(source)
+    need(len(definitions)==expected_tables and set(definitions)==set(tables),"SOURCE_ENGINE_TABLE_SCOPE")
+    live={row["name"]:row["engine"] for row in catalog["tables"]}
+    public={"INNODB","MYISAM","ARIA","MEMORY","HEAP","ROCKSDB","MYROCKS","TOKUDB",
+            "MRG_MYISAM","MERGE","FEDERATED","FEDERATEDX","CONNECT","SPIDER","CSV",
+            "ARCHIVE","BLACKHOLE","COLUMNSTORE","MROONGA","S3","SEQUENCE","PERFORMANCE_SCHEMA"}
+    pairs=Counter();differing=unsupported=0
+    for name,definition in definitions.items():
+        parts=schema._split_create_table(definition)
+        need(parts is not None,"SOURCE_ENGINE_SCHEMA_PARSE")
+        snapshot=options(parts[2],ro)["ENGINE"].upper()
+        current=live[name].upper() if isinstance(live[name],str) else "UNAVAILABLE"
+        pairs[(snapshot if snapshot in public else "OTHER_UNPROVEN",
+               current if current in public else "OTHER_UNPROVEN")]+=1
+        differing+=snapshot!=current
+        unsupported+=snapshot not in {"INNODB","MYISAM"}
+    for ordinal,((snapshot,current),count) in enumerate(sorted(pairs.items()),1):
+        print("SOURCE_ENGINE_PAIR_"+str(ordinal)+"="+snapshot+":"+current+":"+str(count),flush=True)
+    print("SOURCE_ENGINE_SNAPSHOT_LIVE_DIFFERING="+str(differing),flush=True)
+    print("SOURCE_ENGINE_OUTSIDE_CURRENT_COPY_POLICY="+str(unsupported),flush=True)
+    print("SOURCE_ENGINE_EVIDENCE_IS_MIGRATION_APPROVAL=NO",flush=True)
+    return differing,unsupported
+
 def source_rule_plan(source,catalog,ro,expected_tables=157):
     import sql_diff_evidence as schema
     tables,charcols,known=ro._catalog_maps(catalog)
@@ -66,7 +94,8 @@ def source_rule_plan(source,catalog,ro,expected_tables=157):
         parts=schema._split_create_table(definition)
         need(parts is not None,"SOURCE_RULE_SCHEMA_PARSE")
         opts=options(parts[2],ro)
-        need(opts["ENGINE"].upper() in {"INNODB","MYISAM"} and opts["ENGINE"].lower()==str(engines[name]).lower(),"NON_ROCKSDB_ENGINE_UNPROVEN")
+        need(opts["ENGINE"].lower()==str(engines[name]).lower(),"SOURCE_SNAPSHOT_LIVE_ENGINE_DIFFER")
+        need(opts["ENGINE"].upper() in {"INNODB","MYISAM"},"SOURCE_ENGINE_OUTSIDE_CURRENT_COPY_POLICY")
         charset=opts["CHARSET"];rule=tables[name]
         need(known[rule]==charset,"SOURCE_RULE_CHARSET_MISMATCH")
         if "COLLATE" in opts:need(opts["COLLATE"]==rule,"SOURCE_RULE_EXPLICIT_DRIFT")
@@ -169,6 +198,7 @@ def candidate_collations(source_catalog,target_catalog,ro):
     need(a==b and ac==bc,"CANDIDATE_LIVE_COLLATION_DIFFER")
 
 def prepare_copy(original,quarantined,repaired,source_catalog,ro,stage,expected_tables=157,expected_repairs=25):
+    source_engine_evidence(original,source_catalog,ro,expected_tables)
     plan,column_count=source_rule_plan(original,source_catalog,ro,expected_tables)
     need(len(plan)==expected_repairs,"SOURCE_COLLATION_REPAIR_SCOPE_CHANGED")
     prove_rocksdb_only(original,ro)
@@ -188,7 +218,8 @@ def verify_copy(repaired,readback,source_catalog,target_catalog,ro,expected_tabl
     return hex_defaults,report["IDENTICAL_ROWS"]
 
 def run():
-    need(os.geteuid()==0 and sys.argv[1:]==["--create-new-www3-source-rule-candidate"],"EXPLICIT_NEW_CANDIDATE_REQUIRED")
+    need(os.geteuid()==0 and sys.argv[1:] in (["--create-new-www3-source-rule-candidate"],["--read-only-source-engine-evidence"]),"EXPLICIT_NEW_CANDIDATE_OR_READONLY_REQUIRED")
+    engine_only=sys.argv[1]=="--read-only-source-engine-evidence"
     os.umask(0o077)
     ro=load_readonly();base=ro.load(ro.HELPER_NAME,ro.HELPER_BLOB);stage=ro.load(ro.STAGE_NAME,ro.STAGE_BLOB)
     tail,source_db=base.verify_state();base.verify_current_runtime()
@@ -197,6 +228,21 @@ def run():
     need(engine.target_identity()==tail["target_server_identity"],"TARGET_IDENTITY_CHANGED")
     base.inspect_existing_site(base.DOMAIN,source_db)
     old=ro.load_receipt(base,stage,tail["target_server_identity"],source_db)
+    if engine_only:
+        print("MODE=WWW3_SOURCE_ENGINE_READ_ONLY",flush=True)
+        print("DATABASE_CREATE_IMPORT_ALTER_DELETE=NONE",flush=True)
+        print("RECEIPT_AND_MIGRATION_STATE_WRITES=NONE",flush=True)
+        print("SOURCE_NEW_EXPORT_OR_FREEZE=NONE",flush=True)
+        print("WEBSITE_MAPPING_AND_DNS_WRITES=NONE",flush=True)
+        print("CUTOVER_ALLOWED=NO",flush=True)
+        with tempfile.TemporaryDirectory(prefix="p07-www3-engine-readonly-",dir="/root") as td:
+            original=Path(td)/"source.sql.gz"
+            digest=stage.import_existing_verified_source(engine,tail,source_db,base,original)
+            need(digest==old["source_snapshot_sha256"],"SOURCE_ARCHIVE_RECEIPT_MISMATCH")
+            catalog=ro.live_source_catalog(engine,tail,source_db,base,stage)
+            source_engine_evidence(original,catalog,ro)
+        print("ENGINE_EVIDENCE_READBACK=COMPLETE",flush=True)
+        return 0
     name,user,password=site_lifecycle.derive_database_identity(base.DOMAIN,base.TAIL+":source-rule-copy-v1",1)
     need(name not in {source_db,old["scratch_database"]},"CANDIDATE_NAME_COLLISION")
     sites=inventory.build_manifest(Path("/")).get("sites",[])

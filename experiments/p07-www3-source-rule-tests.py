@@ -85,6 +85,41 @@ class SourceRuleTests(unittest.TestCase):
             root,source,catalog=self.files();mutate(catalog)
             with self.assertRaises((candidate.Block,ro.Block)):candidate.source_rule_plan(source,catalog,ro)
 
+    def test_engine_readback_distinguishes_policy_gap_from_actual_drift(self):
+        for snapshot,current,expected in (("MEMORY","MEMORY",(0,1)),("InnoDB","MyISAM",(1,0)),("ROCKSDB","ROCKSDB",(0,1)),("private_engine","private_engine",(0,1))):
+            text,catalog=fixture();text=text.replace("ENGINE=InnoDB","ENGINE="+snapshot,1)
+            root,source,_=self.files(text);catalog["tables"][0]["engine"]=current
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(candidate.source_engine_evidence(source,catalog,ro),expected)
+            self.assertNotIn("fixture_",out.getvalue());self.assertNotIn("private_engine",out.getvalue())
+            with self.assertRaisesRegex(candidate.Block,"SOURCE_SNAPSHOT_LIVE_ENGINE_DIFFER" if snapshot!=current else "SOURCE_ENGINE_OUTSIDE_CURRENT_COPY_POLICY"):
+                candidate.source_rule_plan(source,catalog,ro)
+
+    def test_readonly_engine_mode_cannot_reach_database_or_receipt_writes(self):
+        import cloudpanel,server_migration_pull,site_lifecycle
+        for digest in ("verified","changed"):
+            with self.subTest(digest=digest),tempfile.TemporaryDirectory() as td,contextlib.ExitStack() as s:
+                base=SimpleNamespace(RUNTIME=Path(td),DOMAIN="fixture.example",verify_state=lambda:({"target_server_identity":"target"},"source_db"),verify_current_runtime=Mock(),inspect_existing_site=Mock())
+                stage_mock=SimpleNamespace(import_existing_verified_source=Mock(return_value=digest),save=Mock(side_effect=AssertionError("no receipt writes")),receipt_path=Mock(side_effect=AssertionError("no intent reservation")),absent_sql=Mock(side_effect=AssertionError("no create path")))
+                ro_mock=SimpleNamespace(HELPER_NAME="helper",HELPER_BLOB="x",STAGE_NAME="stage",STAGE_BLOB="y",load=Mock(side_effect=[base,stage_mock]),load_receipt=Mock(return_value={"source_snapshot_sha256":"verified"}),live_source_catalog=Mock(return_value=fixture()[1]))
+                s.enter_context(patch.object(sys,"argv",["probe","--read-only-source-engine-evidence"]))
+                s.enter_context(patch.object(sys,"path",list(sys.path)))
+                s.enter_context(patch.object(candidate.os,"geteuid",return_value=0));s.enter_context(patch.object(candidate.os,"umask"))
+                s.enter_context(patch.object(candidate,"load_readonly",return_value=ro_mock))
+                s.enter_context(patch.object(server_migration_pull,"target_identity",return_value="target"))
+                create=s.enter_context(patch.object(cloudpanel,"add_database",side_effect=AssertionError("no database create")))
+                identity=s.enter_context(patch.object(site_lifecycle,"derive_database_identity",side_effect=AssertionError("no candidate identity")))
+                report=s.enter_context(patch.object(candidate,"source_engine_evidence"))
+                temp=tempfile.TemporaryDirectory
+                s.enter_context(patch.object(candidate.tempfile,"TemporaryDirectory",side_effect=lambda **kw:temp(dir=td)))
+                out=s.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                if digest=="verified":self.assertEqual(candidate.run(),0);report.assert_called_once()
+                else:
+                    with self.assertRaisesRegex(candidate.Block,"SOURCE_ARCHIVE_RECEIPT_MISMATCH"):candidate.run()
+                    report.assert_not_called()
+                create.assert_not_called();identity.assert_not_called();stage_mock.save.assert_not_called();stage_mock.receipt_path.assert_not_called();stage_mock.absent_sql.assert_not_called()
+                self.assertIn("DATABASE_CREATE_IMPORT_ALTER_DELETE=NONE",out.getvalue())
+
     def test_schema_true_default_index_and_column_changes_still_block(self):
         root,source,catalog=self.files();q=root/"q.gz";fixed=root/"fixed.gz"
         with contextlib.redirect_stdout(io.StringIO()):candidate.prepare_copy(source,q,fixed,catalog,ro,stage)
