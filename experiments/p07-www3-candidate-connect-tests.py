@@ -318,12 +318,19 @@ class ConnectionTests(unittest.TestCase):
                 self.assertEqual(path.read_bytes(),before)
 
 def real_mapping_proof(container,mysql,root):
+    # A disposable, dedicated account: Ubuntu's nobody/nogroup is shared by
+    # unrelated system users and correctly fails the isolation policy.
+    name="p07_cfg_"+str(os.getpid())
+    subprocess.run(["useradd","--system","--no-create-home","--user-group","--shell","/usr/sbin/nologin",name],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+    try:return real_mapping_with_account(container,mysql,root,connect.pwd.getpwnam(name))
+    finally:subprocess.run(["userdel",name],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+
+def real_mapping_with_account(container,mysql,root,site):
     """Called inside the existing 157-table MariaDB restoration fixture."""
     assert PHP is not None and os.geteuid()==0
     mysql("CREATE USER 'candidate_user'@'127.0.0.1' IDENTIFIED BY 'synthetic_candidate_password'; GRANT ALL ON corrected_copy.* TO 'candidate_user'@'127.0.0.1';")
     mysql("CREATE USER 'olduser'@'localhost' IDENTIFIED BY 'oldpassword'; GRANT SELECT ON original_copy.* TO 'olduser'@'localhost';")
     # Exercise real non-root dedicated group permissions, not just mocks.
-    site=connect.pwd.getpwnam("nobody")
     assert site.pw_uid!=0 and connect.isolated_site_group(site.pw_gid,site.pw_uid)
     web=root/"site";web.mkdir();os.chown(web,site.pw_uid,site.pw_gid);web.chmod(0o775)
     path=web/"wp-config.php";path.write_bytes(CONFIG);os.chown(path,site.pw_uid,site.pw_gid);path.chmod(0o664)
