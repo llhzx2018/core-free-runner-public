@@ -18,6 +18,8 @@ cp -a theme/src/. "$WP/wp-content/themes/vf-tools-theme/"
 cp -a ops/. "$WP/wp-content/plugins/vf-tools-ops/"
 cp -a legacy/src/. "$PLUGIN/"
 wp theme activate vf-tools-theme
+# Prepare a real non-empty legacy migration input before plugin activation.
+wp option update vf_tool_m3u8_settings '{"frontend_base_skin":"clean_utility"}' --format=json
 wp plugin activate vf-tools-ops/vf-ops.php vf-tools-m3u8/vf-tool-m3u8.php
 wp eval '
   update_option("s01_r8_owner_canary",["origin"=>"before-upgrade","keep"=>["list",17]],false);
@@ -43,7 +45,9 @@ replace_with(){
  cp -a "$1/src/." "$PLUGIN/"
  wp plugin activate vf-tools-m3u8/vf-tool-m3u8.php
 }
+skin_db(){ S01_R8_SKIN_PHASE="$1" wp eval-file control/lanes/s01-r8-upgrade-rollback-20261103/skin-db-parity.php; }
 check_owner
+skin_db baseline
 replace_with candidate
 wp eval '
   $r=vf_tools_m3u8_runtime_bundle();$m=vf_tools_m3u8_provider_manifest();
@@ -55,9 +59,11 @@ wp eval '
   echo "S01_R8_CANDIDATE_UPGRADE_V6_1_25_4=PASS\n";
 '
 check_owner
+skin_db verify
 echo S01_R8_SYNTHETIC_UPGRADE=PASS
 replace_with legacy
 check_owner
+skin_db verify
 wp eval '
   $r=vf_tools_m3u8_runtime_bundle();
   if(($r["version"]??null)!=="1.25.0")throw new Exception("ROLLBACK_SOURCE_VERSION_BAD");
@@ -65,9 +71,12 @@ wp eval '
 '
 replace_with candidate
 check_owner
+skin_db verify
 wp eval '
   $r=vf_tools_m3u8_runtime_bundle();$m=vf_tools_m3u8_provider_manifest();
   if(($r["version"]??null)!=="1.25.4"||($m["version"]??null)!=="1.25.4")throw new Exception("REUPGRADE_VERSION_BAD");
   echo "S01_R8_CANDIDATE_REUPGRADE=PASS\n";
 '
+skin_db guard
+echo S01_R8_SKIN_MIGRATION_MARIADB_LIFECYCLE=PASS
 echo S01_R8_WP_MARIADB_OLD_CANDIDATE_ROLLBACK_REUPGRADE=PASS
