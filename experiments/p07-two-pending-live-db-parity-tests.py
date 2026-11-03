@@ -25,6 +25,7 @@ def payload(mode,tablename="a",count=2,hashvalue="f"*64):
            "SCANNED_ROWS="+str(count),
            "ROW_FINGERPRINTS="+json.dumps({name:[count,hashvalue,"a"*64,
                                                  {col:"b"*64}]}),
+           "IDENTITY_NAMES="+json.dumps({name:[tablename,{col:"col"}]}),
            "READ_ONLY_TRANSACTION=YES",
            "CONTENT_FINGERPRINT_NOT_SNAPSHOT_PARITY=YES"]
     return "\n".join(lines)+"\n"
@@ -53,7 +54,8 @@ class Inventory:
                {"domain":"ilovem3u8.kewaro.com","site_user":"user1","mysql_databases":["db3"]}]}
 class Tests(unittest.TestCase):
     def test_parsed_defensive_worker_output(self):
-        values, mp=m.parsed(payload("SOURCE"),"SOURCE")
+        values, mp, labels=m.parsed(payload("SOURCE"),"SOURCE")
+        self.assertEqual(labels[sha("a")],["a",{sha("col"):"col"}])
         self.assertEqual(values["SCANNED_ROWS"],2)
         self.assertEqual(len(mp),1)
         for text in (payload("SOURCE")+"password=secret\n",
@@ -64,6 +66,10 @@ class Tests(unittest.TestCase):
             with self.assertRaises(m.Block):m.parsed(text,"SOURCE")
         bad=payload("SOURCE").replace("f"*64,"x"*64)
         with self.assertRaises(m.Block):m.parsed(bad,"SOURCE")
+        # A forged name must not change the trusted identifier identity.
+        for bad in (payload("SOURCE").replace('"a"', '"evil"'),
+                    payload("SOURCE").replace('"col"', '"evil"')):
+            with self.assertRaises(m.Block):m.parsed(bad,"SOURCE")
     def test_exact_site_scopes_and_not_ready(self):
         for domain,mid,length,idx,count in m.SITES:
             rows=state(domain,mid,length,idx)
@@ -226,21 +232,26 @@ class Tests(unittest.TestCase):
                ({"SCANNED_TABLES":12,"SCANNED_COLUMNS":12,
                  "SCANNED_ROWS":3 if mode=="SOURCE" else 2},
                 {sha("a"):[3 if mode=="SOURCE" else 2,
-                           "a"*64 if mode=="SOURCE" else "b"*64,"c"*64,{sha("x"):"d"*64}]})), \
+                           "a"*64 if mode=="SOURCE" else "b"*64,"c"*64,{sha("x"):"d"*64 if mode=="SOURCE" else "e"*64}]},
+                {sha("a"):["a",{sha("x"):"x"}]})), \
              contextlib.redirect_stdout(out):
             self.assertEqual(m.compare_one(Remote,Inventory,domain,mid,length,idx,expected),
                              "DIFFER")
         log=out.getvalue()
         self.assertIn("SOURCE_EXCESS_ROWS_IN_SHARED_TABLES=1",log)
         self.assertIn("LIVE_SOURCE_VS_EXISTING_TARGET=DIFFER_ADVISORY",log)
+        self.assertIn("DIFFERING_TABLE_NAMES=a",log)
+        self.assertIn("DIFFERING_COLUMN_NAMES=a.x",log)
         self.assertIn("SITE_DATABASE_PARITY=ADVISORY_COMPLETE",log)
         self.assertNotIn("db1",log)
         self.assertNotIn("db2",log)
     def test_parse_distinct_missing_columns(self):
         p=payload("SOURCE")
         other=payload("SOURCE",tablename="other")
-        a,mp=m.parsed(p,"SOURCE")
-        b,mp2=m.parsed(other,"SOURCE")
+        a,mp,labels=m.parsed(p,"SOURCE")
+        b,mp2,labels2=m.parsed(other,"SOURCE")
+        self.assertEqual(labels[sha("a")][0],"a")
+        self.assertEqual(labels2[sha("other")][0],"other")
         self.assertEqual(len(set(mp)-set(mp2)),1)
         self.assertEqual(a,b)
     def test_scope_and_writes_never_authorized(self):
