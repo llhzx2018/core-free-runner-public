@@ -15,7 +15,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import tempfile
 
 TABLE_CAP=1000
 COLUMN_CAP=200
@@ -26,6 +25,15 @@ OUTPUT_BYTES_CAP=1024*1024*1024
 def block(code):
     print("BLOCKED="+code,flush=True)
     raise SystemExit(13)
+
+def memory_file(name):
+    """Linux anonymous memfd: no DB credentials or SQL scripts on old-VPS disk."""
+    if not hasattr(os,"memfd_create"):
+        block("MEMORY_ONLY_FD_UNAVAILABLE")
+    try:
+        return os.fdopen(os.memfd_create(name,flags=os.MFD_CLOEXEC),"w+b")
+    except OSError:
+        block("MEMORY_ONLY_FD_UNAVAILABLE")
 
 def private(path):
     try: info=path.lstat()
@@ -74,11 +82,11 @@ def target_auth(domain,db):
     # separately restored www3 scratch. Never fall back to raw root socket.
     return source_auth(domain,db)
 
-def sql_read(args,query,timeout=60):
+def sql_read(args,query,timeout=60,pass_fds=()):
     try:
         p=subprocess.run(args+["--execute",query],stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
-            timeout=timeout,check=False)
+            timeout=timeout,check=False,pass_fds=pass_fds)
     except (OSError,subprocess.SubprocessError):
         block("SQL_METADATA_QUERY_UNAVAILABLE")
     if p.returncode!=0 or len(p.stdout)>1048576:
@@ -86,17 +94,17 @@ def sql_read(args,query,timeout=60):
     try:return p.stdout.decode("ascii","strict").strip()
     except UnicodeError:block("SQL_METADATA_NONASCII")
 
-def schema(args,db):
+def schema(args,db,pass_fds=()):
     lit="'"+db+"'"
     names=sql_read(args,"SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA="
-                   +lit+" AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME",90)
+                   +lit+" AND TABLE_TYPE='BASE TABLE' ORDER BY TABLE_NAME",90,pass_fds=pass_fds)
     tables=sorted(names.splitlines()) if names else []
     if not 0<len(tables)<=TABLE_CAP or len(set(tables))!=len(tables):
         block("TABLE_LIST_UNVERIFIED")
     if not all(re.fullmatch("[A-Za-z0-9_]{1,64}",v) for v in tables):
         block("TABLE_IDENTIFIER_UNSUPPORTED")
     values=sql_read(args,"SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA="
-            +lit+" ORDER BY TABLE_NAME,ORDINAL_POSITION",90)
+            +lit+" ORDER BY TABLE_NAME,ORDINAL_POSITION",90,pass_fds=pass_fds)
     cols={x:[] for x in tables}
     for line in values.splitlines():
         pair=line.split("\t")
@@ -110,8 +118,8 @@ def schema(args,db):
     # Stable cross-engine collation-independent field order.
     return tables,{t:sorted(cols[t]) for t in tables}
 
-def fingerprint(args,db,tables,cols):
-    with tempfile.TemporaryFile(mode="w+b") as script:
+def fingerprint(args,db,tables,cols,pass_fds=()):
+    with memory_file("p07-readonly-sql") as script:
         script.write(b"SET SESSION time_zone='+00:00';\n")
         script.write(b"SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;\n")
         script.write(b"START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY;\n")
@@ -136,7 +144,7 @@ def fingerprint(args,db,tables,cols):
                  "--default-character-set=utf8mb4"]
         try:
             process=subprocess.Popen(command,stdin=script,stdout=subprocess.PIPE,
-                                      stderr=subprocess.DEVNULL)
+                                      stderr=subprocess.DEVNULL,pass_fds=pass_fds)
         except OSError:
             block("TRANSACTION_QUERY_UNAVAILABLE")
         rows=[[] for _ in tables]
@@ -206,19 +214,21 @@ def main():
     else:host,port,user,pw=target_auth(domain,db)
     cli=shutil.which("mariadb") or shutil.which("mysql")
     if not cli:block("SQL_CLIENT_UNAVAILABLE")
-    with tempfile.TemporaryDirectory(prefix="p07-content-",dir="/root") as directory:
-        cfg=Path(directory)/"client.cnf"
-        fd=os.open(cfg,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)
+    # Keep the master credentials entirely in an anonymous memory file.
+    # --defaults-file must be the first client argument and its fd inherited.
+    with memory_file("p07-readonly-db-client") as cfg:
         escaped=lambda v:v.replace(chr(92),chr(92)+chr(92)).replace('"',chr(92)+'"')
-        with os.fdopen(fd,"w") as handle:
-            handle.write('[client]'+chr(10)+'user="'+escaped(user)+'"'+chr(10)+
-                         'password="'+escaped(pw)+'"'+chr(10))
-        # Scoped local secret file never leaves this host and is unlinked on exit.
-        args=[cli,"--defaults-extra-file="+str(cfg),"--protocol=tcp",
-              "--host="+host,"--port="+str(port),
+        config=('[client]'+chr(10)+'user="'+escaped(user)+'"'+chr(10)+
+                'password="'+escaped(pw)+'"'+chr(10))
+        cfg.write(config.encode("utf-8"))
+        cfg.flush()
+        cfg.seek(0)
+        inherited=(cfg.fileno(),)
+        args=[cli,"--defaults-file=/proc/self/fd/"+str(cfg.fileno()),
+              "--protocol=tcp","--host="+host,"--port="+str(port),
               "--batch","--skip-column-names"]
-        tables,cols=schema(args,db)
-        rows,total=fingerprint(args[1:],db,tables,cols)
+        tables,cols=schema(args,db,pass_fds=inherited)
+        rows,total=fingerprint(args[1:],db,tables,cols,pass_fds=inherited)
     print("MODE="+mode.upper(),flush=True)
     print("SCANNED_TABLES="+str(len(tables)),flush=True)
     print("SCANNED_COLUMNS="+str(sum(len(v) for v in cols.values())),flush=True)
