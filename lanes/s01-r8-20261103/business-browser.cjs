@@ -16,9 +16,10 @@ async function waitFor(p,fn,label,ms=12000){
    const context=await browser.newContext({viewport:{width,height:900},acceptDownloads:true});
    try {
     const check=await context.newPage();
-    let res=await check.goto(base+'/r8-playlist-checker/',{waitUntil:'networkidle'});
+    let res=await check.goto(base+'/m3u8-playlist-checker/',{waitUntil:'networkidle'});
     assert.equal(res.status(),200);
     let r=rootFor(check,'playlist-checker');await r.waitFor({timeout:12000});
+    await waitFor(check,()=>{let e=document.querySelector('[data-vf-module="playlist-checker"]');return e&&e.dataset.vfPlaylistCheckerReady},'checker-boot');
     await r.locator('[data-vf-playlist-action="sample-media"]').first().click();
     await r.locator('[data-vf-playlist-action="analyze"]').first().click();
     await waitFor(check,()=>{let e=document.querySelector('[data-vf-module="playlist-checker"]');return e && e.getAttribute('data-vf-playlist-has-result')==='1' && e._vfPlaylistResult?.summary?.segmentCount>0},'playlist-media');
@@ -38,7 +39,7 @@ async function waitFor(p,fn,label,ms=12000){
     assert.equal(err.state,'error');mark('PLAYLIST_INVALID_FAIL_CLOSED_'+width,err);
     await check.close();
 
-    const backup=await context.newPage();res=await backup.goto(base+'/r8-backup-restore/',{waitUntil:'networkidle'});assert.equal(res.status(),200);
+    const backup=await context.newPage();res=await backup.goto(base+'/m3u8-backup-restore/',{waitUntil:'networkidle'});assert.equal(res.status(),200);
     r=rootFor(backup,'backup-restore');await r.waitFor({timeout:12000});
     await r.locator('[data-vf-backup-action="preview-workspace"]').first().click();
     await waitFor(backup,()=>{const e=document.querySelector('[data-vf-module="backup-restore"]');return e&&e.dataset.vfBackupBusy==='0'&&e.dataset.vfBackupLastAction==='preview-workspace'},'backup-preview',15000);
@@ -64,7 +65,7 @@ async function waitFor(p,fn,label,ms=12000){
     assert.equal(await r.locator('[data-vf-backup-action="restore-backup"]').isDisabled(),false,'RESTORE should enable only after preflight');
     await backup.close();
 
-    const convert=await context.newPage();res=await convert.goto(base+'/r8-converter/',{waitUntil:'networkidle'});assert.equal(res.status(),200);
+    const convert=await context.newPage();res=await convert.goto(base+'/m3u8-to-mp4/',{waitUntil:'networkidle'});assert.equal(res.status(),200);
     r=rootFor(convert,'converter');await r.waitFor({timeout:12000});
     await convert.route('**/broken.m3u8',route=>route.fulfill({status:404,body:'not found',headers:{'content-type':'text/plain','access-control-allow-origin':'*'}}));
     await r.locator('[data-converter-url]').fill('https://fixture.example.invalid/broken.m3u8');
