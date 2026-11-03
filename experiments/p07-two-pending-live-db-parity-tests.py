@@ -35,13 +35,14 @@ def state(domain,mid,length,index,db="db1"):
                   "site_user":"user1","mysql_databases":[db]}
     return {
        "schema":"vf-server-ops.server-migration.target-pull.v1",
-       "migration_id":mid,"status":"PREPARE_FAILED","cutover_prohibited":(mid==m.LEGACY9),
+       "migration_id":mid,"status":"PREPARE_FAILED","cutover_prohibited":(mid in (m.LEGACY9,m.CURRENT_CHILD)),
        "source_runtime_frozen":False,"dns_changed_by_p07":False,
        "source_delete_allowed":False,"existing_target_overwrite_allowed":False,
        "target_server_identity":"TARGETX",
        "source_runtime_path":"/var/lib/vf-server-ops/pull-source/"+mid+"/runtime",
        "source":{"id":"source-test"},"sites":sites,
-       "partial_parent_migration_id":m.ORIGINAL17 if mid==m.LEGACY9 else None}
+       "partial_parent_migration_id":(m.ORIGINAL17 if mid==m.LEGACY9 else
+                                      m.CURRENT_PARENT if mid==m.CURRENT_CHILD else None)}
 class FakeMigration:
     @staticmethod
     def target_identity():return "TARGETX"
@@ -152,6 +153,53 @@ class Tests(unittest.TestCase):
                 m.preflight(FakeMigration,Inventory,"unzip.kewaro.com",
                             m.LEGACY9,9,6,12)
         self.assertIn("ORIGINAL_CUTOVER_MARKER=MISSING",out.getvalue())
+
+    def test_current_original_owner_scope_is_explicit_and_fail_closed(self):
+        self.assertEqual(m.CURRENT_SITES[0],
+            ("unzip.kewaro.com",m.CURRENT_CHILD,9,6,12))
+        self.assertEqual(m.CURRENT_SITES[1],
+            ("ilovem3u8.kewaro.com",m.CURRENT_PARENT,17,7,42))
+        for domain,mid,n,idx,expected_tables in m.CURRENT_SITES:
+            with self.subTest(domain=domain):
+                original=state(domain,mid,n,idx)
+                with mock.patch.object(m,"private_state",return_value=original):
+                    result=m.preflight(FakeMigration,Inventory,domain,mid,n,idx,expected_tables)
+                self.assertEqual(result[1],"db1")
+                self.assertEqual(result[3],
+                    "/var/lib/vf-server-ops/pull-source/"+mid+"/runtime")
+        child=state("unzip.kewaro.com",m.CURRENT_CHILD,9,6)
+        child["partial_parent_migration_id"]=m.ORIGINAL17
+        with mock.patch.object(m,"private_state",return_value=child):
+            with self.assertRaisesRegex(m.Block,"PARENT_MIGRATION_ID_CHANGED"):
+                m.preflight(FakeMigration,Inventory,
+                    "unzip.kewaro.com",m.CURRENT_CHILD,9,6,12)
+        child=state("unzip.kewaro.com",m.CURRENT_CHILD,9,6)
+        child["cutover_prohibited"]=False
+        with mock.patch.object(m,"private_state",return_value=child):
+            with self.assertRaisesRegex(m.Block,"MIGRATION_SAFETY"):
+                m.preflight(FakeMigration,Inventory,
+                    "unzip.kewaro.com",m.CURRENT_CHILD,9,6,12)
+
+    def test_memory_only_original_server_sql_and_credentials(self):
+        worker=ROOT/"p07-two-pending-live-db-worker.py"
+        text=worker.read_text(encoding="utf-8")
+        self.assertIn("os.memfd_create",text)
+        self.assertIn("--defaults-file=/proc/self/fd/",text)
+        self.assertIn("pass_fds=pass_fds",text)
+        self.assertIn("pass_fds=inherited",text)
+        for unsafe in ("tempfile.TemporaryDirectory","tempfile.TemporaryFile",
+                       "client.cnf","--password="):
+            self.assertNotIn(unsafe,text)
+        spec=importlib.util.spec_from_file_location("p07_pending_memfd_worker",worker)
+        mod=importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        with mod.memory_file("p07-test-anonymous-secret") as private:
+            private.write(b"no-disk-synthetic-secret")
+            private.flush()
+            private.seek(0)
+            self.assertEqual(private.read(),b"no-disk-synthetic-secret")
+            self.assertIn("memfd:",__import__("os").readlink(
+                "/proc/self/fd/"+str(private.fileno())))
 
     def test_equal_and_changed_real_boundaries(self):
         domain,mid,length,idx,expected=m.SITES[0]
