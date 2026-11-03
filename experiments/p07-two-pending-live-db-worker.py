@@ -240,6 +240,15 @@ def main():
     print("SCANNED_COLUMNS="+str(sum(len(v) for v in cols.values())),flush=True)
     print("SCANNED_ROWS="+str(total),flush=True)
     print("ROW_FINGERPRINTS="+json.dumps(rows,sort_keys=True,separators=(",",":")),flush=True)
+    # Only validated SQL identifiers, never row literals or credentials. The
+    # matching wrapper authenticates each label against its SHA-256 identity.
+    labels={
+        hashlib.sha256(table.encode("ascii")).hexdigest(): [
+            table, {hashlib.sha256(col.encode("ascii")).hexdigest():col
+                    for col in cols[table]}
+        ] for table in tables
+    }
+    print("IDENTITY_NAMES="+json.dumps(labels,sort_keys=True,separators=(",",":")),flush=True)
     print("READ_ONLY_TRANSACTION=YES",flush=True)
     print("CONTENT_FINGERPRINT_NOT_SNAPSHOT_PARITY=YES",flush=True)
 
