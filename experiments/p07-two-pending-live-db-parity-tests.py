@@ -63,7 +63,7 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(m.Block,"WORKER_IDENTIFIER_MAP_REQUIRED"):
             m.parsed(payload("SOURCE").replace(
                 next(line for line in payload("SOURCE").splitlines()
-                     if line.startswith("IDENTITY_NAMES="))+"\\n",""),
+                     if line.startswith("IDENTITY_NAMES="))+chr(10),""),
                 "SOURCE",with_labels=True)
         self.assertEqual(values["SCANNED_ROWS"],2)
         self.assertEqual(len(mp),1)
