@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 test "$(git -C baseline rev-parse HEAD)" = "fbe049dc18eb18eab21e9d8c3cededfe55b783e7"
-test "$(git -C candidate rev-parse HEAD)" = "326fd22662500e6f37df997df1acbaa2931d3e70"
+test "$(git -C candidate rev-parse HEAD)" = "7a1bca1deaf08148640812c9e465324442767d90"
 test "$(git -C theme rev-parse HEAD)" = "3305e9447f936c3e2a63a15ac1fc9b2893f188e7"
 test "$(git -C ops rev-parse HEAD)" = "3f22e61339f7c76eea2c4524885819b10ee59057"
 echo S01_R8_ZIP_SOURCE_IDENTITIES=PASS
