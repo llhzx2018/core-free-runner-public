@@ -15,7 +15,7 @@ const { URL } = require('node:url');
   assert(tracking.startsWith('https://kuma.example.test/'));
   const browser = await chromium.launch({
     headless: true,
-    args: ['--no-proxy-server', '--host-resolver-rules=MAP kuma.example.test 127.0.0.1,MAP lander.example.test 127.0.0.1']
+    args: ['--no-proxy-server', '--host-resolver-rules=MAP kuma.example.test 127.0.0.1,MAP lander.example.test 127.0.0.1,MAP offers.example.test 127.0.0.1']
   });
   try {
     const ctx = await browser.newContext({ ignoreHTTPSErrors: true, viewport: { width: 390, height: 844 } });
@@ -60,24 +60,15 @@ const { URL } = require('node:url');
     assert(overflow <= 1, 'tracked 390px horizontal overflow: ' + overflow);
     console.log('P08_R16_REAL_KUMA_CLICK_TO_ACTUAL_P08_STATIC_HTML_AND_CSP_JS_PASS');
 
-    // The exit is followed through the genuine Kuma click.php endpoint.
-    // Only the final synthetic external offer URL is fulfilled locally.
-    let offersSeen = 0;
-    await page.route('https://offers.example.test/**', async route => {
-      offersSeen++;
-      await route.fulfill({
-        status: 200,
-        contentType: 'text/html',
-        body: '<!doctype html><title>R16 synthetic offer</title><p>Only a browser fixture.</p>',
-      });
-    });
+    // The exit traverses the genuine Kuma click.php. The Offer is an
+    // actual local HTTPS vhost, not a third-party URL or a browser mock.
     await Promise.all([
       page.waitForURL(u => u.hostname === 'offers.example.test', { timeout: 30000 }),
       button.click(),
     ]);
-    assert.equal(offersSeen, 1);
     assert.equal(new URL(page.url()).hostname, 'offers.example.test');
     assert.equal(new URL(page.url()).pathname, '/out');
+    assert.match(await page.textContent('body'), /Only a browser fixture/);
     console.log('P08_R16_CHROMIUM_P08_CTA_TO_REAL_KUMA_CLICK_PHP_AND_SYNTHETIC_OFFER_PASS');
 
     // Synthetic S2S Postback must be recorded by Kuma, not by P08.
