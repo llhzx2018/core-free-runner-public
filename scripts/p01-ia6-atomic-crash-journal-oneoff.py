@@ -25,9 +25,22 @@ db=pathlib.Path(p["db_file"]).resolve()
 config=pathlib.Path(p["config_file"]).resolve()
 assert datadir.is_dir() and str(datadir).startswith(str(site)+"/")
 assert db.is_file() and config.is_file()
-updates=datadir/"updates"
+# Do not guess the shipped Atomic journal location. Resolve the actual
+# unchanged release repair class through reflection in a disposable CLI.
+journal_text=subprocess.check_output(["php","-r",
+ "define('VF_ATOMIC_LIBRARY_MODE',true);require $argv[1];"
+ "$rt=include $argv[2];"
+ "$m=new ReflectionMethod('VfAtomicPackage','journalPath');"
+ "echo $m->invoke(null,$rt);",
+ str(repair),str(site/"app/.runtime.php")],text=True).strip()
+assert journal_text
+journal=pathlib.Path(journal_text)
+updates=journal.parent
+assert str(updates.resolve()).startswith(str(datadir)+"/")
+assert updates.name=="updates"
 updates.mkdir(mode=0o750,exist_ok=True)
 stage=updates/".atomic-2.47.492-synthetic-crash-journal"
+print("P01_IA6_ATOMIC_CANONICAL_JOURNAL_LOCATION_RESOLVED=PASS")
 assert not stage.exists()
 stage.mkdir(mode=0o700)
 all_files=sorted(set(target)|set(removed))
@@ -53,7 +66,6 @@ version=site/"VERSION.txt"
 assert "VERSION.txt" in meta and meta["VERSION.txt"]
 version.write_text("2.47.492\n")
 assert version.read_text().strip()=="2.47.492"
-journal=updates/"p01-atomic-transaction.json"
 assert not journal.exists()
 journal.write_text(json.dumps({
  "target_version":"2.47.492",
