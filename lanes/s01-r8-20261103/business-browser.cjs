@@ -66,6 +66,7 @@ async function waitFor(p,fn,label,ms=12000){
 
     const convert=await context.newPage();res=await convert.goto(base+'/r8-converter/',{waitUntil:'networkidle'});assert.equal(res.status(),200);
     r=rootFor(convert,'converter');await r.waitFor({timeout:12000});
+    await convert.route('**/broken.m3u8',route=>route.fulfill({status:404,body:'not found',headers:{'content-type':'text/plain','access-control-allow-origin':'*'}}));
     await r.locator('[data-converter-url]').fill('https://fixture.example.invalid/broken.m3u8');
     await r.locator('[data-converter-generate]').first().click();
     await waitFor(convert,()=>{const e=document.querySelector('[data-vf-module="converter"]');return e && ['blocked','failed','completed'].includes(e.dataset.vfConverterTaskState)},'converter-invalid-url',25000);
