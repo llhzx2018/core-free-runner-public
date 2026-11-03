@@ -8,7 +8,7 @@ const { URL } = require('node:url');
 
 (async () => {
   const temp = process.env.P08_R16_TMP;
-  assert(temp && temp.includes('/p08-kuma/'));
+  assert(temp && temp.endsWith('/p08-kuma'), 'P08_R16_TEMP_PATH_NOT_ISOLATED');
   const token = fs.readFileSync(path.join(temp, 'key'), 'utf8').trim();
   const tracking = fs.readFileSync(path.join(temp, 'tracking-url'), 'utf8').trim();
   assert(token.startsWith('kuma_'));
@@ -108,6 +108,6 @@ const { URL } = require('node:url');
   }
 })().catch(err => {
   // Errors contain only synthetic fixture URLs and assertion identifiers.
-  console.error('P08_R16_CHROMIUM_CHAIN_FAIL=' + err.message.split('\n')[0].slice(0,260));
+  console.error('P08_R16_CHROMIUM_CHAIN_FAIL=' + (err.stack || err.message).split('\n').slice(0,3).join(' | ').slice(0,380));
   process.exitCode=1;
 });
