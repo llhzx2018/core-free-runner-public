@@ -140,6 +140,64 @@ jobs:
             --key-file "$RUNNER_TEMP/p08-kuma/key"
           echo KUMA_R15_REAL_UPSTREAM_SANDBOX_INTEGRATION_PASS
 
+      - name: Checkout exact private VF Lander main into isolated workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-lander
+          ref: f4171bb2da61df77adfd2ade669a36eec2992d50
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: lander
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          extensions: mbstring, curl, xml, dom, pdo_sqlite, sqlite3, fileinfo
+          tools: composer:v2
+
+      - name: Run exact VF Lander read-only adapter against real local Kuma API
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C lander rev-parse HEAD)" = f4171bb2da61df77adfd2ade669a36eec2992d50
+          cd lander/backend
+          composer install --no-interaction --prefer-dist --no-progress --no-dev --optimize-autoloader >/dev/null
+          export KUMA_SANDBOX_TEST_TOKEN="$(cat "$RUNNER_TEMP/p08-kuma/key")"
+          php <<'PHP'
+          <?php
+          require 'vendor/autoload.php';
+          $app = require 'bootstrap/app.php';
+          $app->make(\Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+          config()->set('tracker.simple_kuma.api_base', 'https://kuma.example.test');
+          config()->set('tracker.simple_kuma.public_base', 'https://kuma.example.test');
+          config()->set('tracker.simple_kuma.api_token', getenv('KUMA_SANDBOX_TEST_TOKEN'));
+          try {
+              $adapter = new \App\Support\Tracker\SimpleKumaAdapter();
+              if (!$adapter->configured() || ($adapter->health()['status'] ?? null) !== 'OK') {
+                  throw new RuntimeException('REAL_KUMA_HEALTH_REJECTED');
+              }
+              $verified = $adapter->verify(1, 1, 1);
+              if (($verified['verification_scope'] ?? null) !== 'RESOURCE_ONLY'
+                  || ($verified['campaign_id'] ?? null) !== 1
+                  || !str_starts_with((string)($verified['tracking_url'] ?? ''), 'https://kuma.example.test/')) {
+                  throw new RuntimeException('REAL_KUMA_RESOURCE_VERIFICATION_REJECTED');
+              }
+              $stats = $adapter->stats(1);
+              if (!is_array($stats)) throw new RuntimeException('REAL_KUMA_STATS_REJECTED');
+              echo "P08_EXACT_SOURCE_REAL_KUMA_HEALTH_RESOURCE_AND_STATS_PASS\n";
+              echo "P08_REAL_KUMA_VALIDATION_SCOPE_RESOURCE_ONLY_NOT_FUNNEL_ATTESTED\n";
+          } catch (Throwable $e) {
+              // Never print remote payload, request headers, or temporary token.
+              echo "P08_REAL_KUMA_ADAPTER_BLOCKED=" . (
+                  $e instanceof \App\Support\Tracker\TrackerConnectionException
+                      ? $e->reason : 'UNEXPECTED_RUNTIME'
+              ) . "\n";
+              exit(92);
+          }
+          PHP
+
       - name: Remove temporary containers, credentials, TLS and workspace
         shell: bash
         if: always()
