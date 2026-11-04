@@ -109,7 +109,7 @@ class Tests(unittest.TestCase):
     def test_remaining_pending_site_does_not_promote(self):
         states=make_states()
         states[m.JOBS[2][1]]["sites"][-1]["stage_status"]="PULLED_STAGED"
-        with self.assertRaisesRegex(m.Block,"STAGED_PENDING_SCOPE_CHANGED"):
+        with self.assertRaisesRegex(m.Block,"PER_OWNER_STAGED_COUNT_CHANGED"):
             run(states,{"sites":[]})
 
     def test_current_cp2_task_ids_and_exact_stage_counts(self):
