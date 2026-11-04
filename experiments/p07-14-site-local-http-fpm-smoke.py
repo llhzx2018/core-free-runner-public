@@ -20,7 +20,7 @@ import sys
 
 sys.dont_write_bytecode=True
 BASE=Path(__file__).with_name("p07-17-site-staged-local-evidence.py")
-EXPECTED_BASE="7296ea88fe0d096bc622671bf20f1b2b7aa18f5c"
+EXPECTED_BASE="01b02934109458942e575d4e5a45d2d7f7ea37cf"
 class Block(Exception):pass
 def must(ok,reason):
     if not ok:raise Block(reason)
