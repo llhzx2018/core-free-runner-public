@@ -48,6 +48,37 @@ class Tests(unittest.TestCase):
             with self.assertRaises(m.baseline.Block):
                 m.safe_asset_path({"path":path,"user":"user"})
 
+    def test_source_undeclared_external_kind_is_presence_not_parity(self):
+        with tempfile.TemporaryDirectory() as d:
+            f=Path(d)/"untyped.txt"
+            f.write_bytes(b"test data")
+            folder=Path(d)/"untyped"
+            folder.mkdir()
+            self.assertEqual(m.stat_asset(f,None),"PRESENT_UNDECLARED_KIND")
+            self.assertEqual(m.stat_asset(folder,None),"PRESENT_UNDECLARED_KIND")
+            self.assertEqual(m.stat_asset(f,"file"),"PRESENT")
+            self.assertEqual(m.stat_asset(folder,"directory"),"PRESENT")
+            self.assertEqual(m.stat_asset(f,"DIRECTORY"),"TYPE_DIFFER")
+            self.assertEqual(m.stat_asset(folder,"FILE"),"TYPE_DIFFER")
+            self.assertEqual(m.stat_asset(Path(d)/"absent",None),"MISSING")
+            link=Path(d)/"symlink"
+            link.symlink_to(f)
+            self.assertEqual(m.stat_asset(link,None),"SYMLINK_REVIEW_REQUIRED")
+            self.assertEqual(m.stat_asset(f,"invalid"),"UNKNOWN_KIND")
+
+    def test_untyped_external_counts_as_local_present_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/"present"
+            path.mkdir()
+            s={"sites":[{"site_user":"example","stage_status":"PULLED_STAGED"}],
+               "external_assets":[{"path":"/home/example/assets","user":"example"}],
+               "sqlite_assets":[],"runtime_assets":{}}
+            with mock.patch.object(m,"safe_asset_path",return_value=path):
+                counts,_=m.asset_overview([s])["LAST2"]
+            self.assertEqual(counts["external_present"],1)
+            self.assertEqual(counts["external_present_untyped"],1)
+            self.assertEqual(counts["external_unknown"],0)
+
     def run_fixture(self,override=None):
         states=fixture.make_states()
         if override:override(states)
