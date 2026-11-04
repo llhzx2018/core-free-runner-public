@@ -338,12 +338,12 @@ class Tests(unittest.TestCase):
                  ascii_hex_defaults_equal=10,memory_table_count=1)
         path.write_text(json.dumps(r))
         self.assertEqual(m.www3_candidate_credentials(
-            source,transactions,"target-identity"),
+            source,transactions,"target-identity",os.getuid()),
             ("candidate","p07_user","synthetic-password-123"))
         r["website_activated"]=True
         path.write_text(json.dumps(r))
         with self.assertRaises(m.Block):
-            m.www3_candidate_credentials(source,transactions,"target-identity")
+            m.www3_candidate_credentials(source,transactions,"target-identity",os.getuid())
 
     def test_live_gate_rejects_original_config_before_connection(self):
         source,panel,transactions,wp,_=self.www3_recovery_fixture()
