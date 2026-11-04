@@ -112,6 +112,37 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(m.Block,"STAGED_PENDING_SCOPE_CHANGED"):
             run(states,{"sites":[]})
 
+    def test_current_cp2_task_ids_and_exact_stage_counts(self):
+        self.assertEqual(
+            [mid for _,mid,_ in m.JOBS],
+            [
+                "pull-20261101T045943Z-923729a1",
+                "pull-20261101T052411Z-35663c25",
+                "pull-20261102T005644Z-7178c7d5",
+            ],
+        )
+        self.assertEqual(m.EXPECTED_STAGE_COUNTS,(7,6,1))
+        states=make_states()
+        self.assertEqual(
+            [sum(site["stage_status"]=="PULLED_STAGED" for site in states[mid]["sites"])
+             for _,mid,_ in m.JOBS],
+            list(m.EXPECTED_STAGE_COUNTS),
+        )
+
+    def test_noncurrent_older_task_id_fails_closed(self):
+        states=make_states()
+        orphan=states.pop(m.JOBS[0][1])
+        states["pull-20261028T103425Z-98050c76"]=orphan
+        with self.assertRaises(KeyError):
+            run(states,{"sites":[]})
+
+    def test_stage_count_drift_refused_before_panel_inventory(self):
+        states=make_states()
+        first=states[m.JOBS[0][1]]["sites"][0]
+        first["stage_status"]="PENDING"
+        with self.assertRaisesRegex(m.Block,"PER_OWNER_STAGED_COUNT_CHANGED"):
+            run(states,{"sites":[]})
+
     def test_unverified_database_phase_is_missing(self):
         x=row("sample.example",True)
         x["mysql_verification"][0]["phase"]="final"
