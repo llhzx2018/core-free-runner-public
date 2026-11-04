@@ -28,6 +28,23 @@ HERE=Path(__file__).resolve().parent
 BASE=HERE/"p07-17-site-staged-local-evidence.py"
 BASE_BLOB="01b02934109458942e575d4e5a45d2d7f7ea37cf"
 PRIVATE=Path("/var/lib/vf-server-ops/operator-recovery/p07-missing-assets-cb93c6b490a04068a5533f9cde0fcec7")
+PRIVATE_ROOT=Path("/var/lib/vf-server-ops/operator-recovery")
+PRIVATE_DIR_RE=re.compile(r"p07-missing-assets-[a-f0-9]{32}\\Z")
+
+def validated_private_directory(path_value):
+    """Bind the operator to the *actual* newly staged 35-item package.
+
+    The private stage generator uses a fresh UUID; the historical hardcoded
+    receipt name must never silently substitute for an owner-selected one.
+    """
+    must(type(path_value) is str and len(path_value)<256,
+         "PRIVATE_EVIDENCE_DIRECTORY_INVALID")
+    path=Path(path_value)
+    must(path.is_absolute() and path.parent==PRIVATE_ROOT
+         and PRIVATE_DIR_RE.fullmatch(path.name) is not None
+         and not path.is_symlink() and not PRIVATE_ROOT.is_symlink(),
+         "PRIVATE_EVIDENCE_DIRECTORY_UNSAFE")
+    return path
 EXPECTED={"external":17,"sqlite":13,"cron":5}
 TYPES={"external","sqlite","cron"}
 HEX=re.compile(r"[0-9a-f]{64}$")
@@ -711,7 +728,11 @@ def do_audit_partial(states,approved,roots,overlays):
 
 def do_install():
     must(os.geteuid()==0,"CP2_ROOT_REQUIRED")
+    global PRIVATE
     requested=sys.argv[1:]
+    if len(requested)==3 and requested[1]=="--private-evidence-dir":
+        PRIVATE=validated_private_directory(requested[2])
+        requested=requested[:1]
     must(requested in (["--install-only-30-absent-site-assets"],
                        ["--resume-verified-partial-asset-install"],
                        ["--audit-existing-partial-assets-readonly"]),
