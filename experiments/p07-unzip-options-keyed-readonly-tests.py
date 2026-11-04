@@ -136,6 +136,7 @@ class Tests(unittest.TestCase):
             return subprocess.CompletedProcess(cmd,0,item("siteurl",1,"synthetic-value"),b"")
         out=io.StringIO()
         with mock.patch.object(m,"load_base",return_value=Base), \
+             mock.patch.object(m.os,"geteuid",return_value=0), \
              mock.patch.object(m.shutil,"which",side_effect=lambda x:"/usr/bin/"+x), \
              mock.patch.object(m.subprocess,"run",side_effect=runner), \
              contextlib.redirect_stdout(out):
@@ -148,6 +149,7 @@ class Tests(unittest.TestCase):
         self.assertEqual(len(calls),1)
     def test_unsafe_main_flag_does_not_touch_live_servers(self):
         with mock.patch.object(sys,"argv",["tool","--cutover"]), \
+             mock.patch.object(m.os,"geteuid",return_value=0), \
              mock.patch.object(m,"checked_file") as read:
             with self.assertRaisesRegex(m.Block,"EXPLICIT_SINGLE_SITE_READONLY_FLAG_REQUIRED"):
                 m.main()
