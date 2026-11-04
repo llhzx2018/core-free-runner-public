@@ -18,16 +18,15 @@ import sys
 sys.dont_write_bytecode=True
 HERE=Path(__file__).resolve().parent
 SMOKE=HERE/"p07-14-site-local-http-fpm-smoke.py"
-SMOKE_BLOB="af9784b44cdeec326b37dae27100e21225f83152"
+SMOKE_BLOB="c4d390396819313ce28e923d8740f33291d194e4"
 BASE=HERE/"p07-17-site-staged-local-evidence.py"
-BASE_BLOB="fe9387cadaa987faf11863ee1524b30e0a6aadbc"
+BASE_BLOB="01b02934109458942e575d4e5a45d2d7f7ea37cf"
 ROOT=Path("/var/lib/vf-server-ops/server-migrations")
+# Structural CloudPanel database counts, never app-config or SQL parity.
 THREE=(
- ("ilovem3u8.kewaro.com","ORIGINAL17",
-  "recovery-scratch-ilovem3u8","ISOLATED_SOURCE_READBACK_PASS",2),
- ("unzip.kewaro.com","LEGACY9",None,None,1),
- ("www3.m3u8.one","LAST2",
-  "recovery-scratch-www3","ISOLATED_IMPORT_COMPLETED_NOT_VERIFIED",1),
+ ("ilovem3u8.kewaro.com","ORIGINAL17",2),
+ ("unzip.kewaro.com","LEGACY9",1),
+ ("www3.m3u8.one","LAST2",1),
 )
 class Block(Exception):pass
 def need(ok,code):
@@ -41,17 +40,6 @@ def pinned(path,sha,name):
     mod=importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
-def private_record(path):
-    try:st=path.lstat()
-    except OSError:raise Block("PRIVATE_RECOVERY_STATE_MISSING") from None
-    need(stat.S_ISREG(st.st_mode) and st.st_uid==0 and not st.st_mode&0o077
-         and not path.is_symlink() and 0<st.st_size<1048576,
-         "PRIVATE_RECOVERY_STATE_UNSAFE")
-    try:obj=json.loads(path.read_text("utf-8"))
-    except (UnicodeError,OSError,ValueError):
-        raise Block("PRIVATE_RECOVERY_STATE_UNREADABLE") from None
-    need(type(obj) is dict,"PRIVATE_RECOVERY_STATE_INVALID")
-    return obj
 def status_scope(base):
     states=[]
     seen={}
@@ -77,7 +65,7 @@ def status_scope(base):
             seen[site["domain"]]=(name,site)
         states.append(s)
     need(states[1].get("partial_parent_migration_id")==base.JOBS[0][1]
-         and states[2].get("partial_parent_migration_id")==base.JOBS[1][1],
+         and states[2].get("partial_parent_migration_id")==base.JOBS[0][1],
          "PARENT_MIGRATION_CHAIN_CHANGED")
     need(all(s.get("target_server_identity")==states[0].get("target_server_identity")
              for s in states[1:]),"CP2_MIGRATION_TARGET_IDENTITY_CHANGED")
@@ -88,35 +76,25 @@ def status_scope(base):
               ==base.EXPECTED_STAGED,
          "17_SITE_FINAL_SCOPE_CHANGED")
     return seen
-def scratch_link(site,mid,recorddir,expected_status,cp_dbs):
-    if recorddir is None:
-        need(type(cp_dbs) is list and len(cp_dbs)==1,
-             "UNZIP_REGISTERED_DB_SCOPE_CHANGED")
-        need((site.get("mysql_databases") or [])==cp_dbs,
-             "UNZIP_SOURCE_TARGET_DB_BINDING_CHANGED")
-        return "EXISTING_CP2_DB"
-    root=ROOT/mid/recorddir
-    need(root.is_dir() and not root.is_symlink()
-         and root.stat().st_uid==0 and not root.stat().st_mode&0o077,
-         "ISOLATED_RECOVERY_DIRECTORY_UNSAFE")
-    rec=private_record(root/"status.json")
-    need(rec.get("original_site")==site["domain"]
-         and rec.get("migration_id")==mid
-         and rec.get("status")==expected_status
-         and rec.get("cutover_allowed") is False
-         and rec.get("site_config_modified") is False
-         and rec.get("dns_changed") is False
-         and rec.get("source_frozen") is False
-         and rec.get("existing_target_database_modified") is False,
-         "ISOLATED_RECOVERY_PROTECTION_CHANGED")
-    scratch=(rec.get("resume_scratch_database") if site["domain"]=="www3.m3u8.one"
-             else rec.get("scratch_database"))
-    need(type(scratch) is str and re.fullmatch("p07scratch-[a-f0-9]{12}",scratch)
-         and type(cp_dbs) is list and len(cp_dbs)==(
-             1 if site["domain"]=="www3.m3u8.one" else 2)
-         and scratch in cp_dbs and len(set(cp_dbs))==len(cp_dbs),
-         "ISOLATED_DATABASE_NOT_IN_CLOUDPANEL")
-    return "ISOLATED_SOURCE_SNAPSHOT"
+def panel_db_candidate(site,expected_count,cp_dbs,label):
+    """Structural panel inventory only; no scratch or app-credential claim."""
+    if type(cp_dbs) is not list or any(
+            type(x) is not str or not x or len(x)>128 for x in cp_dbs):
+        return "CP2_DATABASE_INVENTORY_INVALID"
+    if len(set(cp_dbs))!=len(cp_dbs):
+        return "CP2_DATABASE_DUPLICATE"
+    if len(cp_dbs)!=expected_count:
+        return "CP2_DATABASE_COUNT_GAP"
+    declared=site.get("mysql_databases")
+    if declared is not None:
+        if type(declared) is not list or any(type(x) is not str for x in declared):
+            return "SOURCE_DECLARATION_INVALID"
+        # Only unzip is expected to use its registered existing DB directly.
+        # The other two can include isolated scratch DBs, not app bindings.
+        if label=="LEGACY9" and declared and set(declared)!=set(cp_dbs):
+            return "SOURCE_TARGET_DB_NAME_DIFFERENCE"
+    return "PANEL_DB_STRUCTURAL_CANDIDATE_ONLY"
+
 def assess(smoke,site,target):
     src=site.get("runtime")
     runtime=target.get("runtime")
@@ -151,7 +129,7 @@ def scan(base,smoke):
     items=status_scope(base)
     inventory=smoke.inventory()
     entries=[]
-    for domain,label,recorddir,status,dbcount in THREE:
+    for domain,label,dbcount in THREE:
         found=items.get(domain)
         need(found is not None and found[0]==label and
              found[1].get("stage_status")=="PENDING",
@@ -161,8 +139,7 @@ def scan(base,smoke):
         need(len(rows)==1 and rows[0].get("site_user")==site.get("site_user"),
              "CP2_SITE_USER_OR_INVENTORY_CHANGED")
         target=rows[0]
-        bound=scratch_link(site,dict((a,b) for a,b,c in base.JOBS)[label],
-                           recorddir,status,target.get("mysql_databases"))
+        bound=panel_db_candidate(site,dbcount,target.get("mysql_databases"),label)
         result=assess(smoke,site,target)
         entries.append((domain,bound,result))
     return entries
@@ -176,18 +153,23 @@ def main():
     print("STAGED_OTHER_SITES=14_PREVIOUS_EVIDENCE_NOT_RESCANNED",flush=True)
     print("PENDING_SITE_COUNT="+str(len(rows)),flush=True)
     gaps=0
+    db_gaps=0
     for domain,db,result in rows:
         print("SITE="+domain+" DATABASE_CANDIDATE="+db+" "+
               " ".join(k+"="+str(v) for k,v in result.items()),flush=True)
         gaps+=int(result["LOCAL_FILES_VHOST_FPM_EVIDENCE"]!="MATCH")
+        db_gaps+=int(db!="PANEL_DB_STRUCTURAL_CANDIDATE_ONLY")
     print("WEB_RUNTIME_GAP_COUNT="+str(gaps),flush=True)
+    print("PANEL_DATABASE_REGISTRATION_GAP_COUNT="+str(db_gaps),flush=True)
+    print("ISOLATED_SCRATCH_RECOVERY_PROOF=NOT_REEVALUATED",flush=True)
+    print("APPLICATION_DB_BINDING_PROOF=NOT_VERIFIED",flush=True)
     print("CLOUDPANEL_SITE_DB_CONFIGURATION=NOT_MODIFIED",flush=True)
     print("SOURCE_VPS_CONTACTED=NO",flush=True)
     print("HTTP_REQUESTS=NONE",flush=True)
     print("DATABASE_SQL_QUERIES_AND_WRITES=NONE",flush=True)
     print("DNS_OR_CRON_WRITES=NONE",flush=True)
     print("CUTOVER_ALLOWED=NO",flush=True)
-    return 0 if gaps==0 else 13
+    return 0 if gaps==0 and db_gaps==0 else 13
 if __name__=="__main__":
     try:raise SystemExit(main())
     except Block as e:
