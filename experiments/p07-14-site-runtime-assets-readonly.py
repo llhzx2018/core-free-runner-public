@@ -97,10 +97,16 @@ def stat_asset(p,kind):
         return "MISSING"
     if stat.S_ISLNK(st.st_mode):
         return "SYMLINK_REVIEW_REQUIRED"
-    if kind=="FILE":
+    normalized=kind.upper() if type(kind) is str else None
+    if normalized=="FILE":
         return "PRESENT" if stat.S_ISREG(st.st_mode) else "TYPE_DIFFER"
-    if kind=="DIRECTORY":
+    if normalized=="DIRECTORY":
         return "PRESENT" if stat.S_ISDIR(st.st_mode) else "TYPE_DIFFER"
+    # Older migration states omit source kind. Observed local file/dir
+    # existence is usable as a presence observation, not as source parity.
+    if kind is None:
+        return ("PRESENT_UNDECLARED_KIND" if stat.S_ISREG(st.st_mode)
+                or stat.S_ISDIR(st.st_mode) else "UNSAFE_KIND")
     return "UNKNOWN_KIND"
 
 def local_sqlite_header(p):
@@ -120,7 +126,8 @@ def asset_overview(states):
         external=state.get("external_assets",[])
         sqlite=state.get("sqlite_assets",[])
         require(type(external) is list and type(sqlite) is list,"ASSET_LIST_FORMAT_CHANGED")
-        counters={"external_present":0,"external_missing":0,"external_unknown":0,
+        counters={"external_present":0,"external_present_untyped":0,
+                  "external_missing":0,"external_unknown":0,
                   "sqlite_header_pass":0,"sqlite_missing":0,"sqlite_unverified":0}
         for item in external:
             p=safe_asset_path(item)
@@ -129,6 +136,9 @@ def asset_overview(states):
             status=stat_asset(p,item.get("kind"))
             if status=="PRESENT":
                 counters["external_present"]+=1
+            elif status=="PRESENT_UNDECLARED_KIND":
+                counters["external_present"]+=1
+                counters["external_present_untyped"]+=1
             elif status=="MISSING":counters["external_missing"]+=1
             else:counters["external_unknown"]+=1
         for item in sqlite:
@@ -223,6 +233,7 @@ def diagnose():
                   " STAGED="+str(rec["staged_count"])+
                   " FILE_PRESENT="+str(rec["local_staged_present"]))
     print("PHP_INVENTORY_GAP_COUNT="+str(runtime_gaps))
+    print("EXTERNAL_KIND_UNDECLARED=LOCAL_PRESENCE_ONLY_NOT_SOURCE_PARITY")
     print("EXTERNAL_ASSET_AND_SQLITE_DATA_PARITY=NOT_VERIFIED")
     print("PHP_FPM_SOCKET_AND_APP_HTTP_SMOKE=NOT_VERIFIED")
     print("PHP_NODE_CRON_PM2_ACTIVATION=NOT_PERFORMED")
