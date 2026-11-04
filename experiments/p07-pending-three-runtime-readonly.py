@@ -24,9 +24,9 @@ BASE_BLOB="01b02934109458942e575d4e5a45d2d7f7ea37cf"
 ROOT=Path("/var/lib/vf-server-ops/server-migrations")
 # Structural CloudPanel database counts, never app-config or SQL parity.
 THREE=(
- ("ilovem3u8.kewaro.com","ORIGINAL17",2),
- ("unzip.kewaro.com","LEGACY9",1),
- ("www3.m3u8.one","LAST2",1),
+ ("ilovem3u8.kewaro.com","ORIGINAL17"),
+ ("unzip.kewaro.com","LEGACY9"),
+ ("www3.m3u8.one","LAST2"),
 )
 class Block(Exception):pass
 def need(ok,code):
@@ -76,24 +76,33 @@ def status_scope(base):
               ==base.EXPECTED_STAGED,
          "17_SITE_FINAL_SCOPE_CHANGED")
     return seen
-def panel_db_candidate(site,expected_count,cp_dbs,label):
-    """Structural panel inventory only; no scratch or app-credential claim."""
-    if type(cp_dbs) is not list or any(
-            type(x) is not str or not x or len(x)>128 for x in cp_dbs):
-        return "CP2_DATABASE_INVENTORY_INVALID"
+def panel_db_candidate(site, cp_dbs):
+    """CloudPanel site DB inventory, independent of isolated recovery scratch.
+
+    Name equality does NOT prove application config, credentials, data,
+    cross-engine schema parity or cutover readiness.
+    """
+    if type(cp_dbs) is not list or any(type(x) is not str or not x
+                                       or len(x)>128 for x in cp_dbs):
+        return "CP2_SITE_DB_INVENTORY_INVALID"
     if len(set(cp_dbs))!=len(cp_dbs):
-        return "CP2_DATABASE_DUPLICATE"
-    if len(cp_dbs)!=expected_count:
-        return "CP2_DATABASE_COUNT_GAP"
+        return "CP2_SITE_DB_DUPLICATE"
     declared=site.get("mysql_databases")
-    if declared is not None:
-        if type(declared) is not list or any(type(x) is not str for x in declared):
-            return "SOURCE_DECLARATION_INVALID"
-        # Only unzip is expected to use its registered existing DB directly.
-        # The other two can include isolated scratch DBs, not app bindings.
-        if label=="LEGACY9" and declared and set(declared)!=set(cp_dbs):
-            return "SOURCE_TARGET_DB_NAME_DIFFERENCE"
-    return "PANEL_DB_STRUCTURAL_CANDIDATE_ONLY"
+    if type(declared) is not list or any(type(x) is not str or not x
+                                         or len(x)>128 for x in declared):
+        return "SOURCE_SITE_DB_DECLARATION_INVALID"
+    if not declared:
+        return "SOURCE_SITE_DB_DECLARATION_EMPTY"
+    if len(set(declared))!=len(declared):
+        return "SOURCE_SITE_DB_DECLARATION_DUPLICATE"
+    if set(declared)==set(cp_dbs):
+        return "SOURCE_DECLARED_DB_REGISTERED_IN_CP2"
+    if not cp_dbs:
+        return "SOURCE_DECLARED_DB_NOT_REGISTERED_IN_CP2"
+    if set(declared).issubset(set(cp_dbs)):
+        return "ADDITIONAL_CP2_REGISTERED_DB_REVIEW_REQUIRED"
+    return "SOURCE_CP2_SITE_DB_IDENTITY_DIFFERENCE"
+
 
 def assess(smoke,site,target):
     src=site.get("runtime")
@@ -129,7 +138,7 @@ def scan(base,smoke):
     items=status_scope(base)
     inventory=smoke.inventory()
     entries=[]
-    for domain,label,dbcount in THREE:
+    for domain,label in THREE:
         found=items.get(domain)
         need(found is not None and found[0]==label and
              found[1].get("stage_status")=="PENDING",
@@ -139,8 +148,14 @@ def scan(base,smoke):
         need(len(rows)==1 and rows[0].get("site_user")==site.get("site_user"),
              "CP2_SITE_USER_OR_INVENTORY_CHANGED")
         target=rows[0]
-        bound=panel_db_candidate(site,dbcount,target.get("mysql_databases"),label)
+        panel_dbs=target.get("mysql_databases")
+        bound=panel_db_candidate(site,panel_dbs)
         result=assess(smoke,site,target)
+        source_dbs=site.get("mysql_databases")
+        result["SOURCE_DB_DECLARED_COUNT"]=(len(source_dbs)
+            if type(source_dbs) is list else "UNKNOWN")
+        result["CP2_SITE_DB_REGISTERED_COUNT"]=(len(panel_dbs)
+            if type(panel_dbs) is list else "UNKNOWN")
         entries.append((domain,bound,result))
     return entries
 def main():
@@ -158,9 +173,10 @@ def main():
         print("SITE="+domain+" DATABASE_CANDIDATE="+db+" "+
               " ".join(k+"="+str(v) for k,v in result.items()),flush=True)
         gaps+=int(result["LOCAL_FILES_VHOST_FPM_EVIDENCE"]!="MATCH")
-        db_gaps+=int(db!="PANEL_DB_STRUCTURAL_CANDIDATE_ONLY")
+        db_gaps+=int(db!="SOURCE_DECLARED_DB_REGISTERED_IN_CP2")
     print("WEB_RUNTIME_GAP_COUNT="+str(gaps),flush=True)
     print("PANEL_DATABASE_REGISTRATION_GAP_COUNT="+str(db_gaps),flush=True)
+    print("ISOLATED_SCRATCH_DB_CLOUDPANEL_SITE_REGISTRATION=NOT_REQUIRED",flush=True)
     print("ISOLATED_SCRATCH_RECOVERY_PROOF=NOT_REEVALUATED",flush=True)
     print("APPLICATION_DB_BINDING_PROOF=NOT_VERIFIED",flush=True)
     print("CLOUDPANEL_SITE_DB_CONFIGURATION=NOT_MODIFIED",flush=True)
