@@ -330,14 +330,14 @@ def classify_www3():
     print("CUTOVER_ALLOWED=NO",flush=True)
     return 0
 
-def www3_candidate_credentials(source,transactions,identity):
+def www3_candidate_credentials(source,transactions,identity,owner=0):
     """Return credentials in memory only; never print or persist values."""
     need(type(source.get("mysql_databases")) is list
          and len(source["mysql_databases"])==1,"WWW3_ORIGINAL_DB_SCOPE_CHANGED")
     source_db=source["mysql_databases"][0]
     records=[]
     for path in sorted(transactions.glob("www3-hex-scratch-*.json")):
-        row=private_json(path,0)
+        row=private_json(path,owner)
         if row.get("schema")!="p07.www3.source-rule-candidate.v1":
             continue
         if (row.get("migration_id")!=source["migration_id"]
