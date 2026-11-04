@@ -193,8 +193,8 @@ def source_space_preflight(migrate,records):
             raise Block("SOURCE_ASSET_SIZE_FORMAT_UNVERIFIED")
         total_kib+=int(match.group(1))
     free=shutil.disk_usage(SCOPE).free
-    # Conservative reserve: 2x estimated input plus 1GiB spare.
-    need(free>total_kib*2048+1024**3,"INSUFFICIENT_CP2_PRIVATE_STAGE_SPACE")
+    # Raw DB/WAL copy plus CP2 backup and site assets: 4x reserve +1GiB.
+    need(free>total_kib*4096+1024**3,"INSUFFICIENT_CP2_PRIVATE_STAGE_SPACE")
     print("CP2_PRIVATE_STAGE_CAPACITY=PASS",flush=True)
     print("SOURCE_ASSET_ESTIMATED_MIB="+str((total_kib+1023)//1024),flush=True)
 
@@ -226,6 +226,74 @@ def copy_to_private(migrate,category,state,source_path,outpath,kind,user):
          "PRIVATE_FILE_TRANSFER_UNVERIFIED")
     return "FILE_TRANSFERRED_HASHED"
 
+
+def read_only_source_sqlite_hashes(migrate,state,src):
+    """Read authoritative DB and optional WAL fingerprints without source writes."""
+    db=sh_quote(str(src))
+    wal=sh_quote(str(src)+"-wal")
+    journal=sh_quote(str(src)+"-journal")
+    command=(
+        "set -eu; "
+        f"test -f {db} && test ! -L {db}; "
+        f"test ! -e {journal} && test ! -L {journal}; "
+        f"test ! -L {wal}; "
+        f"dbsum=$(sha256sum -- {db} | cut -d ' ' -f 1); "
+        "printf 'DB=%s\n' \"$dbsum\"; "
+        f"if [ -e {wal} ]; then "
+        f"test -f {wal}; "
+        f"walsum=$(sha256sum -- {wal} | cut -d ' ' -f 1); "
+        "printf 'WAL=%s\n' \"$walsum\"; "
+        "else printf 'WAL=ABSENT\n'; fi"
+    )
+    result=migrate.source_remote(state["source"],command,timeout=600,check=False)
+    need(result.returncode==0,"SOURCE_SQLITE_READONLY_HASH_FAILED")
+    rows=result.stdout.strip().splitlines()
+    need(len(rows)==2 and rows[0].startswith("DB=") and
+         rows[1].startswith("WAL="),"SOURCE_SQLITE_FINGERPRINT_FORMAT")
+    dbhash=rows[0][3:]
+    walhash=rows[1][4:]
+    need(SAFE_BLOB.fullmatch(dbhash) and
+         (walhash=="ABSENT" or SAFE_BLOB.fullmatch(walhash)),
+         "SOURCE_SQLITE_FINGERPRINT_INVALID")
+    return dbhash,walhash
+
+def copy_sqlite_source_readonly(migrate,state,src,out):
+    """Pull raw DB/WAL read-only; create consistent SQLite backup on CP2 only.
+
+    Source DB/WAL hashes before and after the copy must match the locally
+    copied bytes. This is a private staging snapshot, NOT a frozen final source.
+    """
+    need(not os.path.lexists(out),"PRIVATE_SQLITE_TARGET_EXISTS")
+    before=read_only_source_sqlite_hashes(migrate,state,src)
+    out.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    with tempfile.TemporaryDirectory(prefix=".p07-sqlite-readonly-",dir=str(SCOPE)) as work:
+        remote_copy=Path(work)/"source.sqlite"
+        migrate.pull_path(state["source"],str(src),remote_copy,user=None,delete=False)
+        need(remote_copy.is_file() and not remote_copy.is_symlink() and
+             hashfile(remote_copy)==before[0],"SQLITE_SOURCE_DB_COPY_HASH_MISMATCH")
+        if before[1]!="ABSENT":
+            local_wal=Path(str(remote_copy)+"-wal")
+            migrate.pull_path(state["source"],str(src)+"-wal",
+                              local_wal,user=None,delete=False)
+            need(local_wal.is_file() and not local_wal.is_symlink() and
+                 hashfile(local_wal)==before[1],"SQLITE_SOURCE_WAL_COPY_HASH_MISMATCH")
+        after=read_only_source_sqlite_hashes(migrate,state,src)
+        need(before==after,"SQLITE_SOURCE_CHANGED_DURING_READONLY_COPY")
+        try:
+            source=sqlite3.connect(remote_copy.as_uri()+"?mode=ro",uri=True,timeout=10)
+            try:
+                target=sqlite3.connect(out,timeout=10)
+                try:
+                    source.backup(target,pages=256,sleep=0.05)
+                finally:
+                    target.close()
+            finally:
+                source.close()
+        except sqlite3.Error:
+            raise Block("CP2_PRIVATE_SQLITE_BACKUP_FAILED") from None
+        need(local_sqlite_ok(out),"COPIED_SQLITE_QUICK_CHECK_FAILED")
+    return "SQLITE_SNAPSHOT_PRIVATE_VERIFIED"
+
 def stage():
     need(sys.argv[1:]==["--stage-exact-missing-assets-private-only"],
          "EXPLICIT_PRIVATE_STAGE_ARGUMENT_REQUIRED")
@@ -249,23 +317,7 @@ def stage():
     for num,((category,label,state,src,user,entry),kind) in enumerate(zip(records,observed),1):
         out=evidence/category/f"{num:03d}-{hashlib.sha256(str(src).encode()).hexdigest()[:20]}"
         if category=="sqlite":
-            remote=f"/var/lib/vf-server-ops/pull-source/{state['migration_id']}/data/"\
-                   f"operator-{uuid.uuid4().hex}.sqlite"
-            need(not os.path.lexists(out),"PRIVATE_SQLITE_TARGET_EXISTS")
-            try:
-                # Source-side temporary snapshot is allowed; never modifies
-                # the live SQLite database or its WAL files.
-                p=migrate.source_python(state["source"],state["source_runtime_path"],
-                    "_source-snapshot-sqlite","--source",str(src),
-                    "--output",remote,timeout=600)
-                need(p.returncode==0,"SOURCE_SQLITE_SNAPSHOT_FAILED")
-                result=copy_to_private(migrate,category,state,Path(remote),out,"FILE",user)
-                need(local_sqlite_ok(out),"COPIED_SQLITE_QUICK_CHECK_FAILED")
-            finally:
-                cleanup=migrate.source_remote(state["source"],
-                   "rm -f -- "+sh_quote(remote),timeout=60,check=False)
-                need(cleanup.returncode==0,"SOURCE_TEMP_SNAPSHOT_CLEANUP_UNVERIFIED")
-            result="SQLITE_SNAPSHOT_PRIVATE_VERIFIED"
+            result=copy_sqlite_source_readonly(migrate,state,src,out)
         elif category=="cron":
             result=copy_to_private(migrate,category,state,src,out,"FILE",user)
             need(out.stat().st_size<1024*1024,"CRON_STAGING_SIZE_LIMIT")
@@ -296,7 +348,9 @@ def stage():
     print("SITE_PATHS_MODIFIED=NO")
     print("CRON_ACTIVATED=NO")
     print("SOURCE_BUSINESS_DATA_WRITES=NONE")
-    print("SOURCE_TEMP_SQLITE_SNAPSHOTS_CLEANED=REQUESTED")
+    print("SOURCE_TEMP_SQLITE_SNAPSHOTS_CREATED=NO")
+    print("SOURCE_FILE_WRITES=NONE")
+    print("CP2_PRIVATE_SQLITE_SNAPSHOTS=13")
     print("ORIGINAL_MIGRATION_STATES_MODIFIED=NO")
     print("SITE_CONTENT_PARITY=NOT_VERIFIED")
     print("DATABASE_WRITES=NONE")
