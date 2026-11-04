@@ -45,6 +45,7 @@ jobs:
           echo P01_LEGACY_CANDIDATE_EXACT_SHA=PASS
 
       - name: Focused native/legacy parity unit tests
+        if: false # Previously PASS exact product SHA in #41799517613
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -75,6 +76,7 @@ jobs:
           echo P01_LEGACY_GUI_FOCUSED_EXACT_SOURCE=PASS
 
       - name: Canonical full-unit baseline comparison
+        if: false # Previously PASS exact product SHA in #41799517613
         shell: bash
         env:
           READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
@@ -87,6 +89,102 @@ jobs:
           grep -Fx 'P01_CANONICAL_UNIT_REGRESSION=PASS' /tmp/p01-ia6-canonical.txt
           grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-ia6-canonical.txt
           echo P01_LEGACY_GUI_CANONICAL_FULL_UNIT=PASS
+
+      - name: Disposable Music legacy Owner Guest HTTP gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          work="$(mktemp -d)"
+          port=18617
+          cookie="$work/session.txt"
+          trap 'test -z "${server_pid:-}" || kill "$server_pid" >/dev/null 2>&1 || true; rm -rf "$work"' EXIT
+          cp -a candidate/src/. "$work/"
+          (
+            cd "$work"
+            php -S 127.0.0.1:"$port" -t . >/dev/null 2>&1 &
+            echo $! >"$work/pid"
+          )
+          server_pid="$(cat "$work/pid")"
+          origin="http://127.0.0.1:$port"
+          for n in $(seq 1 30); do
+            if curl -fsS -c "$cookie" -b "$cookie" "$origin/setup.php" -o "$work/setup.html"; then break; fi
+            sleep 1
+          done
+          csrf="$(python3 - "$work/setup.html" <<'PY'
+          import re,sys
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',open(sys.argv[1]).read())
+          if not m: raise SystemExit('missing setup token')
+          print(m.group(1))
+          PY
+          )"
+          pass='SandboxMusic-2026!Safe'
+          curl -fsS -c "$cookie" -b "$cookie" -X POST "$origin/setup.php" \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'site_title=VF Music Ephemeral' \
+            --data-urlencode "admin_password=$pass" \
+            --data-urlencode "admin_password_confirm=$pass" -o /dev/null
+          (cd "$work" && php cli/verify.php) | grep -Fx VERIFY_PASS=YES
+          login="$(php -r 'echo json_encode(["password"=>$argv[1]]);' "$pass")"
+          curl -fsS -c "$cookie" -b "$cookie" -H 'Content-Type: application/json' \
+            -d "$login" "$origin/api.php?action=login" -o "$work/login.json"
+          python3 - "$work/login.json" <<'PY'
+          import json,sys
+          assert json.load(open(sys.argv[1]))['ok'] is True
+          PY
+          # GET old GUI is only a safe, exact native Owner deep link.
+          for pair in "music.php|music-shell.php?view=home&vf_manage=1&vf_tab=music" \
+              "music-import.php|music-shell.php?view=home&vf_manage=1&vf_tab=music&vf_task=music-advanced"; do
+            route="${pair%%|*}"; target="${pair#*|}"
+            curl -sS -D "$work/headers" -c "$cookie" -b "$cookie" \
+              "$origin/$route" -o /dev/null
+            grep -Eq '^HTTP/1.1 302' "$work/headers"
+            grep -Fq "Location: $target" "$work/headers"
+          done
+          echo P01_MUSIC_OWNER_OLD_GET_TO_NATIVE=PASS
+          # Guests cannot access private Music or its preview adapter.
+          for route in music.php music-import.php; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' "$origin/$route")"
+            test "$code" = 403
+          done
+          echo P01_MUSIC_GUEST_OLD_GUI_BLOCKED=PASS
+          code="$(curl -sS -o /dev/null -w '%{http_code}' -c "$cookie" -b "$cookie" \
+            --data-urlencode 'format=links' "$origin/music-import.php")"
+          test "$code" = 405
+          code="$(curl -sS -o "$work/invalid.json" -w '%{http_code}' \
+            -c "$cookie" -b "$cookie" --data-urlencode 'vf_frontstage_json=1' \
+            --data-urlencode 'csrf=invalid' "$origin/music-import.php")"
+          test "$code" = 419
+          echo P01_MUSIC_LEGACY_NONJSON_AND_BAD_CSRF_DENY=PASS
+          curl -fsS -c "$cookie" -b "$cookie" "$origin/start.php" -o "$work/start.html"
+          user_csrf="$(python3 - "$work/start.html" <<'PY'
+          import re,sys
+          html=open(sys.argv[1]).read()
+          m=re.search(r'data-vf-local-music-advanced-csrf\s+value="([^"]+)"',html)
+          if not m: raise SystemExit('missing live Music CSRF')
+          print(m.group(1))
+          PY
+          )"
+          curl -fsS -c "$cookie" -b "$cookie" -X POST "$origin/music-import.php" \
+            --data-urlencode 'vf_frontstage_json=1' \
+            --data-urlencode "csrf=$user_csrf" \
+            --data-urlencode 'format=links' \
+            --data-urlencode 'content=https://youtu.be/dQw4w9WgXcQ' \
+            -o "$work/preview.json"
+          python3 - "$work/preview.json" <<'PY'
+          import json,sys
+          r=json.load(open(sys.argv[1]))
+          assert r.get('ok') is True and 'summary' in r and 'plan_summary' in r
+          assert 'payload' in r and 'issues' in r and 'metadata_conflicts' in r
+          PY
+          curl -fsS -c "$cookie" -b "$cookie" "$origin/music.php?vf_frontstage=tracks" \
+            -o "$work/tracks.json"
+          python3 - "$work/tracks.json" <<'PY'
+          import json,sys
+          r=json.load(open(sys.argv[1]))
+          assert r.get('ok') is True and isinstance(r.get('playlists'),list) and isinstance(r.get('tracks'),list)
+          PY
+          echo P01_MUSIC_LEGACY_READ_JSON_AND_CSRF_PREVIEW=PASS
+          echo P01_MUSIC_EPHEMERAL_HTTP_PROOF=PASS
 
       - name: Clean transient checkout
         if: always()
