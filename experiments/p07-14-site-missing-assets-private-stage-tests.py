@@ -1,8 +1,11 @@
 """P07 private asset batch: safety and exact-scope synthetic tests only."""
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
+import shutil
+import sqlite3
 from pathlib import Path
 import subprocess
 import sys
@@ -113,7 +116,10 @@ class Tests(unittest.TestCase):
         self.assertIn("site_files_materialized",code)
         self.assertIn("SITE_PATHS_MODIFIED=NO",code)
         self.assertIn("CRON_ACTIVATED=NO",code)
-        self.assertIn("SOURCE_TEMP_SQLITE_SNAPSHOTS_CLEANED=REQUESTED",code)
+        self.assertIn("SOURCE_TEMP_SQLITE_SNAPSHOTS_CREATED=NO",code)
+        self.assertIn("SOURCE_FILE_WRITES=NONE",code)
+        self.assertNotIn("_source-snapshot-sqlite",code)
+        self.assertNotIn("rm -f -- ",code)
         self.assertIn("STAGED_ASSET_COUNTS=",code)
 
     def test_synthetic_full_35_item_private_recovery_without_site_writes(self):
@@ -158,6 +164,10 @@ class Tests(unittest.TestCase):
                  mock.patch.object(m,"source_space_preflight"), \
                  mock.patch.object(m,"create_evidence_folder",return_value=evidence), \
                  mock.patch.object(m,"copy_to_private",side_effect=copier), \
+                 mock.patch.object(m,"copy_sqlite_source_readonly",
+                     side_effect=lambda mg,st,src,out:(
+                         copier(mg,"sqlite",st,src,out,"FILE","site")
+                         and "SQLITE_SNAPSHOT_PRIVATE_VERIFIED")), \
                  mock.patch.object(m,"local_sqlite_ok",return_value=True), \
                  mock.patch.object(m.base,"ROOT",root), \
                  contextlib.redirect_stdout(result):
@@ -168,10 +178,108 @@ class Tests(unittest.TestCase):
             self.assertFalse(manifest["cutover_allowed"])
             self.assertEqual(len(manifest["records"]),35)
             self.assertEqual(len(copied),35)
-            self.assertEqual(len(remote_calls),18)
+            self.assertEqual(len(remote_calls),5)
             self.assertIn("SITE_PATHS_MODIFIED=NO",result.getvalue())
             self.assertIn("CUTOVER_ALLOWED=NO",result.getvalue())
             self.assertNotIn("password",result.getvalue().lower())
+
+
+    def test_sqlite_readonly_copy_writes_only_cp2_and_checks_hashes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            origin=root/"origin.sqlite"
+            conn=sqlite3.connect(origin)
+            conn.execute("CREATE TABLE evidence (id INTEGER PRIMARY KEY, payload TEXT)")
+            conn.execute("INSERT INTO evidence(payload) VALUES ('source-untouched')")
+            conn.commit()
+            conn.close()
+            before=m.hashfile(origin)
+            calls=[]
+            state={"source":{"host":"old.example.test"}}
+            def remote(source,command,**kwargs):
+                calls.append(command)
+                self.assertIn("sha256sum",command)
+                self.assertNotIn("rm -f",command)
+                self.assertNotIn("_source-snapshot-sqlite",command)
+                return subprocess.CompletedProcess([],0,
+                    "DB="+m.hashfile(origin)+"\nWAL=ABSENT\n","")
+            def pull(source,remote_path,local_path,**kwargs):
+                self.assertEqual(remote_path,str(origin))
+                shutil.copy2(origin,local_path)
+            fake=types.SimpleNamespace(source_remote=remote,pull_path=pull)
+            target=root/"private"/"snap.sqlite"
+            with mock.patch.object(m,"SCOPE",root):
+                result=m.copy_sqlite_source_readonly(fake,state,origin,target)
+            self.assertEqual(result,"SQLITE_SNAPSHOT_PRIVATE_VERIFIED")
+            self.assertEqual(before,m.hashfile(origin))
+            self.assertEqual(len(calls),2)
+            self.assertTrue(m.local_sqlite_ok(target))
+            check=sqlite3.connect(target)
+            try:
+                self.assertEqual(check.execute(
+                    "SELECT payload FROM evidence").fetchone()[0],"source-untouched")
+            finally:
+                check.close()
+
+    def test_sqlite_source_changes_midcopy_fail_closed(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            origin=root/"origin.sqlite"
+            conn=sqlite3.connect(origin)
+            conn.execute("CREATE TABLE evidence(id INTEGER)")
+            conn.commit()
+            conn.close()
+            calls=[]
+            state={"source":{"host":"old.example.test"}}
+            def remote(source,command,**kwargs):
+                calls.append(command)
+                digest=m.hashfile(origin) if len(calls)==1 else "a"*64
+                return subprocess.CompletedProcess([],0,
+                    "DB="+digest+"\nWAL=ABSENT\n","")
+            fake=types.SimpleNamespace(source_remote=remote,
+                pull_path=lambda s,r,l,**kw:shutil.copy2(origin,l))
+            target=root/"private"/"snap.sqlite"
+            with mock.patch.object(m,"SCOPE",root):
+                with self.assertRaisesRegex(m.Block,
+                        "SQLITE_SOURCE_CHANGED_DURING_READONLY_COPY"):
+                    m.copy_sqlite_source_readonly(fake,state,origin,target)
+            self.assertFalse(target.exists())
+            self.assertEqual(len(calls),2)
+
+    def test_sqlite_readonly_copy_includes_stable_wal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)
+            origin=root/"origin.sqlite"
+            conn=sqlite3.connect(origin)
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE evidence(id INTEGER PRIMARY KEY, payload TEXT)")
+            conn.execute("INSERT INTO evidence(payload) VALUES ('wal-data')")
+            conn.commit()
+            wal=Path(str(origin)+"-wal")
+            self.assertTrue(wal.is_file())
+            state={"source":{"host":"old.example.test"}}
+            remote_hashes=[]
+            def remote(source,command,**kwargs):
+                remote_hashes.append(command)
+                return subprocess.CompletedProcess([],0,
+                    "DB="+m.hashfile(origin)+"\nWAL="+m.hashfile(wal)+"\n","")
+            def pull(source,remote_path,local_path,**kwargs):
+                shutil.copy2(remote_path,local_path)
+            fake=types.SimpleNamespace(source_remote=remote,pull_path=pull)
+            target=root/"private"/"snap.sqlite"
+            try:
+                with mock.patch.object(m,"SCOPE",root):
+                    self.assertEqual(m.copy_sqlite_source_readonly(
+                        fake,state,origin,target),"SQLITE_SNAPSHOT_PRIVATE_VERIFIED")
+                verify=sqlite3.connect(target)
+                try:
+                    self.assertEqual(verify.execute(
+                        "SELECT payload FROM evidence").fetchone()[0],"wal-data")
+                finally:
+                    verify.close()
+            finally:
+                conn.close()
+            self.assertEqual(len(remote_hashes),2)
 
     def test_exact_argument_required_before_preflight(self):
         with mock.patch.object(sys,"argv",["asset-stage","--unsafe"]), \
