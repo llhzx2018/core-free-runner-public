@@ -1,0 +1,134 @@
+name: P08 R17 Exact-Source Atomic Rollback and Crash Proof (one-off)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p08-r17-atomic-rollback-oneoff.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source-atomic:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci_only_password
+          MARIADB_DATABASE: vf_lander_ci
+          MARIADB_USER: vf_lander_ci
+          MARIADB_PASSWORD: ci_only_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    env:
+      APP_ENV: testing
+      APP_DEBUG: 'false'
+      APP_KEY: 'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+      P08_SOURCE_SHA: 0053c83633beddaf294186fb06c931e8484b4387
+      P08_MARIADB_CI_ONLY: '1'
+    steps:
+      - name: Confirm registered private read capability without displaying credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$READ_TOKEN" || { echo P08_R17_PRIVATE_READ_CAPABILITY_BLOCKED; exit 78; }
+          echo P08_R17_PRIVATE_SOURCE_READ_CAPABILITY_PASS
+
+      - name: Fetch exact P08 development HEAD into transient workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-lander
+          ref: 0053c83633beddaf294186fb06c931e8484b4387
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Gate source identity and changed-scope syntax before full build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P08_SOURCE_SHA"
+          test "$(cat VERSION)" = '0.1.0-dev'
+          python3 -m py_compile backend/bin/isolated-code-upgrade.py backend/tests/ops/upgrade-rehearsal.py
+          bash -n backend/tests/ops/build-full-candidate.sh
+          bash -n backend/tests/ops/mariadb-upgrade-proof.sh
+          echo P08_R17_EXACT_SOURCE_AND_SYNTAX_PASS
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          extensions: mbstring, dom, xml, curl, pdo_mysql, pdo_sqlite, sqlite3, fileinfo
+          tools: composer:v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build private FULL candidate from exact tested P08 HEAD
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! bash backend/tests/ops/build-full-candidate.sh >"$RUNNER_TEMP/p08-r17-full.log" 2>&1; then
+            echo P08_R17_FULL_BUILD_FAIL
+            grep -E '^(FULL_CANDIDATE_[A-Z0-9_]*PASS|P08_R17_)' "$RUNNER_TEMP/p08-r17-full.log" || true
+            exit 1
+          fi
+          grep -E '^FULL_CANDIDATE_.*PASS$' "$RUNNER_TEMP/p08-r17-full.log"
+          echo P08_R17_EXACT_FULL_BUILD_PASS
+
+      - name: Install MariaDB CLI for sandbox-only database operations
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! command -v mariadb >/dev/null 2>&1 || ! command -v mariadb-dump >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mariadb-client
+          fi
+          command -v mariadb >/dev/null && command -v mariadb-dump >/dev/null
+          echo P08_R17_MARIADB_CLIENT_READY
+
+      - name: Real MariaDB backup, isolated restore and atomic rollback injection suite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! bash backend/tests/ops/mariadb-upgrade-proof.sh >"$RUNNER_TEMP/p08-r17-atomic.log" 2>&1; then
+            echo P08_R17_ATOMIC_MACHINE_PROOF_FAIL
+            grep -E '^(MARIADB_|UPGRADE_SCENARIO_PASS=|R9_|P08_R9_)' "$RUNNER_TEMP/p08-r17-atomic.log" || true
+            python3 - "$RUNNER_TEMP/p08-r17-atomic.log" <<'PY'
+          import pathlib,sys
+          lines=pathlib.Path(sys.argv[1]).read_text(errors="replace").splitlines()
+          for name in (
+              "HARD_KILL_NOT_APPLIED",
+              "PERSISTENT_SHARED_DRIFT_BEFORE_SWITCH",
+              "PERSISTENT_SHARED_DRIFT_REQUIRES_SEPARATE_RESTORE",
+              "RECOVERY_BACKUP_INTEGRITY_FAILURE",
+              "OLD_RELEASE_INTEGRITY_FAILURE",
+              "UPGRADE_SCENARIO_FAILED",
+              "Traceback",
+          ):
+              if any(name in line for line in lines):
+                  print("P08_R17_SAFE_ERROR_CLASS="+name)
+          PY
+            exit 1
+          fi
+          grep -E '^(MARIADB_11_8_.*PASS|UPGRADE_SCENARIO_PASS=|R9_|P08_R9_)' "$RUNNER_TEMP/p08-r17-atomic.log"
+          echo P08_R17_EXACT_FULL_MARIADB_ATOMIC_BACKUP_CRASH_AND_RECOVERY_PASS
+
+      - name: Remove ephemeral private source, FULL and SQL backup
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- "$RUNNER_TEMP/p08-artifacts" "$RUNNER_TEMP/p08-mariadb-backup.sql" \
+            "$RUNNER_TEMP/p08-r17-full.log" "$RUNNER_TEMP/p08-r17-atomic.log"
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          echo P08_R17_PRIVATE_TEST_MATERIAL_CLEANUP_ATTEMPTED
+          echo P08_R17_NO_PUBLIC_ARTIFACT_UPLOAD
