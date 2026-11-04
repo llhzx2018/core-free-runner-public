@@ -76,7 +76,7 @@ def site_evidence():
             bydomain[row["domain"]]=(label,row)
         states.append(state)
     need(states[1].get("partial_parent_migration_id")==base.JOBS[0][1]
-         and states[2].get("partial_parent_migration_id")==base.JOBS[1][1],
+         and states[2].get("partial_parent_migration_id")==base.JOBS[0][1],
          "MIGRATION_CHAIN_CHANGED")
     need(all(s.get("target_server_identity")==states[0].get("target_server_identity")
              for s in states[1:]),"CP2_TARGET_IDENTITY_CHANGED")
