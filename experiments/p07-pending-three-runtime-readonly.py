@@ -12,7 +12,9 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
+import subprocess
 import sys
 
 sys.dont_write_bytecode=True
@@ -285,7 +287,8 @@ def candidate_relation(source,panel,transactions,site_config,identity,owner):
        "CUTOVER_ALLOWED":"NO",
     }
 
-def classify_www3():
+def www3_context():
+    """One safe, current CP2-only inventory scope for all www3 subcommands."""
     need(os.geteuid()==0,"CP2_ROOT_REQUIRED")
     base=pinned(BASE,BASE_BLOB,"BASE")
     sites=status_scope(base)
@@ -312,8 +315,11 @@ def classify_www3():
              if os.path.lexists(p)]
     need(len(choices)==1,"WWW3_CONFIG_LOCATION_UNVERIFIED")
     row=dict(site,migration_id=base.JOBS[2][1])
-    result=candidate_relation(row,matches[0],tail/"target-transactions",
-                              choices[0],identity,0)
+    return row,matches[0],tail/"target-transactions",choices[0],identity
+
+def classify_www3():
+    row,panel,transactions,config,identity=www3_context()
+    result=candidate_relation(row,panel,transactions,config,identity,0)
     print("PROBE=P07_WWW3_SITE_DB_AND_RECOVERY_RELATION_READ_ONLY",flush=True)
     print("SITE=www3.m3u8.one",flush=True)
     for key,value in result.items():
@@ -324,7 +330,105 @@ def classify_www3():
     print("CUTOVER_ALLOWED=NO",flush=True)
     return 0
 
+def www3_candidate_credentials(source,transactions,identity):
+    """Return credentials in memory only; never print or persist values."""
+    need(type(source.get("mysql_databases")) is list
+         and len(source["mysql_databases"])==1,"WWW3_ORIGINAL_DB_SCOPE_CHANGED")
+    source_db=source["mysql_databases"][0]
+    records=[]
+    for path in sorted(transactions.glob("www3-hex-scratch-*.json")):
+        row=private_json(path,0)
+        if row.get("schema")!="p07.www3.source-rule-candidate.v1":
+            continue
+        if (row.get("migration_id")!=source["migration_id"]
+            or row.get("domain")!="www3.m3u8.one"
+            or row.get("target_server_identity")!=identity
+            or row.get("source_database")!=source_db):
+            continue
+        records.append(row)
+    need(len(records)==1,"WWW3_CANDIDATE_CREDENTIAL_RECEIPT_NOT_UNIQUE")
+    rec=records[0]
+    need(rec.get("status")=="VERIFIED_STATIC_COPY_NOT_ACTIVATED"
+         and rec.get("cutover_allowed") is False
+         and rec.get("website_activated") is False
+         and rec.get("original_database_modified") is False
+         and rec.get("source_runtime_frozen") is False
+         and rec.get("verified_rows")==198750
+         and rec.get("dynamic_groups_omitted")==3
+         and rec.get("table_collations_explicit")==25
+         and rec.get("ascii_hex_defaults_equal")==10
+         and rec.get("memory_table_count")==1,
+         "WWW3_CANDIDATE_EVIDENCE_OR_GUARD_CHANGED")
+    db,user,password=(rec.get("scratch_database"),
+                      rec.get("username"),rec.get("password"))
+    need(type(db) is str and re.fullmatch(r"[a-zA-Z0-9_-]{1,64}",db)
+         and type(user) is str and re.fullmatch(r"[a-zA-Z0-9_]{1,64}",user)
+         and type(password) is str and 16<=len(password)<=1024
+         and "\x00" not in password,"WWW3_CANDIDATE_CREDENTIAL_IDENTITY_UNSAFE")
+    return db,user,password
+
+def readonly_candidate_probe(client,db,user,password):
+    """Fixed SELECT only, with password in child environment and no app/HTTP."""
+    need(type(client) is str and Path(client).is_absolute()
+         and Path(client).name in ("mariadb","mysql")
+         and type(db) is str and re.fullmatch(r"[a-zA-Z0-9_-]{1,64}",db)
+         and type(user) is str and re.fullmatch(r"[a-zA-Z0-9_]{1,64}",user)
+         and type(password) is str and len(password)>=16,
+         "WWW3_READONLY_CLIENT_ARGUMENT_UNSAFE")
+    sql=("SELECT DATABASE(), (SELECT COUNT(*) FROM information_schema.TABLES "
+         "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE')")
+    argv=[client,"--no-defaults","--protocol=TCP","--host=127.0.0.1",
+          "--port=3306","--connect-timeout=5","--default-character-set=utf8mb4",
+          "--user="+user,"--database="+db,"--batch","--skip-column-names",
+          "--execute="+sql]
+    env={"PATH":"/usr/bin:/bin","HOME":"/nonexistent","LC_ALL":"C",
+         "MYSQL_PWD":password}
+    try:
+        proc=subprocess.run(argv,env=env,stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+                            timeout=30,check=False)
+    except (OSError,subprocess.SubprocessError):
+        raise Block("WWW3_READONLY_SQL_CLIENT_FAILED") from None
+    need(proc.returncode==0 and 0<len(proc.stdout)<=128
+         and proc.stdout.count(b"\n")==1,"WWW3_READONLY_SQL_CONNECTION_FAILED")
+    expected=(db+"\t157\n").encode("ascii")
+    need(proc.stdout==expected,"WWW3_CANDIDATE_DATABASE_OR_TABLE_SCOPE_CHANGED")
+    return "PASS"
+
+def verify_www3_candidate_live_readonly():
+    source,panel,transactions,config,identity=www3_context()
+    relation=candidate_relation(source,panel,transactions,config,identity,0)
+    need(relation["JOURNAL_STATUS"]=="CONNECTED_NOT_CUTOVER_READY"
+         and relation["CURRENT_CONFIG_READBACK"]=="CANDIDATE_MATCH"
+         and relation["CANDIDATE_DB_IN_CP2_SITE_PANEL"]=="YES"
+         and relation["SOURCE_DB_IN_CP2_PANEL"]=="NO"
+         and relation["UNCLASSIFIED_CP2_SITE_DB_COUNT"]==0,
+         "WWW3_CANDIDATE_JOURNAL_AND_PANEL_NOT_READY")
+    db,user,password=www3_candidate_credentials(source,transactions,identity)
+    need(db in panel["mysql_databases"] and
+         db not in source["mysql_databases"],"WWW3_CANDIDATE_IDENTITY_CHANGED")
+    client=shutil.which("mariadb") or shutil.which("mysql")
+    need(client is not None,"WWW3_SQL_CLIENT_NOT_FOUND")
+    outcome=readonly_candidate_probe(client,db,user,password)
+    print("PROBE=P07_WWW3_CANDIDATE_DB_CURRENT_LIVE_READONLY",flush=True)
+    print("SITE=www3.m3u8.one",flush=True)
+    print("CURRENT_CONFIG_READBACK=CANDIDATE_MATCH",flush=True)
+    print("JOURNAL_STATUS=CONNECTED_NOT_CUTOVER_READY",flush=True)
+    print("CANDIDATE_DB_IN_CP2_SITE_PANEL=YES",flush=True)
+    print("CANDIDATE_DB_USER_CONNECTION="+outcome,flush=True)
+    print("CANDIDATE_DB_BASE_TABLE_COUNT=157",flush=True)
+    print("SOURCE_TARGET_DB_PARITY=NOT_VERIFIED",flush=True)
+    print("APPLICATION_HTTP_FUNCTIONALITY=NOT_TESTED",flush=True)
+    print("SOURCE_SERVER_CONTACTED=NO",flush=True)
+    print("SITE_FILES_OR_MIGRATION_STATE_WRITES=NONE",flush=True)
+    print("DB_SQL_WRITE_REQUESTS=NONE",flush=True)
+    print("CRON_AND_DNS_WRITES=NONE",flush=True)
+    print("CUTOVER_ALLOWED=NO",flush=True)
+    return 0
+
 def main():
+    if sys.argv[1:]==["--verify-www3-candidate-live-read-only"]:
+        return verify_www3_candidate_live_readonly()
     if sys.argv[1:]==["--classify-www3-site-db-and-recovery-read-only"]:
         return classify_www3()
     need(os.geteuid()==0 and sys.argv[1:]==["--check-pending-three-runtime-bindings-read-only"],
