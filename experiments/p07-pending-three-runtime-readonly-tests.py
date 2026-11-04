@@ -115,17 +115,16 @@ class Tests(unittest.TestCase):
                      "www3.m3u8.one":"LAST2"}[dom],old_site(dom))
                for dom in DOMAINS}
         calls=[]
-        def classify(site,expected,dbs,label):
-            calls.append((site["domain"],expected,label))
-            return "PANEL_DB_STRUCTURAL_CANDIDATE_ONLY"
+        def classify(site,dbs):
+            calls.append((site["domain"],len(dbs)))
+            return "SOURCE_DECLARED_DB_REGISTERED_IN_CP2"
         with mock.patch.object(m,"status_scope",return_value=items), \
              mock.patch.object(m,"panel_db_candidate",side_effect=classify):
             output=m.scan(Base,Smoke)
         self.assertEqual(len(output),3)
         self.assertEqual(set(DOMAINS),{x[0] for x in output})
         self.assertEqual(calls,[
-            (DOMAINS[0],2,"ORIGINAL17"),(DOMAINS[1],1,"LEGACY9"),
-            (DOMAINS[2],1,"LAST2")])
+            (DOMAINS[0],2),(DOMAINS[1],1),(DOMAINS[2],1)])
 
     def test_current_17_site_scope_and_independent_tail_owner(self):
         records=fixture()
@@ -150,20 +149,34 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(m.Block,"PARENT_MIGRATION_CHAIN_CHANGED"):
             m.status_scope(Base)
 
-    def test_panel_db_count_and_identity_gaps_remain_unverified(self):
-        site=old_site(DOMAINS[1])
-        self.assertEqual(m.panel_db_candidate(site,1,[],"LEGACY9"),
-                         "CP2_DATABASE_COUNT_GAP")
-        self.assertEqual(m.panel_db_candidate(site,1,["db","db"],"LEGACY9"),
-                         "CP2_DATABASE_DUPLICATE")
-        site["mysql_databases"]=["expected"]
-        self.assertEqual(m.panel_db_candidate(site,1,["different"],"LEGACY9"),
-                         "SOURCE_TARGET_DB_NAME_DIFFERENCE")
-        self.assertEqual(m.panel_db_candidate(site,1,["expected"],"LEGACY9"),
-                         "PANEL_DB_STRUCTURAL_CANDIDATE_ONLY")
-        self.assertEqual(m.panel_db_candidate(old_site(DOMAINS[0]),2,
-                         ["original","scratch"],"ORIGINAL17"),
-                         "PANEL_DB_STRUCTURAL_CANDIDATE_ONLY")
+    def test_site_db_vs_isolated_scratch_inventory(self):
+        site=old_site(DOMAINS[0])
+        site["mysql_databases"]=["main-db"]
+        # A scratch DB is not required to be registered with the site.
+        self.assertEqual(m.panel_db_candidate(site,["main-db"]),
+                         "SOURCE_DECLARED_DB_REGISTERED_IN_CP2")
+        self.assertEqual(m.panel_db_candidate(site,["main-db","other"]),
+                         "ADDITIONAL_CP2_REGISTERED_DB_REVIEW_REQUIRED")
+        self.assertEqual(m.panel_db_candidate(site,[]),
+                         "SOURCE_DECLARED_DB_NOT_REGISTERED_IN_CP2")
+        self.assertEqual(m.panel_db_candidate(site,["other"]),
+                         "SOURCE_CP2_SITE_DB_IDENTITY_DIFFERENCE")
+        self.assertEqual(m.panel_db_candidate(site,["main-db","main-db"]),
+                         "CP2_SITE_DB_DUPLICATE")
+        self.assertEqual(m.panel_db_candidate(site,["main-db",""]),
+                         "CP2_SITE_DB_INVENTORY_INVALID")
+        site["mysql_databases"]=[]
+        self.assertEqual(m.panel_db_candidate(site,["main-db"]),
+                         "SOURCE_SITE_DB_DECLARATION_EMPTY")
+        site["mysql_databases"]=["main-db","main-db"]
+        self.assertEqual(m.panel_db_candidate(site,["main-db"]),
+                         "SOURCE_SITE_DB_DECLARATION_DUPLICATE")
+
+    def test_unregistered_www3_db_not_falsely_accepted(self):
+        site=old_site(DOMAINS[2])
+        site["mysql_databases"]=["real-site-db"]
+        self.assertEqual(m.panel_db_candidate(site,[]),
+                         "SOURCE_DECLARED_DB_NOT_REGISTERED_IN_CP2")
 
     def test_operator_never_opens_http_or_sql_or_copies_files(self):
         source=(HERE/"p07-pending-three-runtime-readonly.py").read_text()
