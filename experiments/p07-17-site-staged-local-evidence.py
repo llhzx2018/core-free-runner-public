@@ -15,9 +15,9 @@ import sys
 
 ROOT=Path("/var/lib/vf-server-ops/server-migrations")
 JOBS=(
-    ("ORIGINAL17","pull-20261028T103425Z-98050c76",17),
-    ("LEGACY9","pull-20261031T094144Z-d045fa5a",9),
-    ("LAST2","pull-20261031T095604Z-edae3c44",2),
+    ("ORIGINAL17","pull-20261101T045943Z-923729a1",17),
+    ("LEGACY9","pull-20261101T052411Z-35663c25",9),
+    ("LAST2","pull-20261102T005644Z-7178c7d5",2),
 )
 EXPECTED_STAGED={
     "123.kewaro.com","123.m3u8.one","assetbox.kewaro.com",
@@ -27,6 +27,7 @@ EXPECTED_STAGED={
     "textbox.kewaro.com","updates.kewaro.com",
 }
 EXPECTED_PENDING={"ilovem3u8.kewaro.com","unzip.kewaro.com","www3.m3u8.one"}
+EXPECTED_STAGE_COUNTS=(7,6,1)
 DOMAIN=re.compile(r"[a-z0-9][a-z0-9.-]{1,150}[a-z0-9]$")
 SCHEMA="vf-server-ops.server-migration.target-pull.v1"
 
@@ -98,13 +99,16 @@ def audit(root=ROOT,inventory_fn=None):
     require(os.geteuid()==0,"CP2_ROOT_REQUIRED")
     states=[]
     seen={}
-    for label,mid,expected_count in JOBS:
+    for slot,(label,mid,expected_count) in enumerate(JOBS):
         state=secure_state(root/mid/"state.json")
         require(state.get("schema")==SCHEMA and state.get("migration_id")==mid,
                 "MIGRATION_ID_OR_SCHEMA_CHANGED")
         require(state.get("status")=="PREPARE_FAILED","MIGRATION_STATUS_CHANGED")
         require(type(state.get("sites")) is list and len(state["sites"])==expected_count,
                 "SITE_COUNT_SCOPE_CHANGED")
+        require(sum(type(x) is dict and x.get("stage_status")=="PULLED_STAGED"
+                    for x in state["sites"])==EXPECTED_STAGE_COUNTS[slot],
+                "PER_OWNER_STAGED_COUNT_CHANGED")
         for flag in ("source_runtime_frozen","target_runtime_activated",
                      "dns_changed_by_p07","source_delete_allowed",
                      "existing_target_overwrite_allowed"):
@@ -125,7 +129,7 @@ def audit(root=ROOT,inventory_fn=None):
             and states[2].get("partial_parent_migration_id")==JOBS[1][1],
             "MIGRATION_PARENT_CHAIN_CHANGED")
     statuses={k:rows[-1][1] for k,rows in seen.items()}
-    require(set(statuses)==EXPECTED_STAGED|EXPECTED_PENDING and
+    require(len(statuses)==17 and set(statuses)==EXPECTED_STAGED|EXPECTED_PENDING and
             {k for k,v in statuses.items() if v=="PULLED_STAGED"}==EXPECTED_STAGED and
             {k for k,v in statuses.items() if v=="PENDING"}==EXPECTED_PENDING,
             "STAGED_PENDING_SCOPE_CHANGED")
