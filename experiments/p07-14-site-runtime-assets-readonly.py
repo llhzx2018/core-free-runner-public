@@ -183,7 +183,7 @@ def diagnose():
             seen[s["domain"]]=(label,s)
         states.append(state)
     require(states[1].get("partial_parent_migration_id")==baseline.JOBS[0][1]
-            and states[2].get("partial_parent_migration_id")==baseline.JOBS[1][1],
+            and states[2].get("partial_parent_migration_id")==baseline.JOBS[0][1],
             "PARTIAL_PARENT_CHAIN_CHANGED")
     staged={domain for domain,(label,s) in seen.items()
             if s.get("stage_status")=="PULLED_STAGED"}
