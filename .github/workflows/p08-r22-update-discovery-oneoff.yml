@@ -1,0 +1,130 @@
+name: P08 R22 Official Update Discovery Machine Proof (one-off)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p08-r22-owner-update-oneoff.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source-update-discovery:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      APP_ENV: testing
+      APP_DEBUG: 'false'
+      APP_KEY: 'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+      P08_SOURCE_SHA: 714828ab2488926ad91ee48962c835f118dffda5
+    steps:
+      - name: Registered private-source read capability
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$READ_TOKEN" || { echo P08_R22_PRIVATE_READ_CAPABILITY_BLOCKED; exit 78; }
+          echo P08_R22_PRIVATE_READ_CAPABILITY_PASS
+
+      - name: Checkout exact P08 R22 branch code into ephemeral workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-lander
+          ref: ${{ env.P08_SOURCE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check source, PHP syntax, Node syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P08_SOURCE_SHA"
+          test "$(cat VERSION)" = '0.1.0-dev'
+          php -l backend/app/Http/Controllers/UpdateDiscoveryController.php
+          php -l backend/app/Support/Updates/UpdateChannelContract.php
+          php -l backend/app/Support/Updates/LocalUpdateIdentity.php
+          php -l backend/tests/Unit/UpdateChannelContractTest.php
+          php -l backend/tests/Unit/LocalUpdateIdentityTest.php
+          php -l backend/routes/web.php
+          php -l backend/tests/Feature/FoundationTest.php
+          node --check backend/tests/browser/owner-ui.mjs
+          echo P08_R22_SOURCE_SYNTAX_PASS
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          extensions: mbstring, dom, xml, curl, pdo_sqlite, sqlite3, fileinfo
+          tools: composer:v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pinned application dependencies and build Vue
+        shell: bash
+        working-directory: backend
+        run: |
+          set -Eeuo pipefail
+          composer install --no-interaction --prefer-dist --no-progress >"$RUNNER_TEMP/p08-r22-composer.log" 2>&1 || { echo P08_R22_COMPOSER_INSTALL_FAIL; exit 1; }
+          npm ci --ignore-scripts --no-audit --no-fund >"$RUNNER_TEMP/p08-r22-npm.log" 2>&1 || { echo P08_R22_NPM_INSTALL_FAIL; exit 1; }
+          npm run typecheck
+          npm run build
+          echo P08_R22_VUE_TYPECHECK_AND_BUILD_PASS
+
+      - name: PHP feature regression and R22 official channel/security/layout contract
+        shell: bash
+        working-directory: backend
+        run: |
+          set -Eeuo pipefail
+          vendor/bin/phpunit --testsuite=Foundation --stop-on-failure >"$RUNNER_TEMP/p08-r22-phpunit.log" 2>&1 || {
+            echo P08_R22_PHPUNIT_FAILED
+            grep -A 16 -B 4 -E 'Failed asserting|There was [[:digit:]]+ failure|There were [[:digit:]]+ failures' "$RUNNER_TEMP/p08-r22-phpunit.log" | tail -50 || true
+            exit 1
+          }
+          echo P08_R22_UPDATE_CHANNEL_LAYOUT_SECURITY_AND_AUTH_PHP_PASS
+
+      - name: Chromium authenticated Owner update discovery and landing-page regression
+        shell: bash
+        working-directory: backend
+        env:
+          APP_URL: http://127.0.0.1:8765
+          DB_CONNECTION: sqlite
+          SESSION_DRIVER: file
+          SESSION_SECURE_COOKIE: 'false'
+          CACHE_STORE: file
+          P08_BROWSER_PASSWORD: BrowserOnlyIsolatedPassword123456!
+        run: |
+          set -Eeuo pipefail
+          export DB_DATABASE="$GITHUB_WORKSPACE/backend/database/browser-test.sqlite"
+          npm install --no-save --package-lock=false playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >"$RUNNER_TEMP/p08-r22-chromium.log" 2>&1
+          test ! -e "$DB_DATABASE"
+          touch "$DB_DATABASE"
+          php artisan migrate --force > /dev/null
+          php tests/browser/seed-owner.php > /dev/null
+          php artisan serve --host=127.0.0.1 --port=8765 >"$RUNNER_TEMP/p08-r22-http.log" 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8765/login >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8765/login >/dev/null
+          node tests/browser/owner-ui.mjs >"$RUNNER_TEMP/p08-r22-browser.log" 2>&1 || {
+            echo P08_R22_CHROMIUM_BROWSER_FAILED
+            grep -E 'BROWSER_E2E_(FAILED|PASS)|AssertionError|Error|pageErrors' "$RUNNER_TEMP/p08-r22-browser.log" | tail -20 || true
+            exit 1
+          }
+          grep -E '^BROWSER_E2E_PASS' "$RUNNER_TEMP/p08-r22-browser.log"
+          echo P08_R22_OWNER_UPDATE_DISCOVERY_BROWSER_PASS
+
+      - name: Delete private source, CI database and logs
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- "$RUNNER_TEMP"/p08-r22-*
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          echo P08_R22_PRIVATE_SOURCE_AND_TEST_DB_CLEANUP_ATTEMPTED
+          echo P08_R22_NO_PUBLIC_PRIVATE_ARTIFACT
