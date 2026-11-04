@@ -70,7 +70,7 @@ def stage_rows():
             need(type(site) is dict and type(site.get("domain")) is str,"SITE_INVALID")
             by_domain[site["domain"]]=(label,site)
     need(states[1][1].get("partial_parent_migration_id")==base.JOBS[0][1]
-         and states[2][1].get("partial_parent_migration_id")==base.JOBS[1][1],
+         and states[2][1].get("partial_parent_migration_id")==base.JOBS[0][1],
          "MIGRATION_PARENT_CHAIN_CHANGED")
     need({d for d,(_,s) in by_domain.items() if s.get("stage_status")=="PULLED_STAGED"}
           ==base.EXPECTED_STAGED and
