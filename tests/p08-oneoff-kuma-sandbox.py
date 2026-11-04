@@ -96,6 +96,20 @@ def install(cert):
 
 def api(cert, key):
     h=HttpProbe(cert,key)
+    # Public-safe triage only: the same disposable key via TLS proxy vs the
+    # local Apache API entrypoint. Emit status codes, never headers/credentials.
+    for label, url in [
+        ("direct_apache", "http://127.0.0.1:8080/api/v1/index.php/catalog"),
+        ("canonical_tls", HOST + "/api/v1/catalog"),
+    ]:
+        req = Request(url, headers={"Authorization":"Bearer "+key,
+                                   "Accept":"application/json"})
+        try:
+            with build_opener(ProxyHandler({}), HTTPSHandler(context=h.context)).open(req, timeout=15) as response:
+                status = response.status
+        except HTTPError as e:
+            status = e.code
+        print("P08_R31_KUMA_BEARER_TRANSPORT_PROBE=" + label + ":" + str(status), flush=True)
     def call(path,body=None):
         status,headers,raw=h.send("/api/v1"+path,body,auth=True)
         try: obj=json.loads(raw)
