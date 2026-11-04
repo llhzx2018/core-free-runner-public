@@ -242,13 +242,13 @@ class Tests(unittest.TestCase):
             root=Path(temp)
             path=root/("p07-missing-assets-"+"c"*32)
             path.mkdir()
-            with mock.patch.object(m,"PRIVATE_ROOT",root), \\
-                 mock.patch.object(m,"PRIVATE",root/"legacy-unrelated"), \\
+            with mock.patch.object(m,"PRIVATE_ROOT",root), \
+                 mock.patch.object(m,"PRIVATE",root/"legacy-unrelated"), \
                  mock.patch.object(sys,"argv",["tool","--audit-existing-partial-assets-readonly",
-                                                "--private-evidence-dir",str(path)]), \\
-                 mock.patch.object(m,"check_manifest",return_value=([],[],0)) as chk, \\
-                 mock.patch.object(m,"plan_nested_assets",return_value=([],{})), \\
-                 mock.patch.object(m,"do_audit_partial",return_value=0) as audit, \\
+                                                "--private-evidence-dir",str(path)]), \
+                 mock.patch.object(m,"check_manifest",return_value=([],[],0)) as chk, \
+                 mock.patch.object(m,"plan_nested_assets",return_value=([],{})), \
+                 mock.patch.object(m,"do_audit_partial",return_value=0) as audit, \
                  mock.patch.object(m.os,"geteuid",return_value=0):
                 self.assertEqual(m.do_install(),0)
                 self.assertEqual(m.PRIVATE,path)
@@ -257,8 +257,8 @@ class Tests(unittest.TestCase):
 
     def test_invalid_explicit_directory_fails_before_private_manifest(self):
         with mock.patch.object(sys,"argv",["tool","--install-only-30-absent-site-assets",
-                                             "--private-evidence-dir","/tmp/untrusted"]), \\
-             mock.patch.object(m,"check_manifest") as check, \\
+                                             "--private-evidence-dir","/tmp/untrusted"]), \
+             mock.patch.object(m,"check_manifest") as check, \
              mock.patch.object(m.os,"geteuid",return_value=0):
             with self.assertRaisesRegex(m.Stop,"PRIVATE_EVIDENCE_DIRECTORY_UNSAFE"):
                 m.do_install()
