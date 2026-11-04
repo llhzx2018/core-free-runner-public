@@ -21,7 +21,7 @@ from typing import Any
 sys.dont_write_bytecode=True
 THIS=Path(__file__).resolve()
 COMPANION=THIS.with_name("p07-17-site-staged-local-evidence.py")
-EXPECTED_BASELINE_BLOB="7296ea88fe0d096bc622671bf20f1b2b7aa18f5c"
+EXPECTED_BASELINE_BLOB="01b02934109458942e575d4e5a45d2d7f7ea37cf"
 try:
     data=COMPANION.read_bytes()
 except OSError:
