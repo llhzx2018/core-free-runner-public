@@ -1,0 +1,126 @@
+name: P08 R21 Owner System Update Readback Machine Proof (one-off)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p08-r21-owner-update-oneoff.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source-owner-update:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      APP_ENV: testing
+      APP_DEBUG: 'false'
+      APP_KEY: 'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+      P08_SOURCE_SHA: 645bd00dd8dd5018b123696b6dee2f795b582104
+    steps:
+      - name: Registered private-source read capability
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$READ_TOKEN" || { echo P08_R21_PRIVATE_READ_CAPABILITY_BLOCKED; exit 78; }
+          echo P08_R21_PRIVATE_READ_CAPABILITY_PASS
+
+      - name: Checkout exact P08 PR 18 code into ephemeral workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-lander
+          ref: 645bd00dd8dd5018b123696b6dee2f795b582104
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Check source, PHP syntax, Node syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P08_SOURCE_SHA"
+          test "$(cat VERSION)" = '0.1.0-dev'
+          php -l backend/app/Http/Controllers/UpdateStatusController.php
+          php -l backend/routes/web.php
+          php -l backend/tests/Feature/FoundationTest.php
+          node --check backend/tests/browser/owner-ui.mjs
+          echo P08_R21_SOURCE_SYNTAX_PASS
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          extensions: mbstring, dom, xml, curl, pdo_sqlite, sqlite3, fileinfo
+          tools: composer:v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pinned application dependencies and build Vue
+        shell: bash
+        working-directory: backend
+        run: |
+          set -Eeuo pipefail
+          composer install --no-interaction --prefer-dist --no-progress >"$RUNNER_TEMP/p08-r21-composer.log" 2>&1 || { echo P08_R21_COMPOSER_INSTALL_FAIL; exit 1; }
+          npm ci --ignore-scripts --no-audit --no-fund >"$RUNNER_TEMP/p08-r21-npm.log" 2>&1 || { echo P08_R21_NPM_INSTALL_FAIL; exit 1; }
+          npm run typecheck
+          npm run build
+          echo P08_R21_VUE_TYPECHECK_AND_BUILD_PASS
+
+      - name: Real PHP feature regression and Owner-only status contract
+        shell: bash
+        working-directory: backend
+        run: |
+          set -Eeuo pipefail
+          vendor/bin/phpunit --testsuite=Foundation --stop-on-failure >"$RUNNER_TEMP/p08-r21-phpunit.log" 2>&1 || {
+            echo P08_R21_PHPUNIT_FAILED
+            grep -E '^([[:digit:]]+\\)|Error|Failed|Tests:|[[:space:]]+\\+|Expectation)' "$RUNNER_TEMP/p08-r21-phpunit.log" | tail -30 || true
+            exit 1
+          }
+          echo P08_R21_OWNER_STATUS_AUTH_NO_STORE_NO_MUTATION_FEATURE_PASS
+
+      - name: Chromium authenticated System Update tab smoke
+        shell: bash
+        working-directory: backend
+        env:
+          APP_URL: http://127.0.0.1:8765
+          DB_CONNECTION: sqlite
+          SESSION_DRIVER: file
+          SESSION_SECURE_COOKIE: 'false'
+          CACHE_STORE: file
+          P08_BROWSER_PASSWORD: BrowserOnlyIsolatedPassword123456!
+        run: |
+          set -Eeuo pipefail
+          export DB_DATABASE="$GITHUB_WORKSPACE/backend/database/browser-test.sqlite"
+          npm install --no-save --package-lock=false playwright@1.58.2 >/dev/null
+          npx playwright install --with-deps chromium >"$RUNNER_TEMP/p08-r21-chromium.log" 2>&1
+          test ! -e "$DB_DATABASE"
+          touch "$DB_DATABASE"
+          php artisan migrate --force > /dev/null
+          php tests/browser/seed-owner.php > /dev/null
+          php artisan serve --host=127.0.0.1 --port=8765 >"$RUNNER_TEMP/p08-r21-http.log" 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8765/login >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8765/login >/dev/null
+          node tests/browser/owner-ui.mjs >"$RUNNER_TEMP/p08-r21-browser.log" 2>&1 || {
+            echo P08_R21_CHROMIUM_BROWSER_FAILED
+            grep -E 'BROWSER_E2E_(FAILED|PASS)|AssertionError|Error|pageErrors' "$RUNNER_TEMP/p08-r21-browser.log" | tail -20 || true
+            exit 1
+          }
+          grep -E '^BROWSER_E2E_PASS' "$RUNNER_TEMP/p08-r21-browser.log"
+          echo P08_R21_OWNER_SYSTEM_UPDATE_BROWSER_PASS
+
+      - name: Delete private source, CI database and logs
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- "$RUNNER_TEMP"/p08-r21-*
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          echo P08_R21_PRIVATE_SOURCE_AND_TEST_DB_CLEANUP_ATTEMPTED
+          echo P08_R21_NO_PUBLIC_PRIVATE_ARTIFACT
