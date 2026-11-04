@@ -1,5 +1,9 @@
 """Synthetic P07 CP2 three-pending-sites pre-cutover readiness (no SSH/DB/HTTP)."""
 import contextlib
+import hashlib
+import json
+import os
+import tempfile
 import importlib.util
 import io
 from pathlib import Path
@@ -178,6 +182,113 @@ class Tests(unittest.TestCase):
         self.assertEqual(m.panel_db_candidate(site,[]),
                          "SOURCE_DECLARED_DB_NOT_REGISTERED_IN_CP2")
 
+
+    def www3_recovery_fixture(self):
+        td=tempfile.TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        root=Path(td.name)
+        transactions=root/"target-transactions"
+        transactions.mkdir(mode=0o700)
+        folder=transactions/"www3-source-rule-connection-v1"
+        folder.mkdir(mode=0o700)
+        wp=root/"wp-config.php"
+        original=b"<?php define('DB_NAME','original');"
+        candidate=b"<?php define('DB_NAME','candidate');"
+        wp.write_bytes(candidate)
+        wp.chmod(0o600)
+        def write_private(path,content):
+            path.write_bytes(content)
+            path.chmod(0o600)
+        write_private(folder/"original.php",original)
+        write_private(folder/"candidate.php",candidate)
+        journal={
+            "schema":"p07.www3.config-connection.v1",
+            "target_identity":"target-identity",
+            "config_path":str(wp),
+            "status":"CONNECTED_NOT_CUTOVER_READY",
+            "cutover_allowed":False,
+            "database_writes":False,
+            "migration_state_promoted":False,
+            "original_sha256":hashlib.sha256(original).hexdigest(),
+            "candidate_sha256":hashlib.sha256(candidate).hexdigest()
+        }
+        def receipt(name,data):
+            p=transactions/("www3-hex-scratch-"+name+".json")
+            write_private(p,json.dumps(data).encode())
+            return p
+        common={
+          "migration_id":"current-tail","domain":"www3.m3u8.one",
+          "source_database":"original","target_server_identity":"target-identity",
+        }
+        receipt("candidate",{
+          **common,"schema":"p07.www3.source-rule-candidate.v1",
+          "status":"VERIFIED_STATIC_COPY_NOT_ACTIVATED",
+          "scratch_database":"candidate",
+          "cutover_allowed":False,"website_activated":False,
+          "original_database_modified":False
+        })
+        receipt("quarantine",{
+          **common,"schema":"p07.www3.quarantined-static-copy.v1",
+          "scratch_database":"earlier"
+        })
+        write_private(folder/"journal.json",json.dumps(journal).encode())
+        source={"migration_id":"current-tail","mysql_databases":["original"]}
+        panel={"mysql_databases":["candidate","earlier"]}
+        return source,panel,transactions,wp,journal
+
+    def test_www3_current_candidate_and_previous_scratch_relation(self):
+        source,panel,transactions,wp,_=self.www3_recovery_fixture()
+        result=m.candidate_relation(source,panel,transactions,wp,
+                                    "target-identity",os.getuid())
+        self.assertEqual(result["SOURCE_DB_IN_CP2_PANEL"],"NO")
+        self.assertEqual(result["CANDIDATE_DB_IN_CP2_SITE_PANEL"],"YES")
+        self.assertEqual(result["OLD_SCRATCH_IN_CP2_SITE_PANEL"],"YES")
+        self.assertEqual(result["UNCLASSIFIED_CP2_SITE_DB_COUNT"],0)
+        self.assertEqual(result["CURRENT_CONFIG_READBACK"],"CANDIDATE_MATCH")
+        self.assertEqual(result["JOURNAL_STATUS"],"CONNECTED_NOT_CUTOVER_READY")
+        self.assertEqual(result["SOURCE_TARGET_DB_PARITY"],"NOT_VERIFIED")
+        self.assertEqual(result["CUTOVER_ALLOWED"],"NO")
+        self.assertNotIn("original",repr(result.values()))
+        self.assertNotIn("candidate",repr(result.values()))
+
+    def test_www3_journal_hash_and_guard_fail_closed(self):
+        source,panel,transactions,wp,journal=self.www3_recovery_fixture()
+        folder=transactions/"www3-source-rule-connection-v1"
+        path=folder/"journal.json"
+        journal["cutover_allowed"]=True
+        path.write_bytes(json.dumps(journal).encode())
+        with self.assertRaisesRegex(m.Block,"JOURNAL_IDENTITY_OR_GUARD"):
+            m.candidate_relation(source,panel,transactions,wp,
+                                 "target-identity",os.getuid())
+        journal["cutover_allowed"]=False
+        path.write_bytes(json.dumps(journal).encode())
+        (folder/"candidate.php").write_bytes(b"tampered")
+        with self.assertRaisesRegex(m.Block,"BACKUP_HASH_CHANGED"):
+            m.candidate_relation(source,panel,transactions,wp,
+                                 "target-identity",os.getuid())
+
+    def test_www3_unrecognized_current_config_and_receipt_fail_closed(self):
+        source,panel,transactions,wp,_=self.www3_recovery_fixture()
+        wp.write_bytes(b"<?php define('DB_NAME','unexpected');")
+        with self.assertRaisesRegex(m.Block,"CONFIG_BYTES_OUTSIDE_RECOVERY"):
+            m.candidate_relation(source,panel,transactions,wp,
+                                 "target-identity",os.getuid())
+        (transactions/"www3-hex-scratch-candidate.json").unlink()
+        wp.write_bytes((transactions/"www3-source-rule-connection-v1"/"candidate.php").read_bytes())
+        with self.assertRaisesRegex(m.Block,"UNIQUE_CANDIDATE_RECEIPT"):
+            m.candidate_relation(source,panel,transactions,wp,
+                                 "target-identity",os.getuid())
+
+    def test_www3_symlinked_private_receipt_never_followed(self):
+        source,panel,transactions,wp,_=self.www3_recovery_fixture()
+        path=transactions/"www3-hex-scratch-candidate.json"
+        target=transactions/"outside.json"
+        path.rename(target)
+        path.symlink_to(target)
+        with self.assertRaisesRegex(m.Block,"WWW3_PRIVATE_FILE_UNSAFE"):
+            m.candidate_relation(source,panel,transactions,wp,
+                                 "target-identity",os.getuid())
+
     def test_operator_never_opens_http_or_sql_or_copies_files(self):
         source=(HERE/"p07-pending-three-runtime-readonly.py").read_text()
         for token in ("source_remote(","pull_path(","cloudpanel.add_database(",
@@ -189,6 +300,8 @@ class Tests(unittest.TestCase):
         self.assertIn("DATABASE_SQL_QUERIES_AND_WRITES=NONE",source)
         self.assertIn("APPLICATION_DB_CONFIG_MAPPING",source)
         self.assertIn("CUTOVER_ALLOWED=NO",source)
+        self.assertIn("SOURCE_TARGET_DB_PARITY",source)
+        self.assertIn("SITE_FILES_DB_CRON_DNS_WRITES=NONE",source)
     def test_invalid_arg_first(self):
         with mock.patch.object(sys,"argv",["operator","--migrate"]), \
              mock.patch.object(m.os,"geteuid",return_value=0), \
