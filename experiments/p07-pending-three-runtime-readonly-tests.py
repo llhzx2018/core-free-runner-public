@@ -13,9 +13,9 @@ spec=importlib.util.spec_from_file_location("p07_three_pending",
 m=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 MIDS={
- "ORIGINAL17":"pull-20261028T103425Z-98050c76",
- "LEGACY9":"pull-20261031T094144Z-d045fa5a",
- "LAST2":"pull-20261031T095604Z-edae3c44",
+ "ORIGINAL17":"pull-20261101T045943Z-923729a1",
+ "LEGACY9":"pull-20261101T052411Z-35663c25",
+ "LAST2":"pull-20261102T005644Z-7178c7d5",
 }
 DOMAINS=[row[0] for row in m.THREE]
 def old_site(domain,status="PENDING",user="site"):
@@ -37,7 +37,8 @@ class Smoke:
     def inventory():
         return {d:[{"domain":d,"site_user":"site","runtime":{
             "type":"php","version":"8.4"},
-            "mysql_databases":["real-db"]}] for d in DOMAINS}
+            "mysql_databases":(["real-db","scratch-db"] if d==DOMAINS[0]
+                               else ["real-db"])}] for d in DOMAINS}
     @staticmethod
     def safe_entry_metadata(row):
         return {"index.php":True,"index.html":False}
@@ -48,18 +49,19 @@ class Smoke:
     @staticmethod
     def backend_status(*args):return "UNIX_POOL_AND_SOCKET_CONFIRMED"
 def fixture():
-    a=[]
+    staged=sorted(Base.EXPECTED_STAGED)
+    # The original17 owns all sites, the nine-site child has 6 staged
+    # and 3 pending, and the independent two-site tail has 1 staged +1 pending.
+    original=[old_site(x,"PULLED_STAGED") for x in staged[:7]]+[
+        old_site(x) for x in staged[7:]]+[old_site(x) for x in DOMAINS]
+    legacy=[old_site(x,"PULLED_STAGED") for x in staged[7:13]]+[
+        old_site(DOMAINS[1]),old_site(staged[13]),old_site(DOMAINS[2])]
+    tail=[old_site(staged[13],"PULLED_STAGED"),old_site(DOMAINS[2])]
+    assert len(original)==17 and len(legacy)==9 and len(tail)==2
+    out={}
     for key,mid,n in Base.JOBS:
-        rows=[]
-        for name in Base.EXPECTED_STAGED:
-            rows.append(old_site(name,"PULLED_STAGED"))
-        if key=="ORIGINAL17":
-            rows=rows[:7]+[old_site(DOMAINS[0])]+[old_site("filler.example.test","PULLED_STAGED")]*9
-        if key=="LEGACY9":
-            rows=[old_site("filler.example.test","PULLED_STAGED")]*6+[old_site(DOMAINS[1])]+[old_site("filler.example.test","PULLED_STAGED")]*2
-        if key=="LAST2":
-            rows=[old_site("updates.kewaro.com","PULLED_STAGED"),old_site(DOMAINS[2])]
-        obj={
+        rows={"ORIGINAL17":original,"LEGACY9":legacy,"LAST2":tail}[key]
+        out[key]={
           "schema":Base.SCHEMA,"migration_id":mid,
           "status":"PREPARE_FAILED","sites":rows,
           "source_runtime_frozen":False,"target_runtime_activated":False,
@@ -67,12 +69,10 @@ def fixture():
           "existing_target_overwrite_allowed":False,
           "cutover_prohibited":key!="ORIGINAL17",
           "target_server_identity":"TARGETX",
-          "partial_parent_migration_id":
-            None if key=="ORIGINAL17" else
-            MIDS["ORIGINAL17"] if key=="LEGACY9" else MIDS["LEGACY9"],
+          "partial_parent_migration_id":(
+            None if key=="ORIGINAL17" else MIDS["ORIGINAL17"]),
         }
-        a.append((key,obj))
-    return dict(a)
+    return out
 class Tests(unittest.TestCase):
     def test_classify_pending_three_static_config_only(self):
         obj=old_site(DOMAINS[0])
@@ -111,43 +111,60 @@ class Tests(unittest.TestCase):
         self.assertEqual(bad["LOCAL_FILES_VHOST_FPM_EVIDENCE"],"GAP")
     def test_scan_three_records_is_readonly_scoped(self):
         items={dom:({"ilovem3u8.kewaro.com":"ORIGINAL17",
-                   "unzip.kewaro.com":"LEGACY9",
-                   "www3.m3u8.one":"LAST2"}[dom],old_site(dom))
+                     "unzip.kewaro.com":"LEGACY9",
+                     "www3.m3u8.one":"LAST2"}[dom],old_site(dom))
                for dom in DOMAINS}
         calls=[]
-        def scratch(site,mid,dirname,status,dbs):
-            calls.append((site["domain"],mid,dirname,status))
-            return "ISOLATED_SOURCE_SNAPSHOT" if dirname else "EXISTING_CP2_DB"
+        def classify(site,expected,dbs,label):
+            calls.append((site["domain"],expected,label))
+            return "PANEL_DB_STRUCTURAL_CANDIDATE_ONLY"
         with mock.patch.object(m,"status_scope",return_value=items), \
-             mock.patch.object(m,"scratch_link",side_effect=scratch):
+             mock.patch.object(m,"panel_db_candidate",side_effect=classify):
             output=m.scan(Base,Smoke)
         self.assertEqual(len(output),3)
         self.assertEqual(set(DOMAINS),{x[0] for x in output})
-        self.assertEqual(calls[0][0],"ilovem3u8.kewaro.com")
-        self.assertEqual(calls[1][0],"unzip.kewaro.com")
-        self.assertEqual(calls[2][0],"www3.m3u8.one")
-        self.assertEqual(calls[0][1],MIDS["ORIGINAL17"])
-        self.assertEqual(calls[2][1],MIDS["LAST2"])
-    def test_failed_safe_state_does_not_trigger_sql(self):
+        self.assertEqual(calls,[
+            (DOMAINS[0],2,"ORIGINAL17"),(DOMAINS[1],1,"LEGACY9"),
+            (DOMAINS[2],1,"LAST2")])
+
+    def test_current_17_site_scope_and_independent_tail_owner(self):
         records=fixture()
-        # Replace historical fixture with actual full unique 17-site scope.
-        a=[]
-        staged=sorted(Base.EXPECTED_STAGED)
-        records["ORIGINAL17"]["sites"]=[old_site(x,"PULLED_STAGED") for x in staged[:7]]+[old_site(DOMAINS[0])]+[old_site(x,"PULLED_STAGED") for x in staged[7:]]
-        records["ORIGINAL17"]["sites"]+= [old_site("other1.example.test","PULLED_STAGED"),old_site("other2.example.test","PULLED_STAGED")]
-        records["LEGACY9"]["sites"]=[old_site("other1.example.test","PULLED_STAGED")]*6+[old_site(DOMAINS[1])]+[old_site("other2.example.test","PULLED_STAGED")]*2
-        records["LAST2"]["sites"]=[old_site("updates.kewaro.com","PULLED_STAGED"),old_site(DOMAINS[2])]
-        # The parser must reject incorrect aggregate domain identities.
         Base.allrecords={MIDS[key]:record for key,record in records.items()}
-        with self.assertRaisesRegex(m.Block,"17_SITE_FINAL_SCOPE_CHANGED"):
-            m.status_scope(Base)
+        items=m.status_scope(Base)
+        self.assertEqual(len(items),17)
+        self.assertEqual(set(items),Base.EXPECTED_STAGED|Base.EXPECTED_PENDING)
+        self.assertEqual({d for d,(label,row) in items.items()
+                          if row["stage_status"]=="PENDING"},Base.EXPECTED_PENDING)
+        self.assertEqual(items[DOMAINS[2]][0],"LAST2")
+        self.assertEqual(items[DOMAINS[1]][0],"LEGACY9")
+        self.assertEqual(items[DOMAINS[0]][0],"ORIGINAL17")
+
+    def test_changed_safety_state_or_tail_parent_is_blocked(self):
+        records=fixture()
+        Base.allrecords={MIDS[key]:record for key,record in records.items()}
         records["ORIGINAL17"]["source_delete_allowed"]=True
         with self.assertRaisesRegex(m.Block,"MIGRATION_ID_OR_SAFETY_BOUNDARY_CHANGED"):
             m.status_scope(Base)
-    def test_unsafe_isolated_registration_fails_closed(self):
+        records["ORIGINAL17"]["source_delete_allowed"]=False
+        records["LAST2"]["partial_parent_migration_id"]=MIDS["LEGACY9"]
+        with self.assertRaisesRegex(m.Block,"PARENT_MIGRATION_CHAIN_CHANGED"):
+            m.status_scope(Base)
+
+    def test_panel_db_count_and_identity_gaps_remain_unverified(self):
         site=old_site(DOMAINS[1])
-        with self.assertRaisesRegex(m.Block,"UNZIP_REGISTERED_DB_SCOPE_CHANGED"):
-            m.scratch_link(site,MIDS["LEGACY9"],None,None,[])
+        self.assertEqual(m.panel_db_candidate(site,1,[],"LEGACY9"),
+                         "CP2_DATABASE_COUNT_GAP")
+        self.assertEqual(m.panel_db_candidate(site,1,["db","db"],"LEGACY9"),
+                         "CP2_DATABASE_DUPLICATE")
+        site["mysql_databases"]=["expected"]
+        self.assertEqual(m.panel_db_candidate(site,1,["different"],"LEGACY9"),
+                         "SOURCE_TARGET_DB_NAME_DIFFERENCE")
+        self.assertEqual(m.panel_db_candidate(site,1,["expected"],"LEGACY9"),
+                         "PANEL_DB_STRUCTURAL_CANDIDATE_ONLY")
+        self.assertEqual(m.panel_db_candidate(old_site(DOMAINS[0]),2,
+                         ["original","scratch"],"ORIGINAL17"),
+                         "PANEL_DB_STRUCTURAL_CANDIDATE_ONLY")
+
     def test_operator_never_opens_http_or_sql_or_copies_files(self):
         source=(HERE/"p07-pending-three-runtime-readonly.py").read_text()
         for token in ("source_remote(","pull_path(","cloudpanel.add_database(",
