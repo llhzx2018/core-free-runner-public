@@ -78,7 +78,17 @@ def install(cert):
     status, headers, body = h.send("/install.php?step=complete")
     assert status == 200, f"KUMA_INSTALL_COMPLETE_HTTP_{status}"
     status, headers, body = h.send("/api/v1/health")
-    assert status == 200, f"KUMA_REAL_HEALTH_HTTP_{status}"
+    if status != 200:
+        # Status-only probes; never expose credentials, SQL, or raw web data.
+        for label, path in [
+            ("rewritten", "/api/v1/health"),
+            ("direct_index", "/api/v1/index.php/health"),
+            ("index_only", "/api/v1/index.php"),
+            ("openapi", "/api/v1/openapi.json"),
+        ]:
+            code, response_headers, payload = h.send(path)
+            print("P08_R31_KUMA_API_ROUTE_PROBE=" + label + ":" + str(code), flush=True)
+        raise AssertionError("KUMA_REAL_HEALTH_HTTP_" + str(status))
     try: doc=json.loads(body)
     except ValueError: raise AssertionError("KUMA_REAL_HEALTH_BAD_JSON")
     assert isinstance(doc.get("data"),dict) and doc["data"].get("status")=="ok", "KUMA_REAL_HEALTH_SCHEMA_DRIFT"
