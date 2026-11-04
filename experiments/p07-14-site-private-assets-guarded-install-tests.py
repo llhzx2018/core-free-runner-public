@@ -229,7 +229,7 @@ class Tests(unittest.TestCase):
                 for rejected in (str(root/"missing"),
                                  str(root/".."/name),
                                  str(root/(name+"-extra")),
-                                 str(root/"p07-missing-assets-"+"g"*32),
+                                 str(root/("p07-missing-assets-"+"g"*32)),
                                  "/tmp/"+name):
                     with self.assertRaisesRegex(m.Stop,"PRIVATE_EVIDENCE_DIRECTORY_UNSAFE"):
                         m.validated_private_directory(rejected)
