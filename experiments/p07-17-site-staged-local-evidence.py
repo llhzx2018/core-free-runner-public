@@ -125,8 +125,12 @@ def audit(root=ROOT,inventory_fn=None):
             # consistent with the final observed status order.
             seen.setdefault(name,[]).append((label,status,site))
         states.append(state)
-    require(states[1].get("partial_parent_migration_id")==JOBS[0][1]
-            and states[2].get("partial_parent_migration_id")==JOBS[1][1],
+    # Both the nine-site remainder and the independent last-two tail
+    # belong to the original 17-site parent. The tail is NOT a child of
+    # the nine-site remainder; see migration_chain_consolidation.py.
+    require(not states[0].get("partial_parent_migration_id")
+            and states[1].get("partial_parent_migration_id")==JOBS[0][1]
+            and states[2].get("partial_parent_migration_id")==JOBS[0][1],
             "MIGRATION_PARENT_CHAIN_CHANGED")
     statuses={k:rows[-1][1] for k,rows in seen.items()}
     require(len(statuses)==17 and set(statuses)==EXPECTED_STAGED|EXPECTED_PENDING and
