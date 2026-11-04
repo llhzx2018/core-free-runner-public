@@ -17,7 +17,7 @@ import sys
 sys.dont_write_bytecode=True
 HERE=Path(__file__).resolve().parent
 BASE=HERE/"p07-17-site-staged-local-evidence.py"
-EXPECTED_BASE_BLOB="7296ea88fe0d096bc622671bf20f1b2b7aa18f5c"
+EXPECTED_BASE_BLOB="01b02934109458942e575d4e5a45d2d7f7ea37cf"
 EXPECTED_DOMAINS=("ilovem3u8.kewaro.com","unzip.kewaro.com","www3.m3u8.one")
 WWW3="pull-20261031T095604Z-edae3c44"
 WWW3_RECOVERY=Path("/var/lib/vf-server-ops/server-migrations")/WWW3/"recovery-scratch-www3"
