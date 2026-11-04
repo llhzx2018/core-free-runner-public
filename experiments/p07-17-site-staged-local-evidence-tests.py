@@ -131,9 +131,8 @@ class Tests(unittest.TestCase):
 
     def test_noncurrent_older_task_id_fails_closed(self):
         states=make_states()
-        orphan=states.pop(m.JOBS[0][1])
-        states["pull-20261028T103425Z-98050c76"]=orphan
-        with self.assertRaises(KeyError):
+        states[m.JOBS[0][1]]["migration_id"]="pull-20261028T103425Z-98050c76"
+        with self.assertRaisesRegex(m.Block,"MIGRATION_ID_OR_SCHEMA_CHANGED"):
             run(states,{"sites":[]})
 
     def test_stage_count_drift_refused_before_panel_inventory(self):
