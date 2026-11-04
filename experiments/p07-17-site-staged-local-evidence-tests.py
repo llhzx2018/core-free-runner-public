@@ -50,7 +50,7 @@ def make_states():
           "dns_changed_by_p07":False,
           "source_delete_allowed":False,
           "existing_target_overwrite_allowed":False,
-          "partial_parent_migration_id":m.JOBS[n-1][1] if n else None,
+          "partial_parent_migration_id":m.JOBS[0][1] if n else None,
         }
         assert len(state["sites"])==count
         result[mid]=state
@@ -99,6 +99,36 @@ class Tests(unittest.TestCase):
         self.assertIn("STAGED_SITE_LOCAL_EVIDENCE=GAPS_FOUND",output)
         self.assertIn("STAGED_SITE_GAP_COUNT=1",output)
         self.assertIn("PANEL_INVENTORY=MISSING",output)
+
+    def test_independent_last_two_tail_points_to_original_parent(self):
+        states=make_states()
+        self.assertEqual(
+            states[m.JOBS[2][1]]["partial_parent_migration_id"],
+            m.JOBS[0][1],
+        )
+        manifest={"sites":[]}
+        for state in states.values():
+            for site in state["sites"]:
+                if site["stage_status"]=="PULLED_STAGED":
+                    manifest["sites"].append({
+                        "domain":site["domain"],
+                        "site_user":site["site_user"],
+                        "mysql_databases":site["mysql_databases"],
+                    })
+        result=run(states,manifest)
+        self.assertIn("STAGED_SITE_LOCAL_EVIDENCE=PASS",result)
+
+    def test_tail_wrongly_links_nine_site_child_is_blocked(self):
+        states=make_states()
+        states[m.JOBS[2][1]]["partial_parent_migration_id"]=m.JOBS[1][1]
+        with self.assertRaisesRegex(m.Block,"MIGRATION_PARENT_CHAIN_CHANGED"):
+            run(states,{"sites":[]})
+
+    def test_child_wrong_parent_is_blocked(self):
+        states=make_states()
+        states[m.JOBS[1][1]]["partial_parent_migration_id"]=m.JOBS[2][1]
+        with self.assertRaisesRegex(m.Block,"MIGRATION_PARENT_CHAIN_CHANGED"):
+            run(states,{"sites":[]})
 
     def test_parent_guard_mutation_fails_closed(self):
         states=make_states()
