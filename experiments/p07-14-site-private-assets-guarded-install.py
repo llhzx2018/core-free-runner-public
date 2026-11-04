@@ -29,7 +29,7 @@ BASE=HERE/"p07-17-site-staged-local-evidence.py"
 BASE_BLOB="01b02934109458942e575d4e5a45d2d7f7ea37cf"
 PRIVATE=Path("/var/lib/vf-server-ops/operator-recovery/p07-missing-assets-cb93c6b490a04068a5533f9cde0fcec7")
 PRIVATE_ROOT=Path("/var/lib/vf-server-ops/operator-recovery")
-PRIVATE_DIR_RE=re.compile(r"p07-missing-assets-[a-f0-9]{32}\\Z")
+PRIVATE_DIR_RE=re.compile(r"p07-missing-assets-[a-f0-9]{32}\Z")
 
 def validated_private_directory(path_value):
     """Bind the operator to the *actual* newly staged 35-item package.
