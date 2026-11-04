@@ -209,6 +209,62 @@ jobs:
           wp plugin is-active vf-ops --path="$clean" --allow-root
           cmp "$clean/wp-content/plugins/vf-ops/assets/js/v13/system/recovery.js" ops/assets/js/v13/system/recovery.js
           echo S01_R8_OPS_CLEAN_INSTALL=PASS
+      - name: Real V6 encrypted full-site backup restore pre-snapshot journal and injected failure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/s01-r8-v6-real-restore.php" <<'PHP'
+          <?php
+          function s01v6check(bool $condition,string $why):void{if(!$condition)throw new RuntimeException('V6_REAL_RESTORE_FAIL '.$why);}
+          if(!function_exists('vf_ops_recovery_platform_backup_create_v1211022')){
+           require_once WP_PLUGIN_DIR.'/vf-ops/includes/recovery/service.php';
+          }
+          $uid=vf_ops_recovery_platform_site_uid_v1211022();
+          s01v6check($uid!=='','current site resolved');
+          $uploads=wp_upload_dir();
+          $sample=rtrim($uploads['basedir'],'/').'/s01-r8-v6-restore-proof.txt';
+          s01v6check(is_dir(dirname($sample))||wp_mkdir_p(dirname($sample)),'upload dir');
+          $before='s01-v6-upload-before-20261104';
+          $after='s01-v6-upload-after-20261104';
+          file_put_contents($sample,$before);
+          update_option('vf_ops_r8_v6_restore_canary','before',false);
+          $created=vf_ops_recovery_platform_backup_create_v1211022();
+          s01v6check(!empty($created['ok'])&&($created['code']??'')==='PLATFORM_BACKUP_CREATED','real builtin encrypted backup verified');
+          $bid=(string)$created['snapshotUid'];
+          $snapshot=vf_tools_ops_v6_db_get_by_uid('snapshots',$bid);
+          s01v6check(is_array($snapshot)&&($snapshot['snapshot_type']??'')==='PLATFORM_BACKUP'&&($snapshot['snapshot_state']??'')==='VERIFIED','site backup scope verified');
+          s01v6check(hash_equals($uid,(string)$snapshot['scope_uid']),'backup current scope');
+          $_POST=['vf_recovery_confirmation'=>'wrong'];
+          $bad=vf_ops_recovery_platform_restore_v1211022($bid);
+          s01v6check(empty($bad['ok'])&&($bad['code']??'')==='CONFIRMATION_MISMATCH','typed confirmation negative');
+          update_option('vf_ops_r8_v6_restore_canary','after',false);
+          file_put_contents($sample,$after);
+          $_POST=['vf_recovery_confirmation'=>'RESTORE_SITE_BACKUP'];
+          $restore=vf_ops_recovery_platform_restore_v1211022($bid);
+          s01v6check(!empty($restore['ok'])&&($restore['code']??'')==='PLATFORM_RESTORE_COMPLETE','real builtin restore succeeded');
+          s01v6check(get_option('vf_ops_r8_v6_restore_canary')==='before','db canary restored');
+          s01v6check(file_get_contents($sample)===$before,'uploads bytes restored');
+          $journal=vf_tools_ops_v6_db_get_by_uid('migration_journal',(string)$restore['journalUid']);
+          s01v6check(is_array($journal)&&($journal['journal_state']??'')==='SUCCEEDED','journal succeeded readback');
+          $checkpoint=vf_tools_ops_v6_db_json_decode((string)($journal['checkpoint_json']??'{}'));
+          $preuid=(string)($checkpoint['pre_restore_snapshot_uid']??'');
+          s01v6check($preuid!=='','pre-restore snapshot retained');
+          $pre=vf_tools_ops_v6_db_get_by_uid('snapshots',$preuid);
+          s01v6check(is_array($pre)&&($pre['snapshot_state']??'')==='VERIFIED','pre-restore backup verified');
+          $failureFn=static function($result,$row,$manifest,$pre){return ['ok'=>false,'reason'=>'S01_SYNTHETIC_INJECTED_FAILURE'];};
+          add_filter('vf_tools_ops_v6_platform_restore_execute',$failureFn,10,4);
+          $gotExpected=false;
+          try{vf_tools_ops_v6_platform_restore($bid);}catch(Throwable $e){$gotExpected=str_contains($e->getMessage(),'S01_SYNTHETIC_INJECTED_FAILURE');}
+          remove_filter('vf_tools_ops_v6_platform_restore_execute',$failureFn,10);
+          s01v6check($gotExpected,'injected failed restore fails closed');
+          global $wpdb;
+          $table=vf_tools_ops_v6_table('migration_journal');
+          $failed=(array)$wpdb->get_row($wpdb->prepare("SELECT * FROM `{$table}` WHERE migration_key=%s AND journal_state='FAILED' ORDER BY id DESC LIMIT 1",'restore:'.$bid),ARRAY_A);
+          s01v6check(!empty($failed)&&preg_match('/^[a-f0-9]{64}$/',(string)($failed['failure_provenance']??''))===1,'failed journal provenance durable');
+          s01v6check(get_option('vf_ops_r8_v6_restore_canary')==='before'&&file_get_contents($sample)===$before,'failure keeps canaries unchanged');
+          echo "S01_R8_V6_REAL_ENCRYPTED_SITE_BACKUP_RESTORE=PASS db_uploads_pre_snapshot_journal_and_injected_failure\n";
+          PHP
+          wp eval-file "$RUNNER_TEMP/s01-r8-v6-real-restore.php" --path="$RUNNER_TEMP/s01-r8-ops-wp" --allow-root
       - name: Clean up isolated WordPress and private sources
         if: always()
         shell: bash
