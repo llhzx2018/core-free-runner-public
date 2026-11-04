@@ -1,0 +1,103 @@
+name: S01 M3U8 1.25.100 real WordPress permission nonce recovery proof
+on:
+  push:
+    branches: [test/s01-m3u8-125100-wp-security-20261104]
+    paths: [.github/workflows/s01-m3u8-125100-wp-security-20261104.yml]
+permissions: {contents: read}
+jobs:
+  wp-security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      db:
+        image: mariadb:11.8
+        env: {MARIADB_DATABASE: s01_security, MARIADB_USER: vf, MARIADB_PASSWORD: vf, MARIADB_ROOT_PASSWORD: fixture-only}
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mariadb-admin ping -h 127.0.0.1 -uroot -pfixture-only"
+          --health-interval 10s --health-timeout 5s --health-retries 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: 20f5ce58567c5380843229c6e737a7d1f0a498e7
+          token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'
+          persist-credentials: false
+          path: m3u8
+      - uses: shivammathur/setup-php@v2
+        with: {php-version: '8.3', extensions: 'mysqli,mbstring,intl,zip', coverage: none}
+      - name: Exact source real WordPress MariaDB activation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C m3u8 rev-parse HEAD)" = 20f5ce58567c5380843229c6e737a7d1f0a498e7
+          test "$(cat m3u8/VERSION)" = 1.25.100
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-mysql php8.3-xml php8.3-mbstring php8.3-curl php8.3-zip >/dev/null
+          curl -fsSLo /tmp/s01cli.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          sudo install -m 0755 /tmp/s01cli.phar /usr/local/bin/wp
+          P="$RUNNER_TEMP/s01wp"; mkdir -p "$P"
+          wp core download --path="$P" --version=7.1.3 --allow-root --quiet
+          wp config create --path="$P" --dbname=s01_security --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check --allow-root >/dev/null
+          wp core install --path="$P" --url=http://127.0.0.1:18942 --title=S01 --admin_user=fixture --admin_password=fixture-only --admin_email=fixture@example.invalid --skip-email --allow-root >/dev/null
+          mkdir -p "$P/wp-content/plugins/vf-tool-m3u8"; cp -a m3u8/src/. "$P/wp-content/plugins/vf-tool-m3u8/"
+          wp plugin activate vf-tool-m3u8/vf-tool-m3u8.php --path="$P" --allow-root >/dev/null
+          wp plugin is-active vf-tool-m3u8 --path="$P" --allow-root
+          test "$(wp plugin get vf-tool-m3u8 --field=version --path="$P" --allow-root)" = 1.25.100
+          echo S01_125100_REAL_WORDPRESS_SOURCE_ACTIVATION=PASS
+      - name: PHP actual WordPress guest editor admin nonce and recovery negative
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/probe.php" <<'PHP'
+          <?php
+          function check(bool $v,string $n):void {
+              if (!$v) { throw new RuntimeException('S01_SECURITY_FAILED_'.$n); }
+              echo 'PASS '.$n."\n";
+          }
+          check(defined('ABSPATH') && defined('VF_TOOL_M3U8_DIR') && function_exists('vf_tools_m3u8_v6_security_admin_request_allowed'),'WP_BOOTSTRAPPED_SECURITY');
+          $cap=vf_tools_m3u8_v6_manage_capability();
+          check(get_role('administrator')->has_cap($cap),'ADMIN_CAPABILITY_REGISTERED');
+          $editor=wp_create_user('synthetic-editor','synthetic-only','editor@example.invalid');
+          if(is_wp_error($editor))throw new RuntimeException('editor_creation_failed');
+          wp_update_user(['ID'=>$editor,'role'=>'editor']);
+          $admin=get_user_by('login','fixture');
+          check($admin instanceof WP_User,'ADMIN_EXISTS');
+          wp_set_current_user(0);
+          $guest=vf_tools_m3u8_v6_security_admin_request_allowed('','s01-check',$cap);
+          check(!$guest['ok'] && in_array('authentication_required',$guest['errors'],true),'GUEST_FAIL_CLOSED');
+          wp_set_current_user($editor);
+          $limited=vf_tools_m3u8_v6_security_admin_request_allowed(wp_create_nonce('s01-check'),'s01-check',$cap);
+          check(!$limited['ok'] && in_array('forbidden',$limited['errors'],true),'EDITOR_DENIED_VALID_NONCE');
+          wp_set_current_user($admin->ID);
+          $invalid=vf_tools_m3u8_v6_security_admin_request_allowed('invalid','s01-check',$cap);
+          check(!$invalid['ok'] && in_array('csrf_nonce_invalid',$invalid['errors'],true),'ADMIN_BAD_NONCE_DENIED');
+          $good=vf_tools_m3u8_v6_security_admin_request_allowed(wp_create_nonce('s01-check'),'s01-check',$cap);
+          check($good['ok']===true,'ADMIN_VALID_NONCE_ALLOWED');
+          $secret=vf_tools_m3u8_v6_decode_json_payload('{"api_key":"SYNTHETIC_CANARY"}');
+          check(!$secret['ok'] && in_array('secret_or_credential_forbidden',$secret['errors'],true),'SECRET_PAYLOAD_DENIED');
+          check(vf_tools_m3u8_v6_decode_json_payload('{bad')['ok']===false,'INVALID_JSON_DENIED');
+          check(vf_tools_m3u8_v6_decode_json_payload('{"x":"'.str_repeat('x',1048576).'"}')['ok']===false,'OVERSIZE_JSON_DENIED');
+          $red=vf_tools_m3u8_v6_security_redact(['api_key'=>'SYNTHETIC_CANARY','header'=>'Authorization: Bearer SYNTHETIC_CANARY','url'=>'https://example.invalid/?token=SYNTHETIC_CANARY']);
+          check(strpos(wp_json_encode($red),'SYNTHETIC_CANARY')===false,'SECURITY_EVENT_SECRET_REDACTION');
+          $one=vf_tools_m3u8_v6_security_acquire_lock('synthetic-test');
+          $two=vf_tools_m3u8_v6_security_acquire_lock('synthetic-test');
+          check(!empty($one['ok']) && empty($two['ok']),'DUPLICATE_WRITE_LOCK_DENIED');
+          vf_tools_m3u8_v6_security_release_lock('synthetic-test','incorrect-token');
+          check(is_array(get_option(vf_tools_m3u8_v6_security_lock_key('synthetic-test'),null)),'UNAUTHORIZED_LOCK_RELEASE_DENIED');
+          vf_tools_m3u8_v6_security_release_lock('synthetic-test',(string)$one['token']);
+          check(get_option(vf_tools_m3u8_v6_security_lock_key('synthetic-test'),null)===null,'CORRECT_LOCK_RELEASE');
+          require_once VF_TOOL_M3U8_DIR.'includes/v6-provider-schema-repair-admin.php';
+          require_once VF_TOOL_M3U8_DIR.'includes/v6-provider-controlled-migration-admin.php';
+          $contract=vf_tools_m3u8_v6_schema_repair_contract();
+          check($contract['method']==='POST' && !$contract['automaticRepairWhenNotReady'] && !$contract['destructiveReset'],'REPAIR_EXPLICIT_NONDESTRUCTIVE_POST');
+          check($contract['capability']===$cap && $contract['nonceAction']===vf_tools_m3u8_v6_schema_repair_nonce_action(),'REPAIR_CAPABILITY_NONCE');
+          check(has_action('admin_post_'.vf_tools_m3u8_v6_controlled_migration_action())!==false,'MIGRATION_EXPLICIT_POST_REGISTERED');
+          try {vf_tools_m3u8_v6_controlled_migration_ident('x; DROP TABLE z'); throw new RuntimeException('UNSAFE_IDENTIFIER_ACCEPTED');}
+          catch(RuntimeException $e) {check($e->getMessage()==='UNSAFE_IDENTIFIER','SQL_IDENTIFIER_FAIL_CLOSED');}
+          echo "S01_M3U8_125100_REAL_WP_OWNER_NONCE_SECURITY_RECOVERY=PASS\n";
+          PHP
+          wp eval-file "$RUNNER_TEMP/probe.php" --path="$RUNNER_TEMP/s01wp" --allow-root
+      - name: Clean temporary private source and synthetic DB files
+        if: always()
+        run: rm -rf m3u8 "$RUNNER_TEMP/s01wp" "$RUNNER_TEMP/probe.php" /tmp/s01cli.phar
