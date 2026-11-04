@@ -122,7 +122,7 @@ def site_states():
                  "SITE_ENTRY_INVALID")
             active[site["domain"]]=(label,site)
     must(states[1][2].get("partial_parent_migration_id")==base.JOBS[0][1]
-         and states[2][2].get("partial_parent_migration_id")==base.JOBS[1][1],
+         and states[2][2].get("partial_parent_migration_id")==base.JOBS[0][1],
          "PARENT_CHAIN_CHANGED")
     must({d for d,(_,s) in active.items() if s.get("stage_status")=="PULLED_STAGED"}
          ==base.EXPECTED_STAGED and
