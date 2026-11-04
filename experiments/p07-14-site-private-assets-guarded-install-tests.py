@@ -218,6 +218,52 @@ class Tests(unittest.TestCase):
                 self.assertFalse(path.stat().st_mode&0o077)
                 m.write_progress({"installed":[{"target":"new"}],"status":"COPIED"})
                 self.assertEqual(json.loads(path.read_text())["status"],"COPIED")
+    def test_generated_uuid_private_receipt_directory_is_explicitly_selectable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            name="p07-missing-assets-"+"a"*32
+            valid=root/name
+            valid.mkdir()
+            with mock.patch.object(m,"PRIVATE_ROOT",root):
+                self.assertEqual(m.validated_private_directory(str(valid)),valid)
+                for rejected in (str(root/"missing"),
+                                 str(root/".."/name),
+                                 str(root/(name+"-extra")),
+                                 str(root/"p07-missing-assets-"+"g"*32),
+                                 "/tmp/"+name):
+                    with self.assertRaisesRegex(m.Stop,"PRIVATE_EVIDENCE_DIRECTORY_UNSAFE"):
+                        m.validated_private_directory(rejected)
+                (root/("p07-missing-assets-"+"b"*32)).symlink_to(valid)
+                with self.assertRaisesRegex(m.Stop,"PRIVATE_EVIDENCE_DIRECTORY_UNSAFE"):
+                    m.validated_private_directory(str(root/("p07-missing-assets-"+"b"*32)))
+
+    def test_explicit_generated_directory_binds_before_private_audit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            path=root/("p07-missing-assets-"+"c"*32)
+            path.mkdir()
+            with mock.patch.object(m,"PRIVATE_ROOT",root), \\
+                 mock.patch.object(m,"PRIVATE",root/"legacy-unrelated"), \\
+                 mock.patch.object(sys,"argv",["tool","--audit-existing-partial-assets-readonly",
+                                                "--private-evidence-dir",str(path)]), \\
+                 mock.patch.object(m,"check_manifest",return_value=([],[],0)) as chk, \\
+                 mock.patch.object(m,"plan_nested_assets",return_value=([],{})), \\
+                 mock.patch.object(m,"do_audit_partial",return_value=0) as audit, \\
+                 mock.patch.object(m.os,"geteuid",return_value=0):
+                self.assertEqual(m.do_install(),0)
+                self.assertEqual(m.PRIVATE,path)
+                chk.assert_called_once()
+                audit.assert_called_once()
+
+    def test_invalid_explicit_directory_fails_before_private_manifest(self):
+        with mock.patch.object(sys,"argv",["tool","--install-only-30-absent-site-assets",
+                                             "--private-evidence-dir","/tmp/untrusted"]), \\
+             mock.patch.object(m,"check_manifest") as check, \\
+             mock.patch.object(m.os,"geteuid",return_value=0):
+            with self.assertRaisesRegex(m.Stop,"PRIVATE_EVIDENCE_DIRECTORY_UNSAFE"):
+                m.do_install()
+            check.assert_not_called()
+
     def test_explicit_install_gate_precedes_state_read(self):
         with mock.patch.object(sys,"argv",["tool","--wrong"]), \
              mock.patch.object(m,"check_manifest") as preflight, \
