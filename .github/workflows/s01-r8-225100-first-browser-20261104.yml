@@ -1,0 +1,111 @@
+name: S01 Theme225 M3U8100 clean first browser and admin login
+on:
+  push:
+    branches: [test/s01-three-component-225-100-candidates-20261104]
+    paths: ['.github/workflows/s01-r8-225100-first-browser-20261104.yml']
+permissions: {contents: read}
+jobs:
+  exact-first-browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env: {MARIADB_DATABASE: s01_firstbrowser, MARIADB_USER: vf, MARIADB_PASSWORD: vf, MARIADB_ROOT_PASSWORD: fixture-only}
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mariadb-admin ping -h 127.0.0.1 -uroot -pfixture-only"
+          --health-interval 10s --health-timeout 5s --health-retries 16
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {repository: llhzx2018/vf-tools-theme, ref: 93e1fccec37f7b608a18c1d49711e9dc563bb973, token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}', persist-credentials: false, path: theme}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {repository: llhzx2018/vf-tools-m3u8, ref: 20f5ce58567c5380843229c6e737a7d1f0a498e7, token: '${{ secrets.VF_PRIVATE_READ_TOKEN }}', persist-credentials: false, path: m3u8}
+      - uses: shivammathur/setup-php@v2
+        with: {php-version: '8.3', extensions: 'mysqli,mbstring,intl,zip,xml,curl', coverage: none}
+      - name: Exact merged sources and WordPress first-run setup
+        shell: bash
+        env: {GH_TOKEN: '${{ secrets.VF_PRIVATE_READ_TOKEN }}'}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C theme rev-parse HEAD)" = 93e1fccec37f7b608a18c1d49711e9dc563bb973
+          test "$(git -C m3u8 rev-parse HEAD)" = 20f5ce58567c5380843229c6e737a7d1f0a498e7
+          test "$(cat theme/VERSION)" = 1.35.225
+          test "$(cat m3u8/VERSION)" = 1.25.100
+          test -n "$GH_TOKEN"
+          mkdir -p "$RUNNER_TEMP/ops-zip"
+          gh release download v1.21.1114 -R llhzx2018/vf-tools-ops -p vf-tools-ops_V1.21.1114.zip -D "$RUNNER_TEMP/ops-zip"
+          echo "07accbb20cb23fae08d308f23be729a62daadc6d252c3a4ff213d550030e49a3  $RUNNER_TEMP/ops-zip/vf-tools-ops_V1.21.1114.zip" | sha256sum -c
+          curl -fsSLo /tmp/s01-firstbrowser-wp.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          sudo install -m 0755 /tmp/s01-firstbrowser-wp.phar /usr/local/bin/wp
+          P="$RUNNER_TEMP/s01-browser-wordpress"; mkdir -p "$P"
+          wp core download --path="$P" --version=7.1.3 --allow-root --quiet
+          wp config create --path="$P" --dbname=s01_firstbrowser --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check --allow-root >/dev/null
+          wp core install --path="$P" --url=http://127.0.0.1:18941 --title='S01 first-browser synthetic' --admin_user=s01fixture --admin_password=fixture-only --admin_email=s01fixture@example.invalid --skip-email --allow-root >/dev/null
+          mkdir -p "$P/wp-content/themes/vf-tools-theme" "$P/wp-content/plugins/vf-tool-m3u8"
+          cp -a theme/src/. "$P/wp-content/themes/vf-tools-theme/"
+          cp -a m3u8/src/. "$P/wp-content/plugins/vf-tool-m3u8/"
+          wp theme activate vf-tools-theme --path="$P" --allow-root >/dev/null
+          wp plugin install "$RUNNER_TEMP/ops-zip/vf-tools-ops_V1.21.1114.zip" --activate --path="$P" --allow-root >/dev/null
+          wp plugin activate vf-tool-m3u8/vf-tool-m3u8.php --path="$P" --allow-root >/dev/null
+          test "$(wp theme get vf-tools-theme --field=version --path="$P" --allow-root)" = 1.35.225
+          test "$(wp plugin get vf-tool-m3u8 --field=version --path="$P" --allow-root)" = 1.25.100
+          wp plugin is-active vf-ops --path="$P" --allow-root
+          wp plugin is-active vf-tool-m3u8 --path="$P" --allow-root
+          echo S01_R8_EXACT_THREE_COMPONENT_FIRST_RUN_INSTALL=PASS
+      - name: First genuine anonymous Chromium visit and admin session browser
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          P="$RUNNER_TEMP/s01-browser-wordpress"
+          cat > "$P/.router.php" <<'PHP'
+          <?php
+          $urlPath = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+          if (is_string($urlPath) && $urlPath !== '/' && is_file(__DIR__ . $urlPath)) { return false; }
+          require __DIR__ . '/index.php';
+          PHP
+          php -S 127.0.0.1:18941 -t "$P" "$P/.router.php" >"$RUNNER_TEMP/s01-http.log" 2>&1 &
+          server_pid="$!"
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS --max-time 3 http://127.0.0.1:18941/wp-login.php >/dev/null; then break; fi
+            sleep 1
+          done
+          mkdir -p "$RUNNER_TEMP/s01playwright"
+          npm install --silent --no-audit --no-fund --prefix "$RUNNER_TEMP/s01playwright" playwright@1.62.1
+          "$RUNNER_TEMP/s01playwright/node_modules/.bin/playwright" install chromium >/dev/null
+          export NODE_PATH="$RUNNER_TEMP/s01playwright/node_modules"
+          node <<'JS'
+          const assert = require('node:assert/strict');
+          const { chromium } = require('playwright');
+          (async () => {
+            const browser = await chromium.launch({headless:true});
+            try {
+              const page = await browser.newPage({viewport:{width:1440,height:900}});
+              const origin = 'http://127.0.0.1:18941';
+              let response = await page.goto(origin+'/', {waitUntil:'domcontentloaded',timeout:30000});
+              assert.equal(response.status(),200,'first public HTTP request must succeed');
+              const documentText = await page.locator('html').textContent();
+              assert.ok(!/Fatal error|Uncaught Error|There has been a critical error/i.test(documentText),'fatal error in clean public page');
+              assert.ok((await page.locator('body').count())===1,'first page body present');
+              console.log('S01_R8_CLEAN_BROWSER_FIRST_PUBLIC_REQUEST=PASS');
+              await page.goto(origin+'/wp-admin/', {waitUntil:'domcontentloaded'});
+              assert.match(page.url(), /wp-login\.php/,'guest admin requires authentication');
+              console.log('S01_R8_CLEAN_BROWSER_GUEST_ADMIN_REDIRECT=PASS');
+              await page.locator('#user_login').fill('s01fixture');
+              await page.locator('#user_pass').fill('fixture-only');
+              await page.locator('#wp-submit').click();
+              await page.waitForURL(/\/wp-admin\/(?:index\.php)?(?:\?.*)?$/, {timeout:30000});
+              assert.ok((await page.locator('#wpbody-content').count())===1,'real authenticated WordPress admin shell present');
+              console.log('S01_R8_CLEAN_BROWSER_REAL_ADMIN_LOGIN=PASS');
+              response = await page.goto(origin+'/wp-admin/install.php', {waitUntil:'domcontentloaded'});
+              const setupText = (await page.locator('body').textContent())||'';
+              assert.match(setupText,/already installed|已安装/i,'revisit installer must be locked');
+              console.log('S01_R8_CLEAN_BROWSER_SETUP_REVISIT_LOCK=PASS');
+            } finally { await browser.close(); }
+          })().catch(e=>{ console.error(e.message);process.exit(1); });
+          JS
+      - name: Destroy transient source and synthetic WordPress
+        if: always()
+        shell: bash
+        run: rm -rf theme m3u8 "$RUNNER_TEMP/ops-zip" "$RUNNER_TEMP/s01-browser-wordpress" "$RUNNER_TEMP/s01playwright" "$RUNNER_TEMP/s01-http.log" /tmp/s01-firstbrowser-wp.phar
