@@ -158,7 +158,175 @@ def scan(base,smoke):
             if type(panel_dbs) is list else "UNKNOWN")
         entries.append((domain,bound,result))
     return entries
+
+def private_bytes(path,owner,max_size=2*1024*1024):
+    """Read only root-owned local recovery evidence, never log its raw bytes."""
+    try:
+        info=path.lstat()
+        need(stat.S_ISREG(info.st_mode) and not path.is_symlink()
+             and info.st_uid==owner and info.st_nlink==1
+             and not info.st_mode&0o077 and 0<info.st_size<=max_size,
+             "WWW3_PRIVATE_FILE_UNSAFE")
+        data=path.read_bytes()
+    except OSError:
+        raise Block("WWW3_PRIVATE_FILE_UNAVAILABLE") from None
+    need(len(data)==info.st_size,"WWW3_PRIVATE_FILE_READ_CHANGED")
+    return data
+
+def private_json(path,owner):
+    try:
+        raw=private_bytes(path,owner,65536)
+        value=json.loads(raw)
+    except (ValueError,UnicodeError):
+        raise Block("WWW3_PRIVATE_JSON_UNVERIFIED") from None
+    need(type(value) is dict,"WWW3_PRIVATE_JSON_INVALID")
+    return value
+
+def candidate_relation(source,panel,transactions,site_config,identity,owner):
+    """Read-only link between real source DB, existing scratch receipts & config.
+
+    The recovery scratch is not automatically a CloudPanel *site* database.
+    Never expose DB names, passwords, config content or raw journal.
+    """
+    need(type(source) is dict and type(panel) is dict
+         and type(identity) is str and bool(identity),"WWW3_SITE_CONTEXT_UNVERIFIED")
+    dbs=source.get("mysql_databases")
+    registered=panel.get("mysql_databases")
+    need(type(dbs) is list and len(dbs)==1 and type(dbs[0]) is str
+         and bool(dbs[0]) and type(registered) is list
+         and len(registered)==len(set(registered))
+         and all(type(x) is str and bool(x) for x in registered),
+         "WWW3_SITE_DATABASE_INVENTORY_UNVERIFIED")
+    name=dbs[0]
+    need(transactions.is_dir() and not transactions.is_symlink(),
+         "WWW3_TRANSACTIONS_NOT_FOUND")
+    info=transactions.lstat()
+    need(stat.S_ISDIR(info.st_mode) and info.st_uid==owner
+         and not info.st_mode&0o077,"WWW3_TRANSACTIONS_NOT_PRIVATE")
+    folder=transactions/"www3-source-rule-connection-v1"
+    need(folder.is_dir() and not folder.is_symlink(),
+         "WWW3_CONNECTION_JOURNAL_NOT_FOUND")
+    info=folder.lstat()
+    need(stat.S_ISDIR(info.st_mode) and info.st_uid==owner
+         and not info.st_mode&0o077,"WWW3_JOURNAL_FOLDER_UNSAFE")
+    journal=private_json(folder/"journal.json",owner)
+    need(journal.get("schema")=="p07.www3.config-connection.v1"
+         and journal.get("target_identity")==identity
+         and journal.get("config_path")==str(site_config)
+         and journal.get("status") in {
+            "CONNECTED_NOT_CUTOVER_READY","ROLLED_BACK","ROLLBACK_REQUIRED",
+            "INTENT_RESERVED"}
+         and journal.get("cutover_allowed") is False
+         and journal.get("database_writes") is False
+         and journal.get("migration_state_promoted") is False,
+         "WWW3_CONNECTION_JOURNAL_IDENTITY_OR_GUARD")
+    original=private_bytes(folder/"original.php",owner)
+    candidate=private_bytes(folder/"candidate.php",owner)
+    need(hashlib.sha256(original).hexdigest()==journal.get("original_sha256")
+         and hashlib.sha256(candidate).hexdigest()==journal.get("candidate_sha256"),
+         "WWW3_CONNECTION_BACKUP_HASH_CHANGED")
+    try:
+        local=site_config.lstat()
+        need(stat.S_ISREG(local.st_mode) and not site_config.is_symlink()
+             and local.st_size<=2*1024*1024 and not local.st_mode&0o002,
+             "WWW3_CURRENT_CONFIG_UNSAFE")
+        present=site_config.read_bytes()
+    except OSError:
+        raise Block("WWW3_CURRENT_CONFIG_UNAVAILABLE") from None
+    if present==candidate:cfg="CANDIDATE_MATCH"
+    elif present==original:cfg="ORIGINAL_MATCH"
+    else:cfg="DIFFERENT_REVIEW_REQUIRED"
+    need(cfg!="DIFFERENT_REVIEW_REQUIRED",
+         "WWW3_CONFIG_BYTES_OUTSIDE_RECOVERY_JOURNAL")
+    receipts=sorted(transactions.glob("www3-hex-scratch-*.json"))
+    need(len(receipts)<=32,"WWW3_RECEIPT_SCOPE_UNSAFE")
+    candidate_rows=[]
+    quarantine_rows=[]
+    for path in receipts:
+        row=private_json(path,owner)
+        if (row.get("migration_id")!=source["migration_id"]
+            or row.get("domain")!="www3.m3u8.one"
+            or row.get("source_database")!=name
+            or row.get("target_server_identity")!=identity):
+            continue
+        if row.get("schema")=="p07.www3.source-rule-candidate.v1":
+            need(row.get("status")=="VERIFIED_STATIC_COPY_NOT_ACTIVATED"
+                 and row.get("cutover_allowed") is False
+                 and row.get("website_activated") is False
+                 and row.get("original_database_modified") is False,
+                 "WWW3_CANDIDATE_RECEIPT_GUARD_CHANGED")
+            candidate_rows.append(row)
+        elif row.get("schema")=="p07.www3.quarantined-static-copy.v1":
+            quarantine_rows.append(row)
+    need(len(candidate_rows)==1,"WWW3_UNIQUE_CANDIDATE_RECEIPT_UNPROVEN")
+    fresh=candidate_rows[0].get("scratch_database")
+    need(type(fresh) is str and bool(fresh) and fresh!=name,
+         "WWW3_CANDIDATE_DATABASE_IDENTITY_INVALID")
+    old_scratch={
+        x.get("scratch_database") for x in quarantine_rows
+        if type(x.get("scratch_database")) is str
+    }
+    covered={name,fresh}|old_scratch
+    return {
+       "SOURCE_DB_IN_CP2_PANEL":"YES" if name in registered else "NO",
+       "CP2_SITE_DB_REGISTERED_COUNT":len(registered),
+       "SOURCE_DECLARED_DB_COUNT":len(dbs),
+       "VERIFIED_CANDIDATE_RECEIPTS":len(candidate_rows),
+       "CANDIDATE_DB_IN_CP2_SITE_PANEL":"YES" if fresh in registered else "NO",
+       "OLD_SCRATCH_IN_CP2_SITE_PANEL":(
+           "YES" if old_scratch & set(registered) else
+           "NO" if old_scratch else "NO_RECEIPT"),
+       "UNCLASSIFIED_CP2_SITE_DB_COUNT":len(set(registered)-covered),
+       "JOURNAL_STATUS":journal["status"],
+       "ORIGINAL_CANDIDATE_BACKUP_HASH":"PASS",
+       "CURRENT_CONFIG_READBACK":cfg,
+       "APPLICATION_DB_LIVE_CONNECTION":"NOT_TESTED",
+       "SOURCE_TARGET_DB_PARITY":"NOT_VERIFIED",
+       "CUTOVER_ALLOWED":"NO",
+    }
+
+def classify_www3():
+    need(os.geteuid()==0,"CP2_ROOT_REQUIRED")
+    base=pinned(BASE,BASE_BLOB,"BASE")
+    sites=status_scope(base)
+    label,site=sites["www3.m3u8.one"]
+    need(label=="LAST2" and site.get("stage_status")=="PENDING",
+         "WWW3_SITE_OWNER_CHANGED")
+    sys.path.insert(0,"/opt/vf-server-ops/lib")
+    import inventory
+    matches=[x for x in inventory.build_manifest(Path("/")).get("sites",[])
+             if type(x) is dict and x.get("domain")=="www3.m3u8.one"]
+    need(len(matches)==1 and site.get("site_user")==matches[0].get("site_user"),
+         "WWW3_CP2_SITE_INVENTORY_UNVERIFIED")
+    user=site.get("site_user")
+    need(type(user) is str and re.fullmatch(r"[a-z_][a-z0-9_-]{0,64}",user),
+         "WWW3_SITE_USER_UNSAFE")
+    root=Path("/home")/user/"htdocs"/"www3.m3u8.one"
+    need(site.get("site_root")==str(root)
+         and matches[0].get("site_root")==str(root),
+         "WWW3_SITE_ROOT_CHANGED")
+    tail=ROOT/base.JOBS[2][1]
+    state=base.secure_state(tail/"state.json")
+    identity=state.get("target_server_identity")
+    choices=[p for p in (root/"wp-config.php",root/"public/wp-config.php")
+             if os.path.lexists(p)]
+    need(len(choices)==1,"WWW3_CONFIG_LOCATION_UNVERIFIED")
+    row=dict(site,migration_id=base.JOBS[2][1])
+    result=candidate_relation(row,matches[0],tail/"target-transactions",
+                              choices[0],identity,0)
+    print("PROBE=P07_WWW3_SITE_DB_AND_RECOVERY_RELATION_READ_ONLY",flush=True)
+    print("SITE=www3.m3u8.one",flush=True)
+    for key,value in result.items():
+        print(key+"="+str(value),flush=True)
+    print("SITE_FILES_DB_CRON_DNS_WRITES=NONE",flush=True)
+    print("SOURCE_SERVER_CONTACTED=NO",flush=True)
+    print("DB_SQL_REQUESTS=NONE",flush=True)
+    print("CUTOVER_ALLOWED=NO",flush=True)
+    return 0
+
 def main():
+    if sys.argv[1:]==["--classify-www3-site-db-and-recovery-read-only"]:
+        return classify_www3()
     need(os.geteuid()==0 and sys.argv[1:]==["--check-pending-three-runtime-bindings-read-only"],
          "EXPLICIT_PENDING_THREE_READONLY_ARG_REQUIRED")
     base=pinned(BASE,BASE_BLOB,"BASE")
