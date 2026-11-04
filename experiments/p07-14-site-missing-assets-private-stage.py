@@ -26,7 +26,7 @@ import uuid
 sys.dont_write_bytecode=True
 HERE=Path(__file__).resolve().parent
 BASE=HERE/"p07-17-site-staged-local-evidence.py"
-BASE_SHA="7296ea88fe0d096bc622671bf20f1b2b7aa18f5c"
+BASE_SHA="01b02934109458942e575d4e5a45d2d7f7ea37cf"
 
 class Block(Exception):pass
 def need(ok,why):
