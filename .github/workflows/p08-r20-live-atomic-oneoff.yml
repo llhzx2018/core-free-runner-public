@@ -1,0 +1,118 @@
+name: P08 R20 Atomic Live Runtime and MariaDB Recovery (one-off)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p08-r20-live-atomic-oneoff.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  r20-live-atomic:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci_only_password
+          MARIADB_DATABASE: vf_lander_ci
+          MARIADB_USER: vf_lander_ci
+          MARIADB_PASSWORD: ci_only_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    env:
+      APP_ENV: testing
+      APP_DEBUG: 'false'
+      APP_KEY: 'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+      P08_SOURCE_SHA: 2f11508eded7dc39ec5d960cdb8bda1e5c635bb5
+      P08_MARIADB_CI_ONLY: '1'
+      P08_R20_ATOMIC_RUNTIME: '1'
+    steps:
+      - name: Confirm private source capability without printing credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$READ_TOKEN" || { echo P08_R20_PRIVATE_READ_CAPABILITY_BLOCKED; exit 78; }
+          echo P08_R20_PRIVATE_READ_CAPABILITY_PASS
+
+      - name: Fetch exact private P08 PR 17 source into transient workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-lander
+          ref: 2f11508eded7dc39ec5d960cdb8bda1e5c635bb5
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify exact source identity and syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P08_SOURCE_SHA"
+          test "$(cat VERSION)" = '0.1.0-dev'
+          bash -n backend/tests/ops/r20-atomic-runtime-proof.sh
+          bash -n backend/tests/ops/full-runtime-install.sh
+          python3 -m py_compile backend/bin/isolated-code-upgrade.py backend/bin/build-atomic-candidate.py
+          echo P08_R20_EXACT_SOURCE_AND_SCRIPT_SYNTAX_PASS
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          extensions: mbstring, dom, xml, curl, pdo_mysql, pdo_sqlite, sqlite3, fileinfo
+          tools: composer:v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install MariaDB client when not already present
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! command -v mariadb >/dev/null || ! command -v mariadb-dump >/dev/null; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mariadb-client
+          fi
+          echo P08_R20_MARIADB_CLIENT_READY
+
+      - name: Build exact-source verified FULL candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! bash backend/tests/ops/build-full-candidate.sh >"$RUNNER_TEMP/p08-r20-build.log" 2>&1; then
+            echo P08_R20_FULL_BUILD_FAILED
+            grep -E '^FULL_CANDIDATE_.*PASS$' "$RUNNER_TEMP/p08-r20-build.log" || true
+            exit 1
+          fi
+          grep -E '^FULL_CANDIDATE_.*PASS$' "$RUNNER_TEMP/p08-r20-build.log"
+          echo P08_R20_FULL_BUILD_PASS
+
+      - name: Real Nginx PHP-FPM MariaDB Owner publish live Atomic and scratch restore
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! bash backend/tests/ops/full-runtime-install.sh >"$RUNNER_TEMP/p08-r20-live.log" 2>&1; then
+            echo P08_R20_LIVE_MACHINE_PROOF_FAILED
+            grep -E '^(FULL_|CLEAN_|R11_|R12_|R13_|P08_R20_|R20_|PHP_FPM_|P08_CODE_UPGRADE_BLOCKED)' "$RUNNER_TEMP/p08-r20-live.log" || true
+            exit 1
+          fi
+          grep -E '^(P08_R20_.*PASS|P08_R20_.*NOT_TESTED|FULL_CANDIDATE_.*PASS|R13_.*PASS)' "$RUNNER_TEMP/p08-r20-live.log"
+          echo P08_R20_EXACT_SOURCE_REAL_RUNTIME_MACHINE_PASS
+
+      - name: Remove ephemeral private source and SQL backups
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- "$RUNNER_TEMP/p08-artifacts" "$RUNNER_TEMP/p08-r20-build.log" "$RUNNER_TEMP/p08-r20-live.log"
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          echo P08_R20_PRIVATE_SOURCE_AND_SQL_CLEANUP_ATTEMPTED
+          echo P08_R20_NO_PUBLIC_ARTIFACT_UPLOAD
