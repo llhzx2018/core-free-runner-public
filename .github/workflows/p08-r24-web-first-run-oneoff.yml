@@ -1,0 +1,161 @@
+name: P08 R24 Authenticated One-Time Browser First-Run and CLI Regression (one-off)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p08-r24-web-first-run-oneoff.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  r24-web-first-run:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci_only_password
+          MARIADB_DATABASE: vf_lander_ci
+          MARIADB_USER: vf_lander_ci
+          MARIADB_PASSWORD: ci_only_password
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    env:
+      APP_ENV: testing
+      APP_DEBUG: 'false'
+      APP_KEY: 'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+      P08_SOURCE_SHA: 330b9904c48e37c1e49cade2df5bfc9b5a4aaec3
+      P08_MARIADB_CI_ONLY: '1'
+    steps:
+      - name: Confirm private source capability without printing credential
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$READ_TOKEN" || { echo P08_R24_PRIVATE_READ_CAPABILITY_BLOCKED; exit 78; }
+          echo P08_R24_PRIVATE_READ_CAPABILITY_PASS
+
+      - name: Checkout exact private P08 R24 source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-lander
+          ref: 330b9904c48e37c1e49cade2df5bfc9b5a4aaec3
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify exact source identity and syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P08_SOURCE_SHA"
+          test "$(cat VERSION)" = '0.1.0-dev'
+          bash -n backend/tests/ops/cloudpanel-full-layout-proof.sh
+          bash -n backend/tests/ops/full-runtime-install.sh
+          python3 -m py_compile backend/bin/build-cloudpanel-full.py backend/bin/cloudpanel-vhost-candidate.py backend/bin/cloudpanel-readonly-preflight.py backend/tests/ops/cloudpanel-atomic-vhost-proof.py
+          php -l backend/app/Console/Commands/FirstInstall.php
+          php -l backend/app/Support/Installation/InstallEnvironmentPolicy.php
+          php -l backend/tests/Unit/InstallEnvironmentPolicyTest.php
+          php -l backend/app/Support/Installation/FirstInstallService.php
+          php -l backend/app/Support/Installation/SetupTicket.php
+          php -l backend/app/Console/Commands/PrepareWebInstall.php
+          php -l backend/app/Http/Controllers/FirstRunController.php
+          bash -n backend/tests/ops/r24-web-first-run-proof.sh
+          echo P08_R24_EXACT_SOURCE_AND_SCRIPT_SYNTAX_PASS
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          extensions: mbstring, dom, xml, curl, pdo_mysql, pdo_sqlite, sqlite3, fileinfo
+          tools: composer:v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install MariaDB client when not already present
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! command -v mariadb >/dev/null || ! command -v mariadb-dump >/dev/null; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mariadb-client
+          fi
+          echo P08_R24_MARIADB_CLIENT_READY
+
+      - name: Build exact-source verified FULL candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! bash backend/tests/ops/build-full-candidate.sh >"$RUNNER_TEMP/p08-r24-build.log" 2>&1; then
+            echo P08_R24_FULL_BUILD_FAILED
+            grep -E '^FULL_CANDIDATE_.*PASS$' "$RUNNER_TEMP/p08-r24-build.log" || true
+            exit 1
+          fi
+          grep -E '^FULL_CANDIDATE_.*PASS$' "$RUNNER_TEMP/p08-r24-build.log"
+          echo P08_R24_FULL_BUILD_PASS
+
+      - name: Unit and existing feature security regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          (cd backend && composer install --no-interaction --prefer-dist --no-progress >"$RUNNER_TEMP/p08-r24-composer.log" 2>&1)
+          (cd backend && vendor/bin/phpunit --testsuite=Foundation --stop-on-failure >"$RUNNER_TEMP/p08-r24-phpunit.log" 2>&1) || {
+            echo P08_R24_PHPUNIT_FAILURE
+            grep -A 14 -B 4 -E 'Failed asserting|There was [[:digit:]]+ failure|There were [[:digit:]]+ failures|Error' "$RUNNER_TEMP/p08-r24-phpunit.log" | tail -60 || true
+            exit 1
+          }
+          echo P08_R24_ENV_LAYOUT_UNIT_AND_FEATURE_SECURITY_PASS
+
+      - name: Regress changed FirstInstall against existing direct FULL machine
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! bash backend/tests/ops/full-runtime-install.sh >"$RUNNER_TEMP/p08-r24-live.log" 2>&1; then
+            echo P08_R24_LEGACY_DIRECT_FULL_REGRESSION_FAILURE
+            grep -E '^(FULL_|CLEAN_|R11_|R12_|R13_|R24_|P08_|INSTALL_|OWNER_)' "$RUNNER_TEMP/p08-r24-live.log" | tail -50 || true
+            exit 1
+          fi
+          grep -E '^(R11_|R12_|R13_|FULL_CANDIDATE_).*PASS' "$RUNNER_TEMP/p08-r24-live.log" | tail -30
+          echo P08_R24_EXISTING_FULL_INSTALL_REGRESSION_PASS
+
+      - name: Actual Atomic-ready FULL upload layout MariaDB Owner HTTP and official vhost
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! bash backend/tests/ops/cloudpanel-full-layout-proof.sh >"$RUNNER_TEMP/p08-r24-proof.log" 2>&1; then
+            echo P08_R24_ATOMIC_READY_FULL_MACHINE_FAILURE
+            grep -E '^(P08_R24_|R24_|FULL_|P08_CLOUDPANEL_).*' "$RUNNER_TEMP/p08-r24-proof.log" | tail -80 || true
+            exit 1
+          fi
+          grep -E '^P08_R24_' "$RUNNER_TEMP/p08-r24-proof.log"
+          echo P08_R24_EXACT_SOURCE_ATOMIC_READY_FULL_MACHINE_PASS
+
+      - name: Real one-time site-local browser Owner setup MariaDB installation and replay proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! bash backend/tests/ops/r24-web-first-run-proof.sh >"$RUNNER_TEMP/p08-r24-browser-setup.log" 2>&1; then
+            echo P08_R24_BROWSER_SETUP_PROOF_FAILED
+            grep -E '^(P08_R24_|R24_|P08_CLOUDPANEL_|PHP Fatal|PHP Warning|Error|failed)' "$RUNNER_TEMP/p08-r24-browser-setup.log" | tail -50 || true
+            exit 1
+          fi
+          grep -E '^P08_R24_' "$RUNNER_TEMP/p08-r24-browser-setup.log"
+          echo P08_R24_EXACT_SOURCE_BROWSER_SETUP_MARIADB_MACHINE_PASS
+
+      - name: Remove ephemeral private source and SQL backups
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- "$RUNNER_TEMP/p08-artifacts" "$RUNNER_TEMP"/p08-r24-*
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          echo P08_R24_PRIVATE_SOURCE_AND_SQL_CLEANUP_ATTEMPTED
+          echo P08_R24_NO_PUBLIC_ARTIFACT_UPLOAD
