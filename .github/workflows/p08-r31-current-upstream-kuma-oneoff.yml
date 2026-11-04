@@ -1,0 +1,295 @@
+name: P08 R31 Latest Actual Upstream Kuma and VF Lander Chromium (one-off)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p08-r31-current-upstream-kuma-oneoff.yml'
+      - 'tests/p08-oneoff-kuma-sandbox.py'
+      - 'tests/p08-r16-publish-real-lp.php'
+      - 'tests/p08-r16-real-chromium.cjs'
+
+permissions:
+  contents: read
+
+jobs:
+  kuma-local-real:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      MYSQL_PASSWORD: kuma
+      MYSQL_ROOT_PASSWORD: rootsecret
+    steps:
+      - name: Checkout temporary synthetic-only public harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: runner
+          persist-credentials: false
+
+      - name: Checkout real upstream Simple Kuma at pinned public source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: joe-mulcahy/kuma
+          ref: 80500ea8f47494e94dc5269694de1a122ea1729b
+          path: kuma
+          persist-credentials: false
+
+      - name: Verify official upstream source identity and isolated Docker Compose
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C kuma rev-parse HEAD)" = 80500ea8f47494e94dc5269694de1a122ea1729b
+          test -f kuma/docker-compose.yml && test -f kuma/public/install.php
+          python3 -m py_compile runner/tests/p08-oneoff-kuma-sandbox.py
+          # Official current upstream intentionally uses "expose" only. Bind
+          # Apache to loopback through disposable Compose override, never
+          # publish a remote tracker port.
+          mkdir -p "$RUNNER_TEMP/p08-kuma-compose"
+          cat > "$RUNNER_TEMP/p08-kuma-compose/local-ports.yml" <<'COMPOSE'
+          services:
+            app:
+              ports:
+                - "127.0.0.1:8080:80"
+          COMPOSE
+          docker compose -f kuma/docker-compose.yml -f "$RUNNER_TEMP/p08-kuma-compose/local-ports.yml" config -q
+          echo KUMA_UPSTREAM_EXACT_SOURCE_AND_SANDBOX_COMPOSE_PASS
+
+      - name: Start real upstream Simple Kuma PHP web server and disposable MySQL 8.0
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker compose -f kuma/docker-compose.yml -f "$RUNNER_TEMP/p08-kuma-compose/local-ports.yml" up -d --build
+          for i in $(seq 1 45); do
+            if curl --silent --fail --max-time 3 http://127.0.0.1:8080/install.php >/dev/null; then
+              break
+            fi
+            sleep 2
+          done
+          curl --silent --fail --max-time 5 http://127.0.0.1:8080/install.php >/dev/null
+          echo KUMA_UPSTREAM_REAL_APACHE_AND_MYSQL_READY
+
+      - name: Configure trusted local-only HTTPS reverse proxy, without public DNS
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx
+          mkdir -p "$RUNNER_TEMP/p08-kuma/p08-public"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout "$RUNNER_TEMP/p08-kuma/server.key" -out "$RUNNER_TEMP/p08-kuma/server.crt" \
+            -subj '/CN=kuma.example.test' \
+            -addext 'subjectAltName=DNS:kuma.example.test,DNS:lander.example.test,DNS:offers.example.test' \
+            >/dev/null 2>&1
+          chmod 600 "$RUNNER_TEMP/p08-kuma/server.key"
+          sudo cp "$RUNNER_TEMP/p08-kuma/server.crt" /usr/local/share/ca-certificates/p08-kuma-synthetic-only.crt
+          sudo update-ca-certificates >/dev/null 2>&1
+          printf '%s\n' '127.0.0.1 kuma.example.test lander.example.test offers.example.test' | sudo tee -a /etc/hosts >/dev/null
+          cat > "$RUNNER_TEMP/p08-kuma/nginx.conf" <<EOF
+          user $(id -un);
+          worker_processes 1;
+          pid $RUNNER_TEMP/p08-kuma/nginx.pid;
+          error_log $RUNNER_TEMP/p08-kuma/nginx-error.log warn;
+          events { worker_connections 256; }
+          http {
+            server {
+              listen 127.0.0.1:443 ssl;
+              server_name kuma.example.test;
+              ssl_certificate $RUNNER_TEMP/p08-kuma/server.crt;
+              ssl_certificate_key $RUNNER_TEMP/p08-kuma/server.key;
+              location / {
+                proxy_set_header Host \$host;
+                proxy_set_header X-Forwarded-Proto https;
+                proxy_set_header X-Real-IP 127.0.0.1;
+                proxy_pass http://127.0.0.1:8080;
+              }
+            }
+            server {
+              listen 127.0.0.1:443 ssl;
+              server_name lander.example.test;
+              ssl_certificate $RUNNER_TEMP/p08-kuma/server.crt;
+              ssl_certificate_key $RUNNER_TEMP/p08-kuma/server.key;
+              root $RUNNER_TEMP/p08-kuma/p08-public;
+              location = /landing/r15 {
+                try_files /landing/synthetic-lander/current/index.html =404;
+              }
+              location /landing/ { return 404; }
+            }
+            # Only a synthetic offer, bound to loopback; never a real network.
+            server {
+              listen 127.0.0.1:443 ssl;
+              server_name offers.example.test;
+              ssl_certificate $RUNNER_TEMP/p08-kuma/server.crt;
+              ssl_certificate_key $RUNNER_TEMP/p08-kuma/server.key;
+              location = /out {
+                default_type text/html;
+                return 200 '<!doctype html><title>R16 synthetic offer</title><p>Only a browser fixture.</p>';
+              }
+              location / { return 404; }
+            }
+          }
+          EOF
+          sudo nginx -t -c "$RUNNER_TEMP/p08-kuma/nginx.conf" -p "$RUNNER_TEMP/p08-kuma/"
+          sudo nginx -c "$RUNNER_TEMP/p08-kuma/nginx.conf" -p "$RUNNER_TEMP/p08-kuma/"
+          curl --noproxy '*' --silent --fail --cacert "$RUNNER_TEMP/p08-kuma/server.crt" \
+            https://kuma.example.test/install.php >/dev/null
+          echo KUMA_LOCAL_TLS_HOST_VERIFIED_PASS
+
+      - name: Complete actual upstream installer and verify REST health
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 runner/tests/p08-oneoff-kuma-sandbox.py install \
+            --cert "$RUNNER_TEMP/p08-kuma/server.crt"
+
+      - name: Generate one-use synthetic API token inside isolated container
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          docker compose -f kuma/docker-compose.yml exec -T app php -r '
+            require "vendor/autoload.php";
+            require "config/config.php";
+            $db = new mysqli(DB_HOST, DB_USER, DB_PASSWORD, DB_NAME);
+            $row = $db->query("SELECT id FROM users ORDER BY id LIMIT 1")->fetch_assoc();
+            if (!$row) exit(25);
+            $result = (new \SimpleKuma\Entity\ApiKey($db))->create((int)$row["id"], "P08 Synthetic Disposable Key");
+            if (!$result["success"]) exit(26);
+            echo $result["plain_key"];
+          ' > "$RUNNER_TEMP/p08-kuma/key"
+          test -s "$RUNNER_TEMP/p08-kuma/key"
+          echo "::add-mask::$(cat "$RUNNER_TEMP/p08-kuma/key")"
+          echo KUMA_TEST_API_KEY_RUNTIME_ONLY_PASS
+
+      - name: Test real Kuma resource APIs, tracking click ID, LP exit and test Postback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 runner/tests/p08-oneoff-kuma-sandbox.py api \
+            --cert "$RUNNER_TEMP/p08-kuma/server.crt" \
+            --key-file "$RUNNER_TEMP/p08-kuma/key"
+          echo KUMA_R15_REAL_UPSTREAM_SANDBOX_INTEGRATION_PASS
+
+      - name: Checkout exact private VF Lander main into isolated workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-lander
+          ref: 318085cbd52105a9d9fd9af03e5392c3c4c03d83
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: lander
+          persist-credentials: false
+          fetch-depth: 1
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          coverage: none
+          extensions: mbstring, curl, xml, dom, pdo_sqlite, sqlite3, fileinfo
+          tools: composer:v2
+
+      - name: Run exact VF Lander read-only adapter against real local Kuma API
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C lander rev-parse HEAD)" = 318085cbd52105a9d9fd9af03e5392c3c4c03d83
+          cd lander/backend
+          composer install --no-interaction --prefer-dist --no-progress --no-dev --optimize-autoloader >/dev/null
+          export KUMA_SANDBOX_TEST_TOKEN="$(cat "$RUNNER_TEMP/p08-kuma/key")"
+          php <<'PHP'
+          <?php
+          require 'vendor/autoload.php';
+          $app = require 'bootstrap/app.php';
+          $app->make(\Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+          config()->set('tracker.simple_kuma.api_base', 'https://kuma.example.test');
+          config()->set('tracker.simple_kuma.public_base', 'https://kuma.example.test');
+          config()->set('tracker.simple_kuma.api_token', getenv('KUMA_SANDBOX_TEST_TOKEN'));
+          try {
+              $adapter = new \App\Support\Tracker\SimpleKumaAdapter();
+              if (!$adapter->configured() || ($adapter->health()['status'] ?? null) !== 'OK') {
+                  throw new RuntimeException('REAL_KUMA_HEALTH_REJECTED');
+              }
+              $verified = $adapter->verify(1, 1, 1);
+              if (($verified['verification_scope'] ?? null) !== 'RESOURCE_ONLY'
+                  || ($verified['campaign_id'] ?? null) !== 1
+                  || !str_starts_with((string)($verified['tracking_url'] ?? ''), 'https://kuma.example.test/')) {
+                  throw new RuntimeException('REAL_KUMA_RESOURCE_VERIFICATION_REJECTED');
+              }
+              $stats = $adapter->stats(1);
+              if (!is_array($stats)) throw new RuntimeException('REAL_KUMA_STATS_REJECTED');
+              echo "P08_EXACT_SOURCE_REAL_KUMA_HEALTH_RESOURCE_AND_STATS_PASS\n";
+              echo "P08_REAL_KUMA_VALIDATION_SCOPE_RESOURCE_ONLY_NOT_FUNNEL_ATTESTED\n";
+          } catch (Throwable $e) {
+              // Never print remote payload, request headers, or temporary token.
+              echo "P08_REAL_KUMA_ADAPTER_BLOCKED=" . (
+                  $e instanceof \App\Support\Tracker\TrackerConnectionException
+                      ? $e->reason : 'UNEXPECTED_RUNTIME'
+              ) . "\n";
+              exit(92);
+          }
+          PHP
+
+      - name: Publish a real immutable P08 page bound to the verified live Kuma campaign
+        shell: bash
+        env:
+          APP_ENV: testing
+          APP_DEBUG: 'false'
+          DB_CONNECTION: sqlite
+          SESSION_DRIVER: array
+          CACHE_STORE: array
+        run: |
+          set -Eeuo pipefail
+          php -l runner/tests/p08-r16-publish-real-lp.php >/dev/null
+          test "$(git -C lander rev-parse HEAD)" = 318085cbd52105a9d9fd9af03e5392c3c4c03d83
+          export P08_R16_PUBLIC_ROOT="$RUNNER_TEMP/p08-kuma/p08-public"
+          export P08_R16_SQLITE="$RUNNER_TEMP/p08-kuma/p08-lander.sqlite"
+          export P08_R16_KUMA_TOKEN="$(cat "$RUNNER_TEMP/p08-kuma/key")"
+          (cd lander/backend && php "$GITHUB_WORKSPACE/runner/tests/p08-r16-publish-real-lp.php")
+          test -f "$RUNNER_TEMP/p08-kuma/p08-public/landing/synthetic-lander/current/index.html"
+          test -s "$RUNNER_TEMP/p08-kuma/tracking-url"
+          curl --noproxy '*' --silent --show-error --fail \
+            --cacert "$RUNNER_TEMP/p08-kuma/server.crt" \
+            https://lander.example.test/landing/r15 \
+            | grep -q 'Verified synthetic landing page'
+          echo P08_R16_ACTUAL_STATIC_HTML_OVER_NGINX_TLS_PASS
+
+      - name: Install disposable Chromium browser in the registered runner
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install isolated Playwright Chromium without publishing assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          node --check runner/tests/p08-r16-real-chromium.cjs
+          npm --prefix "$RUNNER_TEMP/p08-playwright" install --no-fund --no-audit \
+            --no-package-lock --no-save playwright@1.58.2 >/dev/null
+          "$RUNNER_TEMP/p08-playwright/node_modules/.bin/playwright" install --with-deps chromium >/dev/null
+          echo P08_R16_CHROMIUM_RUNTIME_READY
+
+      - name: Browser actual P08 generated LP via real Kuma click and synthetic Postback
+        shell: bash
+        env:
+          NO_PROXY: kuma.example.test,lander.example.test,offers.example.test,localhost,127.0.0.1
+        run: |
+          set -Eeuo pipefail
+          export P08_PLAYWRIGHT_ROOT="$RUNNER_TEMP/p08-playwright"
+          export P08_R16_TMP="$RUNNER_TEMP/p08-kuma"
+          node runner/tests/p08-r16-real-chromium.cjs
+          echo P08_R16_EXACT_P08_PUBLISHED_LP_TO_REAL_KUMA_CHROMIUM_PASS
+          echo P08_R31_REAL_CURRENT_UPSTREAM_AND_P08_LP_CHROMIUM_PASS
+
+      - name: Remove temporary containers, credentials, TLS and workspace
+        shell: bash
+        if: always()
+        run: |
+          set +e
+          if test -f "$RUNNER_TEMP/p08-kuma/nginx.conf"; then
+            sudo nginx -s quit -c "$RUNNER_TEMP/p08-kuma/nginx.conf" -p "$RUNNER_TEMP/p08-kuma/" >/dev/null 2>&1
+          fi
+          if test -f kuma/docker-compose.yml; then
+            docker compose -f kuma/docker-compose.yml -f "$RUNNER_TEMP/p08-kuma-compose/local-ports.yml" down -v --remove-orphans --rmi local >/dev/null 2>&1
+          fi
+          rm -rf -- "$RUNNER_TEMP/p08-kuma" "$RUNNER_TEMP/p08-playwright" "$RUNNER_TEMP/p08-kuma-compose"
+          find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+          echo KUMA_ONEOFF_SANDBOX_CLEANUP_ATTEMPTED
+          echo KUMA_NO_REAL_PROVIDER_OR_PUBLIC_ARTIFACT_USED
