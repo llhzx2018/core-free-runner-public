@@ -3,6 +3,7 @@ import contextlib
 import hashlib
 import json
 import os
+import subprocess
 import tempfile
 import importlib.util
 import io
@@ -288,6 +289,76 @@ class Tests(unittest.TestCase):
         with self.assertRaisesRegex(m.Block,"WWW3_PRIVATE_FILE_UNSAFE"):
             m.candidate_relation(source,panel,transactions,wp,
                                  "target-identity",os.getuid())
+
+
+    def test_current_candidate_fixed_select_and_no_secret_argv(self):
+        calls=[]
+        def run(argv,**kwargs):
+            calls.append((argv,kwargs))
+            self.assertEqual(argv[1],"--no-defaults")
+            self.assertIn("--protocol=TCP",argv)
+            self.assertIn("--host=127.0.0.1",argv)
+            self.assertIn("--database=candidate",argv)
+            self.assertEqual(len([a for a in argv if a.startswith("--execute=")]),1)
+            self.assertIn("information_schema.TABLES",argv[-1])
+            self.assertIn("SELECT DATABASE()",argv[-1])
+            self.assertEqual(kwargs["env"]["MYSQL_PWD"],"synthetic-password-123")
+            self.assertNotIn("synthetic-password-123"," ".join(argv))
+            self.assertEqual(kwargs["stderr"],subprocess.DEVNULL)
+            return subprocess.CompletedProcess(argv,0,b"candidate\t157\n",b"")
+        with mock.patch.object(m.subprocess,"run",side_effect=run):
+            self.assertEqual(m.readonly_candidate_probe("/usr/bin/mariadb",
+                "candidate","p07_user","synthetic-password-123"),"PASS")
+        self.assertEqual(len(calls),1)
+        self.assertEqual(set(calls[0][1]["env"]),
+                         {"PATH","HOME","LC_ALL","MYSQL_PWD"})
+
+    def test_candidate_sql_fail_closed_on_wrong_db_and_table_count(self):
+        for stdout,code in ((b"candidate\t156\n",0),
+                            (b"wrong\t157\n",0),
+                            (b"",1)):
+            with mock.patch.object(m.subprocess,"run",return_value=
+                 subprocess.CompletedProcess([],code,stdout,b"secret")), \
+                 self.assertRaises(m.Block):
+                m.readonly_candidate_probe("/usr/bin/mariadb",
+                    "candidate","p07_user","synthetic-password-123")
+        with mock.patch.object(m.subprocess,"run") as call, \
+             self.assertRaises(m.Block):
+            m.readonly_candidate_probe("mariadb","candidate",
+                "p07_user","synthetic-password-123")
+        call.assert_not_called()
+
+    def test_candidate_credential_receipt_fail_closed(self):
+        source,panel,transactions,wp,_=self.www3_recovery_fixture()
+        path=transactions/"www3-hex-scratch-candidate.json"
+        r=json.loads(path.read_text())
+        r.update(username="p07_user",password="synthetic-password-123",
+                 source_runtime_frozen=False,verified_rows=198750,
+                 dynamic_groups_omitted=3,table_collations_explicit=25,
+                 ascii_hex_defaults_equal=10,memory_table_count=1)
+        path.write_text(json.dumps(r))
+        self.assertEqual(m.www3_candidate_credentials(
+            source,transactions,"target-identity"),
+            ("candidate","p07_user","synthetic-password-123"))
+        r["website_activated"]=True
+        path.write_text(json.dumps(r))
+        with self.assertRaises(m.Block):
+            m.www3_candidate_credentials(source,transactions,"target-identity")
+
+    def test_live_gate_rejects_original_config_before_connection(self):
+        source,panel,transactions,wp,_=self.www3_recovery_fixture()
+        relation=dict(JOURNAL_STATUS="CONNECTED_NOT_CUTOVER_READY",
+                      CURRENT_CONFIG_READBACK="ORIGINAL_MATCH",
+                      CANDIDATE_DB_IN_CP2_SITE_PANEL="YES",
+                      SOURCE_DB_IN_CP2_PANEL="NO",
+                      UNCLASSIFIED_CP2_SITE_DB_COUNT=0)
+        with mock.patch.object(m,"www3_context",return_value=(
+                source,panel,transactions,wp,"target-identity")), \
+             mock.patch.object(m,"candidate_relation",return_value=relation), \
+             mock.patch.object(m,"readonly_candidate_probe") as sql, \
+             self.assertRaisesRegex(m.Block,"JOURNAL_AND_PANEL_NOT_READY"):
+            m.verify_www3_candidate_live_readonly()
+        sql.assert_not_called()
 
     def test_operator_never_opens_http_or_sql_or_copies_files(self):
         source=(HERE/"p07-pending-three-runtime-readonly.py").read_text()
