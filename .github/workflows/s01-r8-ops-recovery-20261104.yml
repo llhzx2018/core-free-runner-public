@@ -42,3 +42,174 @@ jobs:
         if: always()
         shell: bash
         run: rm -rf ops /tmp/s01-r8-ops-recovery-playwright
+  exact-wordpress-recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_DATABASE: s01_r8_recovery
+          MARIADB_USER: vf
+          MARIADB_PASSWORD: vf
+          MARIADB_ROOT_PASSWORD: synthetic-ci-only
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mariadb-admin ping -h 127.0.0.1 -uroot -psynthetic-ci-only"
+          --health-interval 10s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: control
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: 9fa16ad5d17f82fa9eecc97f427556f3428dc3dd
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: ops
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: edf6cb70d86af120ad99830c4c51584285b66f32
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: baseline
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: mysqli,mbstring,intl,zip
+          coverage: none
+      - name: Exact Ops runtime, actual WordPress MariaDB recovery guards and ZIP lifecycle
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-mysql php8.3-xml php8.3-mbstring php8.3-curl php8.3-zip unzip curl >/dev/null
+          curl -fsSLo /tmp/s01-r8-wp.phar https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar
+          sudo install -m 0755 /tmp/s01-r8-wp.phar /usr/local/bin/wp
+          python3 ops/.github/release/build-ops-package.py --source ops --output "$RUNNER_TEMP/candidate.zip" > "$RUNNER_TEMP/candidate.json"
+          python3 baseline/.github/release/build-ops-package.py --source baseline --output "$RUNNER_TEMP/baseline.zip" > "$RUNNER_TEMP/baseline.json"
+          python3 - <<'PY'
+          import pathlib,sys,json,hashlib
+          base=pathlib.Path('baseline');cand=pathlib.Path('ops')
+          def runtime_files(root):
+           d={}
+           for rel in ('vf-ops.php','uninstall.php'):
+            p=root/rel
+            if p.is_file(): d[rel]=hashlib.sha256(p.read_bytes()).hexdigest()
+           for top in ('includes','assets','languages','config'):
+            for p in (root/top).rglob('*'):
+             if p.is_file(): d[p.relative_to(root).as_posix()]=hashlib.sha256(p.read_bytes()).hexdigest()
+           return d
+          a,b=runtime_files(base),runtime_files(cand)
+          assert a.keys()==b.keys(),'runtime file inventory changed'
+          changed={n for n in a if a[n]!=b[n]}
+          assert changed=={'assets/js/v13/system/recovery.js'},changed
+          assert (cand/'VERSION').read_text().strip()=='1.21.1113'
+          for x in ('candidate','baseline'):
+           m=json.loads(pathlib.Path('/tmp/unused').read_text()) if False else None
+          print('S01_R8_OPS_EXACT_RUNTIME_JS_ONLY_DELTA=PASS')
+          PY
+          wpdir="$RUNNER_TEMP/s01-r8-ops-wp"
+          mkdir -p "$wpdir"
+          wp core download --path="$wpdir" --version=7.1.3 --allow-root --quiet
+          wp config create --path="$wpdir" --dbname=s01_r8_recovery --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --skip-check --allow-root >/dev/null
+          wp core install --path="$wpdir" --url=http://127.0.0.1:18858 --title='Synthetic S01 Recovery' --admin_user=admin --admin_password=synthetic-ci-only --admin_email=synthetic@example.invalid --skip-email --allow-root >/dev/null
+          wp plugin install "$RUNNER_TEMP/baseline.zip" --activate --path="$wpdir" --allow-root >/dev/null
+          cmp "$wpdir/wp-content/plugins/vf-ops/assets/js/v13/system/recovery.js" baseline/assets/js/v13/system/recovery.js
+          wp option add vf_ops_r8_owner_canary s01-owner-content-stable --path="$wpdir" --allow-root >/dev/null
+          post_id="$(wp post create --post_type=post --post_status=draft --post_title='S01 R8 canary' --porcelain --path="$wpdir" --allow-root)"
+          wp post meta add "$post_id" s01_r8_owner_meta owner-unchanged --path="$wpdir" --allow-root >/dev/null
+          wp plugin install "$RUNNER_TEMP/candidate.zip" --force --activate --path="$wpdir" --allow-root >/dev/null
+          cmp "$wpdir/wp-content/plugins/vf-ops/assets/js/v13/system/recovery.js" ops/assets/js/v13/system/recovery.js
+          wp plugin is-active vf-ops --path="$wpdir" --allow-root
+          test "$(wp option get vf_ops_r8_owner_canary --path="$wpdir" --allow-root)" = s01-owner-content-stable
+          test "$(wp post meta get "$post_id" s01_r8_owner_meta --path="$wpdir" --allow-root)" = owner-unchanged
+          cat > "$RUNNER_TEMP/s01-r8-ops-guard.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require_once WP_PLUGIN_DIR.'/vf-ops/includes/system-integration/fault-recovery-product.php';
+          function s01need($v,$why){if(!$v)throw new RuntimeException('S01_R8_FAIL '.$why);}
+          $contract=vf_ops_fault_contract_v121436();
+          $lockKey=$contract['lockOption'];
+          $snapshotKey=$contract['snapshotOption'];
+          $auditKey=$contract['auditOption'];
+          wp_set_current_user(1);
+          s01need(current_user_can('manage_options'),'admin permission');
+          $nonceAction='vf_ops_fault_seed_delete_v121436';
+          $_REQUEST['_wpnonce']=wp_create_nonce($nonceAction);
+          $_POST=['vf_fault_confirmation'=>'not-the-phrase'];
+          $before=get_option($lockKey,false);
+          $wrong=vf_ops_fault_guard_v121436($nonceAction,'确认将历史种子残留移入回收站','vf_fault_confirmation');
+          s01need(empty($wrong['ok'])&&($wrong['code']??'')==='CONFIRMATION_MISMATCH','wrong phrase rejects');
+          s01need(get_option($lockKey,false)===$before,'wrong phrase does not acquire lock');
+          $oldScan=vf_ops_fault_seed_delete_gate_v121754([]);
+          s01need(($oldScan['code']??'')==='FRESH_SEED_SCAN_REQUIRED','missing fresh scan blocks delete');
+          $_POST['vf_fault_confirmation']='确认将历史种子残留移入回收站';
+          $active=['token'=>'foreign','expiresAt'=>time()+120,'startedAt'=>time()];
+          update_option($lockKey,$active,false);
+          $collision=vf_ops_fault_guard_v121436($nonceAction,'确认将历史种子残留移入回收站','vf_fault_confirmation');
+          s01need(($collision['code']??'')==='ACTION_LOCK_ACTIVE','active lock blocks action');
+          s01need(get_option($lockKey)===$active,'foreign lock preserved');
+          delete_option($lockKey);
+          $valid=vf_ops_fault_guard_v121436($nonceAction,'确认将历史种子残留移入回收站','vf_fault_confirmation');
+          s01need(!empty($valid['ok'])&&!empty($valid['lockToken']),'proper phrase acquires scoped lock');
+          vf_ops_fault_action_unlock_v121436((string)$valid['lockToken']);
+          s01need(get_option($lockKey,false)===false,'own lock released');
+          add_filter('wp_die_handler',static fn()=>static function($message,$title='',$args=[]){throw new RuntimeException('INTERCEPTED_WP_DIE '.(is_array($args)?($args['response']??''):'').':'.(is_scalar($message)?$message:''));});
+          $_REQUEST['_wpnonce']=wp_create_nonce($nonceAction);
+          wp_set_current_user(0);
+          $permissionRejected=false;
+          try{vf_ops_fault_guard_v121436($nonceAction,'确认将历史种子残留移入回收站','vf_fault_confirmation');}catch(RuntimeException $e){$permissionRejected=str_contains($e->getMessage(),'INTERCEPTED_WP_DIE 403');}
+          s01need($permissionRejected,'non-admin capability 403');
+          wp_set_current_user(1);
+          $_REQUEST['_wpnonce']='invalid-nonce';
+          $nonceRejected=false;
+          try{vf_ops_fault_guard_v121436($nonceAction,'确认将历史种子残留移入回收站','vf_fault_confirmation');}catch(RuntimeException $e){$nonceRejected=str_contains($e->getMessage(),'INTERCEPTED_WP_DIE');}
+          s01need($nonceRejected,'invalid nonce rejected');
+          s01need(get_option($lockKey,false)===false,'rejected paths leave lock absent');
+          $_REQUEST['_wpnonce']=wp_create_nonce($nonceAction);
+          $payload=vf_ops_fault_capture_payload_v121436();
+          s01need(!empty($payload['snapshotSha256'])&&strlen($payload['snapshotSha256'])===64,'capture checksum');
+          update_option($snapshotKey,$payload,false);
+          $read=vf_ops_fault_incident_snapshot_v121436();
+          s01need(!empty($read['integrityValid'])&&!empty($read['fresh']),'snapshot persisted and verified');
+          $bad=$payload;$bad['alteredEvidence']='tamper';update_option($snapshotKey,$bad,false);
+          s01need(empty(vf_ops_fault_incident_snapshot_v121436()['integrityValid']),'tampered snapshot fails closed');
+          update_option($snapshotKey,$payload,false);
+          vf_ops_fault_audit_v121436('r8_synthetic_guard_verification','PASS',['scope'=>'isolated-wordpress']);
+          $audit=vf_ops_fault_audit_rows_v121436();
+          s01need(is_array($audit)&&count($audit)>0,'audit readback');
+          s01need(get_option('vf_ops_r8_owner_canary')==='s01-owner-content-stable','owner canary unchanged');
+          echo "S01_R8_REAL_WORDPRESS_RECOVERY_SECURITY=PASS capability nonce challenge lock snapshot integrity audit fail_closed\n";
+          PHP
+          wp eval-file "$RUNNER_TEMP/s01-r8-ops-guard.php" --path="$wpdir" --allow-root
+          printf 'not-a-zip' > "$RUNNER_TEMP/corrupt.zip"
+          if wp plugin install "$RUNNER_TEMP/corrupt.zip" --force --path="$wpdir" --allow-root >/dev/null 2>&1; then echo S01_R8_CORRUPT_ZIP_UNEXPECTED_SUCCESS; exit 1; fi
+          cmp "$wpdir/wp-content/plugins/vf-ops/assets/js/v13/system/recovery.js" ops/assets/js/v13/system/recovery.js
+          test "$(wp option get vf_ops_r8_owner_canary --path="$wpdir" --allow-root)" = s01-owner-content-stable
+          echo S01_R8_CORRUPT_ZIP_NO_WRITE=PASS
+          wp plugin install "$RUNNER_TEMP/baseline.zip" --force --activate --path="$wpdir" --allow-root >/dev/null
+          cmp "$wpdir/wp-content/plugins/vf-ops/assets/js/v13/system/recovery.js" baseline/assets/js/v13/system/recovery.js
+          test "$(wp option get vf_ops_r8_owner_canary --path="$wpdir" --allow-root)" = s01-owner-content-stable
+          test "$(wp post meta get "$post_id" s01_r8_owner_meta --path="$wpdir" --allow-root)" = owner-unchanged
+          wp plugin install "$RUNNER_TEMP/candidate.zip" --force --activate --path="$wpdir" --allow-root >/dev/null
+          cmp "$wpdir/wp-content/plugins/vf-ops/assets/js/v13/system/recovery.js" ops/assets/js/v13/system/recovery.js
+          test "$(wp option get vf_ops_r8_owner_canary --path="$wpdir" --allow-root)" = s01-owner-content-stable
+          test "$(wp post meta get "$post_id" s01_r8_owner_meta --path="$wpdir" --allow-root)" = owner-unchanged
+          echo S01_R8_OPS_REAL_ZIP_UPGRADE_ROLLBACK_REUPGRADE=PASS
+          clean="$RUNNER_TEMP/s01-r8-ops-clean"
+          mkdir -p "$clean"
+          wp core download --path="$clean" --version=7.1.3 --allow-root --quiet
+          wp config create --path="$clean" --dbname=s01_r8_recovery --dbuser=vf --dbpass=vf --dbhost=127.0.0.1:3306 --dbprefix=wp_clean_ --skip-check --allow-root >/dev/null
+          wp core install --path="$clean" --url=http://127.0.0.1:18859 --title='Synthetic clean install' --admin_user=admin --admin_password=synthetic-ci-only --admin_email=synthetic@example.invalid --skip-email --allow-root >/dev/null
+          wp plugin install "$RUNNER_TEMP/candidate.zip" --activate --path="$clean" --allow-root >/dev/null
+          wp plugin is-active vf-ops --path="$clean" --allow-root
+          cmp "$clean/wp-content/plugins/vf-ops/assets/js/v13/system/recovery.js" ops/assets/js/v13/system/recovery.js
+          echo S01_R8_OPS_CLEAN_INSTALL=PASS
+      - name: Clean up isolated WordPress and private sources
+        if: always()
+        shell: bash
+        run: rm -rf ops baseline control "$RUNNER_TEMP"/s01-r8-ops-* "$RUNNER_TEMP"/candidate.* "$RUNNER_TEMP"/baseline.* "$RUNNER_TEMP"/corrupt.zip /tmp/s01-r8-wp.phar
