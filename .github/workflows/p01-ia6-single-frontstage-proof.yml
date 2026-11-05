@@ -30,7 +30,7 @@ jobs:
           set -Eeuo pipefail
           test -n "$READ_TOKEN"
           sudo apt-get update -qq
-          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd >/dev/null
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd jq >/dev/null
           ROOT="$(mktemp -d /tmp/p01-single-frontstage.XXXXXXXX)"
           trap 'rm -rf "$ROOT"' EXIT
           git clone -q --depth 1 --branch fix/p01-v247493-owner-dialog-save-ux "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "$ROOT/candidate"
@@ -52,3 +52,59 @@ jobs:
           done
           node tests/unit/p01_ia6_legacy_route_retirement_inventory.cjs --require-fully-retired
           echo P01_IA6_FRONTSTAGE_SOURCE_GATE=PASS
+
+          # Real localhost install and HTTP readback. No Production, external
+          # credentials, or user data. The synthetic password never leaves this job.
+          LOCAL="$ROOT/clean-install"
+          mkdir -p "$LOCAL"
+          cp -a src/. "$LOCAL/"
+          ORIGIN="http://127.0.0.1:18641"
+          COOKIE="$ROOT/cookie.txt"
+          PASSWORD='SyntheticOneUI!18641'
+          php -S 127.0.0.1:18641 -t "$LOCAL" >"$ROOT/php-server.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" >/dev/null 2>&1 || true; rm -rf "$ROOT"' EXIT
+          for i in $(seq 1 60); do
+            if curl -fsS -c "$COOKIE" -b "$COOKIE" "$ORIGIN/setup.php" -o "$ROOT/setup.html" 2>/dev/null; then break; fi
+            sleep 0.25
+          done
+          test -s "$ROOT/setup.html"
+          CSRF="$(python3 -c 'import re,sys; s=open(sys.argv[1],encoding="utf8").read(); m=re.search(r"name=\"setup_csrf\"\s+value=\"([^\"]+)\"",s); assert m,"setup csrf not found";print(m.group(1))' "$ROOT/setup.html")"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -X POST "$ORIGIN/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode "site_title=IA6 Synthetic Owner" \
+            --data-urlencode "admin_password=$PASSWORD" \
+            --data-urlencode "admin_password_confirm=$PASSWORD" \
+            -o "$ROOT/installed.html"
+          test -f "$LOCAL/app/.runtime.php"
+          (cd "$LOCAL" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_IA6_CLEAN_INSTALL_VERIFY=PASS
+          python3 -c 'import json,sys;open(sys.argv[1],"w").write(json.dumps({"password":sys.argv[2]}))' "$ROOT/login.json" "$PASSWORD"
+          curl -fsS -c "$COOKIE" -b "$COOKIE" -H 'Content-Type: application/json' \
+            --data-binary "@$ROOT/login.json" "$ORIGIN/api.php?action=login" -o "$ROOT/login-response.json"
+          jq -e '.ok==true' "$ROOT/login-response.json" >/dev/null
+          curl -fsS -c "$COOKIE" -b "$COOKIE" "$ORIGIN/start.php" -o "$ROOT/front.html"
+          for marker in data-vf-recovery-files data-vf-global-inventory-root \
+            data-vf-global-bulk-root data-vf-suggestion-root data-vf-uc-root; do
+            grep -Fq "$marker" "$ROOT/front.html"
+          done
+          echo P01_IA6_OWNER_FRONTSTAGE_READBACK=PASS
+          for old in data-safety.php update.php update-credential.php \
+            surface-manager.php all-resources.php workbench.php; do
+            STATUS="$(curl -sS -b "$COOKIE" -o /dev/null -w '%{http_code}' "$ORIGIN/$old")"
+            test "$STATUS" = 404 -o "$STATUS" = 410
+            printf "%s\n" "<?php require __DIR__.'/app/bootstrap.php'; echo 'LEGACY_REACHED';" > "$LOCAL/$old"
+            STATUS="$(curl -sS -b "$COOKIE" -o "$ROOT/stale-response.txt" -w '%{http_code}' "$ORIGIN/$old")"
+            test "$STATUS" = 410
+            if grep -Fq 'LEGACY_REACHED' "$ROOT/stale-response.txt"; then exit 91; fi
+            rm -f "$LOCAL/$old"
+          done
+          echo P01_IA6_ATOMIC_STALE_GUI_GUARD_HTTP=PASS
+          curl -fsS -c "$COOKIE" -b "$COOKIE" \
+            "$ORIGIN/api.php?action=update_credential_status" -o "$ROOT/credential.json"
+          jq -e '.ok==true and (.status.configured|type=="boolean") and (.status|has("token")|not)' "$ROOT/credential.json" >/dev/null
+          DENIED="$(curl -sS -c "$COOKIE" -b "$COOKIE" -o "$ROOT/denied.json" -w '%{http_code}' \
+            -H 'Content-Type: application/json' -H 'X-CSRF-Token: intentionally-invalid' \
+            --data '{}' "$ORIGIN/api.php?action=update_credential_save")"
+          test "$DENIED" = 403 -o "$DENIED" = 419
+          echo P01_IA6_NATIVE_CREDENTIAL_READ_AND_CSRF_DENY=PASS
