@@ -18,7 +18,7 @@ php -S 127.0.0.1:18631 -t "$work" >"$work/server.log" 2>&1 &
 pid="$!"
 ready=0
 for i in $(seq 1 40); do
-  if curl -fsS --max-time 2 "$P01_TEST_ORIGIN/setup.php" -o "$work/setup.html" 2>/dev/null; then
+  if curl -fsS -c "$work/cookie" -b "$work/cookie" --max-time 2 "$P01_TEST_ORIGIN/setup.php" -o "$work/setup.html" 2>/dev/null; then
     ready=1
     break
   fi
