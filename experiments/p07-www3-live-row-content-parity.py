@@ -200,6 +200,17 @@ def compare():
     return 0
 
 
+def current_candidate_context():
+    path,_=get_file(
+        "p07-pending-three-runtime-readonly.py",
+        "1d64c229c8886e34ae1fde15d24025680777d458")
+    spec=importlib.util.spec_from_file_location(
+        "p07_verified_current_candidate_context",path)
+    scope=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scope)
+    return scope
+
+
 def compare_current_candidate():
     """Compare OLD VPS source to CURRENT connected CP2 www3, never scratch.
 
@@ -208,13 +219,7 @@ def compare_current_candidate():
     """
     if sys.argv[1:]!=["--compare-current-candidate-source-rows-read-only"]:
         stop("EXPLICIT_CURRENT_CANDIDATE_READONLY_ARG_REQUIRED")
-    context_path,_=get_file(
-        "p07-pending-three-runtime-readonly.py",
-        "1d64c229c8886e34ae1fde15d24025680777d458")
-    spec=importlib.util.spec_from_file_location(
-        "p07_verified_current_candidate_context",context_path)
-    scope=importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(scope)
+    scope=current_candidate_context()
     source,panel,transactions,config,identity=scope.www3_context()
     relation=scope.candidate_relation(
         source,panel,transactions,config,identity,0)
