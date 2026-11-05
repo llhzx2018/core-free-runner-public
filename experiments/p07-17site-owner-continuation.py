@@ -514,6 +514,63 @@ def restore_isolated(cloud,sql,lifecycle,seen,selected):
     print('APPLICATION_CONFIGS=UNCHANGED')
     print('CUTOVER_READY=NO')
 
+def continue_safe_imports(cloud,sql,lifecycle,seen):
+    """Independently process the two approved isolated restores; no retry of uncertain imports."""
+    verify_stage(sql)
+    selected=('ilovem3u8.kewaro.com','unzip.kewaro.com')
+    failures=0
+    for domain in selected:
+        row=read_manifest()['sites'].get(domain)
+        if not isinstance(row,dict):
+            print('SITE_STATUS='+domain+':MISSING_ARCHIVE',flush=True)
+            failures+=1
+            continue
+        status=row.get('import_status')
+        if status=='IMPORT_SUCCEEDED':
+            print('SITE_STATUS='+domain+':ALREADY_RECORDED_NOT_REVERIFIED',flush=True)
+            continue
+        if status!='NOT_IMPORTED':
+            print('SITE_STATUS='+domain+':UNCERTAIN_PRIOR_IMPORT_NO_RETRY',flush=True)
+            failures+=1
+            continue
+        archive=BUNDLE_ROOT/(hashlib.sha256(domain.encode()).hexdigest()[:16]+'.sql.gz')
+        try:
+            must(archive.is_file() and not archive.is_symlink()
+                 and digest(archive)==row['sha256'],'ARCHIVE_CHANGED')
+            sql_safety(sql,archive)
+        except Block as exc:
+            print('SITE_STATUS='+domain+':SQL_PREFLIGHT_BLOCKED',flush=True)
+            print('SITE_BLOCK_REASON='+str(exc),flush=True)
+            failures+=1
+            continue
+        except Exception:
+            print('SITE_STATUS='+domain+':SQL_PREFLIGHT_UNVERIFIED',flush=True)
+            failures+=1
+            continue
+        print('SQL_PREFLIGHT_PASS='+domain,flush=True)
+        try:
+            restore_isolated(cloud,sql,lifecycle,seen,(domain,))
+        except Block as exc:
+            print('SITE_STATUS='+domain+':RESTORE_BLOCKED',flush=True)
+            print('SITE_BLOCK_REASON='+str(exc),flush=True)
+            failures+=1
+        except Exception:
+            print('SITE_STATUS='+domain+':RESTORE_FAILED_KEEP_JOURNAL_NO_RETRY',flush=True)
+            failures+=1
+        else:
+            print('SITE_STATUS='+domain+':ISOLATED_IMPORT_RECORDED',flush=True)
+    m=read_manifest()
+    total=sum(m['sites'][d].get('import_status')=='IMPORT_SUCCEEDED'
+              for d in selected)
+    print('TWO_SITE_ISOLATED_IMPORT_COUNT='+str(total)+'/2',flush=True)
+    print('BLOCKED_SITE_COUNT='+str(failures),flush=True)
+    print('SOURCE_BUSINESS_WRITES=NONE',flush=True)
+    print('EXISTING_CP2_DATABASE_OVERWRITES=NONE',flush=True)
+    print('DNS_CHANGED=NO',flush=True)
+    print('CUTOVER_READY=NO',flush=True)
+    if failures:
+        raise Block('CONTINUE_SAFE_PARTIAL_REVIEW_REQUIRED')
+
 def verify_stage(sql):
     m=read_manifest()
     must(m.get('phase') in ('STAGED','ISOLATED_RESTORING','ISOLATED_RESTORED'),
