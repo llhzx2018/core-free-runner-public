@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+trap 'echo "P01_CREDENTIAL_FIXTURE_SCRIPT_EXIT=FAIL_LINE_$LINENO"' ERR
 test "$#" -eq 1
 candidate="$(cd "$1" && pwd)"
 test -f "$candidate/src/update-credential.php"
@@ -12,6 +13,7 @@ cleanup() {
 }
 trap cleanup EXIT
 cp -a "$candidate/src/." "$work/"
+echo P01_CREDENTIAL_FIXTURE_SOURCE=PASS
 php -S 127.0.0.1:18631 -t "$work" >"$work/server.log" 2>&1 &
 pid="$!"
 ready=0
@@ -23,6 +25,7 @@ for i in $(seq 1 40); do
   sleep 0.25
 done
 test "$ready" = 1
+echo P01_CREDENTIAL_FIXTURE_SETUP_GET=PASS
 csrf="$(python3 - "$work/setup.html" <<'PY'
 import pathlib,re,sys
 html=pathlib.Path(sys.argv[1]).read_text()
@@ -37,7 +40,13 @@ curl -fsS -c "$work/cookie" -b "$work/cookie" -X POST "$P01_TEST_ORIGIN/setup.ph
   --data-urlencode "admin_password=P01SyntheticRecovery2026!" \
   --data-urlencode "admin_password_confirm=P01SyntheticRecovery2026!" \
   -o "$work/installed.html"
-test -f "$work/app/.runtime.php"
+if ! test -f "$work/app/.runtime.php"; then
+  echo P01_CREDENTIAL_FIXTURE_RUNTIME_MISSING
+  echo "P01_CREDENTIAL_FIXTURE_SETUP_RESPONSE_TITLE=$(grep -o "<title>[^<]*" "$work/installed.html" | head -1 || :)"
+  exit 1
+fi
+echo P01_CREDENTIAL_FIXTURE_INSTALL=PASS
+echo P01_CREDENTIAL_FIXTURE_BROWSER_BEGIN
 P01_TEST_PASSWORD=P01SyntheticRecovery2026! \
   node scripts/p01-ia6-credential-failure-once.cjs "$candidate"
 (cd "$work" && php cli/verify.php) | grep -Fx VERIFY_PASS=YES
