@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     env:
-      TARGET_SHA: 5d57b7fee84f52b5097cbc1d7cf67f23c10a1078
+      TARGET_SHA: f8de0240dde908f794f80a71f0432220f0d81257
       BASE_SHA: f9b71d59ee239be952f8495f2a0cc381e3497a3e
     steps:
       - name: Checkout public-safe Runner lane
@@ -55,6 +55,49 @@ jobs:
             exit "$RC"
           fi
           echo P01_CRUD_CANONICAL_ZERO_DEBT=PASS
+      - name: Isolated PHP setup and real Chromium in-pane Owner CRUD flow
+        shell: bash
+        env:
+          READ_TOKEN: \${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          P01_TEST_ORIGIN: http://127.0.0.1:18681
+          P01_TEST_PASSWORD: P01Synthetic-18681!
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          ROOT="$(mktemp -d /tmp/p01-crud-browser.XXXXXXXX)"
+          trap 'test -z "\${SERVER_PID:-}" || kill "$SERVER_PID" >/dev/null 2>&1 || true; rm -rf "$ROOT"' EXIT
+          git clone -q --depth 1 --branch fix/p01-ia6-owner-crud-inline-feedback-20261105 \
+            "https://x-access-token:\${READ_TOKEN}@github.com/llhzx2018/vf-start.git" "$ROOT/candidate"
+          test "$(git -C "$ROOT/candidate" rev-parse HEAD)" = "$TARGET_SHA"
+          git -C "$ROOT/candidate" remote set-url origin https://github.com/llhzx2018/vf-start.git
+          unset READ_TOKEN
+          cp -a "$ROOT/candidate/src" "$ROOT/runtime"
+          php -S 127.0.0.1:18681 -t "$ROOT/runtime" >"$ROOT/php.log" 2>&1 &
+          SERVER_PID=$!
+          for attempt in $(seq 1 80); do
+            if curl -fsS -c "$ROOT/cookie" -b "$ROOT/cookie" "$P01_TEST_ORIGIN/setup.php" -o "$ROOT/setup.html" 2>/dev/null; then break; fi
+            sleep 0.3
+          done
+          test -s "$ROOT/setup.html"
+          CSRF="$(python3 - "$ROOT/setup.html" <<'PY'
+          import re,sys
+          text=open(sys.argv[1],encoding='utf8').read()
+          match=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert match
+          print(match.group(1))
+          PY
+          )"
+          curl -fsS -c "$ROOT/cookie" -b "$ROOT/cookie" -X POST "$P01_TEST_ORIGIN/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=P01 Isolated CRUD' \
+            --data-urlencode "admin_password=$P01_TEST_PASSWORD" \
+            --data-urlencode "admin_password_confirm=$P01_TEST_PASSWORD" -o "$ROOT/setup-result.html"
+          (cd "$ROOT/runtime" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          cd "$ROOT/candidate"
+          npm install --no-save --no-audit --no-fund --silent playwright@1.56.1
+          npx --no-install playwright install --with-deps chromium >/dev/null
+          timeout 120s node tests/integration/p01_ia6_crud_inline_owner_browser.mjs
+          echo P01_OWNER_CRUD_CHROMIUM=PASS
       - name: Public Runner cleanup acknowledgement
         if: always()
         run: |
