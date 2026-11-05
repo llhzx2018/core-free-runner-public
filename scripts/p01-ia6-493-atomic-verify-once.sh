@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+# Extracted verbatim from active reusable P01 release workflow's pre-publish
+# FULL/Atomic validation step. Synthetic local /tmp ONLY; no GitHub writes.
+set -Eeuo pipefail
+FULL="$ART/VF-Start-V${VERSION}-FULL.zip"
+UPDATE="$ART/VF_Start_V${VERSION}_UPDATE.zip"
+WORK="/tmp/p01-maintenance-gate"
+rm -rf "$WORK"
+mkdir -p "$WORK/update"
+unzip -q "$UPDATE" -d "$WORK/update"
+REPAIR="$WORK/update/repair-v${VERSION}.php"
+
+test -f "$REPAIR"
+test "$(unzip -Z1 "$UPDATE")" = "repair-v${VERSION}.php"
+unzip -t "$FULL" >/dev/null
+unzip -t "$UPDATE" >/dev/null
+php -l "$REPAIR" >/dev/null
+php "$REPAIR" --self-test | tee /tmp/p01-atomic-selftest.json
+grep -Fq '"ok":true' /tmp/p01-atomic-selftest.json
+
+assert_no_private_payload() {
+  local zip="$1"
+  if unzip -Z1 "$zip" | grep -Ei '(^|/)(\.runtime\.php|.*\.sqlite3?$|.*\.db$|private/|backups?/|sessions?/|tokens?/|staging/)' >/tmp/p01-private-hits.txt; then
+    cat /tmp/p01-private-hits.txt
+    echo PRIVATE_PAYLOAD_LEAK
+    exit 90
+  fi
+}
+assert_no_private_payload "$FULL"
+assert_no_private_payload "$UPDATE"
+
+install_full() {
+  local zip="$1" root="$2" port="$3" title="$4"
+  local cookie="/tmp/cookie-$port.txt"
+  rm -rf "$root" "$cookie"
+  mkdir -p "$root"
+  unzip -q "$zip" -d "$root"
+  (
+    cd "$root"
+    php -S 127.0.0.1:"$port" -t . >"/tmp/server-$port.log" 2>&1 &
+    echo $! >"/tmp/server-$port.pid"
+  )
+  local pid
+  pid="$(cat "/tmp/server-$port.pid")"
+  trap 'kill "$pid" >/dev/null 2>&1 || true' RETURN
+  for _ in $(seq 1 50); do
+    if curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$port/setup.php" -o "/tmp/setup-$port.html"; then break; fi
+    sleep 1
+  done
+  local csrf
+  csrf="$(python3 - "/tmp/setup-$port.html" <<'PY'
+import re,sys
+text=open(sys.argv[1],encoding="utf-8").read()
+m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+assert m
+print(m.group(1))
+PY
+)"
+  local pass="ReleaseGate!${port}"
+  curl -fsS -c "$cookie" -b "$cookie" -X POST "http://127.0.0.1:$port/setup.php"               --data-urlencode "setup_csrf=$csrf"               --data-urlencode "site_title=$title"               --data-urlencode "admin_password=$pass"               --data-urlencode "admin_password_confirm=$pass"               -o "/tmp/setup-post-$port.html"
+  (cd "$root" && php cli/verify.php) | tee "/tmp/verify-$port.txt"
+  grep -Fx 'VERIFY_PASS=YES' "/tmp/verify-$port.txt"
+  local revisit
+  revisit="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/setup.php")"
+  test "$revisit" = 302
+  local body status
+  body="$(php -r 'echo json_encode(["password"=>$argv[1]], JSON_UNESCAPED_SLASHES);' "$pass")"
+  status="$(curl -sS -c "$cookie" -b "$cookie" -o "/tmp/login-$port.json" -w '%{http_code}' -H 'Content-Type: application/json' --data "$body" "http://127.0.0.1:$port/api.php?action=login")"
+  test "$status" = 200
+  grep -Fq '"ok":true' "/tmp/login-$port.json"
+  kill "$pid" >/dev/null 2>&1 || true
+  trap - RETURN
+}
+
+install_full "$FULL" "$WORK/target-full" 18511 "VF Start V$VERSION FULL Gate"
+test "$(tr -d '\r\n ' < "$WORK/target-full/VERSION.txt")" = "$VERSION"
+echo P01_CLEAN_FULL_INSTALL=PASS
+
+install_full "$REL/VF-Start-V${SOURCE}-FULL.zip" "$WORK/upgrade" 18512 "VF Start V$SOURCE Upgrade Source"
+cat >"$WORK/upgrade/sentinel.php" <<'PHP'
+<?php
+declare(strict_types=1);
+require __DIR__.'/app/bootstrap.php';
+$repo=new VfRepository(vf_db());
+$cat=$repo->createCategory(['name'=>'Release Sentinel','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+$link=$repo->saveLink(null,['surface'=>'start','category_id'=>$cat,'title'=>'Release Sentinel Link','url'=>'https://example.com/release-sentinel','description'=>'must survive atomic','tags'=>['release-sentinel'],'is_private'=>1,'is_pending'=>0]);
+file_put_contents('/tmp/p01-sentinel-id.txt',(string)$link['id']);
+PHP
+php "$WORK/upgrade/sentinel.php"
+rm "$WORK/upgrade/sentinel.php"
+cp "$REPAIR" "$WORK/upgrade/repair-v${VERSION}.php"
+php "$WORK/upgrade/repair-v${VERSION}.php" --verify-source="$WORK/upgrade" | tee /tmp/p01-source-verify.json
+grep -Fq '"ok":true' /tmp/p01-source-verify.json
+php "$WORK/upgrade/repair-v${VERSION}.php" --run="$WORK/upgrade" | tee /tmp/p01-atomic-success.json
+grep -Fq '"ok":true' /tmp/p01-atomic-success.json
+test "$(tr -d '\r\n ' < "$WORK/upgrade/VERSION.txt")" = "$VERSION"
+(cd "$WORK/upgrade" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+php -r 'require $argv[1]."/app/bootstrap.php"; $id=(int)trim(file_get_contents("/tmp/p01-sentinel-id.txt")); $s=vf_db()->prepare("SELECT title,is_private FROM links WHERE id=?"); $s->execute([$id]); $r=$s->fetch(PDO::FETCH_ASSOC); if(!$r||$r["title"]!=="Release Sentinel Link"||(int)$r["is_private"]!==1) exit(1); echo "SENTINEL_PRESERVED\n";' "$WORK/upgrade"
+
+cp "$REPAIR" "$WORK/upgrade/repair-v${VERSION}.php"
+php "$WORK/upgrade/repair-v${VERSION}.php" --run="$WORK/upgrade" | tee /tmp/p01-atomic-repeat.json
+grep -Fq '"already_current":true' /tmp/p01-atomic-repeat.json
+echo P01_ATOMIC_UPGRADE_AND_IDEMPOTENCY=PASS
+
+install_full "$REL/VF-Start-V${SOURCE}-FULL.zip" "$WORK/rollback" 18513 "VF Start V$SOURCE Rollback Source"
+cat >"$WORK/rollback/sentinel.php" <<'PHP'
+<?php
+declare(strict_types=1);
+require __DIR__.'/app/bootstrap.php';
+$repo=new VfRepository(vf_db());
+$cat=$repo->createCategory(['name'=>'Rollback Sentinel','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+$link=$repo->saveLink(null,['surface'=>'start','category_id'=>$cat,'title'=>'Rollback Sentinel Link','url'=>'https://example.com/rollback-sentinel','description'=>'must survive rollback','tags'=>['rollback-sentinel'],'is_private'=>1,'is_pending'=>0]);
+file_put_contents('/tmp/p01-rollback-id.txt',(string)$link['id']);
+PHP
+php "$WORK/rollback/sentinel.php"
+rm "$WORK/rollback/sentinel.php"
+cp "$REPAIR" "$WORK/rollback/repair-v${VERSION}.php"
+set +e
+VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$WORK/rollback/repair-v${VERSION}.php" --run="$WORK/rollback" >/tmp/p01-rollback.out 2>/tmp/p01-rollback.err
+rollback_rc=$?
+set -e
+test "$rollback_rc" -ne 0
+test "$(tr -d '\r\n ' < "$WORK/rollback/VERSION.txt")" = "$SOURCE"
+(cd "$WORK/rollback" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+php -r 'require $argv[1]."/app/bootstrap.php"; $id=(int)trim(file_get_contents("/tmp/p01-rollback-id.txt")); $s=vf_db()->prepare("SELECT title FROM links WHERE id=?"); $s->execute([$id]); if($s->fetchColumn()!=="Rollback Sentinel Link") exit(1); echo "ROLLBACK_SENTINEL_PRESERVED\n";' "$WORK/rollback"
+echo P01_ATOMIC_ROLLBACK=PASS
+
+unzip -p "$FULL" VERSION.txt | tr -d '\r\n ' | grep -Fx "$VERSION"
+unzip -p "$FULL" release-manifest.json | php -r '$m=json_decode(stream_get_contents(STDIN),true); if(($m["version"]??"")!==$argv[1]||($m["source_version"]??"")!==$argv[2]||empty($m["maintenance_release"]["schema_unchanged"])) exit(1); echo "P01_RELEASE_MANIFEST=PASS\n";' "$VERSION" "$SOURCE"
+echo P01_MAINTENANCE_ARTIFACT_GATE=PASS
+
