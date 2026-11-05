@@ -571,6 +571,138 @@ def continue_safe_imports(cloud,sql,lifecycle,seen):
     if failures:
         raise Block('CONTINUE_SAFE_PARTIAL_REVIEW_REQUIRED')
 
+def restore_two_quarantined_static(cloud,sql,lifecycle,seen):
+    """Strictly isolated COPY only, never final SQL equivalence or cutover.
+
+    The pinned transformation removes exactly the known 13 dynamic-control
+    lines and preserves every other source byte. Never import into an existing
+    database or alter application config. All originals remain immutable.
+    """
+    import importlib.util
+    target=('ilovem3u8.kewaro.com','unzip.kewaro.com')
+    expected={'ilovem3u8.kewaro.com':42,'unzip.kewaro.com':12}
+    helper=Path(__file__).resolve().parent/'p07-www3-isolated-stage.py'
+    must(helper.is_file() and not helper.is_symlink(),
+         'QUARANTINE_GUARD_HELPER_MISSING')
+    data=helper.read_bytes()
+    h=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+    must(h=='8939ff6bd08442a26459a6878d1f94a5c34d000b',
+         'QUARANTINE_GUARD_HELPER_CHANGED')
+    spec=importlib.util.spec_from_file_location('p07_two_static_quarantine',helper)
+    must(spec is not None and spec.loader is not None,
+         'QUARANTINE_GUARD_UNAVAILABLE')
+    guard=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guard)
+    verify_stage(sql)
+    failures=0
+    for domain in target:
+        m=read_manifest()
+        row=m['sites'][domain]
+        prior=row.get('quarantine_status')
+        if prior=='IMPORTED_STATIC_UNVERIFIED':
+            print('QUARANTINE_ALREADY_IMPORTED='+domain,flush=True)
+            continue
+        if prior is not None:
+            print('QUARANTINE_PRIOR_INTENT_REVIEW_REQUIRED='+domain,flush=True)
+            failures+=1
+            continue
+        if row.get('import_status')!='NOT_IMPORTED':
+            print('QUARANTINE_EXISTING_IMPORT_STATE_UNSAFE='+domain,flush=True)
+            failures+=1
+            continue
+        token=hashlib.sha256(domain.encode()).hexdigest()[:16]
+        original=BUNDLE_ROOT/(token+'.sql.gz')
+        transformed=BUNDLE_ROOT/(token+'.quarantine.sql.gz')
+        try:
+            must(original.is_file() and not original.is_symlink()
+                 and digest(original)==row['sha256'],
+                 'QUARANTINE_ORIGINAL_ARCHIVE_CHANGED')
+            must(sql.require_nonempty_source_schema(original)==expected[domain],
+                 'QUARANTINE_SOURCE_SCHEMA_DRIFT')
+            must(not transformed.exists() and not transformed.is_symlink(),
+                 'QUARANTINE_OUTPUT_ALREADY_EXISTS')
+            # Record irreversible intent before writing ANY candidate bytes.
+            row['quarantine_status']='COPY_INTENT_RECORDED'
+            safe_write(manifest_path(),m)
+            print('QUARANTINE_STATIC_COPY_START='+domain,flush=True)
+            transformed_sha=guard.make_quarantined_sql(original,transformed)
+            os.chmod(transformed,0o600)
+            must(digest(transformed)==transformed_sha,
+                 'QUARANTINE_TRANSFORM_DIGEST_CHANGED')
+            must(sql.require_nonempty_source_schema(transformed)==expected[domain],
+                 'QUARANTINE_SCHEMA_LOST')
+            sql_safety(sql,transformed)
+            row['quarantine_status']='STATIC_COPY_VALIDATED'
+            row['quarantine_sha256']=transformed_sha
+            row['quarantine_original_sha256']=row['sha256']
+            safe_write(manifest_path(),m)
+            print('QUARANTINE_STATIC_COPY_VALIDATED='+domain,flush=True)
+            isolated_db,user,password=lifecycle.derive_database_identity(
+                domain,'p07-quarantine-'+secrets.token_hex(8),1)
+            must(isolated_db!=row['database'],
+                 'QUARANTINE_NAME_COLLIDES_WITH_SOURCE')
+            row.update({
+                'quarantine_status':'NEW_DB_INTENT_RECORDED',
+                'quarantine_database':isolated_db,
+                'quarantine_user':user,
+                'quarantine_password':password,
+            })
+            safe_write(manifest_path(),m)
+            cloud.add_database(domain,isolated_db,user,password)
+            row['quarantine_status']='NEW_DB_CREATED'
+            safe_write(manifest_path(),m)
+            import_as_restricted_user(isolated_db,user,password,transformed)
+            row['quarantine_status']='IMPORTED_STATIC_UNVERIFIED'
+            safe_write(manifest_path(),m)
+            print('QUARANTINE_STATIC_DB_IMPORTED='+domain,flush=True)
+        except (Block,guard.Stop) as exc:
+            code=str(exc)
+            allowed={
+                'QUARANTINE_SOURCE_SHAPE_CHANGED',
+                'QUARANTINE_ELSE_BRANCH_UNPROVEN',
+                'QUARANTINE_SOURCE_SQL_UNREADABLE',
+                'QUARANTINE_CONTROL_COUNT_CHANGED',
+                'QUARANTINE_CONTROL_TYPE_COUNTS_UNPROVEN',
+                'QUARANTINE_CONTROL_UNIQUE_LINES_UNPROVEN',
+                'QUARANTINE_OUTPUT_PATH_UNSAFE',
+                'QUARANTINE_SCHEMA_LOST',
+                'QUARANTINE_STATIC_SQL_UNPROVEN',
+                'DYNAMIC_SQL_OTHER_GROUPS_UNVERIFIED_STOP_IMPORT',
+                'SQL_NONLOCAL_EFFECTS_STOP_IMPORT',
+                'CROSS_DATABASE_OR_PRIVILEGED_SQL_BLOCKED',
+                'SQL_LINE_TOO_LARGE',
+                'NEW_DB_GRANTS_UNVERIFIED',
+                'NEW_DB_USER_HAS_GLOBAL_GRANTS',
+                'NEW_DB_USER_HAS_FOREIGN_GRANTS',
+                'RESTRICTED_DB_USER_UNAVAILABLE',
+                'RESTRICTED_DB_IMPORT_FAILED',
+            }
+            print('QUARANTINE_SITE_BLOCKED='+domain,flush=True)
+            print('QUARANTINE_REASON='+(
+                code if code in allowed else 'SAFE_GATE_UNVERIFIED'),flush=True)
+            failures+=1
+        except Exception:
+            print('QUARANTINE_SITE_BLOCKED='+domain,flush=True)
+            print('QUARANTINE_REASON=UNVERIFIED_RETAIN_PRIVATE_JOURNAL',flush=True)
+            failures+=1
+    m=read_manifest()
+    succeeded=sum(
+        m['sites'][d].get('quarantine_status')=='IMPORTED_STATIC_UNVERIFIED'
+        for d in target)
+    print('QUARANTINED_STATIC_IMPORT_COUNT='+str(succeeded)+'/2',flush=True)
+    print('BLOCKED_SITE_COUNT='+str(failures),flush=True)
+    print('ORIGINAL_SOURCE_ARCHIVES=RETAINED_UNCHANGED',flush=True)
+    print('SOURCE_BUSINESS_WRITES=NONE',flush=True)
+    print('EXISTING_CP2_DATABASE_WRITES=NONE',flush=True)
+    print('APP_DATABASE_CONNECTIONS=UNCHANGED',flush=True)
+    print('ORIGINAL_SQL_EFFECT_EQUIVALENCE=NOT_PROVEN',flush=True)
+    print('SOURCE_TARGET_PARITY=NOT_PROVEN',flush=True)
+    print('DNS_CHANGED=NO',flush=True)
+    print('CUTOVER_READY=NO',flush=True)
+    if failures:
+        raise Block('QUARANTINE_PARTIAL_REVIEW_REQUIRED')
+
+
 def verify_stage(sql):
     m=read_manifest()
     must(m.get('phase') in ('STAGED','ISOLATED_RESTORING','ISOLATED_RESTORED'),
@@ -590,7 +722,7 @@ def verify_stage(sql):
 
 def main():
     p=argparse.ArgumentParser(description='P07 17-site owner migration continuation on CP2')
-    p.add_argument('mode',choices=['plan','stage','verify-stage','restore-new-db','continue-safe'],
+    p.add_argument('mode',choices=['plan','stage','verify-stage','restore-new-db','continue-safe','restore-quarantine'],
                    help='plan: read-only; stage: export pending DBs; restore-new-db: fresh DBs only')
     p.add_argument('--site',choices=PENDING,
                    help='Limit isolated DB import to one of the 3 pending sites')
@@ -610,6 +742,10 @@ def main():
         must(a.confirm_new_databases,'EXPLICIT_NEW_DB_PERMISSION_REQUIRED')
         must(not a.site,'CONTINUE_SAFE_SCOPE_FIXED_TWO_SITES')
         continue_safe_imports(cloud,sql,lifecycle,seen)
+    elif a.mode=='restore-quarantine':
+        must(a.confirm_new_databases,'EXPLICIT_NEW_DB_PERMISSION_REQUIRED')
+        must(not a.site,'QUARANTINE_SCOPE_FIXED_TWO_SITES')
+        restore_two_quarantined_static(cloud,sql,lifecycle,seen)
     else:
         must(a.confirm_new_databases,'EXPLICIT_NEW_DB_PERMISSION_REQUIRED')
         restore_isolated(cloud,sql,lifecycle,seen,(a.site,) if a.site else PENDING)
