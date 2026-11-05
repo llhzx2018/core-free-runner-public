@@ -60,6 +60,29 @@ VF_E2E_RUNTIME_ROOT="$disaster" VF_IA6_DISPOSABLE_ACK=IA6-DISASTER-DISPOSABLE-ON
   php "$candidate/tests/integration/p01_ia6_disaster_roundtrip_disposable.php"
 echo P01_IA6_DISASTER_ROUNDTRIP_EXACT_SOURCE=PASS
 
+# Original protected routes: local synthetic installation, denial-only browser HTTP.
+test "${P01_TEST_ORIGIN:-}" = http://127.0.0.1:18631
+test -f "$candidate/tests/integration/p01_ia6_four_fallbacks_http_browser.mjs"
+php -S 127.0.0.1:18631 -t "$disaster" >"$disaster/fallback-server.log" 2>&1 &
+fallback_pid=$!
+pids+=("$fallback_pid")
+fallback_ready=0
+for i in $(seq 1 40); do
+  if curl -sS --max-time 2 -o /dev/null "$P01_TEST_ORIGIN/setup.php" 2>/dev/null; then
+    fallback_ready=1
+    break
+  fi
+  sleep 0.25
+done
+test "$fallback_ready" = 1
+P01_TEST_PASSWORD=P01SyntheticRecovery2026! \
+P01_TEST_ORIGIN=http://127.0.0.1:18631 \
+node "$candidate/tests/integration/p01_ia6_four_fallbacks_http_browser.mjs"
+echo P01_IA6_FOUR_FALLBACKS_BROWSER=PASS
+kill "$fallback_pid" 2>/dev/null || :
+wait "$fallback_pid" 2>/dev/null || :
+
+
 install_fixture "$candidate" "$interrupted" 18964 "IA6 disposable interrupted restore"
 VF_E2E_RUNTIME_ROOT="$interrupted" \
   php "$candidate/tests/integration/p01_ia6_interrupted_restore_disposable.php"
