@@ -21,7 +21,7 @@ sys.dont_write_bytecode=True
 ROOT=Path(__file__).resolve().parent
 FILES=(
     ("p07-www3-restored-readback.py","a1ac6e2c6771ca8f2e8a55bcd7064ccc1f9cf47f"),
-    ("p07-www3-content-worker.py","d42c99637679a123672f2b37d62fa2af327875e1"),
+    ("p07-www3-content-worker.py","d734ae8cff4cd757f78d63a46a609e3198e8bb7b"),
 )
 def stop(code):
     raise Blocked(code)
