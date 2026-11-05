@@ -13,7 +13,7 @@ disaster="$(mktemp -d /tmp/p01-ia6-disaster-parity-XXXXXXXX)"
 interrupted="$(mktemp -d /tmp/p01-ia6-r11-XXXXXXXX)"
 pids=()
 cleanup() {
-  for pid in "\${pids[@]}"; do kill "$pid" 2>/dev/null || :; done
+  for pid in $(jobs -pr); do kill "$pid" 2>/dev/null || :; done
   rm -rf "$work" "$disaster" "$interrupted"
 }
 trap cleanup EXIT
