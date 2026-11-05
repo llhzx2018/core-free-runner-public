@@ -1,0 +1,137 @@
+name: p01-ia6-494-hardexit-only-temporary
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p01-ia6-494-hardexit-only.yml']
+permissions:
+  contents: read
+jobs:
+  isolated-build-and-verify:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      VERSION: 2.47.494
+      SOURCE: 2.47.493
+      TARGET_SHA: 08d7c89073fd2bf84ee696dc4c230cdf8c895a00
+      BASE_SHA: 342a2ad7d7f3d203010c400af45e59e18c65fe31
+      ART: /tmp/p01-ia6-494-artifacts
+      REL: /tmp/p01-ia6-494-source
+    steps:
+      - name: Checkout registered public safe test scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Bind exact candidate, official full/update baseline and build nonrelease artifacts
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd jq unzip >/dev/null
+          git clone -q --depth 1 --branch fix/p01-v247493-owner-dialog-save-ux "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" candidate
+          git clone -q --depth 1 --branch main "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" stable
+          git -C candidate remote set-url origin "https://github.com/${PRODUCT_REPO}.git"
+          git -C stable remote set-url origin "https://github.com/${PRODUCT_REPO}.git"
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C stable rev-parse HEAD)" = "$BASE_SHA"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$VERSION"
+          test "$(tr -d '\r\n ' < stable/VERSION)" = "$SOURCE"
+          TARGET_TREE="$(git -C candidate rev-parse HEAD^{tree})"
+          mkdir -p "$REL/full" "$REL/update"
+          gh release download "v$SOURCE" -R "$PRODUCT_REPO" -D "$REL" -p "VF-Start-V$SOURCE-FULL.zip" -p "VF_Start_V${SOURCE}_UPDATE.zip"
+          unzip -q "$REL/VF-Start-V$SOURCE-FULL.zip" -d "$REL/full"
+          unzip -q "$REL/VF_Start_V${SOURCE}_UPDATE.zip" -d "$REL/update"
+          test "$(tr -d '\r\n ' < "$REL/full/VERSION.txt")" = "$SOURCE"
+          test -f "$REL/update/repair-v$SOURCE.php"
+          python3 scripts/p01-maintenance-release.py \
+            --candidate candidate/src --baseline-full "$REL/full" \
+            --baseline-repair "$REL/update/repair-v$SOURCE.php" \
+            --out "$ART" --version "$VERSION" --source-version "$SOURCE" \
+            --target-sha "$TARGET_SHA" --target-tree "$TARGET_TREE" \
+            >/tmp/p01-ia6-494-build-receipt.json
+          test -f "$ART/VF-Start-V$VERSION-FULL.zip"
+          test -f "$ART/VF_Start_V${VERSION}_UPDATE.zip"
+          echo "P01_IA6_494_EXACT_SHA=$TARGET_SHA"
+          echo P01_IA6_494_BUILD_NON_RELEASE=PASS
+      - name: Prove forced-kill and journal replay on a disposable existing 2.47.493 install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          WORK=/tmp/p01-ia6-hardexit-only
+          REPAIR="$ART/repair-v$VERSION.php"
+          test -f "$REPAIR"
+          install_full() {
+            local zip="$1" root="$2" port="$3" title="$4"
+            local cookie="/tmp/cookie-$port.txt"
+            rm -rf "$root" "$cookie"
+            mkdir -p "$root"
+            unzip -q "$zip" -d "$root"
+            (
+              cd "$root"
+              php -S 127.0.0.1:"$port" -t . >"/tmp/server-$port.log" 2>&1 &
+              echo $! >"/tmp/server-$port.pid"
+            )
+            local pid
+            pid="$(cat "/tmp/server-$port.pid")"
+            trap 'kill "$pid" >/dev/null 2>&1 || true' RETURN
+            for _ in $(seq 1 50); do
+              if curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$port/setup.php" -o "/tmp/setup-$port.html"; then break; fi
+              sleep 1
+            done
+            local csrf
+            csrf="$(python3 - "/tmp/setup-$port.html" <<'PY'
+          import re,sys
+          text=open(sys.argv[1],encoding="utf-8").read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert m
+          print(m.group(1))
+          PY
+          )"
+            local pass="ReleaseGate!${port}"
+            curl -fsS -c "$cookie" -b "$cookie" -X POST "http://127.0.0.1:$port/setup.php"               --data-urlencode "setup_csrf=$csrf"               --data-urlencode "site_title=$title"               --data-urlencode "admin_password=$pass"               --data-urlencode "admin_password_confirm=$pass"               -o "/tmp/setup-post-$port.html"
+            (cd "$root" && php cli/verify.php) | tee "/tmp/verify-$port.txt"
+            grep -Fx 'VERIFY_PASS=YES' "/tmp/verify-$port.txt"
+            local revisit
+            revisit="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/setup.php")"
+            test "$revisit" = 302
+            local body status
+            body="$(php -r 'echo json_encode(["password"=>$argv[1]], JSON_UNESCAPED_SLASHES);' "$pass")"
+            status="$(curl -sS -c "$cookie" -b "$cookie" -o "/tmp/login-$port.json" -w '%{http_code}' -H 'Content-Type: application/json' --data "$body" "http://127.0.0.1:$port/api.php?action=login")"
+            test "$status" = 200
+            grep -Fq '"ok":true' "/tmp/login-$port.json"
+            kill "$pid" >/dev/null 2>&1 || true
+            trap - RETURN
+          }
+
+          install_full "$REL/VF-Start-V$SOURCE-FULL.zip" "$WORK/site" 18524 "P01 IA6 Hardexit Synthetic"
+          cp "$REPAIR" "$WORK/site/repair-v$VERSION.php"
+          php -r 'require $argv[1]."/app/bootstrap.php";$r=new VfRepository(vf_db());$c=$r->createCategory(["name"=>"IA6 Crash Sentinel","is_private"=>1]);$r->saveLink(null,["surface"=>"start","category_id"=>$c,"title"=>"Crash Sentinel Private","url"=>"https://example.org/ia6-crash-private","is_private"=>1,"is_pending"=>0]);' "$WORK/site"
+          set +e
+          VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY=1 php "$WORK/site/repair-v$VERSION.php" --run="$WORK/site" >"$WORK/hardexit.out" 2>"$WORK/hardexit.err"
+          RC=$?
+          set -e
+          test "$RC" = 97
+          grep -Fq 'Injected hard interruption after source apply.' "$WORK/hardexit.err"
+          echo P01_IA6_ATOMIC_FORCED_SOURCE_APPLY_CRASH=PASS
+          php "$WORK/site/repair-v$VERSION.php" --run="$WORK/site" >"$WORK/recovered.json"
+          grep -Fq '"ok":true' "$WORK/recovered.json"
+          grep -Fq '"interrupted_recovered":true' "$WORK/recovered.json"
+          test "$(tr -d '\r\n ' < "$WORK/site/VERSION.txt")" = "$VERSION"
+          (cd "$WORK/site" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          php -r 'require $argv[1]."/app/bootstrap.php";$q=(int)vf_db()->query("SELECT COUNT(*) FROM links WHERE title='."'".'Crash Sentinel Private'."'".' AND is_private=1")->fetchColumn();if($q!==1)exit(1);echo "P01_IA6_CRASH_PRIVATE_SENTINEL=PASS\n";' "$WORK/site"
+          for old in data-safety.php update.php update-credential.php surface-manager.php all-resources.php workbench.php app/AdminShell.php; do
+            test ! -e "$WORK/site/$old"
+          done
+          echo P01_IA6_ATOMIC_HARDEXIT_RECOVERY_RETIRED_GUI_REMOVAL=PASS
+      - name: Destroy transient checkout, fixtures and artifact candidates
+        if: always()
+        shell: bash
+        run: |
+          rm -rf candidate stable "$ART" "$REL" /tmp/p01-ia6-hardexit-only
+          echo P01_IA6_494_EPHEMERAL_CLEANUP=PASS
