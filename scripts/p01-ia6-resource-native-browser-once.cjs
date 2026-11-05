@@ -75,5 +75,52 @@ const assert=(condition,message)=>{if(!condition)throw Error('IA6 resource brows
   });
   assert(denied.status()>=400,'CSRF negative write unexpectedly accepted');
   console.log('P01_IA6_NATIVE_RESOURCE_CSRF_DENIAL=PASS');
+  // CAS stale state is rejected by the canonical service even with a valid CSRF.
+  const fresh=advancedJSON.record;
+  const csrf=(await ctx.request.post(origin+'/api.php?action=login',{
+    data:{password:process.env.P01_TEST_PASSWORD}
+  }).then(r=>r.json())).csrf;
+  assert(typeof csrf==='string'&&csrf.length>=16,'synthetic CSRF not available');
+  const stale=await ctx.request.post(origin+'/api.php?action=resource_advanced_save',{
+    data:{
+      id:ids.advanced,expected_surface:fresh.surface,expected_version:fresh.version,
+      expected_profile_version:fresh.profile_version,
+      expected_fingerprint:'0'.repeat(64),surface:fresh.surface,
+      resource_kind:fresh.resource_kind||'',note:fresh.note||'',
+      media_year:fresh.media_year||'',media_status:fresh.media_status||'',
+      is_private:1,category_id:0,background_friendly:false,
+      confirmation:'ADVANCED_RESOURCE_SAVE_CONFIRMED'
+    },
+    headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},maxRedirects:0
+  });
+  assert(stale.status()>=400,'stale fingerprint advanced write unexpectedly succeeded');
+  console.log('P01_IA6_NATIVE_RESOURCE_STALE_CAS_DENIAL=PASS');
+  // Privacy escalation is tested only with synthetic data and current Owner
+  // password step-up; the server must prove the protected backup before commit.
+  const stepup=await ctx.request.post(origin+'/reauth.php',{
+    data:{password:process.env.P01_TEST_PASSWORD},
+    headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},maxRedirects:0
+  });
+  const stepupJSON=await stepup.json();
+  assert(stepup.status()===200&&stepupJSON.ok===true&&
+    typeof stepupJSON.csrf==='string','Owner recent authentication step-up failed');
+  const beforePublic=await ctx.request.get(origin+'/api.php?action=resource_inventory&surface=all&limit=1&id='+ids.bulk);
+  const beforeJSON=await beforePublic.json();
+  assert(beforeJSON.ok===true&&beforeJSON.rows?.[0]?.is_private===1,'pre-public fixture not private');
+  const promoted=await ctx.request.post(origin+'/api.php?action=resource_bulk_update',{
+    data:{operation:'public',confirmation:'BULK_PUBLIC_CONFIRMED',
+      entries:[{id:ids.bulk,updated_at:beforeJSON.rows[0].updated_at}]},
+    headers:{'Content-Type':'application/json','X-CSRF-Token':stepupJSON.csrf},
+    maxRedirects:0
+  });
+  const promotedJSON=await promoted.json().catch(()=>null);
+  assert(promoted.status()===200&&promotedJSON?.ok===true&&
+    promotedJSON.count===1&&promotedJSON.protected_backup_created===true,
+    'private-to-public bulk operation without protected backup or recent auth');
+  const afterPublic=await ctx.request.get(origin+'/api.php?action=resource_inventory&surface=all&limit=1&id='+ids.bulk);
+  const afterJSON=await afterPublic.json();
+  assert(afterJSON.ok===true&&afterJSON.rows?.[0]?.is_private===0,
+    'bulk public visibility did not persist');
+  console.log('P01_IA6_NATIVE_BULK_PUBLIC_RECENT_AUTH_AND_BACKUP=PASS');
  }finally{await browser.close();}
 })().catch(err=>{console.error(String(err.stack||err));process.exitCode=1;});
