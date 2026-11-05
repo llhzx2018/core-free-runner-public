@@ -1,0 +1,70 @@
+name: p01-ia6-disposable-recovery-temporary
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p01-ia6-disposable-recovery.yml']
+permissions: {contents: read}
+jobs:
+  recovery-and-rollback:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      TARGET_SHA: b5337f551c8c956756e5ffa0c934f33cddedfe16
+    steps:
+      - name: Checkout only temporary public-safe control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - name: Disconnected disposable backup restore and crash rollback
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd jq >/dev/null
+          ROOT="$(mktemp -d /tmp/p01-ia6-recovery.XXXXXXXX)"
+          DISASTER="/tmp/p01-ia6-disaster-parity-20261105"
+          INTERRUPTED="/tmp/p01-ia6-r11-20261105"
+          SERVER_PID=''
+          trap 'test -z "$SERVER_PID" || kill "$SERVER_PID" >/dev/null 2>&1 || true; rm -rf "$ROOT" "$DISASTER" "$INTERRUPTED"' EXIT
+          git clone -q --depth 1 --branch fix/p01-v247493-owner-dialog-save-ux \
+            "https://x-access-token:${READ_TOKEN}@github.com/llhzx2018/vf-start.git" "$ROOT/candidate"
+          git -C "$ROOT/candidate" remote set-url origin https://github.com/llhzx2018/vf-start.git
+          test "$(git -C "$ROOT/candidate" rev-parse HEAD)" = "$TARGET_SHA"
+          unset READ_TOKEN
+          echo "P01_IA6_RECOVERY_EXACT_SOURCE=$TARGET_SHA"
+          install_synthetic () {
+            local site="$1" port="$2" label="$3"
+            cp -a "$ROOT/candidate/src" "$site"
+            php -S "127.0.0.1:$port" -t "$site" >"$ROOT/php-$port.log" 2>&1 &
+            SERVER_PID=$!
+            local origin="http://127.0.0.1:$port" cookie="$ROOT/cookie-$port.txt"
+            for i in $(seq 1 70); do
+              if curl -fsS -c "$cookie" -b "$cookie" "$origin/setup.php" -o "$ROOT/setup-$port.html" 2>/dev/null; then break; fi
+              sleep 0.2
+            done
+            test -s "$ROOT/setup-$port.html"
+            local csrf
+            csrf="$(python3 -c 'import re,sys;s=open(sys.argv[1],encoding="utf8").read();m=re.search(r"name=\"setup_csrf\"\s+value=\"([^\"]+)\"",s);assert m;print(m.group(1))' "$ROOT/setup-$port.html")"
+            local pass="P01Synthetic-$port!"
+            curl -fsS -c "$cookie" -b "$cookie" -X POST "$origin/setup.php" \
+              --data-urlencode "setup_csrf=$csrf" \
+              --data-urlencode "site_title=$label" \
+              --data-urlencode "admin_password=$pass" \
+              --data-urlencode "admin_password_confirm=$pass" \
+              -o "$ROOT/install-$port.html"
+            (cd "$site" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+            kill "$SERVER_PID" >/dev/null 2>&1 || true
+            wait "$SERVER_PID" 2>/dev/null || true
+            SERVER_PID=''
+          }
+          install_synthetic "$DISASTER" 18681 "IA6 Disaster Synthetic Only"
+          VF_E2E_RUNTIME_ROOT="$DISASTER" VF_IA6_DISPOSABLE_ACK=IA6-DISASTER-DISPOSABLE-ONLY \
+            php "$ROOT/candidate/tests/integration/p01_ia6_disaster_roundtrip_disposable.php"
+          echo P01_IA6_DISASTER_RESTORE_MACHINE=PASS
+          install_synthetic "$INTERRUPTED" 18682 "IA6 Crash Synthetic Only"
+          VF_E2E_RUNTIME_ROOT="$INTERRUPTED" \
+            php "$ROOT/candidate/tests/integration/p01_ia6_interrupted_restore_disposable.php"
+          echo P01_IA6_INTERRUPTED_RESTORE_MACHINE=PASS
