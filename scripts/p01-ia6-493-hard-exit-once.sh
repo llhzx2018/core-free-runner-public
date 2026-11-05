@@ -5,7 +5,7 @@ test "$#" -eq 0
 test "$SOURCE" = '2.47.492'
 test "$VERSION" = '2.47.493'
 test -f "$REL/VF-Start-V$SOURCE-FULL.zip"
-test -f "$ART/VF_Start_V$VERSION_UPDATE.zip"
+test -f "$ART/VF_Start_V${VERSION}_UPDATE.zip"
 ROOT="$(mktemp -d /tmp/p01-ia6-hard-exit-XXXXXXXX)"
 pid=''
 cleanup(){
@@ -14,7 +14,7 @@ cleanup(){
 }
 trap cleanup EXIT
 unzip -q "$REL/VF-Start-V$SOURCE-FULL.zip" -d "$ROOT/site"
-unzip -q "$ART/VF_Start_V$VERSION_UPDATE.zip" -d "$ROOT/repair"
+unzip -q "$ART/VF_Start_V${VERSION}_UPDATE.zip" -d "$ROOT/repair"
 REPAIR="$ROOT/repair/repair-v$VERSION.php"
 test -f "$REPAIR"
 test -f "$ROOT/site/setup.php"
