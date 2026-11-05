@@ -96,30 +96,30 @@ class Tests(unittest.TestCase):
         import os
         with mock.patch.dict(os.environ,{
             "P07_CURRENT_CANDIDATE_READ_ONLY":"YES",
-            "P07_CURRENT_CANDIDATE_DB":"p07candidate123",
+            "P07_CURRENT_CANDIDATE_DB":"p07aaaaaaaaaa1",
             "P07_CURRENT_CANDIDATE_USER":"site_reader",
             "P07_CURRENT_CANDIDATE_PASSWORD":"LOCAL_ONLY_NOT_TO_PRINT"
         }):
-            value=m.current_candidate_auth("www3.m3u8.one","p07candidate123")
+            value=m.current_candidate_auth("www3.m3u8.one","p07aaaaaaaaaa1")
             self.assertEqual(value[:3],("127.0.0.1",3306,"site_reader"))
             self.assertEqual(value[3],"LOCAL_ONLY_NOT_TO_PRINT")
             self.assertNotIn("P07_CURRENT_CANDIDATE_PASSWORD",os.environ)
         with mock.patch.dict(os.environ,{},clear=True):
             with self.assertRaises(SystemExit) as ctx:
-                m.current_candidate_auth("www3.m3u8.one","p07candidate123")
+                m.current_candidate_auth("www3.m3u8.one","p07aaaaaaaaaa1")
             self.assertEqual(ctx.exception.code,13)
 
     def test_current_candidate_cannot_read_old_scratch_as_current(self):
         import os
         with mock.patch.dict(os.environ,{
             "P07_CURRENT_CANDIDATE_READ_ONLY":"YES",
-            "P07_CURRENT_CANDIDATE_DB":"p07candidate123",
+            "P07_CURRENT_CANDIDATE_DB":"p07aaaaaaaaaa1",
             "P07_CURRENT_CANDIDATE_USER":"site_reader",
             "P07_CURRENT_CANDIDATE_PASSWORD":"LOCAL_ONLY_NOT_TO_PRINT"
         }):
             for domain,db in (
                 ("www3.m3u8.one","p07scratch-abcdef123456"),
-                ("other.m3u8.one","p07candidate123")
+                ("other.m3u8.one","p07aaaaaaaaaa1")
             ):
                 with self.subTest(domain=domain,db=db):
                     with self.assertRaises(SystemExit):
