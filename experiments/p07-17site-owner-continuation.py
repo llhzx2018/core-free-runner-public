@@ -157,6 +157,70 @@ def read_manifest():
          'BUNDLE_MANIFEST_INVALID')
     return val
 
+def www3_native_export(pull,state,domain,db,remote):
+    """Fallback for a www3 source dump rejected by the old schema pre-parser.
+
+    Exports the SAME source database through the existing CloudPanel adapter.
+    Never imports SQL or writes source business tables. The file remains in
+    the original source task's root-private data staging directory.
+    """
+    must(domain=='www3.m3u8.one','FALLBACK_ONLY_WWW3')
+    must(state.get('migration_id')==JOBS[2][1] and
+         remote.startswith(pull.remote_staging_root(state)+'/owner-final-') and
+         re.fullmatch(r'/var/lib/vf-server-ops/pull-source/pull-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}/data/owner-final-[0-9a-f]{24}\.sql\.gz',remote),
+         'NATIVE_EXPORT_SOURCE_PATH_NOT_BOUND')
+    code=r"""
+import gzip,os,re,stat,sys
+from pathlib import Path
+import cloudpanel,inventory
+mid,domain,db,output=sys.argv[1:]
+base=Path('/var/lib/vf-server-ops/pull-source')/mid/'data'
+path=Path(output)
+if not (domain=='www3.m3u8.one' and
+        re.fullmatch(r'pull-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}',mid) and
+        re.fullmatch(r'[A-Za-z0-9._-]{1,64}',db) and
+        path.parent==base and
+        re.fullmatch(r'owner-final-[a-f0-9]{24}\.sql\.gz',path.name)):
+    raise SystemExit(21)
+try:
+    info=base.lstat()
+    if not (stat.S_ISDIR(info.st_mode) and info.st_uid==0 and
+            info.st_mode&0o077==0 and not base.is_symlink()):
+        raise SystemExit(22)
+    if path.exists() or path.is_symlink():raise SystemExit(23)
+    site=[r for r in inventory.build_manifest(Path('/')).get('sites',[])
+          if isinstance(r,dict) and r.get('domain')==domain]
+    if len(site)!=1 or site[0].get('mysql_databases')!=[db]:
+        raise SystemExit(24)
+    cloudpanel.export_database(db,path,clpctl='clpctl')
+    info=path.lstat()
+    if not (stat.S_ISREG(info.st_mode) and info.st_uid==0 and
+            info.st_size>100 and info.st_nlink==1):
+        raise SystemExit(25)
+    os.chmod(path,0o600)
+    with path.open('rb') as f:
+        if f.read(2)!=bytes([31,139]):raise SystemExit(26)
+except Exception:
+    raise SystemExit(27) from None
+print('WWW3_SOURCE_NATIVE_ARCHIVE_READY=YES')
+"""
+    runtime=state.get('source_runtime_path')
+    must(type(runtime) is str and runtime==(
+         '/var/lib/vf-server-ops/pull-source/'+state['migration_id']+'/runtime'),
+         'SOURCE_RUNTIME_PATH_UNVERIFIED')
+    command=shlex.join(['env','PYTHONDONTWRITEBYTECODE=1',
+         'PYTHONPATH='+runtime+'/lib','python3','-B','-c',code,
+         state['migration_id'],domain,db,remote])
+    try:
+        result=pull.source_remote(state['source'],command,timeout=3600,check=False)
+    except Exception:
+        raise Block('WWW3_SOURCE_NATIVE_CONNECTION_UNAVAILABLE') from None
+    must(result.returncode==0 and
+         result.stdout.strip()=='WWW3_SOURCE_NATIVE_ARCHIVE_READY=YES',
+         'WWW3_SOURCE_NATIVE_EXPORT_FAILED')
+    print('WWW3_SOURCE_NATIVE_EXPORT=PASS',flush=True)
+
+
 def staging(pull,sql,seen):
     must(os.geteuid()==0,'ROOT_REQUIRED')
     private_dir(BUNDLE_ROOT)
@@ -171,22 +235,52 @@ def staging(pull,sql,seen):
         if row:
             must(row['database']==db and local.is_file()
                  and digest(local)==row['sha256'],'PREVIOUS_STAGE_DRIFT')
+            must(row.get('validation_status','PASS')=='PASS',
+                 'PREVIOUS_STAGE_SQL_NOT_VERIFIED')
             print('DATABASE_STAGE_REUSED='+domain,flush=True)
             continue
         must(not local.exists() and not local.is_symlink(),'ARCHIVE_ALREADY_EXISTS')
         remote=pull.remote_staging_root(s)+'/owner-final-'+secrets.token_hex(12)+'.sql.gz'
         print('EXPORT_SOURCE_DATABASE='+domain,flush=True)
-        pull.source_export_database(s,db,remote)
+        try:
+            pull.source_export_database(s,db,remote)
+        except Exception as exc:
+            # The old source helper performs a strict SQL pre-parse. Its
+            # www3-specific rejection must not hide a valid CloudPanel dump.
+            # Do not fall back after SSH errors or for the other two sites.
+            why=str(exc)
+            must(domain=='www3.m3u8.one' and
+                 ('old-server MySQL export failed' in why or
+                  'SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA' in why),
+                 'SOURCE_EXPORT_FAILED_'+domain.replace('.','_').upper())
+            print('WWW3_SOURCE_PARSER_REJECTED_TRY_NATIVE_EXPORT=YES',flush=True)
+            # Do NOT overwrite any partial SQL archive left by a failed
+            # source helper; create a fresh, independent root-private export.
+            remote=pull.remote_staging_root(s)+'/owner-final-'+secrets.token_hex(12)+'.sql.gz'
+            www3_native_export(pull,s,domain,db,remote)
         print('TRANSFER_PRIVATE_ARCHIVE='+domain,flush=True)
         pull.pull_path(s['source'],remote,local,delete=False)
         os.chmod(local,0o600)
         must(local.is_file() and local.stat().st_size>100 and not local.is_symlink(),
              'TRANSFER_ARCHIVE_INVALID')
-        tables=sql.require_nonempty_source_schema(local)
+        # If the native dump is not understood, retain its bytes and SHA
+        # privately, but never label it verified or advance to an import.
+        try:
+            tables=sql.require_nonempty_source_schema(local)
+        except Exception:
+            m['sites'][domain]={
+                'database':db,'sha256':digest(local),
+                'size_bytes':local.stat().st_size,
+                'create_table_statements':0,'validation_status':'UNVERIFIED',
+                'remote_temp_retained':True,'import_status':'NOT_IMPORTED'}
+            safe_write(manifest_path(),m)
+            raise Block('SOURCE_SQL_SCHEMA_UNVERIFIED_'+
+                        domain.replace('.','_').upper()) from None
         must(tables>0,'SOURCE_SQL_SCHEMA_MISSING')
         m['sites'][domain]={'database':db,'sha256':digest(local),
                             'size_bytes':local.stat().st_size,
                             'create_table_statements':tables,
+                            'validation_status':'PASS',
                             'remote_temp_retained':True,'import_status':'NOT_IMPORTED'}
         safe_write(manifest_path(),m)
         print('SOURCE_DATABASE_SAVED='+domain,flush=True)
