@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
 import shlex
@@ -20,7 +21,7 @@ sys.dont_write_bytecode=True
 ROOT=Path(__file__).resolve().parent
 FILES=(
     ("p07-www3-restored-readback.py","a1ac6e2c6771ca8f2e8a55bcd7064ccc1f9cf47f"),
-    ("p07-www3-content-worker.py","6dd44a43357694ac39f203f33296206daf918187"),
+    ("p07-www3-content-worker.py","d42c99637679a123672f2b37d62fa2af327875e1"),
 )
 def stop(code):
     raise Blocked(code)
@@ -198,8 +199,137 @@ def compare():
     print("CUTOVER_ALLOWED=NO")
     return 0
 
+
+def compare_current_candidate():
+    """Compare OLD VPS source to CURRENT connected CP2 www3, never scratch.
+
+    Both SQL transactions are read-only and independently consistent, NOT
+    simultaneous or frozen. MATCH is advisory; no source/target DB writes.
+    """
+    if sys.argv[1:]!=["--compare-current-candidate-source-rows-read-only"]:
+        stop("EXPLICIT_CURRENT_CANDIDATE_READONLY_ARG_REQUIRED")
+    context_path,_=get_file(
+        "p07-pending-three-runtime-readonly.py",
+        "1d64c229c8886e34ae1fde15d24025680777d458")
+    spec=importlib.util.spec_from_file_location(
+        "p07_verified_current_candidate_context",context_path)
+    scope=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(scope)
+    source,panel,transactions,config,identity=scope.www3_context()
+    relation=scope.candidate_relation(
+        source,panel,transactions,config,identity,0)
+    if not (relation["JOURNAL_STATUS"]=="CONNECTED_NOT_CUTOVER_READY"
+            and relation["CURRENT_CONFIG_READBACK"]=="CANDIDATE_MATCH"
+            and relation["CANDIDATE_DB_IN_CP2_SITE_PANEL"]=="YES"
+            and relation["SOURCE_DB_IN_CP2_PANEL"]=="NO"
+            and relation["UNCLASSIFIED_CP2_SITE_DB_COUNT"]==0):
+        stop("CURRENT_CANDIDATE_NOT_JOURNAL_BOUND")
+    target_db,target_user,private_pw=scope.www3_candidate_credentials(
+        source,transactions,identity)
+    if (target_db not in panel["mysql_databases"]
+            or target_db in source["mysql_databases"]):
+        stop("CURRENT_CANDIDATE_DB_IDENTITY_CHANGED")
+    registry=scope.pinned(scope.BASE,scope.BASE_BLOB,"BASE")
+    state=registry.secure_state(
+        scope.ROOT/source["migration_id"]/"state.json")
+    remote_runtime=state.get("source_runtime_path")
+    if (state.get("migration_id")!=source["migration_id"]
+            or state.get("target_server_identity")!=identity
+            or state.get("source_runtime_frozen") is not False
+            or state.get("dns_changed_by_p07") is not False
+            or state.get("cutover_prohibited") is not True
+            or remote_runtime!=(
+                "/var/lib/vf-server-ops/pull-source/"
+                +source["migration_id"]+"/runtime")):
+        stop("CURRENT_CANDIDATE_SOURCE_RUNTIME_CHANGED")
+    original_db=source.get("mysql_databases")
+    if (type(original_db) is not list or len(original_db)!=1
+            or not re.fullmatch("[A-Za-z0-9._-]{1,64}",original_db[0])):
+        stop("CURRENT_CANDIDATE_ORIGINAL_DB_CHANGED")
+    sys.path.insert(0,"/opt/vf-server-ops/lib")
+    import server_migration_pull as migration
+    if migration.target_identity()!=identity:
+        stop("CURRENT_CANDIDATE_CP2_TARGET_IDENTITY_CHANGED")
+    env={**os.environ,
+         "PYTHONDONTWRITEBYTECODE":"1",
+         "P07_CURRENT_CANDIDATE_READ_ONLY":"YES",
+         "P07_CURRENT_CANDIDATE_DB":target_db,
+         "P07_CURRENT_CANDIDATE_USER":target_user,
+         "P07_CURRENT_CANDIDATE_PASSWORD":private_pw}
+    try:
+        local=subprocess.run(
+            ["python3","-B",str(WORKER),"target-current",
+             "www3.m3u8.one",target_db],
+            stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,timeout=1900,check=False,text=True,
+            env=env)
+    except (OSError,subprocess.SubprocessError,UnicodeError):
+        stop("CURRENT_CANDIDATE_READONLY_WORKER_UNAVAILABLE")
+    if local.returncode:
+        stop("CURRENT_CANDIDATE_READONLY_WORKER_FAILED")
+    current,cmap=parsed(local.stdout,"TARGET")
+    if current["SCANNED_TABLES"]!=157:
+        stop("CURRENT_CANDIDATE_157_TABLE_SCOPE_CHANGED")
+    try: source_code=WORKER_CODE.decode("utf-8","strict")
+    except UnicodeError:stop("CURRENT_WORKER_CODE_ENCODING_INVALID")
+    remote=shlex.join([
+        "env","PYTHONDONTWRITEBYTECODE=1",
+        "PYTHONPATH="+remote_runtime+"/lib",
+        "python3","-B","-c",source_code,
+        "source","www3.m3u8.one",original_db[0]])
+    try:
+        response=migration.source_remote(state["source"],remote,
+            timeout=1900,check=False)
+    except Exception:
+        stop("CURRENT_CANDIDATE_OLD_VPS_READONLY_UNAVAILABLE")
+    if response.returncode:
+        stop("CURRENT_CANDIDATE_OLD_VPS_READONLY_FAILED")
+    old,omap=parsed(response.stdout,"SOURCE")
+    if old["SCANNED_TABLES"]!=157:
+        stop("CURRENT_CANDIDATE_OLD_VPS_157_TABLE_SCOPE_CHANGED")
+    common=set(omap)&set(cmap)
+    only_source=len(set(omap)-set(cmap))
+    only_target=len(set(cmap)-set(omap))
+    changed_count=sum(omap[k][0]!=cmap[k][0] for k in common)
+    changed_columns=sum(omap[k][2]!=cmap[k][2] for k in common)
+    changed_values=sum(omap[k][1]!=cmap[k][1] for k in common)
+    column_value_deltas=sum(omap[k][3]!=cmap[k][3] for k in common)
+    same=(not any((only_source,only_target,changed_count,
+                   changed_columns,changed_values,column_value_deltas))
+          and old==current)
+    print("PROBE=P07_WWW3_CURRENT_CONNECTED_CANDIDATE_SOURCE_CONTENT")
+    print("SITE=www3.m3u8.one")
+    print("TARGET_DATABASE=JOURNAL_BOUND_CONNECTED_CANDIDATE_NOT_SCRATCH")
+    for name,value in (
+        ("SOURCE_TABLES",old["SCANNED_TABLES"]),
+        ("CANDIDATE_TABLES",current["SCANNED_TABLES"]),
+        ("SOURCE_ROWS",old["SCANNED_ROWS"]),
+        ("CANDIDATE_ROWS",current["SCANNED_ROWS"]),
+        ("SOURCE_ONLY_TABLES",only_source),
+        ("CANDIDATE_ONLY_TABLES",only_target),
+        ("ROW_COUNT_DIFF_TABLES",changed_count),
+        ("COLUMN_IDENTITY_DIFF_TABLES",changed_columns),
+        ("ROW_VALUE_DIFF_TABLES",changed_values),
+        ("COLUMN_VALUE_DISTRIBUTION_DIFF_TABLES",column_value_deltas)):
+        print(name+"="+str(value))
+    print("LIVE_CONTENT_FINGERPRINT="+(
+        "MATCH_ADVISORY_ONLY" if same else "DIFFER_ADVISORY"))
+    print("BOTH_HOSTS_READ_ONLY_TRANSACTIONS=YES")
+    print("SNAPSHOTS_SIMULTANEOUS=NO")
+    print("SOURCE_WRITES_MAY_CONTINUE=YES")
+    print("SOURCE_EXPORT_SNAPSHOT_PARITY=NOT_VERIFIED")
+    print("DYNAMIC_SQL_EFFECTS_FULLY_VERIFIED=NO")
+    print("DB_OR_SITE_CONFIG_WRITES=NONE")
+    print("DNS_OR_RUNTIME_WRITES=NONE")
+    print("CUTOVER_ALLOWED=NO")
+    return 0
+
 if __name__=="__main__":
-    try:raise SystemExit(compare())
+    try:
+        raise SystemExit(
+            compare_current_candidate()
+            if sys.argv[1:]==["--compare-current-candidate-source-rows-read-only"]
+            else compare())
     except (Blocked,readback.Blocked,base.Stop) as exc:
         print("BLOCKED="+str(exc))
         raise SystemExit(13) from None
