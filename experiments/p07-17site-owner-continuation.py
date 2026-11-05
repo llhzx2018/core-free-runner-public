@@ -378,9 +378,19 @@ def sql_safety(sql,p):
                  p,verify,known_safe_lines=set()),
                  'SQL_NONLOCAL_EFFECTS_STOP_IMPORT')
             print('DYNAMIC_SQL=NO_UNPROVEN_CONTROL_GROUPS',flush=True)
-    except (module.Stop,sql.AdvisoryDiagnosticUnavailable,
+    except module.Stop as exc:
+        reason=str(exc)
+        allowed={
+            'DYNAMIC_SOURCE_ASSIGNMENT_IDENTITY_CHANGED',
+            'DYNAMIC_SOURCE_GROUP_COUNT_CHANGED',
+            'DYNAMIC_BRANCH_STILL_UNSAFE',
+            'DYNAMIC_GROUP_SEQUENCE_UNPROVEN',
+        }
+        raise Block(reason if reason in allowed else
+                    'DYNAMIC_SQL_EXACT_PROOF_FAILED_STOP_IMPORT') from None
+    except (sql.AdvisoryDiagnosticUnavailable,
             verify.RestoreVerifyError,ValueError):
-        raise Block('DYNAMIC_SQL_EXACT_PROOF_FAILED_STOP_IMPORT') from None
+        raise Block('DYNAMIC_SQL_INPUT_OR_GRAMMAR_UNVERIFIED') from None
     with gzip.open(p,'rb') as f:
         for line in f:
             must(len(line)<16*1024*1024,'SQL_LINE_TOO_LARGE')
