@@ -335,6 +335,132 @@ def stage_site_files(pull,seen):
     print('CP2_ACTIVE_SITE_FILES=UNCHANGED')
     print('LIVE_SOURCE_FILE_PARITY=NOT_VERIFIED')
 
+def warm_stage_remaining_site_files(pull, seen):
+    """Pre-copy the 14 already registered sites into PRIVATE, inactive CP2.
+
+    The 3 pending site roots are reused from their existing verified stage.
+    This is live-source warm staging only, NOT a frozen or active-site sync.
+    Existing CloudPanel roots and all existing databases remain untouched.
+    """
+    must(len(seen)==17 and set(PENDING).issubset(seen),
+         'WARM_SITE_SCOPE_CHANGED')
+    private_dir(BUNDLE_ROOT)
+    private_dir(BUNDLE_ROOT/'sites')
+    m=read_manifest()
+    must(m.get('phase') in ('STAGED','ISOLATED_RESTORING','ISOLATED_RESTORED'),
+         'WARM_DATABASE_ARCHIVES_MISSING')
+    for d in PENDING:
+        row=m.get('sites',{}).get(d)
+        dest=BUNDLE_ROOT/'sites'/hashlib.sha256(d.encode()).hexdigest()[:16]
+        must(type(row) is dict and row.get('files_status')=='TRANSFERRED'
+             and dest.is_dir() and not dest.is_symlink()
+             and any(dest.iterdir()),
+             'WARM_THREE_ORIGINAL_SITE_ROOTS_UNVERIFIED')
+    others=sorted(set(seen)-set(PENDING))
+    must(len(others)==14,'WARM_FOURTEEN_SITE_SCOPE_CHANGED')
+    warm=m.setdefault('warm_sites',{})
+    must(type(warm) is dict and set(warm).issubset(others),
+         'WARM_SITE_MANIFEST_SCOPE_CHANGED')
+    source_need=0
+    for d in others:
+        s,site=seen[d]
+        path=site['site_root']
+        identity=hashlib.sha256(
+            (s['migration_id']+'\x00'+d+'\x00'+path).encode()
+        ).hexdigest()
+        dest=BUNDLE_ROOT/'sites'/hashlib.sha256(d.encode()).hexdigest()[:16]
+        row=warm.get(d)
+        if row is not None:
+            must(type(row) is dict and row.get('identity_sha256')==identity,
+                 'WARM_ORIGINAL_OWNER_IDENTITY_CHANGED')
+            must(row.get('status')=='TRANSFERRED',
+                 'WARM_PARTIAL_COPY_NO_AUTO_RETRY')
+            must(dest.is_dir() and not dest.is_symlink() and any(dest.iterdir()),
+                 'WARM_PREVIOUS_COPY_MISSING')
+            continue
+        must(not dest.exists() and not dest.is_symlink(),
+             'WARM_DESTINATION_EXISTS_NO_OVERWRITE')
+        response=pull.source_remote(
+            s['source'],'du -sk -- '+shlex.quote(path),timeout=600,check=False)
+        must(response.returncode==0 and
+             re.fullmatch(r'[0-9]+\s+.+',response.stdout.strip()),
+             'WARM_SOURCE_SIZE_UNVERIFIED')
+        source_need+=int(response.stdout.split()[0])*1024
+    free=shutil.disk_usage(BUNDLE_ROOT).free
+    must(free>=int(source_need*1.25)+1024*1024*1024,
+         'WARM_CP2_DISK_HEADROOM_INSUFFICIENT')
+    for d in others:
+        s,site=seen[d]
+        if d in warm:
+            print('WARM_SITE_REUSED='+d,flush=True)
+            continue
+        path=site['site_root']
+        identity=hashlib.sha256(
+            (s['migration_id']+'\x00'+d+'\x00'+path).encode()
+        ).hexdigest()
+        dest=BUNDLE_ROOT/'sites'/hashlib.sha256(d.encode()).hexdigest()[:16]
+        must(not dest.exists() and not dest.is_symlink(),
+             'WARM_STAGE_CONCURRENT_DESTINATION')
+        warm[d]={
+            'identity_sha256':identity,
+            'status':'TRANSFER_IN_PROGRESS',
+            'destination':'PRIVATE_INACTIVE',
+            'frozen_snapshot':False,
+        }
+        safe_write(manifest_path(),m)
+        private_dir(dest)
+        print('WARM_TRANSFER_SITE='+d,flush=True)
+        pull.pull_path(s['source'],path.rstrip('/')+'/',dest,delete=False)
+        must(dest.is_dir() and not dest.is_symlink() and any(dest.iterdir()),
+             'WARM_SITE_COPY_EMPTY')
+        warm[d]['status']='TRANSFERRED'
+        safe_write(manifest_path(),m)
+        print('WARM_SITE_STAGED='+d,flush=True)
+    print('WARM_FOURTEEN_SITE_FILE_ROOTS=14/14_INACTIVE',flush=True)
+    print('TOTAL_INACTIVE_SITE_FILE_ROOTS=17/17',flush=True)
+    print('LIVE_SOURCE_FILE_PARITY=NOT_VERIFIED',flush=True)
+    print('EXISTING_CP2_SITE_FILES=UNCHANGED',flush=True)
+    print('EXISTING_CP2_DATABASES=UNCHANGED',flush=True)
+    print('SOURCE_BUSINESS_WRITES=NONE',flush=True)
+    print('DNS_CHANGED=NO',flush=True)
+    print('CUTOVER_READY=NO',flush=True)
+
+
+def verify_warm_site_files(seen):
+    """Local-only readback of all inactive roots; no source network or writes."""
+    must(len(seen)==17 and set(PENDING).issubset(seen),
+         'WARM_SITE_SCOPE_CHANGED')
+    m=read_manifest()
+    warm=m.get('warm_sites',{})
+    must(type(warm) is dict and len(warm)==14,
+         'WARM_FOURTEEN_COPY_RECEIPTS_MISSING')
+    count=0
+    for d in sorted(seen):
+        s,site=seen[d]
+        dest=BUNDLE_ROOT/'sites'/hashlib.sha256(d.encode()).hexdigest()[:16]
+        must(dest.is_dir() and not dest.is_symlink() and any(dest.iterdir()),
+             'WARM_SITE_PRIVATE_COPY_MISSING')
+        if d in PENDING:
+            must(m['sites'][d].get('files_status')=='TRANSFERRED',
+                 'WARM_THREE_PENDING_FILE_RECEIPTS_MISSING')
+        else:
+            owner=hashlib.sha256(
+                (s['migration_id']+'\x00'+d+'\x00'+site['site_root']).encode()
+            ).hexdigest()
+            row=warm.get(d)
+            must(type(row) is dict
+                 and row.get('identity_sha256')==owner
+                 and row.get('status')=='TRANSFERRED'
+                 and row.get('frozen_snapshot') is False,
+                 'WARM_SITE_ORIGINAL_OWNER_RECEIPT_INVALID')
+        count+=1
+    print('WARM_INACTIVE_SITE_ROOTS_VERIFIED='+str(count)+'/17',flush=True)
+    print('FINAL_FROZEN_FILE_PARITY=NOT_VERIFIED',flush=True)
+    print('ACTIVE_CP2_SITE_FILES=UNCHANGED',flush=True)
+    print('OLD_VPS_BUSINESS_WRITES=NONE',flush=True)
+    print('CUTOVER_READY=NO',flush=True)
+
+
 def sql_safety(sql,p):
     """Prove bounded legacy session/read guards before any database writes."""
     import importlib.util
@@ -803,7 +929,7 @@ def verify_stage(sql):
 
 def main():
     p=argparse.ArgumentParser(description='P07 17-site owner migration continuation on CP2')
-    p.add_argument('mode',choices=['plan','stage','verify-stage','restore-new-db','continue-safe','restore-quarantine','verify-imports'],
+    p.add_argument('mode',choices=['plan','stage','verify-stage','warm-stage-14','verify-warm','restore-new-db','continue-safe','restore-quarantine','verify-imports'],
                    help='plan: read-only; stage: export pending DBs; restore-new-db: fresh DBs only')
     p.add_argument('--site',choices=PENDING,
                    help='Limit isolated DB import to one of the 3 pending sites')
@@ -819,6 +945,15 @@ def main():
         staging(pull,sql,seen)
         stage_site_files(pull,seen)
     elif a.mode=='verify-stage':verify_stage(sql)
+    elif a.mode=='warm-stage-14':
+        must(not a.site and not a.confirm_new_databases,
+             'WARM_SITE_FILES_ONLY_NO_DB_WRITES')
+        source_ping(pull,seen)
+        warm_stage_remaining_site_files(pull,seen)
+    elif a.mode=='verify-warm':
+        must(not a.site and not a.confirm_new_databases,
+             'WARM_READONLY_ONLY')
+        verify_warm_site_files(seen)
     elif a.mode=='verify-imports':
         must(not a.site and not a.confirm_new_databases,
              'READONLY_VERIFICATION_ONLY')
