@@ -703,6 +703,87 @@ def restore_two_quarantined_static(cloud,sql,lifecycle,seen):
         raise Block('QUARANTINE_PARTIAL_REVIEW_REQUIRED')
 
 
+def verify_isolated_imports(pull,cloud,sql,seen):
+    """Read-only DB export + logical comparison of the two static copies.
+
+    The two databases contain the quarantine input with 13 guarded SQL
+    control lines omitted. Even a full copy/export match is never equivalent
+    to original-source SQL semantics, a final frozen source snapshot, or
+    17-site cutover approval.
+    """
+    must(BUNDLE_ROOT.is_dir() and not BUNDLE_ROOT.is_symlink(),
+         'PRIVATE_STAGE_MISSING')
+    m=read_manifest()
+    expected={'ilovem3u8.kewaro.com':42,'unzip.kewaro.com':12}
+    forbidden_dbs={
+        db for _state,site in seen.values()
+        for db in site['mysql_databases']
+    }
+    passed=0
+    for domain,table_count in expected.items():
+        row=m['sites'].get(domain)
+        if not isinstance(row,dict):
+            print('ISOLATED_VERIFY_BLOCKED='+domain+':MANIFEST_MISSING',flush=True)
+            continue
+        if row.get('quarantine_status')!='IMPORTED_STATIC_UNVERIFIED':
+            print('ISOLATED_VERIFY_BLOCKED='+domain+':IMPORT_NOT_RECORDED',flush=True)
+            continue
+        iso=row.get('quarantine_database')
+        if (type(iso) is not str or not re.fullmatch(r'[A-Za-z0-9]{1,64}',iso)
+                or iso in forbidden_dbs):
+            print('ISOLATED_VERIFY_BLOCKED='+domain+':DB_IDENTITY_UNSAFE',flush=True)
+            continue
+        token=hashlib.sha256(domain.encode()).hexdigest()[:16]
+        original=BUNDLE_ROOT/(token+'.sql.gz')
+        transformed=BUNDLE_ROOT/(token+'.quarantine.sql.gz')
+        if (not original.is_file() or original.is_symlink()
+                or not transformed.is_file() or transformed.is_symlink()
+                or digest(original)!=row.get('sha256')
+                or digest(original)!=row.get('quarantine_original_sha256')
+                or digest(transformed)!=row.get('quarantine_sha256')):
+            print('ISOLATED_VERIFY_BLOCKED='+domain+':ARCHIVE_CHANGED',flush=True)
+            continue
+        try:
+            before=sql.require_nonempty_source_schema(transformed)
+            must(before==table_count,
+                 'SOURCE_STATIC_TABLE_COUNT_CHANGED')
+            with tempfile.TemporaryDirectory(prefix='p07-verify-',dir=BUNDLE_ROOT) as folder:
+                output=Path(folder)/'target.sql.gz'
+                cloud.export_database(iso,output,clpctl='clpctl')
+                must(output.is_file() and not output.is_symlink(),
+                     'ISOLATED_DB_EXPORT_UNAVAILABLE')
+                after=sql.require_nonempty_source_schema(output)
+                print('ISOLATED_SITE='+domain,flush=True)
+                print('STATIC_SOURCE_TABLES='+str(before),flush=True)
+                print('RESTORED_TARGET_TABLES='+str(after),flush=True)
+                must(before==after,
+                     'ISOLATED_TABLE_COUNT_MISMATCH')
+                mode=pull.compare_database_dumps(transformed,output)
+                allowed={
+                    'CANONICAL_SQL_EXACT',
+                    'CROSS_ENGINE_GUARDED_SESSION_SQL_EXACT',
+                    'CROSS_ENGINE_KNOWN_DUMP_FORMAT_SQL_EXACT',
+                    'CROSS_ENGINE_LOGICAL_CONTENT',
+                }
+                must(mode in allowed,'SQL_PARITY_MODE_UNRECOGNIZED')
+                print('STATIC_COPY_EXPORT_PARITY='+mode,flush=True)
+                passed+=1
+        except Exception:
+            # Private DB dumps/SQL/errors can contain secrets or user data.
+            # Never print raw exception strings or the name of the new DB.
+            print('ISOLATED_VERIFY_BLOCKED='+domain+':PARITY_NOT_PROVEN',
+                  flush=True)
+    print('ISOLATED_STATIC_PARITY_VERIFIED='+str(passed)+'/2',flush=True)
+    print('ORIGINAL_SOURCE_SQL_EFFECTS=NOT_PROVEN',flush=True)
+    print('FROZEN_SOURCE_DATABASE_PARITY=NOT_VERIFIED',flush=True)
+    print('EXISTING_CP2_DB_WRITES=NONE',flush=True)
+    print('SOURCE_BUSINESS_WRITES=NONE',flush=True)
+    print('APP_CONFIG_WRITES=NONE',flush=True)
+    print('DNS_CHANGED=NO',flush=True)
+    print('CUTOVER_READY=NO',flush=True)
+    if passed!=2:raise Block('ISOLATED_STATIC_PARITY_NOT_PROVEN')
+
+
 def verify_stage(sql):
     m=read_manifest()
     must(m.get('phase') in ('STAGED','ISOLATED_RESTORING','ISOLATED_RESTORED'),
@@ -722,7 +803,7 @@ def verify_stage(sql):
 
 def main():
     p=argparse.ArgumentParser(description='P07 17-site owner migration continuation on CP2')
-    p.add_argument('mode',choices=['plan','stage','verify-stage','restore-new-db','continue-safe','restore-quarantine'],
+    p.add_argument('mode',choices=['plan','stage','verify-stage','restore-new-db','continue-safe','restore-quarantine','verify-imports'],
                    help='plan: read-only; stage: export pending DBs; restore-new-db: fresh DBs only')
     p.add_argument('--site',choices=PENDING,
                    help='Limit isolated DB import to one of the 3 pending sites')
@@ -738,6 +819,10 @@ def main():
         staging(pull,sql,seen)
         stage_site_files(pull,seen)
     elif a.mode=='verify-stage':verify_stage(sql)
+    elif a.mode=='verify-imports':
+        must(not a.site and not a.confirm_new_databases,
+             'READONLY_VERIFICATION_ONLY')
+        verify_isolated_imports(pull,cloud,sql,seen)
     elif a.mode=='continue-safe':
         must(a.confirm_new_databases,'EXPLICIT_NEW_DB_PERMISSION_REQUIRED')
         must(not a.site,'CONTINUE_SAFE_SCOPE_FIXED_TWO_SITES')
