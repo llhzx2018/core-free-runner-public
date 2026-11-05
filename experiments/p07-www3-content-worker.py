@@ -89,6 +89,26 @@ def target_auth(domain,db):
         block("TARGET_PRIVATE_CREDENTIAL_UNVERIFIED")
     return "127.0.0.1",3306,user,password
 
+
+def current_candidate_auth(domain,db):
+    """Only for the already journal-bound CP2 candidate, never old scratch.
+
+    Credentials arrive from the parent's verified private CloudPanel receipt
+    in the *child environment*. Never put passwords in argv or on stdout.
+    """
+    if domain!="www3.m3u8.one" or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}",db):
+        block("CURRENT_TARGET_SITE_OR_DB_INVALID")
+    if os.environ.get("P07_CURRENT_CANDIDATE_READ_ONLY")!="YES":
+        block("CURRENT_TARGET_EXPLICIT_READONLY_SCOPE_REQUIRED")
+    user=os.environ.pop("P07_CURRENT_CANDIDATE_USER","")
+    pw=os.environ.pop("P07_CURRENT_CANDIDATE_PASSWORD","")
+    bound_db=os.environ.pop("P07_CURRENT_CANDIDATE_DB","")
+    if (bound_db!=db or not re.fullmatch(r"[A-Za-z0-9_]{1,64}",user)
+            or not 16<=len(pw)<=1024
+            or any(x in pw for x in ("\r","\n","\0"))):
+        block("CURRENT_TARGET_PRIVATE_CREDENTIAL_BINDING_INVALID")
+    return "127.0.0.1",3306,user,pw
+
 def sql_read(args,query,timeout=60):
     try:
         p=subprocess.run(args+["--execute",query],stdin=subprocess.DEVNULL,
@@ -214,11 +234,12 @@ def fingerprint(args,db,tables,cols):
     return answers,total
 
 def main():
-    if os.geteuid()!=0 or len(sys.argv)!=4 or sys.argv[1] not in ("source","target"):
+    if os.geteuid()!=0 or len(sys.argv)!=4 or sys.argv[1] not in ("source","target","target-current"):
         block("EXPLICIT_ROOT_MODE_DOMAIN_DATABASE_REQUIRED")
     mode,domain,db=sys.argv[1:]
     if mode=="source":host,port,user,pw=source_auth(domain,db)
-    else:host,port,user,pw=target_auth(domain,db)
+    elif mode=="target":host,port,user,pw=target_auth(domain,db)
+    else:host,port,user,pw=current_candidate_auth(domain,db)
     cli=shutil.which("mariadb") or shutil.which("mysql")
     if not cli:block("SQL_CLIENT_UNAVAILABLE")
     with tempfile.TemporaryDirectory(prefix="p07-content-",dir="/root") as directory:
@@ -234,7 +255,7 @@ def main():
               "--batch","--skip-column-names"]
         tables,cols=schema(args,db)
         rows,total=fingerprint(args[1:],db,tables,cols)
-    print("MODE="+mode.upper(),flush=True)
+    print("MODE="+("TARGET" if mode=="target-current" else mode.upper()),flush=True)
     print("SCANNED_TABLES="+str(len(tables)),flush=True)
     print("SCANNED_COLUMNS="+str(sum(len(v) for v in cols.values())),flush=True)
     print("SCANNED_ROWS="+str(total),flush=True)
