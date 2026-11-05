@@ -590,7 +590,7 @@ def verify_stage(sql):
 
 def main():
     p=argparse.ArgumentParser(description='P07 17-site owner migration continuation on CP2')
-    p.add_argument('mode',choices=['plan','stage','verify-stage','restore-new-db'],
+    p.add_argument('mode',choices=['plan','stage','verify-stage','restore-new-db','continue-safe'],
                    help='plan: read-only; stage: export pending DBs; restore-new-db: fresh DBs only')
     p.add_argument('--site',choices=PENDING,
                    help='Limit isolated DB import to one of the 3 pending sites')
@@ -606,6 +606,10 @@ def main():
         staging(pull,sql,seen)
         stage_site_files(pull,seen)
     elif a.mode=='verify-stage':verify_stage(sql)
+    elif a.mode=='continue-safe':
+        must(a.confirm_new_databases,'EXPLICIT_NEW_DB_PERMISSION_REQUIRED')
+        must(not a.site,'CONTINUE_SAFE_SCOPE_FIXED_TWO_SITES')
+        continue_safe_imports(cloud,sql,lifecycle,seen)
     else:
         must(a.confirm_new_databases,'EXPLICIT_NEW_DB_PERMISSION_REQUIRED')
         restore_isolated(cloud,sql,lifecycle,seen,(a.site,) if a.site else PENDING)
