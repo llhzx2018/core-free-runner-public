@@ -133,5 +133,111 @@ class Tests(unittest.TestCase):
         self.assertIn("ROW_COUNT_DIFFERING_TABLES=1",out)
         self.assertIn("SOURCE_MAY_CHANGE_AFTER_READ=YES",out)
 
+
+def current_worker_reply(mode,changed=False):
+    """Synthetic 157-table read-only fingerprints; no server or real SQL."""
+    rows={}
+    for i in range(157):
+        table=hashlib.sha256(("wp_test_"+str(i)).encode()).hexdigest()
+        column=hashlib.sha256(b"id").hexdigest()
+        value=("e" if changed and i==3 else "b")*64
+        rows[table]=[1,value,"c"*64,{column:"d"*64}]
+    return "\n".join((
+        "MODE="+mode,
+        "SCANNED_TABLES=157",
+        "SCANNED_COLUMNS=157",
+        "SCANNED_ROWS=157",
+        "ROW_FINGERPRINTS="+json.dumps(rows,sort_keys=True),
+        "READ_ONLY_TRANSACTION=YES",
+        "CONTENT_FINGERPRINT_NOT_SNAPSHOT_PARITY=YES",
+    ))+"\n"
+
+
+class CurrentCandidateTests(unittest.TestCase):
+    def run_current(self,*,different=False,relation_status="CONNECTED_NOT_CUTOVER_READY"):
+        mid="pull-20261102T005644Z-7178c7d5"
+        db="p07aaaaaaaaaa1"
+        src={"migration_id":mid,"mysql_databases":["www3data"]}
+        panel={"mysql_databases":[db]}
+        state={"migration_id":mid,"target_server_identity":"cp2",
+               "source_runtime_frozen":False,
+               "dns_changed_by_p07":False,
+               "cutover_prohibited":True,
+               "source_runtime_path":"/var/lib/vf-server-ops/pull-source/"+mid+"/runtime",
+               "source":{"host":"old.example.test"}}
+        relation={"JOURNAL_STATUS":relation_status,
+                  "CURRENT_CONFIG_READBACK":"CANDIDATE_MATCH",
+                  "CANDIDATE_DB_IN_CP2_SITE_PANEL":"YES",
+                  "SOURCE_DB_IN_CP2_PANEL":"NO",
+                  "UNCLASSIFIED_CP2_SITE_DB_COUNT":0}
+        scope=types.SimpleNamespace(
+            www3_context=lambda:(src,panel,Path("/tmp/private"),Path("/tmp/config"),
+                                 "cp2"),
+            candidate_relation=lambda *args:relation,
+            www3_candidate_credentials=lambda *args:(
+                db,"p07u888888881","PASSWORD_NEVER_ECHO"),
+            pinned=lambda *args:types.SimpleNamespace(
+                secure_state=lambda *args:state),
+            BASE=Path("unused"),BASE_BLOB="unused",ROOT=Path("/tmp"))
+        remote_mod=types.ModuleType("server_migration_pull")
+        remote_mod.target_identity=lambda:"cp2"
+        calls=[]
+        def source_remote(source,cmd,timeout,check):
+            calls.append(("remote",source,cmd,timeout,check))
+            return subprocess.CompletedProcess([],0,
+                current_worker_reply("SOURCE",different),"")
+        remote_mod.source_remote=source_remote
+        def candidate_run(argv,**kwargs):
+            calls.append(("local",argv,kwargs))
+            return subprocess.CompletedProcess([],0,
+                current_worker_reply("TARGET"),"")
+        output=io.StringIO()
+        with mock.patch.object(sys,"argv",[str(MAIN),
+            "--compare-current-candidate-source-rows-read-only"]), \
+             mock.patch.object(m,"current_candidate_context",return_value=scope), \
+             mock.patch.dict(sys.modules,{"server_migration_pull":remote_mod}), \
+             mock.patch.object(m.subprocess,"run",side_effect=candidate_run), \
+             mock.patch.object(m.readback,"preflight") as scratch, \
+             contextlib.redirect_stdout(output):
+            if relation_status!="CONNECTED_NOT_CUTOVER_READY":
+                with self.assertRaisesRegex(
+                        m.Blocked,"CURRENT_CANDIDATE_NOT_JOURNAL_BOUND"):
+                    m.compare_current_candidate()
+                self.assertEqual(calls,[])
+                scratch.assert_not_called()
+                return None
+            self.assertEqual(m.compare_current_candidate(),0)
+            scratch.assert_not_called()
+        local=[c for c in calls if c[0]=="local"]
+        remote=[c for c in calls if c[0]=="remote"]
+        self.assertEqual(len(local),1)
+        self.assertEqual(len(remote),1)
+        self.assertEqual(local[0][1][3],"target-current")
+        self.assertEqual(local[0][2]["env"]["P07_CURRENT_CANDIDATE_PASSWORD"],
+                         "PASSWORD_NEVER_ECHO")
+        self.assertNotIn("PASSWORD_NEVER_ECHO",repr(local[0][1]))
+        self.assertNotIn("PASSWORD_NEVER_ECHO",remote[0][2])
+        result=output.getvalue()
+        self.assertIn("CANDIDATE_TABLES=157",result)
+        self.assertIn("SOURCE_TABLES=157",result)
+        self.assertNotIn("PASSWORD_NEVER_ECHO",result)
+        self.assertNotIn("wp_test_",result)
+        self.assertIn("CUTOVER_ALLOWED=NO",result)
+        self.assertIn("SOURCE_EXPORT_SNAPSHOT_PARITY=NOT_VERIFIED",result)
+        self.assertIn("SNAPSHOTS_SIMULTANEOUS=NO",result)
+        return result
+
+    def test_current_candidate_identical_values_never_cutover(self):
+        text=self.run_current()
+        self.assertIn("LIVE_CONTENT_FINGERPRINT=MATCH_ADVISORY_ONLY",text)
+
+    def test_current_candidate_changed_values_are_detected(self):
+        text=self.run_current(different=True)
+        self.assertIn("LIVE_CONTENT_FINGERPRINT=DIFFER_ADVISORY",text)
+        self.assertIn("ROW_VALUE_DIFF_TABLES=1",text)
+
+    def test_unverified_connection_never_runs_source_or_sql(self):
+        self.assertIsNone(self.run_current(relation_status="INTENT_RESERVED"))
+
 if __name__=="__main__":
     unittest.main()
