@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 test "$#" -eq 1
 candidate="$(cd "$1" && pwd)"
-test "\${P01_TEST_ORIGIN:-}" = 'http://127.0.0.1:18631'
+test "${P01_TEST_ORIGIN:-}" = 'http://127.0.0.1:18631'
 test -f "$candidate/src/assets/frontstage-resource-advanced.js"
 test -f "$candidate/src/assets/frontstage-inventory-bulk.js"
 work="$(mktemp -d /tmp/p01-ia6-native-resource-XXXXXXXX)"
