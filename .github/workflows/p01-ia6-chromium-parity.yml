@@ -1,0 +1,101 @@
+name: p01-ia6-chromium-parity-temporary
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p01-ia6-chromium-parity.yml']
+permissions:
+  contents: read
+jobs:
+  isolated-browser:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    env:
+      SOURCE_REPO: llhzx2018/vf-start
+      SOURCE_BRANCH: fix/p01-v247493-owner-dialog-save-ux
+      TARGET_SHA: dcc86edc073a85cf7766e049bc6a140d70cf87f1
+      P01_TEST_ORIGIN: http://127.0.0.1:18671
+      P01_TEST_PASSWORD: P01Synthetic-18671!
+      VF_E2E_RUNTIME_ROOT: /tmp/p01-ia6-advanced-20261105-gate
+      VF_IA6_DISPOSABLE_ACK: IA6-ADVANCED-ONLY
+    steps:
+      - name: Checkout public-safe temporary workflow
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Exact P01 source and real synthetic Chromium interaction
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd jq >/dev/null
+          ROOT="$(mktemp -d /tmp/p01-ia6-chromium.XXXXXXXX)"
+          trap 'test -z "${SERVER_PID:-}" || kill "$SERVER_PID" >/dev/null 2>&1 || true; rm -rf "$ROOT" "$VF_E2E_RUNTIME_ROOT"' EXIT
+          git clone -q --depth 1 --branch "$SOURCE_BRANCH" "https://x-access-token:${READ_TOKEN}@github.com/${SOURCE_REPO}.git" "$ROOT/candidate"
+          git -C "$ROOT/candidate" remote set-url origin "https://github.com/${SOURCE_REPO}.git"
+          test "$(git -C "$ROOT/candidate" rev-parse HEAD)" = "$TARGET_SHA"
+          unset READ_TOKEN
+          echo "P01_EXACT_BROWSER_SOURCE=$TARGET_SHA"
+          cp -a "$ROOT/candidate/src" "$VF_E2E_RUNTIME_ROOT"
+          php -S 127.0.0.1:18671 -t "$VF_E2E_RUNTIME_ROOT" >"$ROOT/server.log" 2>&1 &
+          SERVER_PID=$!
+          for attempt in $(seq 1 80); do
+            if curl -fsS -c "$ROOT/cookie" -b "$ROOT/cookie" "$P01_TEST_ORIGIN/setup.php" -o "$ROOT/setup.html" 2>/dev/null; then break; fi
+            sleep 0.3
+          done
+          test -s "$ROOT/setup.html"
+          CSRF="$(python3 -c 'import re,sys;s=open(sys.argv[1],encoding="utf8").read();m=re.search(r"name=\"setup_csrf\"\s+value=\"([^\"]+)\"",s);assert m;print(m.group(1))' "$ROOT/setup.html")"
+          curl -fsS -c "$ROOT/cookie" -b "$ROOT/cookie" -X POST "$P01_TEST_ORIGIN/setup.php" \
+            --data-urlencode "setup_csrf=$CSRF" \
+            --data-urlencode 'site_title=IA6 Synthetic' \
+            --data-urlencode "admin_password=$P01_TEST_PASSWORD" \
+            --data-urlencode "admin_password_confirm=$P01_TEST_PASSWORD" -o "$ROOT/setup-result.html"
+          (cd "$VF_E2E_RUNTIME_ROOT" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_IA6_BROWSER_FRESH_INSTALL=PASS
+          cd "$ROOT/candidate"
+          npm install --no-save --no-audit --no-fund --silent playwright@1.56.1
+          npx --no-install playwright install --with-deps chromium >/dev/null
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          timeout 180s node tests/integration/p01_ia6_four_fallbacks_http_browser.mjs
+          echo P01_IA6_BROWSER_RETIRED_GUI_AND_OWNER_CSRF=PASS
+          timeout 520s node tests/integration/p01_ia6_27_routes_11_tabs_browser.mjs
+          echo P01_IA6_BROWSER_28_ROUTES_11_TABS=PASS
+          python3 tests/integration/p01_ia6_advanced_fields_disposable.py
+          timeout 150s node tests/integration/p01_ia6_advanced_fields_browser.mjs
+          echo P01_IA6_BROWSER_ADVANCED_RESOURCE_SAVE=PASS
+          timeout 150s node tests/integration/p01_ia6_data_safety_readonly_parity_browser.mjs
+          echo P01_IA6_BROWSER_RECOVERY_READONLY=PASS
+          cat >tests/integration/p01_ia6_temporary_no_auto_open.mjs <<'JS'
+          import assert from 'node:assert/strict';
+          import {chromium} from 'playwright';
+          const origin=process.env.P01_TEST_ORIGIN,password=process.env.P01_TEST_PASSWORD;
+          assert(/^http:\/\/127\.0\.0\.1:\d+$/.test(origin||''));
+          const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+          try{
+            const ctx=await browser.newContext({viewport:{width:1440,height:900}});
+            const login=await ctx.request.post(origin+'/api.php?action=login',{data:{password}});
+            assert.equal(login.status(),200);
+            for(const path of ['topics.php','courses.php','start.php']){
+              const page=await ctx.newPage();
+              const unexpected=[];
+              page.on('dialog',dialog=>{unexpected.push(dialog.type());void dialog.dismiss();});
+              const response=await page.goto(origin+'/'+path,{waitUntil:'domcontentloaded'});
+              assert.equal(response?.status(),200,path);
+              await page.waitForTimeout(350);
+              const initial=await page.locator('#vf-local-management').evaluate(node=>({open:node.open,modals:[...document.querySelectorAll('dialog:modal')].length}));
+              assert.equal(initial.open,false,path+' auto-opened native manager');
+              assert.equal(initial.modals,0,path+' unintended modal');
+              assert.deepEqual(unexpected,[],path+' native alert');
+              await page.locator('[data-vf-local-manage-open]').click();
+              assert.equal(await page.locator('#vf-local-management').evaluate(node=>node.open),true);
+              await page.close();
+            }
+            await ctx.close();
+          }finally{await browser.close();}
+          console.log('P01_OWNER_TOPICS_COURSES_NO_AUTO_MODAL_AND_CLICK_TO_OPEN=PASS');
+          JS
+          timeout 100s node tests/integration/p01_ia6_temporary_no_auto_open.mjs
+          echo P01_IA6_INTERACTIVE_CHROMIUM_GATE=PASS
