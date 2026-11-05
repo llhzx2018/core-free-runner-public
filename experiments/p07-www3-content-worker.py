@@ -96,7 +96,7 @@ def current_candidate_auth(domain,db):
     Credentials arrive from the parent's verified private CloudPanel receipt
     in the *child environment*. Never put passwords in argv or on stdout.
     """
-    if domain!="www3.m3u8.one" or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}",db):
+    if domain!="www3.m3u8.one" or not re.fullmatch(r"p07[a-f0-9]{10}1",db):
         block("CURRENT_TARGET_SITE_OR_DB_INVALID")
     if os.environ.get("P07_CURRENT_CANDIDATE_READ_ONLY")!="YES":
         block("CURRENT_TARGET_EXPLICIT_READONLY_SCOPE_REQUIRED")
