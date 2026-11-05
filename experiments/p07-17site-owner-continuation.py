@@ -336,12 +336,51 @@ def stage_site_files(pull,seen):
     print('LIVE_SOURCE_FILE_PARITY=NOT_VERIFIED')
 
 def sql_safety(sql,p):
-    # This is an additional hard rejector, not a complete SQL semantic proof.
+    """Prove bounded legacy session/read guards before any database writes."""
+    import importlib.util
+    import verify
     sql.require_nonempty_source_schema(p)
     guards=sql.dynamic_guard_syntax_counts(p)
-    must(sum(int(guards.get(x,0)) for x in ('recognized_unsafe','double_quoted_if',
-                                            'other_unknown_set'))==0,
-         'DYNAMIC_SQL_UNVERIFIED_STOP_IMPORT')
+    unsafe=sum(int(guards.get(x,0)) for x in (
+        'recognized_unsafe','double_quoted_if','other_unknown_set'))
+    helper=Path(__file__).resolve().parent/'p07-www3-isolated-stage.py'
+    must(helper.is_file() and not helper.is_symlink(),
+         'PINNED_SQL_GUARD_HELPER_MISSING')
+    raw=helper.read_bytes()
+    blob=hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
+    must(blob=='8939ff6bd08442a26459a6878d1f94a5c34d000b',
+         'PINNED_SQL_GUARD_HELPER_CHANGED')
+    spec=importlib.util.spec_from_file_location(
+        'p07_owner_safe_sql_proof',helper)
+    must(spec is not None and spec.loader is not None,
+         'PINNED_SQL_GUARD_HELPER_UNLOADABLE')
+    module=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    try:
+        if unsafe:
+            must(guards.get('recognized_unsafe')==3
+                 and guards.get('double_quoted_if')==0
+                 and guards.get('other_unknown_set')==0
+                 and guards.get('recognized_safe')==0,
+                 'DYNAMIC_SQL_UNKNOWN_SHAPE_STOP_IMPORT')
+            proven=module.prove_legacy_mysql_dynamic_groups(p,verify,sql)
+            must(len(proven)==13,
+                 'DYNAMIC_SQL_SEQUENCE_UNVERIFIED_STOP_IMPORT')
+            must(not module.standalone_sql_unproven_side_effects(
+                 p,verify,known_safe_lines=proven),
+                 'DYNAMIC_SQL_NONLOCAL_EFFECTS_STOP_IMPORT')
+            print('DYNAMIC_SQL=EXACT_3_GROUP_SESSION_READ_ONLY_PROOF_PASS',
+                  flush=True)
+        else:
+            must(guards.get('recognized_safe')==0,
+                 'DYNAMIC_SQL_OTHER_GROUPS_UNVERIFIED_STOP_IMPORT')
+            must(not module.standalone_sql_unproven_side_effects(
+                 p,verify,known_safe_lines=set()),
+                 'SQL_NONLOCAL_EFFECTS_STOP_IMPORT')
+            print('DYNAMIC_SQL=NO_UNPROVEN_CONTROL_GROUPS',flush=True)
+    except (module.Stop,sql.AdvisoryDiagnosticUnavailable,
+            verify.RestoreVerifyError,ValueError):
+        raise Block('DYNAMIC_SQL_EXACT_PROOF_FAILED_STOP_IMPORT') from None
     with gzip.open(p,'rb') as f:
         for line in f:
             must(len(line)<16*1024*1024,'SQL_LINE_TOO_LARGE')
