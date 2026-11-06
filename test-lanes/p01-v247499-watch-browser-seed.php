@@ -10,6 +10,7 @@ if(!preg_match('#^/tmp/p01-v247499-watch-browser-[a-zA-Z0-9_-]+/site$#',$root)
     fwrite(STDERR,"P01_WATCH_FIXTURE_LOCALHOST_SCOPE_REQUIRED\n");exit(60);
 }
 require $root.'/app/bootstrap.php';
+require_once $root.'/app/SurfaceRepository.php';
 $repo=new VfRepository(vf_db());
 $surfaceRepo=new VfSurfaceRepository(vf_db());
 $cat=$repo->createCategory([
