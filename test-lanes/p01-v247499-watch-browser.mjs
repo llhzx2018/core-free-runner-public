@@ -83,7 +83,7 @@ try {
   const originalTitle=await drawer.locator('[data-detail-form] [name="title"]').inputValue();
   assert.equal(originalTitle,'Public Marked Film');
   await drawer.locator('[data-detail-form] [name="title"]').fill('Unsaved browser fixture change');
-  await drawer.locator('[data-close-panel]').click();
+  await drawer.getByRole('button',{name:'取消',exact:true}).click();
   const feedback=drawer.locator('[data-vf-panel-feedback]');
   assert.match(await feedback.textContent(),/未保存的修改/,'dirty cancel requires inline decision');
   await feedback.getByRole('button',{name:'放弃并关闭'}).click();
