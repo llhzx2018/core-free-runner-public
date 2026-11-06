@@ -6,6 +6,7 @@ Only fixed labels and integer counters leave the module; names and SQL remain lo
 from __future__ import annotations
 
 from collections import Counter
+import codecs
 import gzip
 from pathlib import Path
 import re
@@ -40,11 +41,38 @@ class AdvisoryDiagnosticUnavailable(RuntimeError):
     """Fixed-reason failure; never incorporates an SQL fragment or a filename."""
 
 
-def _read_lines(path: Path):
+_NONUTF8_DML_HEAD = re.compile(r"^(?:INSERT|REPLACE)\s+INTO\b", re.I)
+
+
+def _read_lines(path: Path, *, schema_presence_only: bool = False):
+    """Stream without modifying source SQL bytes, never decode them lossily.
+
+    Strict UTF-8 remains the default for all cross-engine diagnostics. Only
+    the pre-import *schema presence* check may pass through malformed UTF-8
+    bytes when their physical line has an unambiguous INSERT/REPLACE head.
+    This is not SQL data validity, compatibility, or authorization to reimport
+    a partially staged database. Unsupported positions fail closed.
+    """
     opener = gzip.open if path.name.endswith(".gz") else open
     try:
-        with opener(path, "rt", encoding="utf-8", errors="strict") as handle:
-            yield from handle
+        with opener(
+            path, "rt", encoding="utf-8",
+            errors="surrogateescape" if schema_presence_only else "strict",
+        ) as handle:
+            for raw in handle:
+                if schema_presence_only:
+                    # Prevent unbounded allocation downstream for one enormous
+                    # row/statement; never truncate a SQL line and then PASS.
+                    if len(raw) > _MAX_SCHEMA_STATEMENT:
+                        raise AdvisoryDiagnosticUnavailable(
+                            "SQL_SOURCE_LINE_TOO_LARGE"
+                        )
+                    if any(0xDC80 <= ord(char) <= 0xDCFF for char in raw):
+                        if not _NONUTF8_DML_HEAD.match(raw.lstrip()):
+                            raise AdvisoryDiagnosticUnavailable(
+                                "SQL_SOURCE_NONUTF8_OUTSIDE_KNOWN_DML"
+                            )
+                yield raw
     except (OSError, EOFError, UnicodeError) as exc:
         raise AdvisoryDiagnosticUnavailable("SQL_DIAGNOSTIC_INPUT_UNAVAILABLE") from exc
 
@@ -144,16 +172,25 @@ def dynamic_guard_syntax_counts(source: Path) -> dict[str, Any]:
     return counts
 
 
-def _schema_statements(path: Path) -> tuple[dict[str, str], Counter[str]]:
+def _schema_statements(
+    path: Path, *, schema_presence_only: bool = False,
+) -> tuple[dict[str, str], Counter[str]]:
     tables: dict[str, str] = {}
     other: Counter[str] = Counter()
     pending: list[str] = []
     size = 0
-    for raw in _read_lines(path):
+    for raw in _read_lines(path, schema_presence_only=schema_presence_only):
         line = raw.strip()
         if not pending:
             if not _SCHEMA_START.match(line):
                 continue
+        if schema_presence_only and pending and any(
+            0xDC80 <= ord(char) <= 0xDCFF for char in line
+        ):
+            # A DML-looking continuation cannot be accepted as schema DDL.
+            raise AdvisoryDiagnosticUnavailable(
+                "SQL_SOURCE_NONUTF8_SCHEMA_CONTINUATION"
+            )
         pending.append(line)
         size += len(line)
         if size > _MAX_SCHEMA_STATEMENT:
@@ -322,6 +359,51 @@ def schema_difference_counts(source: Path, target: Path) -> dict[str, Any]:
     return result
 
 
+_MAX_PREIMPORT_UTF8_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def require_source_import_utf8_integrity(path: Path) -> int:
+    """Reject raw non-UTF-8 SQL before the first target database write.
+
+    Schema PRESENCE ignores unambiguous malformed DML bytes on purpose, but
+    the current target import path uses SET NAMES/CloudPanel and the row-parity
+    verifier requires strict UTF-8. Allowing that one-way schema result to
+    start database creation would risk an irreversible partial target import.
+    This function validates the *entire* decompressed stream, does not repair
+    or transcode any byte, and emits only stable, secret-free reasons.
+
+    A PASS is not row parity, database import safety or cutover permission.
+    """
+    opener = gzip.open if path.name.endswith(".gz") else open
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
+    count = 0
+    try:
+        with opener(path, "rb") as stream:
+            while True:
+                chunk = stream.read(1024 * 1024)
+                if not chunk:
+                    decoder.decode(b"", final=True)
+                    break
+                count += len(chunk)
+                if count > _MAX_PREIMPORT_UTF8_BYTES:
+                    raise AdvisoryDiagnosticUnavailable(
+                        "SQL_SOURCE_IMPORT_SIZE_CAP"
+                    )
+                try:
+                    decoder.decode(chunk, final=False)
+                except UnicodeDecodeError:
+                    raise AdvisoryDiagnosticUnavailable(
+                        "SQL_SOURCE_IMPORT_ENCODING_UNPROVEN"
+                    ) from None
+    except (OSError, EOFError, UnicodeError):
+        raise AdvisoryDiagnosticUnavailable(
+            "SQL_SOURCE_IMPORT_STREAM_UNAVAILABLE"
+        ) from None
+    if not count:
+        raise AdvisoryDiagnosticUnavailable("SQL_SOURCE_IMPORT_EMPTY")
+    return count
+
+
 def require_nonempty_source_schema(path: Path) -> int:
     """Reject an empty/unrecognized source dump before any target DB import.
 
@@ -329,7 +411,11 @@ def require_nonempty_source_schema(path: Path) -> int:
     export contains the source database's table definitions. This is a
     one-way safety prerequisite, never proof of data equivalence.
     """
-    tables, _other = _schema_statements(path)
+    # The source's raw INSERT bytes are never rewritten. Reject malformed
+    # UTF-8 in any unproven position; only explicit single-line INSERT/REPLACE
+    # bytes may be skipped while verifying the *existence* of CREATE TABLE DDL.
+    # Independent target import, guarded DDL, and data parity gates remain.
+    tables, _other = _schema_statements(path, schema_presence_only=True)
     if not tables:
         raise AdvisoryDiagnosticUnavailable("SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA")
     return len(tables)

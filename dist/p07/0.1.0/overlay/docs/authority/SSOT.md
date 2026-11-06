@@ -1,9 +1,6 @@
-# P07 · VF Server Ops · Engineering SSOT V1.0
+# P07 · VF Server Ops · 工程 SSOT
 
-状态：CURRENT / V1 REAL PRE-PRODUCTION CLOSURE PASS / OWNER CUTOVER OPEN  
-日期：2026-09-06
-
-Canonical Real closure evidence：`docs/evidence/P07_REAL_GATE_CLOSURE_20260906.md`。
+> 维护运行、状态、数据与恢复合同。历史测试和实机证据由 [项目 Current](CURRENT.md) 路由。
 
 ## 1. Runtime / Product Boundary
 
@@ -12,7 +9,7 @@ Canonical Real closure evidence：`docs/evidence/P07_REAL_GATE_CLOSURE_20260906.
 - Non-TTY no-arg：help
 - Implementation helper：Python 3 stdlib
 - Storage transport：rclone
-- Migration transport：OpenSSH + tar private stream
+- 普通服务器迁移使用 OpenSSH 与 rsync 由目标机拉取；备份包传输兼容路径可用私有 SSH/tar 流
 - Remote encryption：rclone `crypt` REQUIRED for PRIVATE remote backup
 - CloudPanel integration：read-only capability discovery + official `clpctl`
 - V1 Web UI：N/A
@@ -33,13 +30,15 @@ lib/verify.py             post-restore file/DB/runtime verification
 lib/cutover.py            cross-server compare + curl --resolve target probe
 lib/migrate.py            target-local single-site migration orchestration
 lib/transport.py          source-to-target SSH/tar transport
-lib/server_migration.py   low-disk full-server two-phase migration orchestrator
+lib/server_migration_pull.py  普通单站/整机目标机主动拉取、状态与续迁
+lib/server_migration.py       旧编排兼容与共用安全原语
+lib/sql_diff_evidence.py      SQL 差异诊断，独立于写入准入
 lib/app_config.py         atomic WordPress/dotenv database identity remap
 lib/policy.py             settings / automatic backup / retention / Cron render
 scripts/secret_scan.py    tracked-source Secret Gate
 ```
 
-Backup / Restore / Migration MUST use the same Portable Package Contract. Transport may move a package, but must never become a second restore implementation.
+备份与包恢复遵循同一 Portable Package 合同。目标机 Pull 的文件层使用直接 rsync，并复用数据库、SQLite、运行时与独立验证原语。
 
 ## 3. Inventory Contract
 
@@ -55,8 +54,6 @@ Rules：
 - Cron command body / PM2 env do not enter manifest；
 - PRIVATE `--output` = exclusive create + 0600 + refuse overwrite；
 - Ordinary Inventory 的 SQLite discovery boundary = site root；candidate must pass `SQLite format 3` header validation。Full-server migration 另有私有 supplement scan，覆盖所选 Site User Home 内真实 SQLite；该补充扫描不扩大普通 Inventory 输出面。
-
-A02 real status：**REAL_PASS**。
 
 ## 4. Portable Backup Package
 
@@ -82,8 +79,6 @@ Classification：`PRIVATE_SENSITIVE_BACKUP`。
 
 Pipeline：Fresh Inventory → private staging → archive/MySQL/SQLite/runtime metadata → checksums/verification → PASS only → atomic rename。
 
-A04/A08/A09/A10 real status：**REAL_PASS**。
-
 ## 5. Secret / Recovery Boundary
 
 Inventory remains `WHITELIST_ONLY`.
@@ -98,8 +93,6 @@ A complete disaster-recovery package may contain recovery-critical private mater
 - fetched remote package remains private；
 - direct migration uses SSH private stream；
 - product SSH password CLI/config remains unsupported。
-
-A17 tracked-source + real runtime/log scan：**REAL_PASS**。
 
 ## 6. Storage Adapter
 
@@ -129,8 +122,6 @@ fresh local verify
 
 Only COMPLETE packages are listed/fetched. Fetch uses private staging → fresh package verify → marker verification → atomic local finalize.
 
-A05/A06/A07 Real Storage：**REAL_PASS**。
-
 ## 7. Restore Contract
 
 ### Zero-write plan
@@ -156,8 +147,6 @@ Hard rules：
 - DB rollback deletes only DBs created by current operation；
 - DNS untouched。
 
-A12 real status：**REAL_PASS**。
-
 ## 8. Runtime Activation
 
 `vfops runtime apply-new-site` requires exact：
@@ -178,8 +167,6 @@ Automatic activation scope：
 - `/etc/cron.d/*` remains Manual Gate；
 - no Secret values emitted。
 
-A20 real status：**REAL_PASS**，including negative rollback probe。
-
 ## 9. Verify / Technical Cutover
 
 Restore Verify covers files, SQLite, MySQL re-export semantic comparison and runtime metadata.
@@ -197,13 +184,11 @@ RESTORE_VERIFIED
 = TECHNICAL_CUTOVER_READY
 ```
 
-Formal real SOURCE→TARGET gate reached `TECHNICAL_CUTOVER_READY=PASS`.
+技术就绪记录本机验证范围。DNS 由 Owner 独立执行，公网验证使用目标专有证明和实际 HTTPS 路由。
 
-OWNER Cutover remains separate and **NOT_EXECUTED**。
+## 10. 服务器迁移与备份包兼容
 
-## 10. Source-to-target Migration
-
-User-facing command：
+以下为旧的备份包定向传输 CLI。普通服务器迁移从目标机发起，见本节 §10.2。
 
 ```text
 vfops migrate transfer-new-site \
@@ -242,12 +227,10 @@ SSH hard rules：
 - remote runtime/package staging private and cleaned；
 - no DNS mutation / no old-server delete。
 
-A13/A14 real status：**REAL_PASS**。
 
+### 10.1 旧编排兼容与共用安全原语
 
-### 10.1 Full-server two-phase orchestrator
-
-Target bootstrap contract：
+以下初始化参数描述历史兼容编排，普通操作使用独立的「新服务器初始化」。发布允许的 OS、引擎组合与安装器身份按实际任务核验。
 
 - normal path requires only reachable root SSH; a preinstalled CloudPanel is not mandatory for a genuinely empty supported TARGET；
 - if CloudPanel is absent, P07 may bootstrap only after exact `BOOTSTRAP_CLOUDPANEL:<target_ip>` confirmation；
@@ -342,38 +325,14 @@ CloudPanel DB compatibility：
 - multi-DB ambiguous automatic remap fails closed。
 
 
-### 10.2 Current target-owned pull migration authority · release68 real closure / release69 hardening
+### 10.2 目标机主动迁入与跨任务收口
 
-The ordinary full-server migration route is now the **target-owned pull** engine in `server_migration_pull.py`: the Owner starts P07 on the NEW server, supplies the OLD-server endpoint, and the NEW server pulls business data from OLD. The legacy push engine remains an internal compatibility library and is not the ordinary full-server route.
-
-Current real evidence:
-
-```text
-migration_id   pull-20261005T062015Z-04275579
-old_server     24.199.108.229
-new_server     45.76.171.57
-sites          16
-closure_build  0.1.0-release68
-local_verify   16/16 PASS
-DNS            Owner manual
-public_verify  PRODUCTION_PASS
-old_server     RETAINED_FOR_RECOVERY
-```
-
-Canonical evidence: `docs/evidence/P07_FULL_SERVER_MIGRATION_REAL_PRODUCTION_PASS_20261005.md`.
-
-The release69 hardening candidate adds these fail-closed contracts for future migrations:
-
-- one central external-asset discovery authority records both path and discovery reason across Site User Home, Web-Root siblings and `.local/share`;
-- before `PREPARED` and again before the maintenance window, P07 refreshes the live OLD-server plan and blocks on source identity or selected-site structural drift;
-- newly discovered external Runtime/Storage or SQLite assets are backfilled while OLD still serves traffic;
-- pre-cutover reconciliation proves staged sites, target document roots, prepare-phase MySQL verification, external path type/existence, SQLite `quick_check`, staged Cron/PM2 counts, and required source HTTP baseline;
-- a reconciliation failure occurs **before** SOURCE freeze whenever SOURCE is still live;
-- HTTP verification compares NEW behavior against the recorded OLD-server baseline: OLD 2xx/3xx requires NEW 2xx/3xx, and an OLD 4xx requires the same NEW 4xx. OLD 200 → NEW 404 is a hard regression;
-- local and public Production verification share the same baseline rule;
-- DNS mutation remains Owner-only and OLD-server deletion remains denied.
-
-release69 is a hardening candidate until its Machine/Distribution gates pass. It does not rerun the already-completed release68 Production migration and does not change the old-server Recovery Copy.
+- [目标端 Pull 编排](../../lib/server_migration_pull.py)是普通单站与整机入口。任务状态、主机和站点身份、事务标记、续传与回滚收据归目标机。准备阶段保护已存在的站点和数据库，旧机继续服务，目标端计划任务和应用写入保持未激活。
+- 资产分母包含站点文件、Web Root 外业务资产、站点账户、应用配置、SQL 对象和数据、SQLite 权威快照及 sidecar、Cron/PM2/NVM、源端 HTTP 基线。最终同步前重新核对范围、目标归属、应用映射和安全恢复点。源身份、资产范围或现有目标状态发生歧义时阻断。
+- [SQL 差异诊断](../../lib/sql_diff_evidence.py)只形成建议性证据。将导出完整性、主键/行值、DDL 与引擎语义、未知 SQL 副作用、时间一致性、隔离恢复分开校验。不同时间的快照或隔离过滤后的恢复不能直接授权使用原始 SQL。
+- 跨任务处理保留父任务、续迁任务和余站任务的原身份。只有能证明站点与数据库均归属本次事务时才纳入执行范围。只读对账、隔离演练、状态认领、创建隔离数据库和应用连接切换分别标明写入范围。已暂存、已认领、已连接与最终同步、完整回滚、可切换分层记账。
+- 最终操作前保全原目标数据库与应用配置。配置切换须有可恢复备份与回读，记录并拒绝未预期的并发改动。回滚先确认新端运行已停止且公网流量条件仍允许回退，才可恢复旧端；公网已改路由或已产生新端写入时，进入独立的数据对账和恢复评估。
+- 跨任务候选接口、实现范围和机器证据以对应 PR 精确提交为准。单任务或隔离样本结果只覆盖该路径，整机验收按全部站点、资产和阶段逐一证明。
 
 ## 11. Destructive Guard
 
@@ -386,8 +345,6 @@ A16 real negative gate proves：
 - target business assets remain unchanged on refusal；
 - failed migration leaves no private transport staging；
 - DNS/Production/old-server destructive writes remain zero。
-
-A16：**REAL_PASS**。
 
 ## 12. Settings / Retention / Automation
 
@@ -408,11 +365,9 @@ Retention：
 
 Automation only renders VF policy-run Cron; it is not a generic Cron manager.
 
-A19 real status：**REAL_PASS / 8 of 8**。
-
 ## 13. Disaster Recovery
 
-A18 real DR pipeline：
+历史 A18 验证覆盖的恢复流程：
 
 ```text
 SOURCE real PHP/MySQL/SQLite/Cron/SSL/private package
@@ -425,56 +380,8 @@ SOURCE real PHP/MySQL/SQLite/Cron/SSL/private package
 → strict remote seed purge
 ```
 
-A18：**REAL_PASS**。
-
 The DR seed is fixture preparation only. It does not rerun or replace the separate Real Storage authority.
 
-## 14. Final Secret / Credential Cleanup
+## 14. 证据归属
 
-Final A17 observed：
-
-```text
-P07_A17_SOURCE_LOG_SCAN=PASS
-P07_A17_TARGET_LOG_SCAN=PASS
-P07_A17_DIRECT_TEMP_CREDENTIAL_CLEANUP=PASS
-P07_A17_FINAL_SECRET_LOG_SCAN=PASS
-```
-
-Test-only copied rclone config, A18 remote config, DB recovery input, temporary direct SSH key/authorized-key entries and Windows test-only VPS password file were removed. User original local rclone config was preserved.
-
-## 15. Exact Real Closure Identity
-
-```text
-Product real-fix candidate  c189a0620e8ed1471767b4f1bb29799ce9155053
-Baseline                    9d3b5d1e022c3434244a52a6686ebc6fe6f1870f
-Formal execution            1788683001-1 · 9/9 PASS · rc=0
-A20 execution               1788684001-1 · 8/8 PASS · rc=0
-A18 execution               1788691001-1 · 9/9 PASS
-Runner one-time head         572b5213d71c920c10b1619584cadc44f5db28cc
-Runner PR                    #19 CLOSED / UNMERGED
-```
-
-The exact `9d3... → c189...` product delta is only `lib/runtime.py` plus its regression test.
-
-Private GitHub-hosted Actions for the one-time Runner PR remained `steps=[] / runner_id=0`; classification stays `BLOCKED_ENV_ACTIONS_START` and is not used as Real evidence.
-
-## 16. Current Safety State
-
-```text
-V1_REAL_PREPRODUCTION_CLOSURE = PASS
-FULL_SERVER_TARGET_PULL_REAL  = PASS (release68 · 16 sites)
-OWNER_DNS_CUTOVER             = MANUAL_PASS for recorded release68 migration
-PRODUCTION_VERIFY             = PASS for recorded release68 migration
-SOURCE_RECOVERY_COPY          = RETAINED
-SOURCE_DECOMMISSION_SAFE      = NOT_PROVEN
-OLD_SERVER_DELETE_ALLOWED     = NO
-RELEASE69_OWNER_REAL          = NOT_RUN
-```
-
-The recorded release68 full-server migration has completed its Owner-manual DNS cutover and Production verification. This evidence does not authorize unrelated restore paths, a blanket P07 User Acceptance PASS, old-server decommission, or old-server deletion.
-
-## 17. Next Engineering Phase
-
-Current engineering line returns to **L2 Product Optimization**：UX, diagnostics, maintainability, test quality and operational ergonomics may continue on `develop` without weakening any security contract.
-
-Release / Production remain separately Owner-gated.
+源码与候选、发布与分发、现场构建、实际迁移和用户验收由 [项目 Current](CURRENT.md) 分别路由。历史 A01–A20 和精确身份保留于 [历史 SSOT](https://github.com/llhzx2018/vf-server-ops/blob/aa0f6242f60033d626d9dc6543781322e6e32507/docs/authority/SSOT.md) 和 [历史实机证据](../evidence/P07_REAL_GATE_CLOSURE_20260906.md)。每项结果仅覆盖其任务、资产、运行环境和精确构建。

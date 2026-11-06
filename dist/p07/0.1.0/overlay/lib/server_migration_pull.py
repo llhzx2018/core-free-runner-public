@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import fcntl
 import grp
 import hashlib
 import ipaddress
@@ -22,6 +23,7 @@ import tempfile
 import time
 from typing import Any
 
+import app_config
 import cloudpanel
 import cutover
 import inventory
@@ -30,6 +32,11 @@ import isolated_db_restore
 import private_recovery_gate
 import private_sql_literal_reconcile
 import migration_remainder
+import migration_chain_recovery
+import migration_chain_consolidation
+import migration_chain_execution_scope
+import migration_three_site_window
+import migration_db_adoption
 import package as package_engine
 import server_migration as legacy
 import transport
@@ -450,6 +457,7 @@ def source_python(
     runtime: str,
     *args: str,
     timeout: int = 1800,
+    check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     command = [
         "env",
@@ -459,7 +467,7 @@ def source_python(
         *args,
     ]
     rendered = " ".join(shlex.quote(item) for item in command)
-    return source_remote(source, rendered, timeout=timeout)
+    return source_remote(source, rendered, timeout=timeout, check=check)
 
 
 # A migration is resumable across releases. The source-side helper staged at
@@ -1302,6 +1310,7 @@ def source_export_database(
         "--database", database,
         "--output", remote_file,
         timeout=3600,
+        check=False,  # Caller must classify the pinned SQL-helper exit marker.
     )
     if proc.returncode != 0:
         # Only this complete fixed marker can be attributed to the pinned
@@ -1311,6 +1320,40 @@ def source_export_database(
                 and (proc.stderr or "").strip() == "ERROR: SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA"):
             raise PullMigrationError("SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA")
         raise PullMigrationError(f"old-server MySQL export failed: {database}")
+
+
+def guarded_export_comparison_advisory(
+    source_dump: Path, target_dump: Path
+) -> dict[str, Any]:
+    """Probe exact conservative SQL comparator with NO migration state write.
+
+    A live old-VPS source dump is not simultaneous with the stored target;
+    even identical content here is advisory, not approval for a database
+    re-import, migration resume, source freeze or DNS cutover.
+    """
+    try:
+        mode = compare_database_dumps(source_dump, target_dump)
+    except PullMigrationError as exc:
+        detail = str(exc)
+        reason = (
+            "CONDITIONAL_DDL"
+            if detail.startswith("MySQL verification failed [CONDITIONAL_DDL]")
+            else "SCHEMA_OR_DATA_UNPROVEN"
+        )
+        return {"status": "BLOCKED", "reason": reason,
+                "cutover_allowed": False}
+    if mode not in {
+        "CANONICAL_SQL_EXACT", "CROSS_ENGINE_GUARDED_SESSION_SQL_EXACT",
+        "CROSS_ENGINE_KNOWN_DUMP_FORMAT_SQL_EXACT",
+        "CROSS_ENGINE_LOGICAL_CONTENT",
+    }:
+        return {"status": "BLOCKED", "reason": "UNKNOWN_COMPARISON_MODE",
+                "cutover_allowed": False}
+    return {
+        "status": "MATCH_ADVISORY_NOT_MIGRATION_PASS",
+        "comparison_mode": mode,
+        "cutover_allowed": False,
+    }
 
 
 def diagnose_sql_difference(
@@ -1423,6 +1466,9 @@ def diagnose_sql_difference(
                         continue
                     cloudpanel.export_database(database, target_dump, clpctl="clpctl")
                     evidence = sql_diff_probe.diagnostic(source_dump, target_dump)
+                    evidence["guarded_export_comparison"] = (
+                        guarded_export_comparison_advisory(source_dump, target_dump)
+                    )
                     evidence["source_export_readback"] = {
                         "attempts": attempt + 1, "source_tables": count,
                     }
@@ -1517,6 +1563,27 @@ def diagnose_sql_difference(
 
 def compare_database_dumps(source_dump: Path, target_dump: Path) -> str:
     try:
+        # A full SQL digest equality or a cross-engine normalized match never
+        # proves that version-guarded dynamic SQL is harmless. The source and
+        # the target may run branches under different server versions. Check
+        # each dump *before* allowing any fingerprint shortcut.
+        for candidate in (source_dump, target_dump):
+            try:
+                if verify_engine.sql_unproven_side_effects(candidate):
+                    raise verify_engine.RestoreVerifyError(
+                        "SQL unproven side effect or privilege statement"
+                    )
+                branch_counts = sql_diff_probe.dynamic_guard_syntax_counts(candidate)
+            except sql_diff_probe.AdvisoryDiagnosticUnavailable as exc:
+                raise verify_engine.RestoreVerifyError(
+                    "SQL dump cannot be fingerprinted"
+                ) from exc
+            if any(branch_counts.get(key, 0) for key in (
+                "recognized_unsafe", "other_unknown_set", "double_quoted_if"
+            )):
+                raise verify_engine.RestoreVerifyError(
+                    "conditional SQL DDL is not independently verified"
+                )
         before, before_count = verify_engine.sql_fingerprint(source_dump)
         after, after_count = verify_engine.sql_fingerprint(target_dump)
         if before == after and before_count == after_count:
@@ -1551,7 +1618,9 @@ def compare_database_dumps(source_dump: Path, target_dump: Path) -> str:
         # contain production data and must never be printed in operator output.
         detail = str(exc)
         reason = "UNCLASSIFIED_SQL_VERIFICATION"
-        if detail.startswith("SQL dump cannot be fingerprinted"):
+        if detail.startswith(("SQL dump cannot be fingerprinted",
+                               "SQL side-effect scan cannot be read",
+                               "cross-engine dynamic guard scan cannot be read")):
             reason = "SQL_DUMP_UNREADABLE"
         elif detail.startswith("SQL dump has no comparable statements"):
             reason = "NO_COMPARABLE_STATEMENTS"
@@ -1565,6 +1634,8 @@ def compare_database_dumps(source_dump: Path, target_dump: Path) -> str:
             reason = "CUSTOM_DELIMITER"
         elif detail.startswith("conditional SQL DDL"):
             reason = "CONDITIONAL_DDL"
+        elif detail.startswith("SQL unproven side effect or privilege statement"):
+            reason = "UNPROVEN_PRIVILEGED_SQL"
         elif detail.startswith("multiline SQL data"):
             reason = "MULTILINE_DATA"
         elif detail.startswith("unrecognized SQL data command"):
@@ -1624,6 +1695,8 @@ def sync_site_databases(state: dict[str, Any], site: dict[str, Any], *, phase: s
         source_dump = work / f"{token}-source.sql.gz"
         import_dump = work / f"{token}-import.sql.gz"
         target_dump = work / f"{token}-target.sql.gz"
+        import_started = False
+        verification_completed = False
         try:
             phase_cn = "最终同步" if phase == "final" else "首轮迁入"
             progress_note(f"{phase_cn} MySQL · 正在导出 {database}")
@@ -1640,8 +1713,27 @@ def sync_site_databases(state: dict[str, Any], site: dict[str, Any], *, phase: s
                 raise PullMigrationError(
                     "old-server MySQL export has no verifiable table schema"
                 ) from exc
+            # Schema presence is only a one-way advisory. If non-UTF-8 data
+            # bytes were present, the strict verification pipeline cannot
+            # establish source/target row identity. Stop BEFORE CloudPanel
+            # creates a database or rewrites application configuration.
+            try:
+                sql_diff_probe.require_source_import_utf8_integrity(source_dump)
+            except sql_diff_probe.AdvisoryDiagnosticUnavailable as exc:
+                label = str(exc)
+                if label == "SQL_SOURCE_IMPORT_ENCODING_UNPROVEN":
+                    raise PullMigrationError(
+                        "SQL_SOURCE_IMPORT_ENCODING_UNPROVEN"
+                    ) from None
+                raise PullMigrationError(
+                    "SQL_SOURCE_IMPORT_STREAM_UNVERIFIED"
+                ) from None
             shutil.copy2(source_dump, import_dump)
             progress_note(f"{phase_cn} MySQL · 正在导入 {database}")
+            # From here onward, target DB and application config MAY have
+            # changed even when the command eventually raises. Preserve
+            # private SQL bytes for a safe, read-only recovery assessment.
+            import_started = True
             try:
                 result = legacy.target_create_database_local(
                     state["migration_id"],
@@ -1690,6 +1782,39 @@ def sync_site_databases(state: dict[str, Any], site: dict[str, Any], *, phase: s
                 "config_file": result.get("application_config_file"),
             })
             count += 1
+            verification_completed = True
+        except Exception as exc:
+            if import_started and not verification_completed:
+                # This is forensic retention, NOT import rollback or a
+                # relaxation of any SQL verifier / resume gate.
+                from migration_sql_failure_retention import retain_failed_import
+                reason = (
+                    "CONDITIONAL_DDL"
+                    if isinstance(exc, PullMigrationError) and
+                    str(exc).startswith("MySQL verification failed [CONDITIONAL_DDL]")
+                    else "IMPORT_OR_VERIFICATION_FAILURE"
+                )
+                try:
+                    site["failed_prepare_sql_evidence"] = retain_failed_import(
+                        migration_id=str(state["migration_id"]),
+                        domain=str(site["domain"]),
+                        database=database,
+                        phase=phase,
+                        source_dump=source_dump,
+                        import_dump=import_dump,
+                        target_dump=target_dump,
+                        reason=reason,
+                    )
+                except Exception:
+                    # Never replace the original DB error with an evidence
+                    # logger error; keep all private exports for inspection.
+                    site["failed_prepare_sql_evidence"] = {
+                        "status": "EVIDENCE_RETENTION_UNVERIFIED",
+                        "reason": reason,
+                        "cutover_allowed": False,
+                        "db_reimport_allowed": False,
+                    }
+            raise
         finally:
             source_remote(
                 state["source"],
@@ -1697,8 +1822,12 @@ def sync_site_databases(state: dict[str, Any], site: dict[str, Any], *, phase: s
                 timeout=60,
                 check=False,
             )
-            for path in (source_dump, import_dump, target_dump):
-                path.unlink(missing_ok=True)
+            # Source/temp SQL from a potentially changed target DB must
+            # survive a verifier failure. The existing 0700 migration
+            # directory is owner-private; no business data is deleted here.
+            if not import_started or verification_completed:
+                for path in (source_dump, import_dump, target_dump):
+                    path.unlink(missing_ok=True)
     return count
 
 
@@ -2763,6 +2892,963 @@ def prepare_migration(
     return resume_prepare_migration(mid)
 
 
+def prepare_chain_tail(parent_mid: str, child_mid: str, confirm: str) -> dict[str, Any]:
+    """Stage only never-created suffix sites under a separate blocked-cutover job.
+
+    Strict provenance and target identity checks run before any source probing.
+    No parent/child SQL guard or stage_status is altered. Existing sites/DBs
+    continue to be rejected by the normal target preflight. Any new tail job
+    remains independently cutover-prohibited; no 17-site promotion is implied.
+    """
+    if confirm != f"STAGE_CHAIN_TAIL:{parent_mid}:{child_mid}":
+        raise PullMigrationError("CHAIN_TAIL_EXPLICIT_CONFIRMATION_REQUIRED")
+    parent = load_state(parent_mid)
+    child = load_state(child_mid)
+    try:
+        plan = migration_chain_recovery.select(parent, child)
+    except migration_chain_recovery.ChainRecoveryBlocked as exc:
+        raise PullMigrationError(str(exc)) from None
+    if target_identity() != parent["target_server_identity"]:
+        raise PullMigrationError("CHAIN_TAIL_LOCAL_TARGET_IDENTITY_CHANGED")
+    domains = plan["uncreated_candidate_domains"]
+    if not domains or any(
+        item.get("stage_status") != "PENDING"
+        for item in parent["sites"][-len(domains):]
+    ):
+        raise PullMigrationError("CHAIN_TAIL_NOT_UNTOUCHED")
+    return prepare_migration(
+        parent["source"], domains, "PREPARE_PULL_MIGRATION",
+        remainder_parent=parent_mid,
+        expected_source_identity=str(parent["source_server_identity"]),
+        expected_remainder_sites=[
+            dict(row) for row in parent["sites"][-len(domains):]
+        ],
+    )
+
+
+def _private_marker_readback(path: Path, fields: dict[str, str]) -> dict[str, Any]:
+    """Verify exact already-owned private marker without creating a new one."""
+    try:
+        metadata = path.lstat()
+    except OSError:
+        raise PullMigrationError("ADOPT_TARGET_OWNERSHIP_MARKER_MISSING") from None
+    if (not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != 0
+            or metadata.st_mode & 0o077):
+        raise PullMigrationError("ADOPT_TARGET_OWNERSHIP_MARKER_UNSAFE")
+    try:
+        payload = legacy.read_target_ownership_marker(path, fields)
+    except legacy.ServerMigrationError:
+        raise PullMigrationError("ADOPT_TARGET_OWNERSHIP_UNVERIFIED") from None
+    if not isinstance(payload, dict):
+        raise PullMigrationError("ADOPT_TARGET_OWNERSHIP_UNVERIFIED")
+    return payload
+
+
+def _owned_pending_database_readback(state: dict[str, Any], domain: str) -> dict[str, Any]:
+    """Read three SQL exports, never open an import or modify existing DB."""
+    try:
+        database = migration_db_adoption.selected_db(state, domain)
+    except migration_db_adoption.AdoptBlocked as exc:
+        raise PullMigrationError(str(exc)) from None
+    mid = str(state["migration_id"])
+    row = next(x for x in state["sites"] if x.get("domain") == domain)
+    target_root = state_dir(mid) / "target-transactions"
+    site_token = hashlib.sha256(domain.encode("ascii")).hexdigest()[:16]
+    db_token = hashlib.sha256(f"{domain}:{database}:1".encode()).hexdigest()[:16]
+    _private_marker_readback(target_root / f"site-{site_token}.json", {
+        "domain": domain, "created_by_migration": mid,
+    })
+    ownership = _private_marker_readback(target_root / f"db-{db_token}.json", {
+        "domain": domain, "database": database, "created_by_migration": mid,
+    })
+    if (not isinstance(ownership.get("username"), str)
+            or not ownership.get("username")
+            or not isinstance(ownership.get("password"), str)
+            or not ownership.get("password")):
+        raise PullMigrationError("ADOPT_DB_OWNERSHIP_CREDENTIALS_UNVERIFIED")
+    site_root = Path(str(row.get("site_root") or ""))
+    if not site_root.is_dir() or site_root.is_symlink():
+        raise PullMigrationError("ADOPT_TARGET_SITE_ROOT_MISSING")
+    if not app_config.verify_rewritten_application_database_config(
+        site_root, database, ownership["username"], ownership["password"]
+    ):
+        raise PullMigrationError("ADOPT_TARGET_APPLICATION_DB_CONFIG_UNVERIFIED")
+    try:
+        mismatches = legacy.verify_target_site_creation(row)
+    except legacy.ServerMigrationError:
+        raise PullMigrationError("ADOPT_TARGET_SITE_CONFIG_UNVERIFIED") from None
+    if mismatches:
+        raise PullMigrationError("ADOPT_TARGET_SITE_CONFIG_DRIFT")
+    if not state.get("source_runtime_path") or not state.get("source"):
+        raise PullMigrationError("ADOPT_SOURCE_HELPER_UNAVAILABLE")
+
+    with tempfile.TemporaryDirectory(prefix="vfops-adopt-readback-") as location:
+        directory = Path(location)
+        os.chmod(directory, 0o700)
+        first = directory / "first.sql.gz"
+        reread = directory / "reread.sql.gz"
+        target = directory / "target.sql.gz"
+        remote_paths: list[str] = []
+        try:
+            for local in (first,):
+                name = f"{remote_staging_root(state)}/adopt-{os.urandom(16).hex()}.sql.gz"
+                remote_paths.append(name)
+                source_export_database(state, database, name)
+                pull_path(state["source"], name, local)
+                try:
+                    sql_diff_probe.require_nonempty_source_schema(local)
+                except sql_diff_probe.AdvisoryDiagnosticUnavailable:
+                    raise PullMigrationError("ADOPT_SOURCE_SQL_SCHEMA_UNVERIFIED") from None
+            try:
+                cloudpanel.export_database(database, target, clpctl="clpctl")
+            except (cloudpanel.CloudPanelError, ValueError):
+                raise PullMigrationError("ADOPT_TARGET_SQL_EXPORT_FAILED") from None
+            name = f"{remote_staging_root(state)}/adopt-{os.urandom(16).hex()}.sql.gz"
+            remote_paths.append(name)
+            source_export_database(state, database, name)
+            pull_path(state["source"], name, reread)
+            try:
+                sql_diff_probe.require_nonempty_source_schema(reread)
+            except sql_diff_probe.AdvisoryDiagnosticUnavailable:
+                raise PullMigrationError("ADOPT_SOURCE_SQL_SCHEMA_UNVERIFIED") from None
+            try:
+                mode = compare_database_dumps(first, target)
+                readback_mode = compare_database_dumps(first, reread)
+                first_fingerprint, first_statements = verify_engine.sql_fingerprint(first)
+                reread_fingerprint, reread_statements = verify_engine.sql_fingerprint(reread)
+            except verify_engine.RestoreVerifyError:
+                raise PullMigrationError("ADOPT_SOURCE_SQL_FINGERPRINT_UNAVAILABLE") from None
+            if (first_fingerprint != reread_fingerprint
+                    or first_statements != reread_statements):
+                raise PullMigrationError("ADOPT_SOURCE_CHANGED_BETWEEN_READS")
+            def digest(p: Path) -> str:
+                value = hashlib.sha256()
+                with p.open("rb") as stream:
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        value.update(block)
+                return value.hexdigest()
+            return {
+                "domain": domain, "migration_id": mid, "database": database,
+                "comparison_mode": mode, "source_readback_mode": readback_mode,
+                "source_dump_sha256": digest(first),
+                "source_readback_sha256": digest(reread),
+                "target_dump_sha256": digest(target),
+                "source_snapshot_fingerprint": first_fingerprint,
+                "readback_snapshot_fingerprint": reread_fingerprint,
+            }
+        finally:
+            for path in remote_paths:
+                source_remote(
+                    state["source"],
+                    f"rm -f -- {shlex.quote(path)}",
+                    timeout=60, check=False,
+                )
+
+
+def adopt_existing_guarded_site(mid: str, domain: str, confirm: str) -> dict[str, Any]:
+    """Recover exactly ONE imported, marked, failed site without re-importing.
+
+    A failed first-site checkpoint cannot prevent recovering the second site:
+    each existing migration state updates atomically and independently. The
+    parent/child stay PREPARE_FAILED, and the old SQL guard is retained. Never
+    changes runtime activation, source freeze or DNS.
+    """
+    if confirm != f"ADOPT_EXISTING_DB:{mid}:{domain}":
+        raise PullMigrationError("ADOPT_EXPLICIT_OWNER_CONFIRMATION_REQUIRED")
+    if not SAFE_ID_RE.fullmatch(mid):
+        raise PullMigrationError("ADOPT_MIGRATION_ID_INVALID")
+    # Record lock prevents two owner recovery commands racing on this state.
+    # This also closes TOCTOU between readback and the atomic state write.
+    lock_path = state_dir(mid) / ".database-adoption.lock"
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        raise PullMigrationError("ADOPT_PRIVATE_LOCK_UNAVAILABLE") from None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        state = load_state(mid)
+        if (state.get("status") != "PREPARE_FAILED"
+                or not isinstance(state.get("last_sql_guard_failure"), dict)
+                or state["last_sql_guard_failure"].get("reason") != "CONDITIONAL_DDL"):
+            raise PullMigrationError("ADOPT_ORIGINAL_FAILED_GUARD_REQUIRED")
+        selected = [x for x in state.get("sites", [])
+                    if isinstance(x, dict) and x.get("domain") == domain]
+        if len(selected) != 1:
+            raise PullMigrationError("ADOPT_SITE_NOT_IN_MIGRATION")
+        if selected[0].get("stage_status") == "PULLED_STAGED":
+            # Idempotent checkpoint: do not repeat source exports, imports
+            # or state writes. Original guard remains recorded.
+            checkpoint = selected[0].get("database_adoption")
+            if isinstance(checkpoint, dict) and (
+                checkpoint.get("schema") == "P07_EXISTING_DB_ADOPTION_CHECKPOINT_V1"
+                and checkpoint.get("status") == "SOURCE_TARGET_PREPARE_READBACK_PASS"
+                and checkpoint.get("db_reimported") is False
+                and checkpoint.get("cutover_allowed") is False
+            ):
+                return {
+                    "status": "ALREADY_ADOPTED_FIRST_STAGE",
+                    "migration_id": mid, "domain": domain,
+                    "cutover_allowed": False, "database_writes_performed": False,
+                }
+            raise PullMigrationError("ADOPT_SITE_ALREADY_STAGED_WITHOUT_PROOF")
+        try:
+            migration_db_adoption.selected_db(state, domain)
+        except migration_db_adoption.AdoptBlocked as exc:
+            raise PullMigrationError(str(exc)) from None
+        if target_identity() != state.get("target_server_identity"):
+            raise PullMigrationError("ADOPT_LOCAL_TARGET_IDENTITY_CHANGED")
+        # Check the same source identity and exact site configuration, not
+        # merely an address or an old transcript's source IP.
+        plan = source_probe(state["source"], [domain])
+        fresh = [row for row in plan.get("sites", [])
+                 if isinstance(row, dict) and row.get("domain") == domain]
+        if (plan.get("source_server_identity") != state.get("source_server_identity")
+                or len(fresh) != 1
+                or _site_structure_fingerprint(fresh[0])
+                   != _site_structure_fingerprint(selected[0])):
+            raise PullMigrationError("ADOPT_OLD_SERVER_IDENTITY_OR_SITE_DRIFT")
+        before_state_hash = hashlib.sha256(state_path(mid).read_bytes()).hexdigest()
+        proof = _owned_pending_database_readback(state, domain)
+        # Detect a non-cooperating migration process or admin editing state
+        # while source/target SQL exports were being compared.
+        if hashlib.sha256(state_path(mid).read_bytes()).hexdigest() != before_state_hash:
+            raise PullMigrationError("ADOPT_MIGRATION_STATE_CHANGED_DURING_EXPORT")
+        try:
+            updated = migration_db_adoption.stage_existing_verified_site(state, domain, proof)
+        except migration_db_adoption.AdoptBlocked as exc:
+            raise PullMigrationError(str(exc)) from None
+        # Never erase SQL failure history; a first-stage readback does not
+        # release either a parent or a partial child for cutover.
+        if (updated.get("status") != "PREPARE_FAILED"
+                or updated.get("last_sql_guard_failure") != state.get("last_sql_guard_failure")):
+            raise PullMigrationError("ADOPT_ORIGINAL_GUARD_LOST")
+        save_state(updated)
+        return {
+            "status": "FIRST_STAGE_ADOPTED_REQUIRES_CHAIN_RECOVERY",
+            "migration_id": mid, "domain": domain,
+            "cutover_allowed": False, "database_writes_performed": False,
+            "source_frozen": False, "site_stage_status": "PULLED_STAGED",
+        }
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def chain_adopt_database_proof(parent_mid: str, child_mid: str) -> dict[str, Any]:
+    """Two prior imports, both checked; NO state change, DB import or cutover."""
+    parent, child = load_state(parent_mid), load_state(child_mid)
+    try:
+        scope = migration_chain_recovery.select(parent, child)
+    except migration_chain_recovery.ChainRecoveryBlocked as exc:
+        raise PullMigrationError(str(exc)) from None
+    if target_identity() != parent.get("target_server_identity"):
+        raise PullMigrationError("ADOPT_LOCAL_TARGET_IDENTITY_CHANGED")
+    # Refuse to probe either DB unless BOTH states match the exact unsafe
+    # parent-child chain and both pending sites are single-DB bindings.
+    for state, domain in zip((parent, child), scope["blocked_sites"]):
+        try:
+            migration_db_adoption.selected_db(state, domain)
+        except migration_db_adoption.AdoptBlocked as exc:
+            raise PullMigrationError(str(exc)) from None
+    proof = [
+        _owned_pending_database_readback(parent, scope["blocked_sites"][0]),
+        _owned_pending_database_readback(child, scope["blocked_sites"][1]),
+    ]
+    try:
+        receipt = migration_db_adoption.sealed_receipt(proof)
+    except migration_db_adoption.AdoptBlocked as exc:
+        raise PullMigrationError(str(exc)) from None
+    receipt["parent_migration_id"] = parent_mid
+    receipt["child_migration_id"] = child_mid
+    return receipt
+
+
+def diagnose_chain_sql(parent_mid: str, child_mid: str) -> dict[str, Any]:
+    """One opt-in advisory read/export of the two already-failed DBs.
+
+    Enforce both states and host identity before any network call. Never infer
+    that a matching row fingerprint proves conditional DDL equivalence.
+    There is no migration state write, data import, cleanup of an existing
+    target, or permission to resume or cut over.
+    """
+    parent = load_state(parent_mid)
+    child = load_state(child_mid)
+    try:
+        scope = migration_chain_recovery.select(parent, child)
+    except migration_chain_recovery.ChainRecoveryBlocked as exc:
+        raise PullMigrationError(str(exc)) from None
+    if target_identity() != parent.get("target_server_identity"):
+        raise PullMigrationError("CHAIN_SQL_LOCAL_TARGET_IDENTITY_CHANGED")
+    exact = (
+        (parent, parent_mid, scope["blocked_sites"][0]),
+        (child, child_mid, scope["blocked_sites"][1]),
+    )
+    for state, _, domain in exact:
+        rows = [
+            entry for entry in state["sites"]
+            if entry.get("domain") == domain
+        ]
+        if (len(rows) != 1 or rows[0].get("stage_status") != "PENDING"
+                or not isinstance(rows[0].get("mysql_databases"), list)
+                or len(rows[0]["mysql_databases"]) != 1):
+            raise PullMigrationError("CHAIN_SQL_GUARDED_DB_BINDING_UNVERIFIED")
+    results = []
+    for _, mid, domain in exact:
+        evidence = diagnose_sql_difference(mid, domain)
+        # Returned diagnostics are advisory-only; limit output to fixed,
+        # code-owned aggregate categories rather than SQL or raw values.
+        info = evidence.get("evidence")
+        if (evidence.get("status") != "ADVISORY_DIAGNOSTIC_ONLY"
+                or not isinstance(info, dict)):
+            raise PullMigrationError("CHAIN_SQL_ADVISORY_EVIDENCE_INVALID")
+        # Only fixed key names with bounded aggregate counts may leave
+        # this command. Raw SQL/literals/identifiers never enter stdout.
+        def picked_counts(blob: Any, keys: tuple[str, ...]) -> dict[str, int]:
+            if blob is None:
+                return {}
+            if not isinstance(blob, dict):
+                raise PullMigrationError("CHAIN_SQL_COUNTERS_UNVERIFIED")
+            output = {}
+            for key in keys:
+                value = blob.get(key)
+                if value is not None:
+                    if type(value) is not int or not 0 <= value <= 100000000:
+                        raise PullMigrationError("CHAIN_SQL_COUNTERS_UNVERIFIED")
+                    output[key] = value
+            return output
+
+        guard = picked_counts(info.get("dynamic_guard"), (
+            "recognized_safe", "recognized_unsafe", "double_quoted_if",
+            "other_unknown_set", "unsafe_yes_branches", "unsafe_no_branches",
+            "unsafe_control_or_multi",
+        ))
+        schema = picked_counts(info.get("schema_difference"), (
+            "source_tables", "target_tables", "common_tables",
+            "source_only_tables", "target_only_tables", "mismatched_tables",
+            "changed_columns", "changed_indexes", "changed_options",
+            "unclassified_tables", "other_schema_source_only",
+            "other_schema_target_only",
+        ))
+        readback = info.get("source_export_readback", {})
+        if not isinstance(readback, dict):
+            raise PullMigrationError("CHAIN_SQL_READBACK_UNVERIFIED")
+        verification = info.get("verification", "UNAVAILABLE")
+        if verification not in {
+            "NOT_A_PASS_GATE", "UNAVAILABLE", "SOURCE_EXPORT_UNUSABLE",
+            "SOURCE_TABLE_COUNT_MISMATCH",
+        }:
+            verification = "UNAVAILABLE"
+        guarded = info.get("guarded_export_comparison", {})
+        if not isinstance(guarded, dict):
+            raise PullMigrationError("CHAIN_SQL_GUARDED_EXPORT_VERDICT_INVALID")
+        safe_status = guarded.get("status", "UNAVAILABLE")
+        if safe_status not in {
+            "BLOCKED", "MATCH_ADVISORY_NOT_MIGRATION_PASS", "UNAVAILABLE",
+        }:
+            safe_status = "UNAVAILABLE"
+        guarded_reason = guarded.get("reason")
+        if guarded_reason not in {
+            "CONDITIONAL_DDL", "SCHEMA_OR_DATA_UNPROVEN",
+            "UNKNOWN_COMPARISON_MODE", None,
+        }:
+            guarded_reason = "UNAVAILABLE"
+        results.append({
+            "domain": domain,
+            "migration_id": mid,
+            "guarded_export_comparison": {
+                "status": safe_status,
+                "reason": guarded_reason,
+                "cutover_allowed": False,
+            },
+            "verification": verification,
+            "source_export_readback": picked_counts(
+                readback, ("attempts", "source_tables", "expected_source_tables")
+            ),
+            "dynamic_guard_counts": guard,
+            "schema_difference_counts": schema,
+            "database_writes_performed": False,
+            "migration_state_writes_performed": False,
+        })
+    return {
+        "schema": "P07_CHAIN_SQL_ADVISORY_V1",
+        "status": "ADVISORY_ONLY",
+        "source_target_snapshot_atomic": False,
+        "conditional_ddl_semantics_verified": False,
+        "database_writes_performed": False,
+        "migration_state_writes_performed": False,
+        "cutover_allowed": False,
+        "sites": results,
+    }
+
+
+def chain_recovery_scope(parent_mid: str, child_mid: str) -> dict[str, Any]:
+    """Only return cross-task evidence; keep all live assets and state intact."""
+    try:
+        return migration_chain_recovery.select(
+            load_state(parent_mid), load_state(child_mid)
+        )
+    except migration_chain_recovery.ChainRecoveryBlocked as exc:
+        raise PullMigrationError(str(exc)) from None
+
+
+def consolidated_chain_scope(
+    parent_mid: str, child_mid: str, tail_mid: str, *,
+    verify_target_markers: bool = False,
+    locked_candidate_id: str | None = None,
+) -> dict[str, Any]:
+    """Read-only three-task reconciliation or sealed, nonexecutable candidate."""
+    try:
+        parent, child, tail = (
+            load_state(parent_mid), load_state(child_mid), load_state(tail_mid)
+        )
+        if locked_candidate_id is not None:
+            if not verify_target_markers:
+                raise PullMigrationError("CONSOLIDATED_EXECUTION_LOCAL_PROOF_REQUIRED")
+            return migration_chain_consolidation.build_locked_execution_candidate(
+                parent, child, tail,
+                proposed_migration_id=locked_candidate_id,
+                local_target_identity=target_identity(),
+            )
+        if verify_target_markers:
+            return migration_chain_consolidation.local_target_marker_proof(
+                parent, child, tail, local_target_identity=target_identity()
+            )
+        return migration_chain_consolidation.consolidate(parent, child, tail)
+    except migration_chain_consolidation.ConsolidationBlocked as exc:
+        raise PullMigrationError(str(exc)) from None
+
+
+def chain_execution_scope(parent_mid: str, child_mid: str,
+                          tail_mid: str) -> dict[str, Any]:
+    """No-write 17-site owner and connected-www3 recovery view.
+
+    This is deliberately separate from cutover_migration: an existing
+    three-task incident cannot impersonate a single PREPARED target-pull.
+    """
+    try:
+        parent, child, tail = (
+            load_state(parent_mid), load_state(child_mid), load_state(tail_mid)
+        )
+        if target_identity() != parent.get("target_server_identity"):
+            raise PullMigrationError("CHAIN_EXECUTION_LOCAL_TARGET_IDENTITY_CHANGED")
+        result = migration_chain_execution_scope.scope(parent, child, tail)
+        # Attach the exact OWNER-approved final window to the existing
+        # original-owner CLI output. This is a locked scope only, never a
+        # source-side pause or a permission to run legacy all-sites freeze.
+        result["owner_final_window"] = (
+            migration_three_site_window.owner_window_scope(
+                result["final_sync_plan"],
+                migration_three_site_window.OWNER_SITES,
+                # OWNER explicitly approved a brief outage for all 17 sites.
+                # Approval does NOT satisfy source freeze, shadow or rollback.
+                whole_server_outage_approved=True,
+            )
+        )
+        # Reconcile the three original owners' Cron/PM2 source controls once,
+        # not once per partial migration. The full private control is never
+        # printed by this read-only CLI and cannot activate any source stop.
+        try:
+            control = migration_three_site_window.assemble_seventeen_site_source_maintenance(
+                result["final_sync_plan"], (parent, child, tail),
+            )
+            result["source_maintenance"] = {
+                key: value for key, value in control.items()
+                if key != "control"
+            }
+        except migration_three_site_window.WindowBlocked as exc:
+            result["source_maintenance"] = {
+                "status": "CONTROL_INVENTORY_OR_OWNER_BLOCKED",
+                "reason": str(exc),
+                "source_pause_performed": False,
+                "source_pause_allowed": False,
+                "cutover_allowed": False,
+            }
+        return result
+    except migration_three_site_window.WindowBlocked as exc:
+        raise PullMigrationError(str(exc)) from None
+    except migration_chain_execution_scope.RecoveryScopeBlocked as exc:
+        raise PullMigrationError(str(exc)) from None
+
+
+
+
+
+def _verify_three_owner_private_sql_dumps(plan: dict[str, Any],
+                                          parent_mid: str) -> dict[str, Any]:
+    """Read only the 3 original-owner private dumps; never infer final parity."""
+    import migration_chain_final_saga as saga
+    path = state_dir(parent_mid) / "three-source-dumps-prestage-v1" / "journal.json"
+    try:
+        record = saga._read_receipt(
+            path, expected_schema="p07.chain-three-source-dumps-prestage.v1")
+    except (saga.SagaBlocked, OSError):
+        raise PullMigrationError("17_SITE_PRIVATE_SOURCE_DUMPS_UNVERIFIED") from None
+    expected = set(migration_three_site_window.OWNER_SITES)
+    done = record.get("completed")
+    if (record.get("status") != "THREE_SOURCE_DUMPS_PRESTAGED_NOT_FINAL"
+            or record.get("plan_sha256") != plan["plan_sha256"]
+            or record.get("target_identity_sha256")
+            != plan["target_identity_sha256"]
+            or record.get("source_runtime_frozen") is not False
+            or record.get("cutover_allowed") is not False
+            or type(done) is not list or len(done) != 3
+            or {row.get("domain") for row in done
+                if isinstance(row, dict)} != expected):
+        raise PullMigrationError("17_SITE_PRIVATE_SQL_RECEIPT_DRIFT")
+    verified = []
+    for item in done:
+        name = item.get("dump_basename")
+        if (type(name) is not str
+                or re.fullmatch(r"[0-9a-f]{20}\.sql\.gz", name) is None
+                or item.get("final_snapshot") is not False
+                or item.get("source_target_parity_verified") is not False):
+            raise PullMigrationError("17_SITE_PRIVATE_SQL_PATH_UNSAFE")
+        local = path.parent / name
+        try:
+            stat_info = local.lstat()
+            if (not stat.S_ISREG(stat_info.st_mode)
+                    or stat_info.st_nlink != 1
+                    or stat_info.st_uid != os.geteuid()
+                    or stat.S_IMODE(stat_info.st_mode) & 0o077
+                    or stat_info.st_size != item.get("dump_bytes")
+                    or stat_info.st_size <= 0):
+                raise PullMigrationError("17_SITE_PRIVATE_SQL_FILE_UNSAFE")
+            digest = hashlib.sha256()
+            with local.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1048576), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != item.get("dump_sha256"):
+                raise PullMigrationError("17_SITE_PRIVATE_SQL_CONTENT_CHANGED")
+            sql_diff_probe.require_nonempty_source_schema(local)
+        except (OSError, sql_diff_probe.AdvisoryDiagnosticUnavailable):
+            raise PullMigrationError("17_SITE_PRIVATE_SQL_READBACK_UNAVAILABLE") from None
+        verified.append(item["domain"])
+    return {
+        "status": "THREE_ORIGINAL_PRIVATE_SQL_DUMPS_VERIFIED_NOT_FINAL",
+        "site_count": 17, "database_count": 3,
+        "source_frozen": False, "final_source_parity": False,
+        "existing_target_database_writes": False, "cutover_allowed": False,
+    }
+
+
+def chain_seventeen_site_delivery(
+    parent_mid: str, child_mid: str, tail_mid: str, *,
+    action: str = "status", confirm: str | None = None,
+) -> dict[str, Any]:
+    """ONE incident-specific operator interface, not three independent cutovers.
+
+    This command manages strictly PRIVATE preparation. Source write-freeze,
+    database promotion, active target overwrite and cutover are deliberately
+    outside this command until the full original-owner transaction is proven.
+    """
+    if action not in {
+        "status", "private-prestage", "verify-private", "pause-preview",
+        "paused-db-copy", "verify-paused-dbs",
+    }:
+        raise PullMigrationError("17_SITE_DELIVERY_ACTION_UNSUPPORTED")
+    if action == "private-prestage":
+        if confirm != "PRESTAGE_EXISTING_17_SITES_PRIVATE_ONLY":
+            raise PullMigrationError("17_SITE_PRIVATE_PRESTAGE_CONFIRMATION_REQUIRED")
+    elif action == "paused-db-copy":
+        if confirm != "COPY_PAUSED_THREE_SOURCE_DATABASES_PRIVATE_ONLY":
+            raise PullMigrationError("17_SITE_PAUSED_SQL_COPY_CONFIRMATION_REQUIRED")
+    elif confirm is not None:
+        raise PullMigrationError("17_SITE_READ_ONLY_CONFIRMATION_UNEXPECTED")
+    tasks = (
+        load_state(parent_mid), load_state(child_mid), load_state(tail_mid),
+    )
+    current_target = target_identity()
+    if current_target != tasks[0].get("target_server_identity"):
+        raise PullMigrationError("17_SITE_DELIVERY_TARGET_IDENTITY_CHANGED")
+    try:
+        scope = migration_chain_execution_scope.scope(*tasks)
+        plan = scope["final_sync_plan"]
+        migration_three_site_window.owner_window_scope(
+            plan, migration_three_site_window.OWNER_SITES,
+            whole_server_outage_approved=True,
+        )
+    except (migration_chain_execution_scope.RecoveryScopeBlocked,
+            migration_three_site_window.WindowBlocked) as exc:
+        raise PullMigrationError("17_SITE_DELIVERY_ORIGINAL_OWNERS_UNVERIFIED") from None
+    if (scope["site_count"] != 17 or scope["source_task_count"] != 3
+            or plan["cutover_allowed"] is not False
+            or plan["source_freeze_allowed"] is not False):
+        raise PullMigrationError("17_SITE_DELIVERY_CUTOVER_BOUNDARY_CHANGED")
+
+    root = state_dir(parent_mid)
+    if action in {"paused-db-copy", "verify-paused-dbs"}:
+        import migration_chain_paused_sql as frozen_sql
+        try:
+            if action == "paused-db-copy":
+                return frozen_sql.copy_paused_three_source_dbs(
+                    plan, tasks, root=root, target_identity=current_target,
+                    confirmation=confirm)
+            return frozen_sql.verify_paused_three_source_dbs(
+                plan, tasks, root=root, target_identity=current_target)
+        except frozen_sql.PausedDatabaseBlocked as exc:
+            raise PullMigrationError(str(exc)) from None
+    if action == "status":
+        # Even all three private receipts do not prove a frozen source,
+        # a safe original-owner DB switch or a reversible final migration.
+        return {
+            "status": "17_SITE_DELIVERY_NOT_CUTOVER_READY",
+            "site_count": 17, "original_task_count": 3,
+            "staged_site_count": scope["staged_count"],
+            "pending_site_count": scope["pending_count"],
+            "plan_sha256": plan["plan_sha256"],
+            "private_site_warm_attempt_exists": os.path.lexists(
+                root / "p07-17-site-private-warm-stage-v1"),
+            "private_resource_warm_attempt_exists": os.path.lexists(
+                root / "p07-17-site-private-resource-stage-v1"),
+            "private_sql_dump_attempt_exists": os.path.lexists(
+                root / "three-source-dumps-prestage-v1"),
+            "paused_source_sql_copy_attempt_exists": os.path.lexists(
+                root / "p07-three-paused-source-db-private-v1"),
+            "source_maintenance_control": "NOT_EXECUTED",
+            "remaining_final_gates": [
+                "FROZEN_SOURCE_WRITERS_AND_DATABASE_PARITY",
+                "THREE_ORIGINAL_DB_SHADOW_ROLLBACK",
+                "FROZEN_FILES_EXTERNAL_SQLITE_PARITY",
+                "REAL_CP2_HTTP_AND_FULL_RECOVERY",
+            ],
+            "source_runtime_paused": False,
+            "database_writes_performed": False,
+            "cutover_allowed": False, "writes_performed": False,
+        }
+
+    if action == "pause-preview":
+        import migration_chain_source_pause as pausing
+        try:
+            return pausing.source_pause_preview(
+                plan, tasks, root=root, target_identity=current_target)
+        except pausing.SourcePauseBlocked:
+            raise PullMigrationError(
+                "17_SITE_SOURCE_PAUSE_CONTROL_NOT_READY"
+            ) from None
+
+    if action == "verify-private":
+        import migration_chain_private_file_stage as files
+        import migration_chain_private_resource_stage as resources
+        try:
+            a = files.verify_private_seventeen_site_warm_copy(plan, root=root)
+            b = resources.verify_original_private_resources(
+                plan, tasks, root=root)
+        except (files.WarmStageBlocked,
+                resources.ResourceStageBlocked) as exc:
+            raise PullMigrationError("17_SITE_PRIVATE_STAGE_READBACK_FAILED") from None
+        c = _verify_three_owner_private_sql_dumps(plan, parent_mid)
+        return {
+            "status": "17_SITE_PRIVATE_PRESTAGE_VERIFIED_NOT_CUTOVER",
+            "site_file_count": a["site_count"],
+            "private_resource_count": b["resource_count"],
+            "original_database_count": c["database_count"],
+            "source_snapshot_frozen": False,
+            "source_target_final_parity": False,
+            "cutover_allowed": False, "writes_performed": False,
+        }
+
+    # Verify all destination namespaces are fresh BEFORE the first transfer.
+    # A partial prior operation must be independently reconciled; never
+    # auto-repeat a previous file, SQLite or SQL export.
+    for dirname in (
+        "p07-17-site-private-warm-stage-v1",
+        "p07-17-site-private-resource-stage-v1",
+        "three-source-dumps-prestage-v1",
+    ):
+        if os.path.lexists(root / dirname):
+            raise PullMigrationError(
+                "17_SITE_PRESTAGE_PRIOR_ATTEMPT_RETAIN_FOR_RECOVERY")
+    import migration_chain_private_file_stage as files
+    import migration_chain_private_resource_stage as resources
+    try:
+        a = files.stage_private_seventeen_site_warm_copy(
+            plan, tasks, root=root, actual_target_identity=current_target,
+            authorize_private_copy=True)
+        b = resources.stage_original_private_resources(
+            plan, tasks, root=root, actual_target_identity=current_target,
+            authorize_private_copy=True)
+    except (files.WarmStageBlocked, resources.ResourceStageBlocked):
+        raise PullMigrationError(
+            "17_SITE_PRIVATE_PRESTAGE_PARTIAL_RECONCILIATION_REQUIRED"
+        ) from None
+    c = chain_prestage_three_source_dumps(
+        parent_mid, child_mid, tail_mid,
+        confirm="PRESTAGE_THREE_SOURCE_DUMPS_ONLY")
+    if (a.get("site_count") != 17
+            or a.get("cutover_allowed") is not False
+            or b.get("cutover_allowed") is not False
+            or c.get("domain_count") != 3
+            or c.get("cutover_allowed") is not False):
+        raise PullMigrationError("17_SITE_PRESTAGE_UNEXPECTED_RESULT_RETAIN")
+    return chain_seventeen_site_delivery(
+        parent_mid, child_mid, tail_mid, action="verify-private")
+
+def chain_original_resource_type_readiness(
+    parent_mid: str, child_mid: str, tail_mid: str, *,
+    verify_live_source: bool = False,
+) -> dict[str, Any]:
+    """Never silently SSH or mutate three original migration states."""
+    import migration_chain_asset_audit as resources
+
+    originals = (
+        load_state(parent_mid), load_state(child_mid), load_state(tail_mid),
+    )
+    if target_identity() != originals[0].get("target_server_identity"):
+        raise PullMigrationError("CHAIN_RESOURCES_TARGET_IDENTITY_CHANGED")
+    try:
+        plan = migration_chain_execution_scope.scope(*originals)["final_sync_plan"]
+        if verify_live_source:
+            return resources.verify_original_resource_source_types(
+                plan, *originals,
+            )
+        result = resources.bind_original_resources(plan, *originals)
+        return {key: value for key, value in result.items()
+                if key != "resources"}
+    except (resources.ResourceOwnerBlocked,
+            migration_chain_execution_scope.RecoveryScopeBlocked) as exc:
+        raise PullMigrationError(str(exc)) from None
+
+
+
+def chain_private_resource_warm_stage(
+    parent_mid: str, child_mid: str, tail_mid: str, *,
+    confirm: str | None = None, verify_only: bool = False,
+) -> dict[str, Any]:
+    """Private external and SQLite source-origin pre-copy, never cutover.
+
+    SQLite warm snapshots create temporary files ONLY under the original
+    old-server PRIVATE source staging root. No live website/database path,
+    existing CP2 path, DNS, Cron or PM2 state may be changed by this flow.
+    """
+    import migration_chain_private_resource_stage as resources
+    if verify_only:
+        if confirm is not None:
+            raise PullMigrationError("CHAIN_RESOURCE_VERIFY_CONFIRM_UNEXPECTED")
+    elif confirm != "PRESTAGE_17_RESOURCES_PRIVATE_ONLY":
+        raise PullMigrationError("CHAIN_RESOURCE_EXPLICIT_PRIVATE_SCOPE_REQUIRED")
+    original = (
+        load_state(parent_mid), load_state(child_mid), load_state(tail_mid),
+    )
+    real_target = target_identity()
+    if original[0].get("target_server_identity") != real_target:
+        raise PullMigrationError("CHAIN_RESOURCE_LOCAL_TARGET_IDENTITY_CHANGED")
+    try:
+        plan = migration_chain_execution_scope.scope(*original)["final_sync_plan"]
+        if verify_only:
+            return resources.verify_original_private_resources(
+                plan, original, root=state_dir(parent_mid),
+            )
+        return resources.stage_original_private_resources(
+            plan, original, root=state_dir(parent_mid),
+            actual_target_identity=real_target,
+            authorize_private_copy=True,
+        )
+    except (resources.ResourceStageBlocked,
+            migration_chain_execution_scope.RecoveryScopeBlocked) as exc:
+        raise PullMigrationError(str(exc)) from None
+
+
+def chain_private_file_warm_stage(
+    parent_mid: str, child_mid: str, tail_mid: str, *,
+    confirm: str | None = None, verify_only: bool = False,
+) -> dict[str, Any]:
+    """Bounded cross-owner CP2 private warm files; NOT a final migration.
+
+    Uses the same original-three-task scope. Real file transfer is allowed
+    only behind the explicit private-only confirmation; none of the active
+    website roots, credentials, databases, services, DNS or state.json change.
+    A prior interrupted intent is retained and cannot be automatically rerun.
+    """
+    import migration_chain_private_file_stage as warm
+
+    if verify_only:
+        if confirm is not None:
+            raise PullMigrationError("CHAIN_WARM_VERIFY_CONFIRMATION_UNEXPECTED")
+    elif confirm != "PRESTAGE_17_FILES_PRIVATE_ONLY":
+        raise PullMigrationError("CHAIN_WARM_EXPLICIT_PRIVATE_SCOPE_REQUIRED")
+    originals = (
+        load_state(parent_mid), load_state(child_mid), load_state(tail_mid),
+    )
+    target = target_identity()
+    if originals[0].get("target_server_identity") != target:
+        raise PullMigrationError("CHAIN_WARM_TARGET_IDENTITY_CHANGED")
+    try:
+        plan = migration_chain_execution_scope.scope(*originals)["final_sync_plan"]
+        if verify_only:
+            return warm.verify_private_seventeen_site_warm_copy(
+                plan, root=state_dir(parent_mid),
+            )
+        return warm.stage_private_seventeen_site_warm_copy(
+            plan, originals, root=state_dir(parent_mid),
+            actual_target_identity=target,
+            authorize_private_copy=True,
+        )
+    except (warm.WarmStageBlocked,
+            migration_chain_execution_scope.RecoveryScopeBlocked) as exc:
+        raise PullMigrationError(str(exc)) from None
+
+
+def chain_prestage_three_source_dumps(
+    parent_mid: str, child_mid: str, tail_mid: str, *, confirm: str,
+) -> dict[str, Any]:
+    """Transfer fresh, source-only SQL copies for the three original owners.
+
+    This is NOT the final consistency snapshot: the old sites keep serving
+    traffic. No existing CP2 DB, application mapping or migration state.json
+    is touched. Failures retain a private intent record and do not retry.
+    """
+    if confirm != "PRESTAGE_THREE_SOURCE_DUMPS_ONLY":
+        raise PullMigrationError("CHAIN_PRESTAGE_EXPLICIT_SCOPE_REQUIRED")
+    originals = [load_state(mid) for mid in (parent_mid, child_mid, tail_mid)]
+    parent, child, tail = originals
+    if target_identity() != parent.get("target_server_identity"):
+        raise PullMigrationError("CHAIN_PRESTAGE_TARGET_IDENTITY_CHANGED")
+    try:
+        report = migration_chain_execution_scope.scope(parent, child, tail)
+        consent = migration_three_site_window.owner_window_scope(
+            report["final_sync_plan"], migration_three_site_window.OWNER_SITES)
+    except (migration_chain_execution_scope.RecoveryScopeBlocked,
+            migration_three_site_window.WindowBlocked) as exc:
+        raise PullMigrationError("CHAIN_PRESTAGE_SCOPE_NOT_VERIFIED") from exc
+    if (report["site_count"] != 17 or report["source_task_count"] != 3
+            or consent["cutover_allowed"] is not False
+            or report["source_freeze_allowed"] is not False):
+        raise PullMigrationError("CHAIN_PRESTAGE_BOUNDARY_CHANGED")
+
+    tasks = {state["migration_id"]: state for state in originals}
+    sites = {row["domain"]: row for row in report["sites"]}
+    eligible = []
+    for domain in migration_three_site_window.OWNER_SITES:
+        owned = sites[domain]
+        source_task = tasks[owned["owner_migration_id"]]
+        original_site = source_task["sites"][owned["owner_index"]]
+        dbs = original_site.get("mysql_databases")
+        if (original_site.get("domain") != domain
+                or not isinstance(dbs, list) or len(dbs) != 1
+                or not isinstance(dbs[0], str) or not dbs[0]
+                or source_task.get("status") not in {"PREPARE_FAILED", "PREPARED"}
+                or source_task.get("source_runtime_frozen") is not False
+                or source_task.get("target_runtime_activated") is not False
+                or source_task.get("dns_changed_by_p07") is not False
+                or source_task.get("source_delete_allowed") is not False
+                or source_task.get("existing_target_overwrite_allowed") is not False
+                or not isinstance(source_task.get("source"), dict)):
+            raise PullMigrationError("CHAIN_PRESTAGE_SOURCE_SITE_UNSAFE")
+        eligible.append((domain, dbs[0], source_task))
+
+    root = state_dir(parent_mid) / "three-source-dumps-prestage-v1"
+    if os.path.lexists(root):
+        raise PullMigrationError("CHAIN_PRESTAGE_PRIOR_ATTEMPT_RETAINED")
+    if state_dir(parent_mid).is_symlink() or not state_dir(parent_mid).is_dir():
+        raise PullMigrationError("CHAIN_PRESTAGE_PRIVATE_STATE_ROOT_UNSAFE")
+    root.mkdir(mode=0o700, exist_ok=False)
+    record: dict[str, Any] = {
+        "schema": "p07.chain-three-source-dumps-prestage.v1",
+        "status": "INTENT_RECORDED_UNVERIFIED",
+        "original_owner_ids": [parent_mid, child_mid, tail_mid],
+        "plan_sha256": report["final_sync_plan"]["plan_sha256"],
+        "source_identity_sha256": report["source_identity_sha256"],
+        "target_identity_sha256": report["target_identity_sha256"],
+        "domains": list(migration_three_site_window.OWNER_SITES),
+        "completed": [],
+        "source_runtime_frozen": False,
+        "source_business_writes_performed": False,
+        "target_database_writes_performed": False,
+        "target_config_writes_performed": False,
+        "migration_state_writes_performed": False,
+        "automatic_dns_change_allowed": False,
+        "cutover_allowed": False,
+    }
+    journal = root / "journal.json"
+    legacy.atomic_private_json(journal, record)
+    # The helper runs only in a distinct migration-owned temporary source
+    # directory; it never touches the old site's files, DB or service config.
+    token = "p07-three-source-dumps-" + hashlib.sha256(
+        report["final_sync_plan"]["plan_sha256"].encode("ascii")
+    ).hexdigest()[:20]
+    record["status"] = "SOURCE_HELPER_STAGING_INTENT"
+    legacy.atomic_private_json(journal, record)
+    runtime = stage_source_runtime(parent["source"], token)
+    for domain, db, task in eligible:
+        digest = hashlib.sha256(
+            f"{task['migration_id']}:{domain}:{db}".encode("utf-8")
+        ).hexdigest()[:20]
+        remote_file = f"{remote_staging_root(task)}/prestage-{digest}.sql.gz"
+        local_file = root / f"{digest}.sql.gz"
+        if os.path.lexists(local_file):
+            raise PullMigrationError("CHAIN_PRESTAGE_PRIVATE_DUMP_ALREADY_EXISTS")
+        record["status"] = "SOURCE_EXPORT_AND_TRANSFER_INTENT"
+        record["active_domain"] = domain
+        legacy.atomic_private_json(journal, record)
+        bound = dict(task, source_runtime_path=runtime)
+        source_export_database(bound, db, remote_file)
+        pull_path(task["source"], remote_file, local_file)
+        if local_file.is_symlink() or not local_file.is_file() or local_file.stat().st_size == 0:
+            raise PullMigrationError("CHAIN_PRESTAGE_SOURCE_DUMP_UNVERIFIED")
+        try:
+            sql_diff_probe.require_nonempty_source_schema(local_file)
+        except sql_diff_probe.AdvisoryDiagnosticUnavailable as exc:
+            raise PullMigrationError("CHAIN_PRESTAGE_SOURCE_SCHEMA_UNVERIFIED") from exc
+        checksum = hashlib.sha256()
+        with local_file.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                checksum.update(block)
+        record["completed"].append({
+            "domain": domain,
+            "original_owner": task["migration_id"],
+            "dump_basename": local_file.name,
+            "dump_sha256": checksum.hexdigest(),
+            "dump_bytes": local_file.stat().st_size,
+            "final_snapshot": False,
+            "source_target_parity_verified": False,
+        })
+        record.pop("active_domain", None)
+        legacy.atomic_private_json(journal, record)
+    record["status"] = "THREE_SOURCE_DUMPS_PRESTAGED_NOT_FINAL"
+    legacy.atomic_private_json(journal, record)
+    return {
+        "status": record["status"],
+        "domain_count": 3,
+        "original_task_count": 3,
+        "plan_sha256": record["plan_sha256"],
+        "source_writes_frozen": False,
+        "source_business_writes_performed": False,
+        "source_private_export_files_created": True,
+        "target_private_export_files_created": True,
+        "existing_target_databases_modified": False,
+        "target_config_modified": False,
+        "migration_state_modified": False,
+        "source_target_final_parity_verified": False,
+        "automatic_dns_changed": False,
+        "cutover_allowed": False,
+    }
+
+
+def chain_original_database_readiness(
+    parent_mid: str, child_mid: str, tail_mid: str, *,
+    verify_original_markers: bool = False,
+) -> dict[str, Any]:
+    """Local CP2-only, read-only three-owner DB blocker triage.
+
+    It reuses existing www3 candidate-connection journal without
+    reconnecting, importing or altering the previously staged database.
+    """
+    parent, child, tail = (
+        load_state(parent_mid), load_state(child_mid), load_state(tail_mid)
+    )
+    if target_identity() != parent.get("target_server_identity"):
+        raise PullMigrationError("CHAIN_DB_LOCAL_TARGET_IDENTITY_CHANGED")
+    try:
+        return migration_chain_execution_scope.original_database_readiness(
+            parent, child, tail,
+            verify_original_markers=verify_original_markers,
+        )
+    except migration_chain_execution_scope.RecoveryScopeBlocked as exc:
+        raise PullMigrationError(str(exc)) from None
+
+
 def remainder_scope(mid: str) -> dict[str, Any]:
     """Read-only parent-state selector; no remote call or state update."""
     try:
@@ -2795,7 +3881,136 @@ def prepare_remainder(mid: str, confirm: str) -> dict[str, Any]:
     return state
 
 
-def resume_prepare_migration(mid: str) -> dict[str, Any]:
+def _verify_adopted_failed_sql_resume_scope(
+    state: dict[str, Any], site_domain: str
+) -> None:
+    """Read-only proof for exactly one verified first-stage SQL re-adoption.
+
+    Old target DB is NEVER imported, renamed, dropped, or overwritten. The
+    old SQL guard stays in history. Any uncertain ownership, site layout,
+    second failed DB, source drift or existing suffix is a hard stop.
+    """
+    if (state.get("status") != "PREPARE_FAILED"
+            or not isinstance(state.get("last_sql_guard_failure"), dict)
+            or state["last_sql_guard_failure"].get("reason") != "CONDITIONAL_DDL"
+            or not isinstance(state.get("sites"), list)
+            or len(state["sites"]) != 18
+            or not all(state.get(key) is False for key in (
+                "source_runtime_frozen", "target_runtime_activated",
+                "dns_changed_by_p07", "source_delete_allowed",
+                "existing_target_overwrite_allowed",
+            ))
+            or target_identity() != state.get("target_server_identity")):
+        raise PullMigrationError("ADOPTED_RESUME_ORIGINAL_18_SITE_SCOPE_UNPROVEN")
+    rows = state["sites"]
+    marked = [
+        (i, item) for i, item in enumerate(rows)
+        if isinstance(item, dict) and isinstance(item.get("database_adoption"), dict)
+    ]
+    if (len(marked) != 1 or marked[0][0] < 1
+            or marked[0][0] >= len(rows) - 1
+            or marked[0][1].get("domain") != site_domain):
+        raise PullMigrationError("ADOPTED_RESUME_EXACT_ONE_RECOVERED_DB_REQUIRED")
+    n, selected = marked[0]
+    if (any(not isinstance(x, dict) or x.get("stage_status") != "PULLED_STAGED"
+            for x in rows[:n + 1])
+            or any(not isinstance(x, dict) or x.get("stage_status") != "PENDING"
+                   for x in rows[n + 1:])):
+        raise PullMigrationError("ADOPTED_RESUME_SUFFIX_NOT_UNTOUCHED")
+    checkpoint = selected["database_adoption"]
+    if (checkpoint.get("schema") != "P07_EXISTING_DB_ADOPTION_CHECKPOINT_V1"
+            or checkpoint.get("status") != "SOURCE_TARGET_PREPARE_READBACK_PASS"
+            or checkpoint.get("db_reimported") is not False
+            or checkpoint.get("cutover_allowed") is not False
+            or checkpoint.get("snapshot_is_atomic_across_servers") is not False
+            or not re.fullmatch(r"[a-f0-9]{64}", str(checkpoint.get("target_dump_sha256", "")))):
+        raise PullMigrationError("ADOPTED_RESUME_SQL_CHECKPOINT_UNPROVEN")
+    database = selected.get("mysql_databases")
+    if not isinstance(database, list) or len(database) != 1:
+        raise PullMigrationError("ADOPTED_RESUME_SINGLE_DATABASE_REQUIRED")
+    verifications = selected.get("mysql_verification")
+    if (not isinstance(verifications, list) or
+            not any(isinstance(v, dict) and
+                    v.get("database") == database[0] and
+                    v.get("phase") == "prepare" and
+                    v.get("status") == "PASS" and
+                    v.get("recovered_from_failed_guard") is True and
+                    v.get("config_mode") == "PREEXISTING_OWNED_DB_NO_REIMPORT" and
+                    v.get("mode") in migration_db_adoption.VALID_MODES
+                    for v in verifications)):
+        raise PullMigrationError("ADOPTED_RESUME_SQL_VERIFICATION_UNPROVEN")
+    mid = str(state["migration_id"])
+    if not SAFE_ID_RE.fullmatch(mid):
+        raise PullMigrationError("ADOPTED_RESUME_MIGRATION_ID_UNVERIFIED")
+    root = state_dir(mid) / "target-transactions"
+    domain = str(selected["domain"])
+    db = str(database[0])
+    site_token = hashlib.sha256(domain.encode()).hexdigest()[:16]
+    db_token = hashlib.sha256(f"{domain}:{db}:1".encode()).hexdigest()[:16]
+    _private_marker_readback(root / f"site-{site_token}.json", {
+        "domain": domain, "created_by_migration": mid,
+    })
+    ownership = _private_marker_readback(root / f"db-{db_token}.json", {
+        "domain": domain, "database": db, "created_by_migration": mid,
+    })
+    try:
+        site_mismatch = legacy.verify_target_site_creation(selected)
+    except legacy.ServerMigrationError:
+        raise PullMigrationError("ADOPTED_RESUME_TARGET_SITE_UNVERIFIED") from None
+    if site_mismatch:
+        raise PullMigrationError("ADOPTED_RESUME_TARGET_SITE_CHANGED")
+    if (not isinstance(ownership.get("username"), str)
+            or not isinstance(ownership.get("password"), str)
+            or not app_config.verify_rewritten_application_database_config(
+                Path(str(selected["site_root"])), db,
+                ownership["username"], ownership["password"]
+            )):
+        raise PullMigrationError("ADOPTED_RESUME_APP_CONFIG_DRIFT")
+    selected_plan = source_probe(state["source"], [domain])
+    if (selected_plan.get("source_server_identity")
+            != state.get("source_server_identity")
+            or not isinstance(selected_plan.get("sites"), list)
+            or len(selected_plan["sites"]) != 1
+            or _site_structure_fingerprint(selected_plan["sites"][0])
+               != _site_structure_fingerprint(selected)):
+        raise PullMigrationError("ADOPTED_RESUME_SOURCE_IDENTITY_CHANGED")
+    # Before any target write, independently assert that all suffix site
+    # identities are still bound to the same source and ABSENT on CP2.
+    remaining = rows[n + 1:]
+    remaining_names = [str(x["domain"]) for x in remaining]
+    fresh = source_probe(state["source"], remaining_names)
+    if fresh.get("source_server_identity") != state.get("source_server_identity"):
+        raise PullMigrationError("ADOPTED_RESUME_SOURCE_IDENTITY_CHANGED")
+    require_remainder_exact_source_scope(
+        remaining, fresh.get("sites"), remaining_names
+    )
+    target_preflight_local(fresh)
+
+
+def resume_after_verified_adoption(
+    mid: str, site_domain: str, confirm: str
+) -> dict[str, Any]:
+    """Explicit protected first-copy continuation only; NOT a final cutover."""
+    if confirm != f"RESUME_VERIFIED_ADOPTION:{mid}:{site_domain}":
+        raise PullMigrationError("ADOPTED_RESUME_EXPLICIT_CONFIRMATION_REQUIRED")
+    if not SAFE_ID_RE.fullmatch(mid):
+        raise PullMigrationError("ADOPTED_RESUME_MIGRATION_ID_INVALID")
+    lock_path = state_dir(mid) / ".database-adoption.lock"
+    try:
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    except OSError:
+        raise PullMigrationError("ADOPTED_RESUME_PRIVATE_LOCK_UNAVAILABLE") from None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return resume_prepare_migration(mid, verified_adoption=site_domain)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def resume_prepare_migration(
+    mid: str, *, verified_adoption: str | None = None
+) -> dict[str, Any]:
     state = load_state(mid)
     if state.get("status") not in {"PREPARING", "PREPARE_FAILED"}:
         raise PullMigrationError("migration is not resumable from prepare stage")
@@ -2804,17 +4019,24 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
     # populated target merely because a retry was requested. This check
     # intentionally runs before any status transition, save or remote call.
     previous_guard = state.get("last_sql_guard_failure")
-    if (state.get("status") == "PREPARE_FAILED"
-            and isinstance(previous_guard, dict)
-            and previous_guard.get("reason") == "CONDITIONAL_DDL"):
-        raise PullMigrationError(
-            "PREPARE_RESUME_SQL_GUARD_AND_RECOVERY_PROOF_REQUIRED"
-        )
+    guarded_failure = (
+        state.get("status") == "PREPARE_FAILED"
+        and isinstance(previous_guard, dict)
+        and previous_guard.get("reason") == "CONDITIONAL_DDL"
+    )
+    if guarded_failure:
+        if verified_adoption is None:
+            raise PullMigrationError(
+                "PREPARE_RESUME_SQL_GUARD_AND_RECOVERY_PROOF_REQUIRED"
+            )
+        _verify_adopted_failed_sql_resume_scope(state, verified_adoption)
+    elif verified_adoption is not None:
+        raise PullMigrationError("ADOPTED_RESUME_NOT_A_GUARDED_SQL_FAILURE")
     # Older migrations can have no persisted SQL-guard evidence although
     # some sites were already staged. Never infer a safe retry merely from
     # a missing field: target DBs may already hold source/target mixed data.
     # This must execute before a status change, network call or DB write.
-    if state.get("status") == "PREPARE_FAILED":
+    if state.get("status") == "PREPARE_FAILED" and not guarded_failure:
         sites = state.get("sites")
         if (not isinstance(sites, list) or not sites
                 or any(not isinstance(site, dict) for site in sites)
@@ -2830,6 +4052,20 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
     require_mariadb_target()
     transition_migration_status(state, "PREPARING")
     state.pop("last_error_class", None)
+    if guarded_failure:
+        # Keep previous failure and its fixed-count evidence in private task
+        # history, never silently claim it did not happen.
+        prior = state.get("sql_guard_recovery_history")
+        if prior is not None:
+            raise PullMigrationError("ADOPTED_RESUME_RECOVERY_ALREADY_ATTEMPTED")
+        state["sql_guard_recovery_history"] = {
+            "schema": "P07_ADOPTED_GUARD_FIRST_STAGE_RESUME_V1",
+            "site": verified_adoption,
+            "reason": "CONDITIONAL_DDL",
+            "flow": previous_guard.get("flow", "SQL_GUARD_FLOW_V1_UNAVAILABLE"),
+            "state": "FIRST_STAGE_ONLY_NOT_FINAL_PARITY",
+            "cutover_allowed": False,
+        }
     state.pop("last_sql_guard_failure", None)
     save_state(state)
     try:
@@ -2881,6 +4117,361 @@ def resume_prepare_migration(mid: str) -> dict[str, Any]:
         raise PullMigrationError("target-pull prepare failed") from exc
 
 
+def stage_frozen_final_mysql_shadows(
+    state: dict[str, Any], *, expected_site_count: int,
+) -> dict[str, Any]:
+    """Stage all frozen-source final SQL dumps into NEW target shadow DBs.
+
+    This function is intentionally NOT called by cutover_migration or CLI:
+    the current full-server gate remains a hard stop. It is an independently
+    testable transaction primitive, not permission to freeze a live server.
+
+    A failed later site leaves previously verified SHADOW databases intact,
+    never retries or changes original database credentials, and does not
+    switch any application configuration. Exactly one snapshot per DB is
+    imported only when a new empty shadow identity was first proven absent.
+    """
+    import migration_final_db_batch as batch
+    import migration_final_db_shadow as shadow
+
+    identity = target_identity()
+    _all_sites, selected, _fingerprint = batch._safe_scope(
+        state, identity, expected_site_count
+    )
+    if not selected:
+        return {
+            "status": "NO_DATABASES", "database_count": 0,
+            "cutover_allowed": False, "app_config_modified": False,
+        }
+    # Preflight ALL original target ownership receipts and app credentials
+    # before exporting or creating the first shadow. A later site without a
+    # proven original DB must not cause a partial new-DB staging pass.
+    for site in selected:
+        domain, database = str(site["domain"]), str(site["mysql_databases"][0])
+        owner_mid = shadow.original_database_owner(state, site)
+        marker = legacy.target_db_marker(
+            owner_mid, domain, database, 1
+        )
+        try:
+            owned = legacy.read_target_ownership_marker(
+                marker,
+                {"domain": domain, "database": database,
+                 "created_by_migration": owner_mid},
+            )
+        except legacy.ServerMigrationError as exc:
+            raise PullMigrationError(
+                "FINAL_SHADOW_ORIGINAL_MARKER_UNVERIFIED"
+            ) from exc
+        if (
+            not isinstance(owned, dict)
+            or not isinstance(owned.get("username"), str)
+            or not isinstance(owned.get("password"), str)
+            or not owned["username"] or not owned["password"]
+            or not app_config.verify_rewritten_application_database_config(
+                Path(str(site["site_root"])), database,
+                owned["username"], owned["password"],
+            )
+        ):
+            raise PullMigrationError(
+                "FINAL_SHADOW_ORIGINAL_APP_OR_DB_UNVERIFIED"
+            )
+        shadow_name = shadow.shadow_identity(state, site)[1]
+        if os.path.lexists(shadow._marker(state, site, shadow_name)):
+            raise PullMigrationError(
+                "FINAL_SHADOW_ALREADY_STAGED_RECOVERY_REQUIRED"
+            )
+    work = state_dir(str(state["migration_id"])) / "mysql" / "final-shadow"
+    work.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(work, 0o700)
+    staged = 0
+    for site in selected:
+        domain = str(site["domain"])
+        database = str(site["mysql_databases"][0])
+        token = hashlib.sha256(
+            f"{state['migration_id']}:{domain}:{database}:final-shadow".encode()
+        ).hexdigest()[:24]
+        remote_dump = f"{remote_staging_root(state)}/shadow-{token}.sql.gz"
+        source_dump = work / f"{token}-source.sql.gz"
+        try:
+            # Source must already be frozen by a distinct guarded transaction.
+            source_export_database(state, database, remote_dump)
+            pull_path(state["source"], remote_dump, source_dump)
+            if source_dump.is_symlink() or not source_dump.is_file():
+                raise PullMigrationError("FINAL_SHADOW_SOURCE_EXPORT_UNVERIFIED")
+            os.chmod(source_dump, 0o600)
+            result = shadow.stage_frozen_source_shadow(
+                state, site, source_dump, actual_target_identity=identity
+            )
+            if result.get("status") != "STAGED_VERIFIED_NOT_ACTIVATED":
+                raise PullMigrationError("FINAL_SHADOW_STAGE_NOT_VERIFIED")
+            staged += 1
+        except (shadow.ShadowBlocked, OSError, ValueError) as exc:
+            # No SQL, passwords or source data in the public error.
+            raise PullMigrationError(
+                "FINAL_SHADOW_STAGING_RECOVERY_REQUIRED"
+            ) from exc
+        finally:
+            source_remote(
+                state["source"],
+                f"rm -f -- {shlex.quote(remote_dump)}",
+                timeout=60, check=False,
+            )
+            source_dump.unlink(missing_ok=True)
+    return {
+        "status": "ALL_SHADOW_DATABASES_STAGED_NOT_ACTIVATED",
+        "database_count": staged, "site_count": expected_site_count,
+        "app_config_modified": False, "original_databases_retained": True,
+        "cutover_allowed": False, "source_runtime_frozen": True,
+    }
+
+
+def run_frozen_final_mysql_shadow_transaction(
+    state: dict[str, Any], *, expected_site_count: int,
+) -> dict[str, Any]:
+    """One frozen-source final-DB transaction; NOT bound to normal cutover.
+
+    Stages all final source DBs into new isolated target databases, requires
+    fresh live SQL readbacks on each, atomically journals every app mapping,
+    and rolls all mappings back if any switch fails. The source was already
+    frozen by a distinct guarded phase. This does NOT turn on target runtime,
+    edit DNS, or set the migration to CUTOVER_PREP_READY.
+
+    For actual site migration, caller still must validate frozen-source
+    assets, Nginx/PHP/SQLite/Cron/PM2 and staged file parity, then integrate
+    explicit rollback of this phase into the complete cutover exception path.
+    The existing user-facing cutover is deliberately unchanged.
+    """
+    import migration_final_db_batch as shadow_batch
+
+    identity = target_identity()
+    try:
+        all_sites, selected, _fingerprint = shadow_batch._safe_scope(
+            state, identity, expected_site_count
+        )
+        if len(all_sites) != expected_site_count:
+            raise shadow_batch.BatchBlocked("FINAL_SHADOW_SITE_COUNT_UNVERIFIED")
+    except shadow_batch.BatchBlocked as exc:
+        raise PullMigrationError(str(exc)) from None
+    if not selected:
+        return {
+            "status": "NO_MYSQL_DATABASES",
+            "site_count": expected_site_count, "database_count": 0,
+            "cutover_allowed": False, "runtime_activated": False,
+        }
+    # This does not switch any site's credentials while the final SQL copy
+    # is incomplete or any site still lacks the verified SQL snapshot.
+    staged = stage_frozen_final_mysql_shadows(
+        state, expected_site_count=expected_site_count
+    )
+    if (
+        staged.get("status") != "ALL_SHADOW_DATABASES_STAGED_NOT_ACTIVATED"
+        or staged.get("database_count") != len(selected)
+        or staged.get("app_config_modified") is not False
+        or staged.get("cutover_allowed") is not False
+    ):
+        raise PullMigrationError("FINAL_SHADOW_STAGE_PHASE_INCOMPLETE")
+    try:
+        switched = shadow_batch.switch_verified_shadow_batch(
+            state, actual_target_identity=identity,
+            expected_site_count=expected_site_count,
+        )
+    except shadow_batch.BatchBlocked as exc:
+        # switch_verified_shadow_batch has already attempted a reverse
+        # rollback and journaled its true status. Never retry a failed batch.
+        raise PullMigrationError(str(exc)) from None
+    if (
+        switched.get("status") != "SWITCHED_VERIFIED_NOT_ACTIVATED"
+        or switched.get("database_count") != len(selected)
+        or switched.get("cutover_allowed") is not False
+    ):
+        raise PullMigrationError("FINAL_SHADOW_SWITCH_PHASE_INCOMPLETE")
+    return {
+        "status": "FINAL_MYSQL_SHADOW_TRANSACTION_VERIFIED_NOT_CUTOVER",
+        "site_count": expected_site_count,
+        "database_count": len(selected),
+        "source_runtime_frozen": True,
+        "original_databases_retained": True,
+        "rollback_required_if_later_phase_fails": True,
+        "cutover_allowed": False,
+        "runtime_activated": False,
+    }
+
+
+def rollback_frozen_final_mysql_shadow_transaction(
+    state: dict[str, Any], *, expected_site_count: int,
+) -> dict[str, Any]:
+    """Recovery after a later failure while the old server remains frozen.
+
+    Only the DB app mappings are restored. This intentionally does NOT
+    claim the old server was unfrozen, site files restored, or DNS changed.
+    """
+    import migration_final_db_batch as shadow_batch
+    # The original journal was sealed in CUTOVER_RUNNING. After target
+    # smoke passes the owning state becomes CUTOVER_PREP_READY, whereas
+    # explicit rollback is still permitted before DNS. Reuse the immutable
+    # frozen-snapshot boundary for verification without changing the actual
+    # state/status or admitting any post-DNS production operation.
+    status = state.get("status")
+    if status not in {
+        "CUTOVER_RUNNING", "CUTOVER_PREP_READY", "CUTOVER_FAILED_ROLLBACK_PARTIAL",
+    } or state.get("source_runtime_frozen") is not True:
+        raise PullMigrationError("FINAL_SHADOW_ROLLBACK_SOURCE_OR_STATUS_UNVERIFIED")
+    if (
+        state.get("dns_changed_by_p07") is True
+        or state.get("source_delete_allowed") is True
+        or state.get("target_runtime_activated") is True
+    ):
+        raise PullMigrationError("FINAL_SHADOW_ROLLBACK_RUNTIME_BOUNDARY_UNSAFE")
+    scoped = dict(state)
+    scoped["status"] = "CUTOVER_RUNNING"
+    try:
+        result = shadow_batch.rollback_verified_shadow_batch(
+            scoped, actual_target_identity=target_identity(),
+            expected_site_count=expected_site_count,
+        )
+    except shadow_batch.BatchBlocked as exc:
+        raise PullMigrationError(str(exc)) from None
+    if result.get("status") != "ROLLED_BACK":
+        raise PullMigrationError("FINAL_SHADOW_BATCH_ROLLBACK_UNVERIFIED")
+    return {
+        "status": "FINAL_MYSQL_APP_MAPPING_ROLLED_BACK",
+        "site_count": result["site_count"],
+        "database_count": result["database_count"],
+        "source_runtime_restored": False,
+        "original_databases_retained": True,
+        "shadow_databases_retained": True,
+        "cutover_allowed": False,
+    }
+
+
+def recover_shadow_application_mappings_if_present(state: dict[str, Any]) -> bool:
+    """Fail closed on a pending 17-site DB switch before source unfreeze.
+
+    The journal is created before the first app-config change. No journal
+    means legacy no-DB cutover has nothing to unwind; a malformed or
+    mismatched journal must NOT be treated as absence of a transaction.
+    This function does not remove databases, touch DNS or alter site data.
+    """
+    import migration_final_db_batch as shadow_batch
+
+    mid = str(state.get("migration_id") or "")
+    if not legacy.SAFE_ID_RE.fullmatch(mid):
+        return False
+    receipt_path = state_dir(mid) / "final-shadow-batch.json"
+    try:
+        receipt = shadow_batch._read_receipt(receipt_path)
+        if receipt is None:
+            return True
+        if not isinstance(receipt, dict):
+            return False
+        recovered = rollback_frozen_final_mysql_shadow_transaction(
+            state, expected_site_count=len(state.get("sites") or [])
+        )
+        return recovered.get("status") == "FINAL_MYSQL_APP_MAPPING_ROLLED_BACK"
+    except (PullMigrationError, shadow_batch.BatchBlocked, OSError, ValueError):
+        return False
+
+
+def require_non_destructive_final_db_plan(state: dict[str, Any]) -> None:
+    """Read-only early proof before source freeze for an ordinary single task.
+
+    DB-free migrations retain their old cutover path. A DB-bearing migration
+    may use an independent verified *new shadow* only if every original DB
+    belongs to this exact already PREPARED task, app credentials still match,
+    and there is no prior shadow attempt. Three-task parent/child/tail recovery
+    is explicitly NOT admitted by this single-task route; it requires a
+    separately proven whole-asset execution plan.
+    """
+    import migration_final_db_shadow as shadow
+
+    sites = state.get("sites")
+    if not isinstance(sites, list):
+        raise PullMigrationError("FINAL_MYSQL_SITE_SCOPE_UNVERIFIED")
+    if any(not isinstance(site, dict) for site in sites):
+        raise PullMigrationError("FINAL_MYSQL_SITE_SCOPE_UNVERIFIED")
+    if any(not isinstance(site.get("mysql_databases"), list) for site in sites):
+        raise PullMigrationError("FINAL_MYSQL_DATABASE_SCOPE_UNVERIFIED")
+    db_sites = [site for site in sites if site["mysql_databases"]]
+    if not db_sites:
+        return
+    # A failed or partial job might retain newly created databases, journal
+    # markers and original source-freeze assets. Never transparently retry it.
+    if (
+        state.get("status") != "PREPARED"
+        or state.get("source_runtime_frozen") is not False
+        or state.get("target_runtime_activated") is not False
+        or state.get("cutover_prohibited") is True
+        or state.get("partial_parent_migration_id")
+        or state.get("original_db_migration_owners") is not None
+        or state.get("dns_changed_by_p07") is not False
+        or state.get("source_delete_allowed") is not False
+        or state.get("existing_target_overwrite_allowed") is not False
+        or not state.get("source_runtime_path")
+        or not isinstance(state.get("source"), dict)
+        or not state.get("source_server_identity")
+        or not state.get("target_server_identity")
+    ):
+        raise PullMigrationError("FINAL_MYSQL_SAFE_REPLACEMENT_NOT_IMPLEMENTED")
+    if target_identity() != state["target_server_identity"]:
+        raise PullMigrationError("FINAL_MYSQL_TARGET_IDENTITY_CHANGED")
+    mid = str(state.get("migration_id") or "")
+    if not SAFE_ID_RE.fullmatch(mid):
+        raise PullMigrationError("FINAL_MYSQL_MIGRATION_ID_UNVERIFIED")
+    root = state_dir(mid)
+    tx_root = root / "target-transactions"
+    if root.is_symlink() or tx_root.is_symlink() or not tx_root.is_dir():
+        raise PullMigrationError("FINAL_MYSQL_ORIGINAL_TRANSACTION_ROOT_UNVERIFIED")
+    if os.path.lexists(root / "final-shadow-batch.json"):
+        raise PullMigrationError("FINAL_MYSQL_PRIOR_SHADOW_TRANSACTION_EXISTS")
+    seen_databases: set[str] = set()
+    for site in sites:
+        if site.get("stage_status") != "PULLED_STAGED":
+            raise PullMigrationError("FINAL_MYSQL_SITE_NOT_STAGED")
+        raw = site["mysql_databases"]
+        if len(raw) > 1:
+            raise PullMigrationError("FINAL_MYSQL_MULTI_DB_UNSUPPORTED")
+        if not raw:
+            continue
+        domain, db = site.get("domain"), raw[0]
+        try:
+            domain = cloudpanel.validate_domain(str(domain))
+            db = cloudpanel.validate_name(str(db), "database")
+            original, shadow_name = shadow.shadow_identity(state, site)
+        except (ValueError, shadow.ShadowBlocked):
+            raise PullMigrationError("FINAL_MYSQL_SITE_IDENTITY_UNVERIFIED") from None
+        if original != db or db in seen_databases:
+            raise PullMigrationError("FINAL_MYSQL_DATABASE_SCOPE_AMBIGUOUS")
+        seen_databases.add(db)
+        token = hashlib.sha256(f"{domain}:{db}:1".encode()).hexdigest()[:16]
+        marker = tx_root / f"db-{token}.json"
+        if marker.is_symlink() or not marker.is_file():
+            raise PullMigrationError("FINAL_MYSQL_ORIGINAL_MARKER_MISSING")
+        try:
+            owned = legacy.read_target_ownership_marker(
+                marker, {"domain": domain, "database": db,
+                         "created_by_migration": mid},
+            )
+        except legacy.ServerMigrationError:
+            raise PullMigrationError("FINAL_MYSQL_ORIGINAL_MARKER_UNSAFE") from None
+        if (
+            not isinstance(owned, dict)
+            or not isinstance(owned.get("username"), str)
+            or not isinstance(owned.get("password"), str)
+            or not owned["username"] or not owned["password"]
+            or not app_config.verify_rewritten_application_database_config(
+                Path(str(site.get("site_root") or "")), db,
+                owned["username"], owned["password"],
+            )
+        ):
+            raise PullMigrationError("FINAL_MYSQL_ORIGINAL_APP_CONFIG_UNVERIFIED")
+        token2 = hashlib.sha256(
+            f"{mid}:{domain}:{shadow_name}:final".encode()
+        ).hexdigest()[:20]
+        if os.path.lexists(tx_root / f"final-shadow-{token2}.json"):
+            raise PullMigrationError("FINAL_MYSQL_PRIOR_SHADOW_EXISTS")
+
+
+
 def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
     state = load_state(mid)
     if state.get("cutover_prohibited") or state.get("partial_parent_migration_id"):
@@ -2892,6 +4483,10 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
     if confirm != f"CUTOVER_PULL:{mid}":
         raise PullMigrationError(f"explicit confirmation required: CUTOVER_PULL:{mid}")
 
+    # A marked initial-import target is not disposable. Do not freeze the old
+    # server before a non-destructive final database replacement has been
+    # independently implemented and verified.
+    require_non_destructive_final_db_plan(state)
     require_mariadb_target()
 
     # Run all completeness work while the old server is still serving traffic.
@@ -2957,8 +4552,14 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
         if state["pre_cutover_reconciliation"]["status"] != "PASS":
             # An interrupted CUTOVER_RUNNING task already has SOURCE frozen.
             # Restore it before returning a reconciliation failure.
-            restore_old_server(state)
-            transition_migration_status(state, "CUTOVER_FAILED_ROLLED_BACK")
+            recovery = guarded_restore_cutover_boundary(state)
+            complete = all(recovery.values())
+            transition_migration_status(
+                state,
+                "CUTOVER_FAILED_ROLLED_BACK"
+                if complete else "CUTOVER_FAILED_ROLLBACK_PARTIAL",
+            )
+            state["last_reconciliation_recovery"] = recovery
             save_state(state)
             details = ",".join(
                 state["pre_cutover_reconciliation"]["failures"][:12]
@@ -2987,9 +4588,27 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
         progress_note("3/7 · 正在同步站点外部业务文件")
         state["external_paths_synced_final"] = sync_external_assets(state, final=True)
         progress_note("4/7 · 正在最终同步 MySQL 数据库")
-        mysql_count = 0
-        for site in state["sites"]:
-            mysql_count += sync_site_databases(state, site, phase="final")
+        if any(site.get("mysql_databases") for site in state["sites"]):
+            # Existing target DBs are NEVER dropped or reimported. Only
+            # isolated new shadow DBs receive the frozen source snapshot.
+            mysql_result = run_frozen_final_mysql_shadow_transaction(
+                state, expected_site_count=len(state["sites"]),
+            )
+            if (
+                mysql_result.get("status")
+                != "FINAL_MYSQL_SHADOW_TRANSACTION_VERIFIED_NOT_CUTOVER"
+                or mysql_result.get("source_runtime_frozen") is not True
+                or mysql_result.get("original_databases_retained") is not True
+                or mysql_result.get("cutover_allowed") is not False
+            ):
+                raise PullMigrationError("FINAL_MYSQL_SHADOW_PROOF_INCOMPLETE")
+            mysql_count = mysql_result["database_count"]
+            state["mysql_shadow_transaction"] = mysql_result
+            save_state(state)
+        else:
+            mysql_count = 0
+            for site in state["sites"]:
+                mysql_count += sync_site_databases(state, site, phase="final")
         state["mysql_final_count"] = mysql_count
         progress_note("5/7 · 正在生成并同步 SQLite 一致性快照")
         state["sqlite_snapshot_count_final"] = sync_sqlite_assets(
@@ -3034,15 +4653,16 @@ def cutover_migration(mid: str, confirm: str) -> dict[str, Any]:
         save_state(state)
         return state
     except Exception as exc:
-        progress_note("安全恢复 · 正在撤销新服务器临时运行任务")
-        target_ok = deactivate_target_runtime(state)
-        progress_note("安全恢复 · 正在恢复旧服务器运行状态")
-        source_ok = restore_old_server(state)
+        progress_note("安全恢复 · 正在验证目标运行任务停止并恢复旧服务器")
+        recovery = guarded_restore_cutover_boundary(state)
+        target_ok = recovery["target_stopped"]
+        db_ok = recovery["database_mapping_restored"]
+        source_ok = recovery["source_restored"]
         transition_migration_status(
             state,
             (
                 "CUTOVER_FAILED_ROLLED_BACK"
-                if target_ok and source_ok
+                if target_ok and db_ok and source_ok
                 else "CUTOVER_FAILED_ROLLBACK_PARTIAL"
             ),
         )
@@ -3091,6 +4711,79 @@ def finalize_migration(
     return state
 
 
+def guarded_restore_cutover_boundary(state: dict[str, Any]) -> dict[str, bool]:
+    """Prevent split-brain: never restart SOURCE while target may be active.
+
+    Deactivation, DB app-config restoration and SOURCE unfreeze are separate,
+    evidence-bearing operations. A failed target deactivation is a hard stop
+    for SOURCE unfreeze, even if an exception occurs in cleanup itself.
+    On DB rollback failure with target *verified stopped*, restoring SOURCE
+    is allowed for service recovery, but the overall status remains PARTIAL.
+    """
+    try:
+        stopped = deactivate_target_runtime(state) is True
+    except Exception:
+        stopped = False
+    # A successful return is not enough if the runtime state still claims
+    # an active job. Avoid silently reopening the old source alongside it.
+    target_ok = stopped and state.get("target_runtime_activated") is not True
+    db_ok = False
+    source_ok = False
+    if target_ok:
+        try:
+            db_ok = recover_shadow_application_mappings_if_present(state) is True
+        except Exception:
+            db_ok = False
+        try:
+            source_ok = restore_old_server(state) is True
+        except Exception:
+            source_ok = False
+    return {
+        "target_stopped": target_ok,
+        "database_mapping_restored": db_ok,
+        "source_restored": source_ok,
+    }
+
+
+def require_old_source_route_before_manual_rollback(state: dict[str, Any]) -> None:
+    """Fail closed before any pre-DNS rollback that could strand live clients.
+
+    The owner switches DNS manually, independent of P07. Therefore the field
+    dns_changed_by_p07=False is NOT evidence DNS remains on the source VPS.
+    Only direct, non-proxied DNS that still resolves every selected domain
+    exclusively to the pinned old source IP is safe for automatic rollback.
+    CDN/dual-stack/ambiguous records require supervised reconciliation.
+    This performs DNS reads only; it does not touch source or target files.
+    """
+    source = state.get("source")
+    sites = state.get("sites")
+    if not isinstance(source, dict) or not isinstance(sites, list) or not sites:
+        raise PullMigrationError("MANUAL_ROLLBACK_PRE_DNS_SOURCE_ROUTE_UNPROVEN")
+    try:
+        old_address = ipaddress.ip_address(str(source.get("ip") or ""))
+    except ValueError:
+        raise PullMigrationError("MANUAL_ROLLBACK_PRE_DNS_SOURCE_ROUTE_UNPROVEN") from None
+    seen: set[str] = set()
+    for site in sites:
+        if not isinstance(site, dict):
+            raise PullMigrationError("MANUAL_ROLLBACK_PRE_DNS_SOURCE_ROUTE_UNPROVEN")
+        domain = str(site.get("domain") or "")
+        if not domain or domain.lower() in seen:
+            raise PullMigrationError("MANUAL_ROLLBACK_PRE_DNS_SOURCE_ROUTE_UNPROVEN")
+        seen.add(domain.lower())
+        try:
+            addresses = {
+                ipaddress.ip_address(record[4][0])
+                for record in socket.getaddrinfo(
+                    domain, 443, type=socket.SOCK_STREAM
+                )
+            }
+        except (OSError, ValueError, IndexError):
+            raise PullMigrationError("MANUAL_ROLLBACK_PRE_DNS_SOURCE_ROUTE_UNPROVEN") from None
+        if addresses != {old_address}:
+            raise PullMigrationError("MANUAL_ROLLBACK_PRE_DNS_SOURCE_ROUTE_UNPROVEN")
+
+
 def rollback_migration(mid: str, confirm: str) -> dict[str, Any]:
     state = load_state(mid)
     if state.get("status") in {"PRODUCTION_PASS", "PRODUCTION_VERIFY_FAILED"}:
@@ -3104,16 +4797,22 @@ def rollback_migration(mid: str, confirm: str) -> dict[str, Any]:
         raise PullMigrationError("migration is not in a rollback-eligible state")
     if confirm != f"ROLLBACK_PULL:{mid}":
         raise PullMigrationError(f"explicit confirmation required: ROLLBACK_PULL:{mid}")
-    target_ok = deactivate_target_runtime(state)
-    source_ok = restore_old_server(state)
+    if state.get("status") == "CUTOVER_PREP_READY":
+        # A manual DNS switch can precede finalization without updating P07
+        # state. Require fresh proof of the old route before ANY rollback.
+        require_old_source_route_before_manual_rollback(state)
+    recovery = guarded_restore_cutover_boundary(state)
+    target_ok = recovery["target_stopped"]
+    db_ok = recovery["database_mapping_restored"]
+    source_ok = recovery["source_restored"]
     transition_migration_status(
         state,
-        "ROLLED_BACK" if target_ok and source_ok else "ROLLBACK_PARTIAL",
+        "ROLLED_BACK" if target_ok and db_ok and source_ok else "ROLLBACK_PARTIAL",
     )
     state["source_delete_allowed"] = False
     state["dns_changed_by_p07"] = False
     save_state(state)
-    if not (target_ok and source_ok):
+    if not (target_ok and db_ok and source_ok):
         raise PullMigrationError("rollback is partial and needs operator attention")
     return state
 
@@ -3198,8 +4897,63 @@ def post_migration_audit(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _blocked_first_pending_database(state: dict[str, Any]) -> tuple[str | None, dict[str, Any] | None]:
+    """Return ONLY the first failed DB's public domain and redacted receipt.
+
+    Do not select a later database if the earliest unfinished site is not
+    an owned PENDING single-DB site. A menu diagnostic is not a resume gate.
+    """
+    if (state.get("status") != "PREPARE_FAILED"
+            or not isinstance(state.get("last_sql_guard_failure"), dict)
+            or state["last_sql_guard_failure"].get("reason") != "CONDITIONAL_DDL"):
+        return None, None
+    sites = state.get("sites")
+    if not isinstance(sites, list):
+        return None, None
+    first = next((row for row in sites
+                  if isinstance(row, dict)
+                  and row.get("stage_status") != "PULLED_STAGED"), None)
+    if (not isinstance(first, dict)
+            or first.get("stage_status") != "PENDING"
+            or not isinstance(first.get("domain"), str)
+            or not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", first["domain"])
+            or not isinstance(first.get("mysql_databases"), list)
+            or len(first["mysql_databases"]) != 1):
+        return None, None
+    raw = first.get("failed_prepare_sql_evidence")
+    sanitized = None
+    if isinstance(raw, dict) and raw.get("status") in {
+        "RETAINED_NOT_RECOVERED", "EVIDENCE_RETENTION_UNVERIFIED",
+    }:
+        sanitized = {
+            "status": raw["status"],
+            "source_dump_retained": raw.get("source_dump_retained") is True,
+            "target_dump_retained": raw.get("target_dump_retained") is True,
+            "cutover_allowed": False,
+            "db_reimport_allowed": False,
+        }
+    return first["domain"], sanitized
+
+
 def summary(state: dict[str, Any]) -> dict[str, Any]:
+    blocked_site, blocked_evidence = _blocked_first_pending_database(state)
+    adopted = [
+        row.get("domain") for row in state.get("sites", [])
+        if isinstance(row, dict) and isinstance(row.get("database_adoption"), dict)
+        and row["database_adoption"].get("status") == "SOURCE_TARGET_PREPARE_READBACK_PASS"
+    ] if isinstance(state.get("sites"), list) else []
+    adopted_site = (
+        adopted[0] if len(adopted) == 1 and isinstance(adopted[0], str)
+        and re.fullmatch(r"[A-Za-z0-9.-]{1,253}", adopted[0])
+        and state.get("status") == "PREPARE_FAILED"
+        and isinstance(state.get("last_sql_guard_failure"), dict)
+        and state["last_sql_guard_failure"].get("reason") == "CONDITIONAL_DDL"
+        else None
+    )
     return {
+        "first_failed_sql_site": blocked_site,
+        "first_failed_sql_evidence": blocked_evidence,
+        "first_stage_adopted_sql_site": adopted_site,
         "schema": state.get("schema"),
         "migration_id": state.get("migration_id"),
         "status": state.get("status"),
@@ -3630,9 +5384,21 @@ def source_snapshot_sqlite(source: Path, output: Path) -> dict[str, Any]:
 
 
 def source_export_db(database: str, output: Path) -> dict[str, Any]:
-    if not str(output).startswith("/var/lib/vf-server-ops/pull-source/"):
+    allowed = Path("/var/lib/vf-server-ops/pull-source")
+    try:
+        output.relative_to(allowed)
+    except ValueError:
+        raise PullMigrationError("unsafe MySQL staging output") from None
+    if (output == allowed or output.suffix != ".gz"
+            or ".." in output.parts
+            or allowed.is_symlink()
+            or not output.parent.resolve().is_relative_to(allowed)):
         raise PullMigrationError("unsafe MySQL staging output")
+    if os.path.lexists(output) or output.parent.is_symlink():
+        raise PullMigrationError("source SQL export already exists or path unsafe")
     output.parent.mkdir(parents=True, exist_ok=True)
+    if not output.parent.resolve().is_relative_to(allowed):
+        raise PullMigrationError("unsafe MySQL staging output")
     os.chmod(output.parent, 0o700)
     try:
         cloudpanel.export_database(database, output, clpctl="clpctl")
@@ -3648,7 +5414,106 @@ def source_export_db(database: str, output: Path) -> dict[str, Any]:
     return {"status": "PASS", "secrets_emitted": False}
 
 
-def source_freeze(mid: str, control_path: Path) -> dict[str, Any]:
+
+def validate_seventeen_site_source_freeze_control(
+    control: dict[str, Any], *, check_live_source_files: bool = True,
+) -> dict[str, Any]:
+    """Source-side *second* authority check before global Cron/PM2/Nginx stop.
+
+    The CP2 planner already checks original owner provenance. The old VPS
+    independently denies arbitrary file deletion or user shutdown even if a
+    transferred freeze-control.json was malformed or raced between checks.
+    Missing/symlinked/renamed Cron or PM2 inventory is stale and fails closed.
+    Pure-data validation may be run without touching the old VPS in tests.
+    """
+    if not isinstance(control, dict):
+        raise PullMigrationError("17_SITE_SOURCE_CONTROL_INVALID")
+    sites = control.get("sites")
+    if type(sites) is not list or len(sites) != 17:
+        raise PullMigrationError("17_SITE_SOURCE_SCOPE_CHANGED")
+    users: set[str] = set()
+    domains: set[str] = set()
+    for site in sites:
+        if not isinstance(site, dict):
+            raise PullMigrationError("17_SITE_SOURCE_SITE_INVALID")
+        domain, user = site.get("domain"), site.get("site_user")
+        root = site.get("site_root")
+        if (type(domain) is not str or not domain
+                or type(user) is not str
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,63}", user)
+                or type(root) is not str
+                or not root.startswith(f"/home/{user}/")
+                or ".." in Path(root).parts
+                or "//" in root or "\x00" in root
+                or domain in domains or user in users):
+            raise PullMigrationError("17_SITE_SOURCE_SITE_IDENTITY_INVALID")
+        domains.add(domain)
+        users.add(user)
+
+    rows = []
+    for kind in ("pending_system_cron", "pending_user_cron", "pending_pm2"):
+        items = control.get(kind)
+        if type(items) is not list:
+            raise PullMigrationError("17_SITE_SOURCE_RUNTIME_CONTROL_MISSING")
+        seen = set()
+        for item in items:
+            if not isinstance(item, dict) or item.get("activated") is not False:
+                raise PullMigrationError("17_SITE_SOURCE_RUNTIME_CONTROL_INVALID")
+            path, user = item.get("source_path"), item.get("user")
+            if (type(path) is not str or not path.startswith("/")
+                    or "//" in path or "\x00" in path
+                    or ".." in Path(path).parts
+                    or str(Path(path)) != path):
+                raise PullMigrationError("17_SITE_SOURCE_RUNTIME_PATH_UNSAFE")
+            if kind == "pending_system_cron":
+                if (user is not None or not path.startswith("/etc/cron.d/")
+                        or not re.fullmatch(r"[A-Za-z0-9_.-]+",
+                                            path[len("/etc/cron.d/"):])):
+                    raise PullMigrationError("17_SITE_SOURCE_SYSTEM_CRON_SCOPE_UNSAFE")
+                key = path
+            else:
+                if type(user) is not str or user not in users:
+                    raise PullMigrationError("17_SITE_SOURCE_RUNTIME_USER_UNOWNED")
+                if kind == "pending_user_cron":
+                    if path not in (
+                        f"/var/spool/cron/crontabs/{user}",
+                        f"/var/spool/cron/{user}",
+                    ):
+                        raise PullMigrationError("17_SITE_SOURCE_USER_CRON_UNSAFE")
+                elif path != f"/home/{user}/.pm2/dump.pm2":
+                    raise PullMigrationError("17_SITE_SOURCE_PM2_PATH_UNSAFE")
+                key = user
+            if key in seen:
+                raise PullMigrationError("17_SITE_SOURCE_RUNTIME_DUPLICATED")
+            seen.add(key)
+            rows.append((kind, path))
+    if check_live_source_files:
+        for kind, path in rows:
+            try:
+                info = Path(path).lstat()
+            except OSError:
+                raise PullMigrationError(
+                    "17_SITE_SOURCE_RUNTIME_PATH_CHANGED"
+                ) from None
+            if (not stat.S_ISREG(info.st_mode)
+                    or stat.S_ISLNK(info.st_mode)
+                    or stat.S_IMODE(info.st_mode) & 0o002):
+                raise PullMigrationError("17_SITE_SOURCE_RUNTIME_FILE_UNSAFE")
+    return {
+        "status": "SOURCE_FREEZE_CONTROL_17_VERIFIED_NOT_EXECUTED",
+        "site_count": 17,
+        "system_cron_count": len(control["pending_system_cron"]),
+        "user_cron_count": len(control["pending_user_cron"]),
+        "pm2_count": len(control["pending_pm2"]),
+        "writers_stopped": False, "cutover_allowed": False,
+    }
+
+
+def source_freeze(
+    mid: str, control_path: Path, *, require_fresh: bool = False,
+    expected_site_count: int | None = None,
+    expected_control_sha256: str | None = None,
+) -> dict[str, Any]:
     if not SAFE_ID_RE.fullmatch(mid):
         raise PullMigrationError("invalid migration id")
     if not str(control_path).startswith("/var/lib/vf-server-ops/pull-source/"):
@@ -3659,6 +5524,52 @@ def source_freeze(mid: str, control_path: Path) -> dict[str, Any]:
         raise PullMigrationError("freeze control is invalid") from exc
     if control.get("migration_id") != mid:
         raise PullMigrationError("freeze control migration id mismatch")
+    if require_fresh:
+        # Three historical owners MUST be paused in one fresh recovery
+        # transaction. Never reuse an old or interrupted source journal.
+        if expected_site_count != 17:
+            raise PullMigrationError("17-site source freeze count required")
+        if not isinstance(expected_control_sha256, str) or not re.fullmatch(
+            r"[0-9a-f]{64}", expected_control_sha256
+        ):
+            raise PullMigrationError("17-site freeze control digest required")
+        try:
+            raw = control_path.read_bytes()
+            info = control_path.lstat()
+        except OSError:
+            raise PullMigrationError("17-site source control unavailable") from None
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) & 0o077
+                or hashlib.sha256(raw).hexdigest()
+                != expected_control_sha256):
+            raise PullMigrationError("17-site source control identity unsafe")
+        sites = control.get("sites")
+        if (not isinstance(sites, list)
+                or len(sites) != expected_site_count
+                or any(not isinstance(site, dict)
+                       or not isinstance(site.get("domain"), str)
+                       or not isinstance(site.get("site_user"), str)
+                       for site in sites)
+                or len({site["domain"] for site in sites}) != 17
+                or len({site["site_user"] for site in sites}) != 17
+                or any(not isinstance(control.get(key), list)
+                       for key in ("pending_system_cron",
+                                   "pending_user_cron", "pending_pm2"))):
+            raise PullMigrationError("17-site source control incomplete")
+        validate_seventeen_site_source_freeze_control(
+            control, check_live_source_files=True)
+        # A prior source-side attempt may have stopped services before a
+        # network outage. Its record must remain for explicit recovery.
+        previous_root = legacy.STATE_ROOT
+        try:
+            legacy.STATE_ROOT = SOURCE_RECOVERY_ROOT
+            if os.path.lexists(legacy.state_path(mid)):
+                raise PullMigrationError(
+                    "17-site source freeze prior attempt retained"
+                )
+        finally:
+            legacy.STATE_ROOT = previous_root
     previous = legacy.STATE_ROOT
     legacy.STATE_ROOT = SOURCE_RECOVERY_ROOT
     state = {
@@ -3677,6 +5588,10 @@ def source_freeze(mid: str, control_path: Path) -> dict[str, Any]:
         "dns_changed_by_p07": False,
         "secrets_emitted": False,
     }
+    # Once an owned source recovery record exists, a partial stop of Cron,
+    # PM2, or Nginx must trigger the recorded inverse operations. The caller
+    # only receives a generic result, never a raw command/secret exception.
+    recovery_initialized = False
     try:
         recovery = legacy.state_path(mid)
         if recovery.is_file():
@@ -3686,11 +5601,31 @@ def source_freeze(mid: str, control_path: Path) -> dict[str, Any]:
                 raise PullMigrationError("old-server recovery state is invalid") from exc
         else:
             legacy.save_state(state)
+        recovery_initialized = True
         legacy.freeze_source_runtime(state)
         state["status"] = "SOURCE_FROZEN"
         legacy.save_state(state)
-    except legacy.ServerMigrationError as exc:
-        raise PullMigrationError("old-server freeze failed") from exc
+    except Exception:
+        if not recovery_initialized:
+            raise PullMigrationError("old-server freeze preflight failed") from None
+        restored = False
+        try:
+            restored = legacy.restore_source_runtime(state) is True
+        except Exception:
+            pass
+        state["status"] = (
+            "SOURCE_FREEZE_FAILED_RESTORED" if restored
+            else "SOURCE_FREEZE_FAILED_RECOVERY_REQUIRED"
+        )
+        try:
+            legacy.save_state(state)
+        except Exception:
+            restored = False
+        if restored:
+            raise PullMigrationError("old-server freeze failed; source restored") from None
+        raise PullMigrationError(
+            "old-server freeze failed; source recovery required"
+        ) from None
     finally:
         legacy.STATE_ROOT = previous
     return {
@@ -3701,6 +5636,98 @@ def source_freeze(mid: str, control_path: Path) -> dict[str, Any]:
         "secrets_emitted": False,
     }
 
+
+
+def source_frozen_readback(mid: str) -> dict[str, Any]:
+    """Read-only original old-server 17-site stop evidence; NOT a DB fence.
+
+    Never infer status from CP2 journal alone after an SSH timeout. The
+    original source retains its own durable recovery record and must still
+    have inactive Nginx before allowing a private frozen SQL copy.
+    """
+    if (not SAFE_ID_RE.fullmatch(mid)
+            or not mid.startswith("pull-p07-17sites-")):
+        raise PullMigrationError("17_SITE_SOURCE_RECOVERY_ID_UNVERIFIED")
+    previous = legacy.STATE_ROOT
+    try:
+        legacy.STATE_ROOT = SOURCE_RECOVERY_ROOT
+        try:
+            state = legacy.load_state(mid)
+        except legacy.ServerMigrationError:
+            raise PullMigrationError(
+                "17_SITE_SOURCE_FREEZE_RECEIPT_UNAVAILABLE") from None
+        sites = state.get("sites")
+        pending_sys = state.get("pending_system_cron")
+        pending_user = state.get("pending_user_cron")
+        pending_pm2 = state.get("pending_pm2")
+        if (state.get("status") != "SOURCE_FROZEN"
+                or state.get("migration_id") != mid
+                or state.get("source_nginx_frozen") is not True
+                or state.get("source_still_live") is not False
+                or state.get("source_delete_allowed") is not False
+                or state.get("dns_changed_by_p07") is not False
+                or not isinstance(sites, list) or len(sites) != 17
+                or not isinstance(pending_sys, list)
+                or not isinstance(pending_user, list)
+                or not isinstance(pending_pm2, list)):
+            raise PullMigrationError(
+                "17_SITE_SOURCE_FREEZE_STATE_NOT_PROVEN")
+        validate_seventeen_site_source_freeze_control(
+            {
+                "sites": sites,
+                "pending_system_cron": pending_sys,
+                "pending_user_cron": pending_user,
+                "pending_pm2": pending_pm2,
+            }, check_live_source_files=False,
+        )
+        saved_sys = state.get("source_system_cron_saved")
+        saved_users = state.get("source_user_cron_saved")
+        saved_pm2 = state.get("source_pm2_stopped")
+        if (not isinstance(saved_sys, list)
+                or not isinstance(saved_users, list)
+                or not isinstance(saved_pm2, list)
+                or len(saved_sys) != len(pending_sys)
+                or len(saved_users) != len(pending_user)
+                or len(saved_pm2) != len(pending_pm2)
+                or any(not isinstance(r, dict) for r in
+                       (*saved_sys, *saved_users, *saved_pm2))
+                or {r.get("source_path") for r in saved_sys} !=
+                   {r.get("source_path") for r in pending_sys}
+                or {r.get("user") for r in saved_users} !=
+                   {r.get("user") for r in pending_user}
+                or {r.get("user") for r in saved_pm2} !=
+                   {r.get("user") for r in pending_pm2}
+                or not all(r.get("disabled") is True for r in saved_sys)
+                or not all(
+                    r.get("disabled") is True or r.get("existed") is False
+                    for r in saved_users)
+                or not all(r.get("stopped") is True for r in saved_pm2)):
+            raise PullMigrationError(
+                "17_SITE_SOURCE_CRON_PM2_RECOVERY_NOT_PROVEN")
+        try:
+            proc = legacy.run_local(
+                ["systemctl", "is-active", "nginx"],
+                timeout=30, check=False,
+            )
+        except legacy.ServerMigrationError:
+            raise PullMigrationError(
+                "17_SITE_SOURCE_NGINX_LIVE_CHECK_UNAVAILABLE") from None
+        if proc.returncode == 0 or proc.stdout.strip() != "inactive":
+            raise PullMigrationError(
+                "17_SITE_SOURCE_NGINX_NOT_INACTIVE")
+        return {
+            "status": "SOURCE_17_RUNTIME_STOP_READBACK_PASS_NOT_DATABASE_FENCE",
+            "migration_id": mid,
+            "site_count": 17,
+            "cron_pm2_journal_verified": True,
+            "source_nginx_inactive_verified": True,
+            "source_business_writers_all_fenced": False,
+            "source_final_sql_data_parity": False,
+            "cutover_allowed": False,
+            "writes_performed": False,
+        }
+    finally:
+        legacy.STATE_ROOT = previous
 
 def source_restore(mid: str) -> dict[str, Any]:
     previous = legacy.STATE_ROOT
@@ -3758,6 +5785,96 @@ def main() -> int:
 
     resume = sub.add_parser("resume")
     resume.add_argument("--migration-id", required=True)
+
+    resume_adopted = sub.add_parser("resume-verified-adoption")
+    resume_adopted.add_argument("--migration-id", required=True)
+    resume_adopted.add_argument("--domain", required=True)
+    resume_adopted.add_argument("--confirm", required=True)
+
+    chain_tail = sub.add_parser("chain-tail-prepare")
+    chain_tail.add_argument("--parent-migration-id", required=True)
+    chain_tail.add_argument("--child-migration-id", required=True)
+    chain_tail.add_argument("--confirm", required=True)
+
+    adopt = sub.add_parser("adopt-existing-guarded-db")
+    adopt.add_argument("--migration-id", required=True)
+    adopt.add_argument("--domain", required=True)
+    adopt.add_argument("--confirm", required=True)
+
+    chain_adopt = sub.add_parser("chain-adopt-db-proof")
+    chain_adopt.add_argument("--parent-migration-id", required=True)
+    chain_adopt.add_argument("--child-migration-id", required=True)
+
+    chain_sql = sub.add_parser("chain-sql-diagnose")
+    chain_sql.add_argument("--parent-migration-id", required=True)
+    chain_sql.add_argument("--child-migration-id", required=True)
+
+    chain_plan = sub.add_parser("chain-recovery-plan")
+    chain_plan.add_argument("--parent-migration-id", required=True)
+    chain_plan.add_argument("--child-migration-id", required=True)
+
+    consolidation = sub.add_parser("chain-consolidation-proof")
+    consolidation.add_argument("--parent-migration-id", required=True)
+    consolidation.add_argument("--child-migration-id", required=True)
+    consolidation.add_argument("--tail-migration-id", required=True)
+    consolidation.add_argument("--verify-target-markers", action="store_true")
+    consolidation.add_argument("--locked-candidate-id", default=None)
+
+
+    execution_scope = sub.add_parser("chain-execution-scope")
+    execution_scope.add_argument("--parent-migration-id", required=True)
+    execution_scope.add_argument("--child-migration-id", required=True)
+    execution_scope.add_argument("--tail-migration-id", required=True)
+
+    delivered = sub.add_parser("chain-17site-delivery")
+    delivered.add_argument("--parent-migration-id", required=True)
+    delivered.add_argument("--child-migration-id", required=True)
+    delivered.add_argument("--tail-migration-id", required=True)
+    delivered.add_argument("--action", choices=(
+        "status", "private-prestage", "verify-private", "pause-preview",
+        "paused-db-copy", "verify-paused-dbs"), default="status")
+    delivered.add_argument("--confirm")
+
+    resource_stage = sub.add_parser("chain-private-resource-warm-stage")
+    resource_stage.add_argument("--parent-migration-id", required=True)
+    resource_stage.add_argument("--child-migration-id", required=True)
+    resource_stage.add_argument("--tail-migration-id", required=True)
+    resource_stage.add_argument("--confirm", required=True)
+
+    resource_verify = sub.add_parser("chain-private-resource-warm-verify")
+    resource_verify.add_argument("--parent-migration-id", required=True)
+    resource_verify.add_argument("--child-migration-id", required=True)
+    resource_verify.add_argument("--tail-migration-id", required=True)
+
+    resource_types = sub.add_parser("chain-source-resource-types")
+    resource_types.add_argument("--parent-migration-id", required=True)
+    resource_types.add_argument("--child-migration-id", required=True)
+    resource_types.add_argument("--tail-migration-id", required=True)
+    resource_types.add_argument("--verify-live-source", action="store_true")
+
+    warm_stage = sub.add_parser("chain-private-file-warm-stage")
+    warm_stage.add_argument("--parent-migration-id", required=True)
+    warm_stage.add_argument("--child-migration-id", required=True)
+    warm_stage.add_argument("--tail-migration-id", required=True)
+    warm_stage.add_argument("--confirm", required=True)
+
+    warm_verify = sub.add_parser("chain-private-file-warm-verify")
+    warm_verify.add_argument("--parent-migration-id", required=True)
+    warm_verify.add_argument("--child-migration-id", required=True)
+    warm_verify.add_argument("--tail-migration-id", required=True)
+
+    prestage = sub.add_parser("chain-prestage-three-source-dumps")
+    prestage.add_argument("--parent-migration-id", required=True)
+    prestage.add_argument("--child-migration-id", required=True)
+    prestage.add_argument("--tail-migration-id", required=True)
+    prestage.add_argument("--confirm", required=True)
+
+    original_db = sub.add_parser("chain-db-readiness")
+    original_db.add_argument("--parent-migration-id", required=True)
+    original_db.add_argument("--child-migration-id", required=True)
+    original_db.add_argument("--tail-migration-id", required=True)
+    original_db.add_argument("--verify-original-markers",
+                             action="store_true")
 
     remainder_plan = sub.add_parser("remainder-plan")
     remainder_plan.add_argument("--migration-id", required=True)
@@ -3852,9 +5969,14 @@ def main() -> int:
     freeze = sub.add_parser("_source-freeze")
     freeze.add_argument("--migration-id", required=True)
     freeze.add_argument("--control", required=True)
+    freeze.add_argument("--require-fresh", action="store_true")
+    freeze.add_argument("--expected-site-count", type=int)
+    freeze.add_argument("--expected-control-sha256")
 
     restore = sub.add_parser("_source-restore")
     restore.add_argument("--migration-id", required=True)
+    readback = sub.add_parser("_source-frozen-readback")
+    readback.add_argument("--migration-id", required=True)
 
     args = parser.parse_args()
     try:
@@ -3902,6 +6024,89 @@ def main() -> int:
             ))
         elif args.command == "resume":
             result = summary(resume_prepare_migration(args.migration_id))
+        elif args.command == "resume-verified-adoption":
+            result = summary(resume_after_verified_adoption(
+                args.migration_id, args.domain, args.confirm,
+            ))
+        elif args.command == "chain-tail-prepare":
+            result = summary(prepare_chain_tail(
+                args.parent_migration_id, args.child_migration_id,
+                args.confirm,
+            ))
+        elif args.command == "adopt-existing-guarded-db":
+            result = adopt_existing_guarded_site(
+                args.migration_id, args.domain, args.confirm
+            )
+        elif args.command == "chain-adopt-db-proof":
+            result = chain_adopt_database_proof(
+                args.parent_migration_id, args.child_migration_id
+            )
+        elif args.command == "chain-sql-diagnose":
+            result = diagnose_chain_sql(
+                args.parent_migration_id, args.child_migration_id
+            )
+        elif args.command == "chain-recovery-plan":
+            result = chain_recovery_scope(
+                args.parent_migration_id, args.child_migration_id
+            )
+        elif args.command == "chain-consolidation-proof":
+            result = consolidated_chain_scope(
+                args.parent_migration_id, args.child_migration_id,
+                args.tail_migration_id,
+                verify_target_markers=args.verify_target_markers,
+                locked_candidate_id=args.locked_candidate_id,
+            )
+
+        elif args.command == "chain-execution-scope":
+            result = chain_execution_scope(
+                args.parent_migration_id, args.child_migration_id,
+                args.tail_migration_id,
+            )
+        elif args.command == "chain-17site-delivery":
+            result = chain_seventeen_site_delivery(
+                args.parent_migration_id, args.child_migration_id,
+                args.tail_migration_id, action=args.action,
+                confirm=args.confirm,
+            )
+        elif args.command == "chain-private-resource-warm-stage":
+            result = chain_private_resource_warm_stage(
+                args.parent_migration_id, args.child_migration_id,
+                args.tail_migration_id, confirm=args.confirm,
+            )
+        elif args.command == "chain-private-resource-warm-verify":
+            result = chain_private_resource_warm_stage(
+                args.parent_migration_id, args.child_migration_id,
+                args.tail_migration_id, verify_only=True,
+            )
+        elif args.command == "chain-source-resource-types":
+            result = chain_original_resource_type_readiness(
+                args.parent_migration_id, args.child_migration_id,
+                args.tail_migration_id,
+                verify_live_source=args.verify_live_source,
+            )
+        elif args.command == "chain-private-file-warm-stage":
+            result = chain_private_file_warm_stage(
+                args.parent_migration_id, args.child_migration_id,
+                args.tail_migration_id, confirm=args.confirm,
+            )
+        elif args.command == "chain-private-file-warm-verify":
+            result = chain_private_file_warm_stage(
+                args.parent_migration_id, args.child_migration_id,
+                args.tail_migration_id, verify_only=True,
+            )
+        elif args.command == "chain-prestage-three-source-dumps":
+            result = chain_prestage_three_source_dumps(
+                args.parent_migration_id,
+                args.child_migration_id,
+                args.tail_migration_id,
+                confirm=args.confirm,
+            )
+        elif args.command == "chain-db-readiness":
+            result = chain_original_database_readiness(
+                args.parent_migration_id, args.child_migration_id,
+                args.tail_migration_id,
+                verify_original_markers=args.verify_original_markers,
+            )
         elif args.command == "remainder-plan":
             result = remainder_scope(args.migration_id)
         elif args.command == "remainder-prepare":
@@ -3968,9 +6173,16 @@ def main() -> int:
         elif args.command == "_source-export-db":
             result = source_export_db(args.database, Path(args.output))
         elif args.command == "_source-freeze":
-            result = source_freeze(args.migration_id, Path(args.control))
+            result = source_freeze(
+                args.migration_id, Path(args.control),
+                require_fresh=args.require_fresh,
+                expected_site_count=args.expected_site_count,
+                expected_control_sha256=args.expected_control_sha256,
+            )
         elif args.command == "_source-restore":
             result = source_restore(args.migration_id)
+        elif args.command == "_source-frozen-readback":
+            result = source_frozen_readback(args.migration_id)
         else:
             raise PullMigrationError("unsupported command")
     except (

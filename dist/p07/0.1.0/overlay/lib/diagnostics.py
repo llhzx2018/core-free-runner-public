@@ -19,6 +19,8 @@ OPERATION_CLASS = {
     "verify": "VERIFY_ERROR",
     "migrate.transfer-new-site": "TRANSPORT_ERROR",
     "migrate": "MIGRATION_ERROR",
+    "server-migrate": "MIGRATION_ERROR",
+    "fresh-17site": "MIGRATION_ERROR",
     "policy": "POLICY_ERROR",
 }
 
@@ -35,8 +37,16 @@ OPERATION_STAGE = {
     "verify": "VERIFY",
     "migrate.transfer-new-site": "TRANSPORT",
     "migrate": "MIGRATION",
+    "server-migrate": "MIGRATION",
+    "fresh-17site": "MIGRATION",
     "policy": "POLICY",
 }
+
+# Only an exact code-owned error marker may classify guarded SQL; do not
+# infer a safe recovery or echo SQL text from an arbitrary stderr fragment.
+SQL_GUARD_FAILURE_RE = re.compile(
+    r"(?:^|\n)ERROR: MySQL verification failed \[CONDITIONAL_DDL\](?:\s|$)"
+)
 
 BLOCKER_RULES = (
     ("[mysql_snapshot_changed]", "MYSQL_SNAPSHOT_CHANGED"),
@@ -120,6 +130,10 @@ def infer_error_class(operation: str) -> str:
 
 
 def infer_blocker(stderr: str) -> str:
+    if SQL_GUARD_FAILURE_RE.search(stderr or ""):
+        return "SQL_CONDITIONAL_DDL_UNPROVEN"
+    if "PREPARE_RESUME_SQL_GUARD_AND_RECOVERY_PROOF_REQUIRED" in (stderr or ""):
+        return "SQL_RECOVERY_PROOF_REQUIRED"
     lower = (stderr or "").lower()
     for needle, code in BLOCKER_RULES:
         if needle in lower:

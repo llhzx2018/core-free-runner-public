@@ -173,6 +173,105 @@ def locate_wordpress_config(site: Path) -> Path | None:
     return None
 
 
+def verify_rewritten_application_database_config(
+    site: Path, database: str, username: str, password: str,
+) -> bool:
+    """Fail closed on ambiguous target app database mappings.
+
+    A matching comment, shadowed duplicate, or conflicting .env override must
+    never prove that the imported database is connected to the application.
+    This is intentionally stricter than guessing an application's config
+    precedence; no credential or config content is returned to the caller.
+    """
+    def bounded(path: Path) -> str | None:
+        try:
+            if path.is_symlink() or not path.is_file() or path.stat().st_size > 1024 * 1024:
+                return None
+            return path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError, ValueError):
+            return None
+
+    # A symlinked or duplicated WordPress entrypoint is ambiguous even when
+    # an unrelated .env appears correct. Never fall back to .env in that case.
+    wp_candidates = (site / "wp-config.php", site / "public" / "wp-config.php")
+    if any(path.is_symlink() for path in wp_candidates):
+        return False
+    if sum(path.is_file() for path in wp_candidates) > 1:
+        return False
+    config = locate_wordpress_config(site)
+    if config is not None:
+        content = bounded(config)
+        if content is None:
+            return False
+        for name, value in (("DB_NAME", database), ("DB_USER", username),
+                            ("DB_PASSWORD", password)):
+            # The migration rewrite uses one exact standalone literal define.
+            # Counting all line-start definitions prevents a second active
+            # definition from shadowing the expected credentials. A commented
+            # line or a matching substring inside other code cannot prove it.
+            definition = re.compile(
+                rf"(?m)^[ \t]*define[ \t]*\([ \t]*(['\"]){re.escape(name)}\1[ \t]*,"
+            )
+            expected = f"define('{name}', '{_php_single_quote(value)}');"
+            if (len(definition.findall(content)) != 1
+                    or not re.search(r"(?m)^[ \t]*" + re.escape(expected)
+                                     + r"[ \t]*$", content)):
+                return False
+        return True
+
+    from urllib.parse import unquote
+    found = False
+    for name in ENV_NAMES:
+        for file in (site / name, site / "public" / name):
+            if file.is_symlink():
+                return False
+            if not file.exists():
+                continue
+            content = bounded(file)
+            if content is None:
+                return False
+            seen: dict[str, str] = {}
+            for line in content.splitlines(keepends=True):
+                parsed = _split_env_line(line)
+                if parsed is None:
+                    continue
+                key, _, value = parsed
+                if key not in DB_NAME_KEYS | DB_USER_KEYS | DB_PASS_KEYS | DB_URL_KEYS:
+                    continue
+                body = value.strip()
+                if len(body) >= 2 and body[0] == body[-1] and body[0] in {"'", '"'}:
+                    body = body[1:-1]
+                current: dict[str, str] = {}
+                if key in DB_NAME_KEYS:
+                    current["database"] = body
+                elif key in DB_USER_KEYS:
+                    current["user"] = body
+                elif key in DB_PASS_KEYS:
+                    current["password"] = body
+                else:
+                    try:
+                        parts = urlsplit(body)
+                        if parts.scheme not in ("mysql", "mariadb") or not parts.hostname:
+                            return False
+                        current = {
+                            "database": unquote(parts.path.lstrip("/")),
+                            "user": unquote(parts.username or ""),
+                            "password": unquote(parts.password or ""),
+                        }
+                    except ValueError:
+                        return False
+                for field, actual in current.items():
+                    if field in seen and seen[field] != actual:
+                        return False
+                    seen[field] = actual
+            if seen:
+                if seen != {"database": database, "user": username,
+                            "password": password}:
+                    return False
+                found = True
+    return found
+
+
 def rewrite_application_database_config(
     staged_site: Path,
     source_domain: str,
