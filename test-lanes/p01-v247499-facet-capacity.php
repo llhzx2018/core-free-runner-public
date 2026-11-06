@@ -27,7 +27,7 @@ $run=function(int $n)use($statuses):array{
   $recent=VfWatchFacetContext::forView($items,'recent',$statuses);
   $listFacets=VfWatchFacetContext::build($lists,$statuses,'',0,'',0.0);
   $recentFacets=VfWatchFacetContext::build($recent,$statuses,'',0,'',0.0);
-  if(count($lists)!==(int)floor(($n+2)/3)*2 && $n%3===0)throw new RuntimeException('Unexpected marked count');
+  if(count($lists)!==intdiv($n,3)*2+min(2,$n%3))throw new RuntimeException('Unexpected marked count');
   if(count($recent)!==(int)ceil($n/4))throw new RuntimeException('Unexpected recent count');
   if(count($listFacets['assets'])!==count($lists) || count($recentFacets['assets'])!==count($recent))
     throw new RuntimeException('Facet population drift');
