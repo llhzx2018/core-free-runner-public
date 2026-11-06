@@ -1,0 +1,125 @@
+name: p01-v247499-watch-browser-gap
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247499-watch-browser-gap-temp.yml'
+permissions:
+  contents: read
+jobs:
+  watch-browser:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      PRODUCT_BRANCH: release/p01-v247499-watch-consolidated-candidate
+      TARGET_VERSION: "2.47.499"
+      TARGET_SHA: 6c0bad287786e5d4da5738224c06bf6064da35cb
+      TARGET_TREE: bd157f1f4835f38aad961824def73d8eacdce951
+      BASE_VERSION: "2.47.498"
+      WORK: /tmp/p01-v247499-watch-browser-acceptance
+      PORT: "18741"
+    steps:
+      - name: Checkout public Runner control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Identity audit and isolated runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_spec.py audit-rendered \
+            --spec test-lanes/p01-v247499-watch-browser-lane.json \
+            --input .github/workflows/p01-v247499-watch-browser-gap-temp.yml
+          command -v php
+          command -v node
+          command -v google-chrome
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd unzip >/dev/null
+          php -m | grep -Fx pdo_sqlite
+          php -m | grep -Fx sqlite3
+          echo P01_WATCH_BROWSER_RUNNER_READY=PASS
+
+      - name: Transient private exact SHA checkout
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test -n "$READ_TOKEN"
+          observed="$(git ls-remote "https://x-access-token:$READ_TOKEN@github.com/$PRODUCT_REPO.git" "refs/heads/$PRODUCT_BRANCH" | awk '{print $1}')"
+          test "$observed" = "$TARGET_SHA"
+          git clone -q --no-checkout "https://x-access-token:$READ_TOKEN@github.com/$PRODUCT_REPO.git" candidate
+          git -C candidate fetch -q --depth 1 origin "$TARGET_SHA"
+          git -C candidate checkout -q --detach FETCH_HEAD
+          git -C candidate remote set-url origin "https://github.com/$PRODUCT_REPO.git"
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C candidate rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$TARGET_VERSION"
+          grep -Fq "define('VF_VERSION', '$TARGET_VERSION');" candidate/src/app/bootstrap.php
+          echo "P01_WATCH_BROWSER_EXACT_SHA=$TARGET_SHA"
+          echo P01_WATCH_BROWSER_SOURCE_BOUND=PASS
+
+      - name: Fresh isolated localhost first-run and synthetic Owner data
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$WORK/site" "$WORK/harness"
+          cp -a candidate/src/. "$WORK/site/"
+          (
+            cd "$WORK/site"
+            php -S "127.0.0.1:$PORT" -t . > "$WORK/server.log" 2>&1 &
+            echo $! > "$WORK/server.pid"
+          )
+          for i in $(seq 1 50); do
+            if curl -fsS -c "$WORK/cookie" -b "$WORK/cookie" "http://127.0.0.1:$PORT/setup.php" -o "$WORK/setup.html"; then break; fi
+            sleep 1
+          done
+          test -s "$WORK/setup.html"
+          csrf="$(python3 - "$WORK/setup.html" <<'PY'
+          import re,sys
+          s=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',s)
+          if not m: raise SystemExit('MISSING_LOCAL_SETUP_CSRF')
+          print(m.group(1))
+          PY
+          )"
+          curl -fsS -c "$WORK/cookie" -b "$WORK/cookie" \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode "site_title=P01 Synthetic Watch Browser" \
+            --data-urlencode "admin_password=ReleaseGate!18741" \
+            --data-urlencode "admin_password_confirm=ReleaseGate!18741" \
+            "http://127.0.0.1:$PORT/setup.php" -o "$WORK/setup-post.html"
+          (cd "$WORK/site" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          P01_SITE_ROOT="$WORK/site" P01_FIXTURE_JSON="$WORK/fixture.json" php test-lanes/p01-v247499-watch-browser-seed.php
+          test -s "$WORK/fixture.json"
+          echo P01_WATCH_BROWSER_FIRST_RUN_AND_SEED=PASS
+
+      - name: Real Chrome Owner and Guest Watch closure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm install --prefix "$WORK/harness" --no-save --no-audit --no-fund --silent playwright@1.56.1
+          cp test-lanes/p01-v247499-watch-browser.mjs "$WORK/harness/browser.mjs"
+          P01_TEST_ORIGIN="http://127.0.0.1:$PORT" \
+            P01_TEST_PASSWORD="ReleaseGate!18741" \
+            P01_FIXTURE_JSON="$WORK/fixture.json" \
+            node "$WORK/harness/browser.mjs"
+          echo P01_WATCH_BROWSER_END_TO_END=PASS
+
+      - name: Safety boundary and ephemeral cleanup
+        if: always()
+        shell: bash
+        run: |
+          echo P01_WATCH_BROWSER_FORMAL_RELEASE=NOT_EXECUTED
+          echo P01_WATCH_BROWSER_CORE_UPDATES=UNCHANGED
+          echo P01_WATCH_BROWSER_PRODUCTION=UNCHANGED
+          echo P01_WATCH_BROWSER_PUBLIC_PRIVATE_SOURCE_ARTIFACT=NONE
+          echo P01_WATCH_BROWSER_TEST_PR=CLOSE_WITHOUT_MERGE
+          if [ -f "$WORK/server.pid" ]; then kill "$(cat "$WORK/server.pid")" >/dev/null 2>&1 || true; fi
+          case "$WORK" in /tmp/p01-v247499-watch-browser-*) rm -rf -- "$WORK";; *) exit 66;; esac
+          rm -rf candidate
