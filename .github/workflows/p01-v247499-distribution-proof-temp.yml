@@ -1,0 +1,109 @@
+name: p01-v247499-distribution-exact-proof
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p01-v247499-distribution-proof-temp.yml']
+permissions:
+  contents: read
+jobs:
+  exact-manifest-and-asset:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      TARGET_REPO: llhzx2018/core-updates
+      TARGET_VERSION: "2.47.499"
+      TARGET_SHA: 7cf87b20e79e0175f172d2a72206fed5e19fb214
+      TARGET_TREE: d1f20bc4fa02fc6fca98abfc0cacbb4f00deeb4f
+      BASE_VERSION: "2.47.498"
+      SPEC: test-lanes/p01-v247499-distribution-lane.json
+      WORK: /tmp/p01-channel499-${{ github.run_id }}
+    steps:
+      - name: Checkout public trusted control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Source identity preflight and isolated capabilities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_spec.py validate --spec "$SPEC"
+          python3 scripts/ephemeral_lane_spec.py audit-rendered --spec "$SPEC" --input .github/workflows/p01-v247499-distribution-proof-temp.yml
+          mkdir -p "$WORK"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-curl jq unzip >/dev/null
+          command -v gh
+          echo P01_DISTRIBUTION499_LANE_IDENTITY=PASS
+      - name: Exact core-updates candidate and official Release/asset
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test -n "$READ_TOKEN" && test -n "$GH_TOKEN"
+          branch="$(jq -r '.extra.CHANNEL_BRANCH' "$SPEC")"
+          repo="$(jq -r '.repository' "$SPEC")"
+          product_repo="$(jq -r '.extra.PRODUCT_REPO' "$SPEC")"
+          product_sha="$(jq -r '.extra.PRODUCT_SHA' "$SPEC")"
+          tag="$(jq -r '.extra.RELEASE_TAG' "$SPEC")"
+          release_id="$(jq -r '.extra.RELEASE_ID' "$SPEC")"
+          asset="$(jq -r '.extra.UPDATE_NAME' "$SPEC")"
+          bytes="$(jq -r '.extra.UPDATE_BYTES' "$SPEC")"
+          digest="$(jq -r '.extra.UPDATE_SHA256' "$SPEC")"
+          test "$repo" = "$TARGET_REPO"
+          test "$branch" = "dist/p01-v247499-watch-four-fix-20261106"
+          test "$tag" = "v$TARGET_VERSION"
+          observed="$(git ls-remote "https://x-access-token:$READ_TOKEN@github.com/$repo.git" "refs/heads/$branch" | awk '{print $1}')"
+          test "$observed" = "$TARGET_SHA"
+          git clone -q --depth 1 --branch "$branch" "https://x-access-token:$READ_TOKEN@github.com/$repo.git" "$WORK/channel"
+          git -C "$WORK/channel" remote set-url origin "https://github.com/$repo.git"
+          test "$(git -C "$WORK/channel" rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C "$WORK/channel" rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          unset READ_TOKEN
+          cd "$WORK/channel"
+          jq -e --arg from "$BASE_VERSION" --arg to "$TARGET_VERSION" --arg rid "$release_id" --arg prod "$product_sha" --arg tag "$tag" --arg name "$asset" --arg bytes "$bytes" --arg digest "$digest" '
+            .schema_version=="1.0" and .project_id=="P01" and .component_id=="APP"
+            and .enabled==true and .current_version==$from and .target_version==$to
+            and .update_type=="ATOMIC" and .from_versions==[$from]
+            and .schema_from=="2026102201" and .schema_to=="2026102201"
+            and .repository=="llhzx2018/vf-start" and .release_tag==$tag
+            and .release_id==($rid|tonumber) and .product_identity==$prod
+            and .asset_name==$name and .asset_bytes==($bytes|tonumber)
+            and .asset_sha256==$digest and .backup_required==true and .rollback_supported==true
+          ' projects/P01.json >/dev/null
+          echo "P01_DISTRIBUTION499_SOURCE_SHA=$TARGET_SHA"
+          echo P01_DISTRIBUTION499_ATOMIC_ALLOWLIST_AND_SCHEMA=PASS
+          python3 scripts/check_manifest_contract.py > "$WORK/manifest-audit.json"
+          jq -e '.status=="PASS"' "$WORK/manifest-audit.json" >/dev/null
+          echo P01_DISTRIBUTION499_ALL_MANIFESTS=PASS
+          find update-core/php -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          php update-core/php/tests/run.php > "$WORK/php-tests.txt" 2>&1 || {
+            tail -45 "$WORK/php-tests.txt"; exit 1;
+          }
+          tail -20 "$WORK/php-tests.txt" | sed -E 's/[[:cntrl:]]//g'
+          echo P01_DISTRIBUTION499_UPDATE_CORE_NATIVE_PHP=PASS
+          test "$(gh api "repos/$product_repo/git/ref/tags/$tag" --jq .object.sha)" = "$product_sha"
+          gh api "repos/$product_repo/releases/tags/$tag" > "$WORK/release.json"
+          jq -e --arg tag "$tag" --arg rid "$release_id" --arg name "$asset" --arg bytes "$bytes" --arg digest "$digest" '
+            .tag_name==$tag and .id==($rid|tonumber) and .draft==false and .prerelease==false
+            and (.assets|any(.name==$name and .size==($bytes|tonumber) and .digest==("sha256:"+$digest)))
+          ' "$WORK/release.json" >/dev/null
+          mkdir -p "$WORK/assets"
+          gh release download "$tag" -R "$product_repo" -p "$asset" -D "$WORK/assets"
+          test "$(stat -c %s "$WORK/assets/$asset")" = "$bytes"
+          test "$(sha256sum "$WORK/assets/$asset" | awk '{print $1}')" = "$digest"
+          unzip -t "$WORK/assets/$asset" >/dev/null
+          echo P01_DISTRIBUTION499_OFFICIAL_TAG_RELEASE_ASSET=PASS
+          echo P01_DISTRIBUTION499_MACHINE=PASS
+      - name: Public/private boundary and isolated cleanup
+        if: always()
+        shell: bash
+        run: |
+          echo P01_DISTRIBUTION499_FORMAL_RELEASE_WRITES=NONE
+          echo P01_DISTRIBUTION499_PRODUCT_REPO_WRITES=NONE
+          echo P01_DISTRIBUTION499_PRODUCTION_WRITES=NONE
+          echo P01_DISTRIBUTION499_PRIVATE_SOURCE_ARTIFACT=NONE
+          echo P01_DISTRIBUTION499_CLOSE_RUNNER_PR_UNMERGED=YES
+          case "$WORK" in /tmp/p01-channel499-*) rm -rf -- "$WORK";; *) exit 67;; esac
