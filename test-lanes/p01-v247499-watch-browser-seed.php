@@ -11,6 +11,7 @@ if(!preg_match('#^/tmp/p01-v247499-watch-browser-[a-zA-Z0-9_-]+/site$#',$root)
 }
 require $root.'/app/bootstrap.php';
 $repo=new VfRepository(vf_db());
+$surfaceRepo=new VfSurfaceRepository(vf_db());
 $cat=$repo->createCategory([
     'name'=>'Watch Browser Isolated Fixture','description'=>'','icon'=>'',
     'is_private'=>0,'sort_order'=>0
@@ -36,6 +37,12 @@ foreach($specs as $key=>$row){
     ]);
     $id=(int)($created['id']??0);
     if($id<=0){fwrite(STDERR,"P01_WATCH_SEED_INVALID_ID\n");exit(61);}
+    // Base saveLink owns the canonical URL/identity, while the existing
+    // SurfaceRepository owns Watch domain/status. A base-only link is Start.
+    $surfaceRepo->upsertProfile($id,[
+        'surface'=>'watch','resource_kind'=>$kind,
+        'media_status'=>$status,'media_year'=>2024
+    ]);
     $ids[$key]=$id;
 }
 file_put_contents($output,json_encode($ids,JSON_THROW_ON_ERROR));
