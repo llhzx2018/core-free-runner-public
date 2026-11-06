@@ -45,9 +45,102 @@ jobs:
           git diff --quiet 7193ac991d13159614cd6396cf7e625d3cbb86ca..HEAD \
             -- lib/verify.py lib/migration_db_adoption.py lib/migration_sql_failure_retention.py
           echo P07_ISSUE287_EXACT_SOURCE_ONE_SHOT_PRIVATE_REPRO_SYNTHETIC_PASS
+      - name: Checkout published release114 public installer baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: 9561d8a30d6cadda40442461e54cf8d35d551eda
+          persist-credentials: false
+          path: _p07_public114
+      - name: Exact-source release115 candidate manifests and real local 114-to-115 upgrade rollback
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          P07_ALLOW_NONROOT: "1"
+          P07_NO_EXEC: "1"
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C _p07_issue287 rev-parse HEAD)" = b5b353f9c0f56d6db309a2d47491cd6e5757df3d
+          test "$(git -C _p07_public114 rev-parse HEAD)" = 9561d8a30d6cadda40442461e54cf8d35d551eda
+          python3 -B _p07_issue287/scripts/p07_candidate_bundle.py \
+            --product-root _p07_issue287 \
+            --public-root _p07_public114 \
+            --output _p07_candidate115 \
+            --product-sha b5b353f9c0f56d6db309a2d47491cd6e5757df3d \
+            --build 0.1.0-release115 \
+            --care 0.1.0-rc82
+          python3 - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          root=Path('_p07_candidate115')
+          data=json.loads((root/'candidate_attestation.json').read_text())
+          assert data['status']=='FORMAL_STAGING_NOT_PUBLISHED'
+          assert data['product_source_sha']=='b5b353f9c0f56d6db309a2d47491cd6e5757df3d'
+          assert data['product_build']=='0.1.0-release115'
+          assert data['system_care_build']=='0.1.0-rc82'
+          assert not any(data['negative'].values())
+          base=root/'dist/p07/0.1.0/overlay'
+          def blob(path):
+            b=path.read_bytes()
+            return hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest()
+          def check_manifest(name):
+            entries=set()
+            for row in (base/name).read_text().splitlines():
+              digest,rel=row.split('  ',1)
+              assert rel not in entries
+              entries.add(rel)
+              f=base/rel
+              assert f.is_file() and not f.is_symlink() and blob(f)==digest,rel
+            return entries
+          runtime=check_manifest('RUNTIME.gitblob')
+          complete=check_manifest('MANIFEST.gitblob')
+          assert runtime<=complete
+          assert 'lib/migration_private_sql_repro.py' in runtime
+          assert 'tests/test_issue287_private_repro.py' in complete
+          assert data['runtime_manifest_blob']==blob(base/'RUNTIME.gitblob')
+          assert data['overlay_manifest_blob']==blob(base/'MANIFEST.gitblob')
+          assert data['final_installer_blob']==blob(root/'installers/p07-final.sh')
+          assert (base/'BUILD_ID').read_text().strip()=='0.1.0-release115'
+          assert '--capture-private-repro' in (base/'bin/vfops-migrate-ui').read_text()
+          assert 'PRIVATE_MINIMAL_REPRO_CAPTURED_NOT_VERIFIED' in (base/'lib/migration_private_sql_repro.py').read_text()
+          assert "VFOPS_BUILD_EXPECTED='0.1.0-release115'" in (root/'packages/p07-system-care/0.1.0-rc82/vf-system-care.sh').read_text()
+          print('P07_115_PRIVATE_DIAGNOSTIC_CANDIDATE_RUNTIME_AND_MANIFESTS_PASS')
+          PY
+          bash -n _p07_candidate115/installers/p07-final.sh \
+            _p07_candidate115/installers/p07.sh \
+            _p07_candidate115/installers/p07-toolbox.sh \
+            _p07_candidate115/installers/p07-system-care.sh
+          sandbox="$(mktemp -d -t p07-issue287-upgrade.XXXXXX)"
+          trap 'rm -rf -- "$sandbox"' EXIT
+          export P07_INSTALL_DIR="$sandbox/installed"
+          export P07_PREVIOUS_DIR="$sandbox/previous"
+          export P07_BIN_LINK="$sandbox/vfops"
+          export P07_PUBLIC_ROOT="file://$GITHUB_WORKSPACE/_p07_public114"
+          bash _p07_public114/installers/p07-final.sh >"$sandbox/install114.log" 2>&1
+          test "$(NO_COLOR=1 "$P07_BIN_LINK" --build-id)" = 0.1.0-release114
+          mkdir "$sandbox/invalid-bin-link"
+          export P07_PUBLIC_ROOT="file://$GITHUB_WORKSPACE/_p07_candidate115"
+          if P07_BIN_LINK="$sandbox/invalid-bin-link" \
+            bash _p07_candidate115/installers/p07-final.sh >"$sandbox/rejected-upgrade.log" 2>&1; then
+            echo P07_115_FAILURE_INJECTION_SHOULD_BLOCK >&2
+            exit 1
+          fi
+          test "$(NO_COLOR=1 "$P07_BIN_LINK" --build-id)" = 0.1.0-release114
+          bash _p07_candidate115/installers/p07-final.sh >"$sandbox/upgrade115.log" 2>&1
+          test "$(NO_COLOR=1 "$P07_BIN_LINK" --build-id)" = 0.1.0-release115
+          test "$(NO_COLOR=1 bash "$P07_PREVIOUS_DIR/bin/vfops-user" --build-id)" = 0.1.0-release114
+          test -f "$P07_INSTALL_DIR/lib/migration_private_sql_repro.py"
+          grep -Fq -- "--capture-private-repro" "$P07_INSTALL_DIR/bin/vfops-migrate-ui"
+          NO_COLOR=1 "$P07_BIN_LINK" server-migrate diagnose-sql --help >"$sandbox/diagnostic-help.log"
+          grep -Fq -- '--capture-private-repro' "$sandbox/diagnostic-help.log"
+          digest="$(sha256sum "$P07_INSTALL_DIR/.runtime-manifest.gitblob")"
+          bash _p07_candidate115/installers/p07-final.sh >"$sandbox/noop.log" 2>&1
+          test "$(sha256sum "$P07_INSTALL_DIR/.runtime-manifest.gitblob")" = "$digest"
+          echo P07_115_LOCAL_REAL_INSTALL_UPGRADE_ROLLBACK_IDEMPOTENT_PASS
+          echo P07_115_CP2_AND_SOURCE_BUSINESS_WRITES=NONE
       - name: Cleanup private source unconditionally
         if: always()
         shell: bash
         run: |
-          rm -rf -- _p07_issue287
+          rm -rf -- _p07_issue287 _p07_public114 _p07_candidate115
           echo P07_ISSUE287_PRIVATE_SOURCE_CLEANED
