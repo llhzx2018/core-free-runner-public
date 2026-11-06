@@ -25,7 +25,8 @@ try {
   assert.equal(await cards(visitor).count(),2,'guest can only see the 2 public films');
   assert.equal(await card(visitor,fixture.privateWatched).count(),0,'guest cannot read private watched film');
   assert.equal(await card(visitor,fixture.privateUnmarked).count(),0,'guest cannot read private unmarked film');
-  assert.equal(await visitor.locator('[data-watch-manage="status"]').count(),0,'no Owner-only controls in anonymous detail');
+  assert.equal(await visitor.locator('[data-watch-detail-owner]').count(),1,'guest dialog shell exists without extra editor');
+  assert.equal(await visitor.locator('[data-watch-detail-owner]').isVisible(),false,'guest Owner-only actions stay hidden');
   await visitor.goto(origin+'/watch.php?view=lists&sort=title',{waitUntil:'domcontentloaded'});
   assert.equal(await cards(visitor).count(),2,'guest ?view=lists remains public library, never Owner list');
   assert.equal(await visitor.locator('.vf-watch-hero h1').textContent(),'影视库');
@@ -126,7 +127,8 @@ try {
   assert.equal(posts,1,'Owner triggers one explicit synthetic TMDB request');
   await detail.locator('[data-watch-detail-close]').click();
   await card(page,fixture.publicMarked).locator('.vf-watch-title-open').click();
-  await detail.locator('.vf-watch-detail-extra > summary').click();
+  if(!await detail.locator('.vf-watch-detail-extra').evaluate(el=>el.open))
+    await detail.locator('.vf-watch-detail-extra > summary').click();
   assert.equal(await detail.locator('[data-watch-detail-sync]').isDisabled(),true,
     'sync remains locked when detail is reopened during pending POST');
   assert.equal(posts,1,'reopen never double-submits');
