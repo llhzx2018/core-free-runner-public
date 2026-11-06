@@ -1,0 +1,117 @@
+name: p01-atomic-lock-stale-journal-proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-atomic-lock-stale-journal-proof-temp.yml'
+permissions:
+  contents: read
+jobs:
+  independent-p01-upgrade-lock:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      PRODUCT_BRANCH: fix/p01-atomic-lock-bounded-and-interrupted-install-r1
+      TARGET_SHA: 3f67cec6e60ce35a91aa43c802b0ba4454ad7558
+      TARGET_TREE: 8749ba939696914e4e3963feccf86be8b57778f3
+      BASE_SHA: 80f47b2133c8515816a70bd494013358ea158d4d
+      BUILDER_SOURCE_SHA: dbb5adfaaf4e2e943d402295e47d00ce737c02e2
+      WORK: /tmp/p01-upgrade-lock-proof-${{ github.run_id }}
+    steps:
+      - name: Checkout registered public test control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Environment and exact public builder
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$WORK"
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y php-cli php-sqlite3 php-curl php-zip php-mbstring >/dev/null
+          php -v | head -n 2
+          python3 --version
+          test "$(git hash-object scripts/p01-build-release-v2.py)" = "$BUILDER_SOURCE_SHA"
+          python3 -m py_compile scripts/p01-build-release-v2.py scripts/test_p01_atomic_builder_bounded_lock.py
+          python3 scripts/test_p01_atomic_builder_bounded_lock.py
+          echo P01_ATOMIC_BUILDER_EXACT_SOURCE=PASS
+      - name: Transient authenticated product checkout
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test -n "$READ_TOKEN"
+          observed="$(git ls-remote "https://x-access-token:$READ_TOKEN@github.com/$PRODUCT_REPO.git" "refs/heads/$PRODUCT_BRANCH" | awk '{print $1}')"
+          test "$observed" = "$TARGET_SHA"
+          git clone -q --no-checkout "https://x-access-token:$READ_TOKEN@github.com/$PRODUCT_REPO.git" "$WORK/candidate"
+          git -C "$WORK/candidate" fetch -q --depth 1 origin "$TARGET_SHA"
+          git -C "$WORK/candidate" fetch -q --depth 1 origin "$BASE_SHA"
+          git -C "$WORK/candidate" checkout -q --detach "$TARGET_SHA"
+          git -C "$WORK/candidate" worktree add -q --detach "$WORK/stable" "$BASE_SHA"
+          git -C "$WORK/candidate" remote set-url origin "https://github.com/$PRODUCT_REPO.git"
+          test "$(git -C "$WORK/candidate" rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C "$WORK/candidate" rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n ' < "$WORK/candidate/VERSION")" = "2.47.499"
+          test "$(tr -d '\r\n ' < "$WORK/stable/VERSION")" = "2.47.499"
+          echo P01_UPGRADE_LOCK_EXACT_PRODUCT_SHA=PASS
+      - name: PHP syntax and real flock/journal failure regressions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$WORK/candidate"
+          for f in src/app/Platform/Barrier.php src/app/UpdateManager.php tests/unit/p01_upgrade_global_lock_timeout_contract.php tests/unit/p01_update_interrupted_install_fail_closed.php; do
+            php -l "$f"
+          done
+          php tests/unit/p01_upgrade_global_lock_timeout_contract.php
+          php tests/unit/p01_update_interrupted_install_fail_closed.php
+          echo P01_524_GLOBAL_LOCK_AND_STALE_JOURNAL=PASS
+      - name: Full canonical changed-source zero-debt
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash "$WORK/candidate/tests/canonical_release_regression.sh" "$WORK/candidate" "$WORK/stable" --require-zero-debt
+          echo P01_UPGRADE_LOCK_CANONICAL_ZERO_DEBT=PASS
+      - name: Generated Atomic versus real stable held global reader
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$WORK/old-site/app/Platform"
+          git -C "$WORK/candidate" show "$BASE_SHA:src/app/Platform/Barrier.php" > "$WORK/old-site/app/Platform/Barrier.php"
+          printf '2.47.499\n' > "$WORK/old-site/VERSION.txt"
+          python3 - "$WORK/old-site/repair.php" <<'PY'
+          import importlib.util, pathlib,sys
+          source=pathlib.Path("scripts/p01-build-release-v2.py").resolve()
+          spec=importlib.util.spec_from_file_location("p01_builder_lock",source)
+          assert spec and spec.loader
+          m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
+          old={"VERSION.txt":b"2.47.499\n"}
+          new={"VERSION.txt":b"2.47.500\n"}
+          pathlib.Path(sys.argv[1]).write_text(m.build_repair(old,new,""),encoding="utf-8")
+          PY
+          php -l "$WORK/old-site/repair.php"
+          php -r 'define("VF_ROOT",$argv[1]);require $argv[1]."/app/Platform/Barrier.php";$l=VfMaintenanceBarrier::globalShared();file_put_contents($argv[2],"READY");sleep(4);$l->release();' "$WORK/old-site" "$WORK/reader-ready" &
+          reader_pid=$!
+          for i in $(seq 1 40); do [ -f "$WORK/reader-ready" ] && break; sleep 0.05; done
+          test -f "$WORK/reader-ready"
+          set +e
+          timeout 3s php "$WORK/old-site/repair.php" "--run=$WORK/old-site" > "$WORK/atomic-out.log" 2>&1
+          rc=$?
+          set -e
+          test "$rc" = 1
+          grep -Fq '系统正在执行维护操作' "$WORK/atomic-out.log"
+          test "$(tr -d '\r\n ' < "$WORK/old-site/VERSION.txt")" = "2.47.499"
+          wait "$reader_pid"
+          echo P01_ATOMIC_OLD_RUNTIME_HELD_SHARED_FAILFAST=PASS
+      - name: Safe isolated cleanup and boundaries
+        if: always()
+        shell: bash
+        run: |
+          echo P01_UPGRADE_LOCK_MACHINE_FORMAL_RELEASE=NOT_EXECUTED
+          echo P01_UPGRADE_LOCK_MACHINE_CORE_UPDATES=UNCHANGED
+          echo P01_UPGRADE_LOCK_MACHINE_PRODUCTION=UNCHANGED
+          echo P01_UPGRADE_LOCK_MACHINE_PUBLIC_PRIVATE_SOURCE_ARTIFACT=NONE
+          case "$WORK" in /tmp/p01-upgrade-lock-proof-*) rm -rf -- "$WORK";; *) exit 66;; esac
