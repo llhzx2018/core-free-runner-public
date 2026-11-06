@@ -103,9 +103,12 @@ class P07IntegrationManifestTests(unittest.TestCase):
         self.assertNotIn("current_public_main_commit", release)
         current_build = (ROOT / "BUILD_ID").read_text(encoding="utf-8").strip()
         self.assertNotIn("candidate", self.data)
-        # Release87 is publicly published; release86 is historical.
-        self.assertEqual(current_build, "0.1.0-release87")
-        self.assertEqual(release["slot3_build"], current_build)
+        # The integration manifest is a release87 historical snapshot, not
+        # the current toolchain BUILD_ID. Newer builds must not rewrite
+        # recorded publication facts or cause the snapshot test to fail.
+        self.assertEqual(release["slot3_build"], "0.1.0-release87")
+        self.assertRegex(current_build, r"^0\.1\.0-release[0-9]+$")
+        self.assertGreaterEqual(int(current_build.rsplit("release", 1)[1]), 87)
         self.assertEqual(self.data["release_history"]["release86"]["slot3_build"], "0.1.0-release86")
         self.assertEqual(self.data["release_history"]["release85"]["slot3_build"], "0.1.0-release85")
         self.assertEqual(release["system_care_build"], self.data["slots"][3]["internal_version"])

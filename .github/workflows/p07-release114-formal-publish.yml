@@ -1,0 +1,159 @@
+name: P07 release114 formal publication (exact-gated, owner-directed)
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release114-formal-publish.yml'
+      - 'experiments/p07-release114-attestation.json'
+      - 'dist/p07/0.1.0/overlay/**'
+      - 'installers/p07.sh'
+      - 'installers/p07-final.sh'
+      - 'installers/p07-toolbox.sh'
+      - 'installers/p07-system-care.sh'
+permissions:
+  contents: read
+concurrency:
+  group: p07-release114-formal-publish
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: >-
+      ${{ github.repository == 'llhzx2018/core-free-runner-public' && github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'P07 release114 exact gated formal publish') }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      RELEASE_REPO: llhzx2018/core-free-runner-public
+      RELEASE_TAG: p07-v0.1.0-release114
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify official current source, prior gates, data boundary and manifests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN" || { echo "P07_RELEASE_WRITE_CAPABILITY_MISSING"; exit 78; }
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(gh api "repos/$RELEASE_REPO/git/ref/heads/main" --jq '.object.sha')" = "$GITHUB_SHA"
+          test "$(gh api repos/llhzx2018/vf-server-ops/git/ref/heads/main --jq '.object.sha')" = 46014482feadb8db61cff71928326eb35791b192
+          for run in 42203353906 42203354112 42203354001 42203353848 42203353927 42203354025 42194768489; do
+            if [[ "$run" == 42194768489 ]]; then repo=llhzx2018/core-free-runner-public; else repo="$RELEASE_REPO"; fi
+            state="$(gh api "repos/$repo/actions/runs/$run" --jq '.conclusion')"
+            test "$state" = success || { echo "P07_REQUIRED_EXACT_MACHINE_RUN_NOT_PASS:$run"; exit 78; }
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib, json
+          a=json.loads(Path('experiments/p07-release114-attestation.json').read_text())
+          assert a['schema']=='p07.release-candidate.offline.v1'
+          assert a['status']=='FORMAL_STAGING_NOT_PUBLISHED'
+          assert a['product_source_sha']=='46014482feadb8db61cff71928326eb35791b192'
+          assert a['product_build']=='0.1.0-release114'
+          assert a['system_care_build']=='0.1.0-rc81'
+          assert a['runtime_file_count']==79
+          assert a['negative']=={'dns_modified':False,'production_modified':False,
+              'public_main_modified':False,'source_deleted':False,'vps_modified':False}
+          def blob(path):
+              data=path.read_bytes()
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          def verify_manifest(root,manifest):
+              seen=set()
+              for entry in (root/manifest).read_text().splitlines():
+                  expect,rel=entry.split('  ',1)
+                  p=Path(rel)
+                  assert rel not in seen and not p.is_absolute() and '..' not in p.parts
+                  seen.add(rel)
+                  f=root/p
+                  assert f.is_file() and not f.is_symlink() and blob(f)==expect,rel
+              return seen
+          root=Path('dist/p07/0.1.0/overlay')
+          runtime=verify_manifest(root,'RUNTIME.gitblob')
+          complete=verify_manifest(root,'MANIFEST.gitblob')
+          assert len(runtime)==79 and len(complete)==181 and runtime<=complete
+          assert (root/'BUILD_ID').read_text().strip()=='0.1.0-release114'
+          assert blob(root/'RUNTIME.gitblob')=='ac4086db6a20859a8f101d2aeec588e42e0b5b40'
+          assert blob(root/'MANIFEST.gitblob')=='9dd0e09a2ffe104bf75ef9619b7d61f8d5f989eb'
+          assert a['runtime_manifest_blob']==blob(root/'RUNTIME.gitblob')
+          assert a['overlay_manifest_blob']==blob(root/'MANIFEST.gitblob')
+          for key,rel in [('final_installer_blob','installers/p07-final.sh'),
+                          ('system_care_manifest_blob','packages/p07-system-care/0.1.0-rc81/MANIFEST.gitblob')]:
+              assert blob(Path(rel))==a[key],key
+          assert a['final_installer_blob']=='763da480b5bf9a02ff452e2c668dd96602106395'
+          assert blob(Path('installers/p07.sh'))=='1fa4f195500458bd25b3f419b9d835e430413cf6'
+          assert a['final_installer_blob'] in Path('installers/p07.sh').read_text()
+          care=Path('packages/p07-system-care/0.1.0-rc81')
+          assert len(verify_manifest(care,'MANIFEST.gitblob'))>0
+          assert "VFOPS_BUILD_EXPECTED='0.1.0-release114'" in (care/'vf-system-care.sh').read_text()
+          toolbox=Path('installers/p07-toolbox.sh').read_text()
+          assert 'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release114"' in toolbox
+          assert 'SYSTEM_CARE_EXPECTED="0.1.0-rc81"' in toolbox
+          assert 'SQL_CONDITIONAL_DDL_UNPROVEN' in (root/'lib/diagnostics.py').read_text()
+          assert 'resume-verified-adoption' in (root/'bin/vfops-migrate-ui').read_text()
+          print('P07_RELEASE114_PUBLISHED_SOURCE_AND_FAIL_CLOSED_RUNTIME_PRECHECK_PASS')
+          PY
+          bash -n installers/p07.sh installers/p07-final.sh installers/p07-toolbox.sh installers/p07-system-care.sh
+
+      - name: Create exact release identity; retain existing release unchanged
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$RELEASE_TAG" -R "$RELEASE_REPO" >/dev/null 2>&1; then
+            test "$(gh api "repos/$RELEASE_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')" = "$GITHUB_SHA" || { echo "P07_RELEASE114_TAG_COLLISION"; exit 81; }
+            echo "P07_RELEASE114_PREEXISTING_EXACT_TAG_NO_OVERWRITE"
+          else
+            if gh api "repos/$RELEASE_REPO/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+              echo "P07_RELEASE114_ORPHAN_TAG_BLOCKED"
+              exit 81
+            fi
+            gh release create "$RELEASE_TAG" -R "$RELEASE_REPO" --target "$GITHUB_SHA" \
+              --title "P07 · release114 · 工具箱升级与原18站 SQL 安全门禁" \
+              --notes "VF Server Ops 0.1.0-release114 / System Care rc81. Product source 46014482; exact-source registered machine evidence: Runner #42194768489, distribution #42203353906, independent install/upgrade/rollback and security PASS. Owner manually installs and verifies. 18-site real private SQL remains NOT_VERIFIED; never blindly resume or re-import, never overwrite target DB, never auto-change DNS, never delete old VPS. Public release does not activate or modify any server."
+            echo "P07_RELEASE114_FORMAL_RELEASE_CREATED"
+          fi
+          test "$(gh api "repos/$RELEASE_REPO/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')" = "$GITHUB_SHA"
+          test "$(gh api "repos/$RELEASE_REPO/releases/tags/$RELEASE_TAG" --jq '.draft')" = false
+          test "$(gh api "repos/$RELEASE_REPO/releases/tags/$RELEASE_TAG" --jq '.prerelease')" = false
+
+      - name: Publish once and independently read back all exact release assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tmp="$(mktemp -d -t p07-release114-assets.XXXXXX)"
+          trap 'rm -rf -- "$tmp"' EXIT
+          if [[ "$(gh api "repos/$RELEASE_REPO/releases/tags/$RELEASE_TAG" --jq '.assets | length')" -eq 0 ]]; then
+            gh release upload "$RELEASE_TAG" -R "$RELEASE_REPO" \
+              installers/p07.sh installers/p07-final.sh \
+              installers/p07-toolbox.sh installers/p07-system-care.sh
+          fi
+          test "$(gh api "repos/$RELEASE_REPO/releases/tags/$RELEASE_TAG" --jq '.assets | length')" -eq 4
+          gh release download "$RELEASE_TAG" -R "$RELEASE_REPO" --dir "$tmp"
+          for name in p07.sh p07-final.sh p07-toolbox.sh p07-system-care.sh; do
+            test -f "$tmp/$name"
+            test "$(git hash-object "$tmp/$name")" = "$(git hash-object "installers/$name")" || { echo "P07_RELEASE114_REMOTE_ASSET_MISMATCH:$name"; exit 78; }
+          done
+          echo "P07_RELEASE114_FORMAL_ASSETS_REMOTE_EXACT_READBACK_PASS"
+
+      - name: Prove stable public Toolbox, runtime and installer visibility
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tmp="$(mktemp -t p07-public114.XXXXXX)"
+          trap 'rm -f "$tmp"' EXIT
+          for rel in \
+              installers/p07.sh installers/p07-final.sh \
+              installers/p07-toolbox.sh installers/p07-system-care.sh \
+              dist/p07/0.1.0/overlay/BUILD_ID \
+              dist/p07/0.1.0/overlay/RUNTIME.gitblob \
+              dist/p07/0.1.0/overlay/MANIFEST.gitblob \
+              dist/p07/0.1.0/overlay/lib/server_migration_pull.py; do
+            for ref in "$GITHUB_SHA" main; do
+              curl -fsSL --retry 6 --retry-delay 2 --proto '=https' --tlsv1.2 \
+                "https://raw.githubusercontent.com/$RELEASE_REPO/$ref/$rel" -o "$tmp"
+              test "$(git hash-object "$tmp")" = "$(git hash-object "$rel")" || {
+                echo "P07_RELEASE114_PUBLIC_INSTALLER_MISMATCH:$rel"; exit 78;
+              }
+            done
+          done
+          echo "P07_RELEASE114_TOOLBOX_DISTRIBUTION_REMOTE_READBACK_PASS"
+          echo "P07_OWNER_SERVER_WRITES=NONE;REAL_PRIVATE_SQL=NOT_VERIFIED;DNS_WRITES=NONE"

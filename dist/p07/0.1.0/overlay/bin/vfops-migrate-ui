@@ -38,6 +38,8 @@ migration_wait_label() {
     *" server-migrate resume "*) printf '继续迁入处理中' ;;
     *" server-migrate prepare "*) printf '首轮迁入处理中' ;;
     *" server-migrate finalize "*) printf '公网验证处理中' ;;
+    *" fresh-17site preview "*) printf '检查全新CP2及旧VPS三个数据库' ;;
+    *" fresh-17site prepare "*) printf '首轮迁入17站' ;;
     *" server-migrate plan "*) printf '正在读取迁移清单' ;;
     *" server-migrate target-status "*) printf '正在检查新服务器状态' ;;
     *" server-migrate status "*) printf '正在读取迁移状态' ;;
@@ -166,7 +168,7 @@ migration_status_label() {
     WAITING_DNS) printf '等待 DNS 生效' ;;
     PREPARING) printf '正在首轮迁入' ;;
     CUTOVER_RUNNING) printf '正在最终增量同步' ;;
-    PREPARE_FAILED) printf '首轮迁入未完成，可继续' ;;
+    PREPARE_FAILED) printf '首轮迁入失败，需核验恢复条件' ;;
     PRODUCTION_VERIFY_FAILED) printf '公网验证未通过，可重试' ;;
     CUTOVER_FAILED_ROLLED_BACK) printf '最终同步失败，旧服务器已恢复' ;;
     CUTOVER_FAILED_ROLLBACK_PARTIAL) printf '最终同步失败，恢复不完整' ;;
@@ -212,7 +214,7 @@ ensure_migration_dependencies() {
 }
 
 ensure_current_server_ready() {
-  local payload status
+  local payload status answer
   if ! run_quiet_with_progress '正在检查新服务器状态' "$CORE" server-migrate target-status; then
     ui_bad '无法检查当前服务器。'
     return 1
@@ -225,8 +227,23 @@ ensure_current_server_ready() {
   fi
 
   ui_attention '当前服务器还没有完成初始化。'
-  ui_note '请返回一级菜单 → 5. 初始化服务器，完成后再进入服务器迁移。'
-  ui_note '迁移流程本身不再负责安装或初始化服务器。'
+  ui_note '可从本页直接打开 P07 初始化向导；向导会独立检查空服务器及安装权限，绝不覆盖已有业务。'
+  ui_prompt '现在进入初始化向导？[y/N]：'
+  read -r answer || return 1
+  if [[ "$answer" =~ ^[Yy]$ ]]; then
+    if ! bash "$ROOT_DIR/bin/vfops-init-ui"; then
+      ui_bad '初始化向导未正常完成，请先查看页面结果。'
+      return 1
+    fi
+    if run_quiet_with_progress '复查新服务器环境' "$CORE" server-migrate target-status; then
+      status="$(json_field "$WAIT_PAYLOAD" status 2>/dev/null || printf UNKNOWN)"
+      if [[ "$status" == 'CLOUDPANEL_READY' ]]; then
+        ui_good '新服务器 CloudPanel 已就绪 ✓'
+        return 0
+      fi
+    fi
+    ui_attention 'CloudPanel 还未达到迁移条件；请先完成初始化界面提示的必要步骤。'
+  fi
   return 1
 }
 
@@ -405,7 +422,8 @@ prepare_and_continue() {
   ui_note '下面会实时显示已传输量 / 百分比 / 速度；不同网站会分段显示。'
   if ! run_migration_live server-migrate prepare "${args[@]}" --confirm PREPARE_PULL_MIGRATION; then
     payload="$MIGRATION_PAYLOAD"
-    ui_bad '首轮迁入未完整结束；目标端状态已保留，可从“继续未完成迁移”续跑。'
+    ui_bad '首轮迁入未完整结束；目标端状态已保留，禁止直接重新首轮迁入。'
+    ui_note '若失败涉及 SQL 安全校验或已写入的目标数据库，不可直接从断点重试；先保留状态并完成安全恢复评估。'
     [[ -n "$payload" ]] && printf '%s\n' "$payload" >&2
     pause
     return 0
@@ -422,8 +440,29 @@ prepare_and_continue() {
   continue_migration "$mid"
 }
 
+offer_verified_adopted_first_copy() {
+  local mid="$1" domain="$2" answer output status
+  ui_note '已有数据库必须通过独立所有权、配置、源端身份及未创建站点检查；仅继续原任务的首轮复制。'
+  ui_note '旧 VPS 不停写；本操作绝不允许直接切换 DNS 或覆盖已导入的数据库。'
+  ui_prompt '确认在此18站任务内安全续迁未创建的站点？[y/N]：'
+  read -r answer || return 0
+  [[ "$answer" =~ ^[Yy]$ ]] || return 0
+  if ! run_migration_live server-migrate resume-verified-adoption --migration-id "$mid" --domain "$domain" --confirm "RESUME_VERIFIED_ADOPTION:$mid:$domain"; then
+    ui_attention '严格恢复门禁拒绝继续，原任务和已有数据库均保留。'
+    return 0
+  fi
+  output="$MIGRATION_PAYLOAD"
+  status="$(json_field "$output" status 2>/dev/null || printf UNKNOWN)"
+  if [[ "$status" == PREPARED ]]; then
+    ui_good '18站首轮复制已完成；仍非最终一致性或正式切换。'
+  else
+    ui_attention '首轮续迁尚未完成；保留现有状态，不自动重试。'
+  fi
+  return 0
+}
+
 continue_migration() {
-  local mid="$1" payload status answer output guard_flow
+  local mid="$1" payload status answer output guard_flow guard_reason provenance blocked_site adopted_site evidence_state diagnostic verification reasons advisory
   while true; do
     if ! run_quiet_with_progress '正在读取迁移状态' "$CORE" server-migrate status --migration-id "$mid"; then
       ui_bad "无法读取迁移状态：$mid"
@@ -438,14 +477,82 @@ continue_migration() {
     # The source SQL dump is deliberately transient. Display only the
     # fail-closed verifier's fixed-count evidence saved in private state.
     guard_flow="$(json_field "$payload" last_sql_guard_failure.flow 2>/dev/null || true)"
+    guard_reason="$(json_field "$payload" last_sql_guard_failure.reason 2>/dev/null || true)"
+    provenance="$(json_field "$payload" prepare_failure_provenance 2>/dev/null || true)"
     if [[ "$guard_flow" == SQL_GUARD_FLOW_V1\ * || "$guard_flow" == SQL_GUARD_FLOW_V1_UNAVAILABLE ]]; then
       ui_attention '上次 MySQL 校验被安全阻断；以下是脱敏诊断，不含 SQL 正文。'
       ui_note "$guard_flow"
     fi
 
+    # A rejected SQL comparison may occur AFTER initial target import and app
+    # config remap. Neither an automatic retry nor a new migration is safe.
+    # Keep the immutable evidence in place and return to the menu.
+    if [[ "$status" == 'PREPARE_FAILED' &&
+          ( "$guard_reason" == 'CONDITIONAL_DDL' ||
+            "$provenance" == 'MISSING_PARTIAL_STATE_RECOVERY_REQUIRED' ) ]]; then
+      ui_bad '数据库验证被安全拦截；不能直接续跑或重新导入。'
+      ui_note '现有站点文件、目标数据库和迁移记录必须保留。旧服务器继续运行，DNS 不修改。'
+      evidence_state="$(json_field "$payload" first_failed_sql_evidence.status 2>/dev/null || true)"
+      if [[ "$evidence_state" == 'RETAINED_NOT_RECOVERED' ]]; then
+        ui_good '已有目标私有 SQL 快照与哈希留证，尚未获准恢复。'
+      elif [[ "$evidence_state" == 'EVIDENCE_RETENTION_UNVERIFIED' ]]; then
+        ui_attention 'SQL 留证未得到完整验证；保留所有迁移目录。'
+      else
+        ui_note '此前正式版可能已清理临时 SQL；不能把缺少留证视为数据库丢失。'
+      fi
+      blocked_site="$(json_field "$payload" first_failed_sql_site 2>/dev/null || true)"
+      adopted_site="$(json_field "$payload" first_stage_adopted_sql_site 2>/dev/null || true)"
+      if [[ -n "$blocked_site" ]]; then
+        ui_note "受阻数据库所在网站：$blocked_site"
+        ui_note '可对现有 CP2 数据库及旧 VPS 当前快照做一次只读诊断；旧 VPS 会临时导出并尝试清理私有 SQL，不会重新导入数据库。'
+        ui_prompt '只执行此站的安全诊断？[y/N]：'
+        read -r answer || return 0
+        if [[ "$answer" =~ ^[Yy]$ ]]; then
+          if run_quiet_with_progress '核对受阻数据库（不重复迁入）' "$CORE" server-migrate diagnose-sql --migration-id "$mid" --domain "$blocked_site"; then
+            diagnostic="$WAIT_PAYLOAD"
+            verification="$(json_field "$diagnostic" evidence.verification 2>/dev/null || printf UNKNOWN)"
+            reasons="$(json_field "$diagnostic" evidence.dynamic_guard.unsafe_branch_reasons 2>/dev/null || printf UNAVAILABLE)"
+            ui_note "校验资料状态：$verification（仅供诊断，非迁移放行）"
+            ui_note "动态 SQL 拒绝原因分类：$reasons"
+            ui_note '本诊断不更改任务状态，不重导数据库，不授予继续或切换权限。'
+            advisory="$(json_field "$diagnostic" evidence.guarded_export_comparison.status 2>/dev/null || printf UNAVAILABLE)"
+            if [[ "$advisory" == 'MATCH_ADVISORY_NOT_MIGRATION_PASS' ]]; then
+              ui_note '诊断仅为参考；下面的独立双次源端回读、原DB归属与配置验证仍可能拒绝恢复。'
+              ui_prompt '仅核验并登记已导入数据库的安全检查点？[y/N]：'
+              read -r answer || return 0
+              if [[ "$answer" =~ ^[Yy]$ ]]; then
+                if run_quiet_with_progress '原数据库严格重验（不重导）' "$CORE" server-migrate adopt-existing-guarded-db --migration-id "$mid" --domain "$blocked_site" --confirm "ADOPT_EXISTING_DB:$mid:$blocked_site"; then
+                  verification="$(json_field "$WAIT_PAYLOAD" status 2>/dev/null || printf UNKNOWN)"
+                  if [[ "$verification" == 'FIRST_STAGE_ADOPTED_REQUIRES_CHAIN_RECOVERY' || "$verification" == 'ALREADY_ADOPTED_FIRST_STAGE' ]]; then
+                    ui_good '已建立原数据库受保护的首轮检查点；原始阻断历史保留。'
+                    offer_verified_adopted_first_copy "$mid" "$blocked_site"
+                  else
+                    ui_attention '回执状态未经验证，不能进入续迁。'
+                  fi
+                else
+                  ui_attention '独立数据重验尚未通过；不能安全续迁，且未重新导入原数据库。'
+                fi
+              fi
+            else
+              ui_attention 'SQL 安全等价未证明；不尝试重验写入状态或恢复导入。'
+            fi
+          else
+            ui_attention '只读 SQL 诊断未完成；没有解锁迁移或修改数据库。'
+          fi
+        fi
+      elif [[ -n "$adopted_site" ]]; then
+        ui_good '已存在经过原数据库严格重验的首轮检查点；恢复前还将重新核对全部身份与目标缺失项。'
+        offer_verified_adopted_first_copy "$mid" "$adopted_site"
+      else
+        ui_attention '无法安全确定唯一受阻数据库，不进行任何自动数据库操作。'
+      fi
+      pause
+      return 0
+    fi
+
     case "$status" in
       PREPARING|PREPARE_FAILED)
-        ui_note '上次首轮迁入未完整结束，可从已完成位置继续。'
+        ui_note '仅无 SQL 保护阻断、无已暂存站点冲突的任务，才允许受保护的恢复尝试。'
         printf '继续首轮迁入？[Y/n]：'
         read -r answer || return 0
         [[ ! "$answer" =~ ^[Nn]$ ]] || return 0
@@ -461,6 +568,14 @@ continue_migration() {
         ui_good '首轮迁入完成 ✓'
         ;;
       PREPARED)
+        local scope_count
+        scope_count="$(json_field "$payload" site_count 2>/dev/null || printf UNKNOWN)"
+        if [[ "$scope_count" == 17 || "$scope_count" == 18 ]]; then
+          ui_attention '当前整机首轮迁入已完成，最终同步与回滚尚须独立现场门禁。'
+          ui_note '此菜单不会直接停旧服务器或重放三个数据库；请保留迁移任务，等待通过最终切换门禁。'
+          pause
+          return 0
+        fi
         ui_attention '下一步进入短维护窗口：旧服务器会暂时停止 网站服务 / 定时任务 / Node.js 进程，然后新服务器做最终增量复制。'
         ui_note '此阶段仍不会修改 DNS；失败会尝试恢复旧服务器运行。'
         ui_safety_tier migration '会短暂停止旧服务器运行环境并执行最终增量。'
@@ -582,20 +697,70 @@ PY
 }
 
 whole_server_in() {
-  local old_ip rc
-  ui_page '迁入整台旧服务器' '当前：这台新服务器（接收数据）'
-  ui_flow '整机迁入'
-  ui_note '请在新服务器上执行；它会主动从旧服务器读取数据。'
-  printf '流程：检查旧服务器 → 盘点网站/数据库/运行环境 → 首轮复制 → 最终增量复制 → 新机验证 → DNS 人工确认。\n\n'
-
-  if ! read_old_ip; then
-    rc=$?
-    [[ "$rc" -eq 2 ]] && return 0
-    return 0
-  fi
+  local old_ip preview status count databases target answer result state reason
+  local -a fresh_args=()
+  ui_page '全新CP2 · 17站整机迁移' '当前：新服务器（接收数据）'
+  ui_flow '一次完成环境检查 → 旧VPS连接 → 17站/三库预检 → 首轮复制'
+  ui_note '旧服务器继续运营；首轮仅准备目标数据，不停站、不修改 DNS。'
+  ui_note '最终停写、最终一致性、回滚验收及 DNS 切换是后续独立阶段。'
+  say
+  read_old_ip || return 0
   old_ip="$OLD_SERVER_IP"
   ensure_source_access "$old_ip" || { pause; return 0; }
-  prepare_and_continue "$old_ip"
+
+  fresh_args=(--source-ip "$old_ip")
+  [[ -n "$SOURCE_IDENTITY_FILE" ]] && fresh_args+=(--identity-file "$SOURCE_IDENTITY_FILE")
+
+  say
+  ui_attention '预检会在旧 VPS 的 P07 私有目录暂存采集助手和 SQL 快照并尝试清理；不会执行数据库导入。'
+  ui_prompt '同意临时采集并检查三个数据库？[y/N]：'
+  read -r answer || return 0
+  [[ "$answer" =~ ^[Yy]$ ]] || { ui_note '已取消，没有执行迁移。'; return 0; }
+
+  ui_flow '正在确认新 CP2 为空、旧VPS恰有17站及3个数据库安全性...'
+  if ! run_quiet_with_progress '17站与三库迁移预检' "$CORE" fresh-17site preview "${fresh_args[@]}" --confirm ALLOW_TEMP_SOURCE_PREFLIGHT; then
+    reason="$(json_field "$WAIT_PAYLOAD" reason 2>/dev/null || printf 'SOURCE_OR_CP2_NOT_READY')"
+    ui_bad "预检未通过：$reason"
+    ui_note '没有创建目标网站或导入数据库。请保留旧VPS，不要重复尝试被阻断操作。'
+    pause
+    return 0
+  fi
+  preview="$WAIT_PAYLOAD"
+  status="$(json_field "$preview" status 2>/dev/null || printf UNKNOWN)"
+  count="$(json_field "$preview" source_site_count 2>/dev/null || printf 0)"
+  databases="$(json_field "$preview" source_db_count 2>/dev/null || printf 0)"
+  target="$(json_field "$preview" target_empty_verified 2>/dev/null || printf False)"
+  if [[ "$status" != 'PREFLIGHT_PASS_NOT_CUTOVER_READY' || "$count" != 17 ||
+        "$databases" != 3 || "$target" != True ]]; then
+    ui_bad '预检输出未达到17站/三库/空目标要求，未执行复制。'
+    pause
+    return 0
+  fi
+  ui_good '17站与三个数据库安全预检通过 ✓'
+  ui_good '已确认当前目标为全新 CP2 ✓'
+  ui_note '接下来只执行首轮迁入，旧VPS不停写。真正最终一致性要等停写窗口。'
+  ui_prompt '现在开始首轮复制到这台新 CP2？[y/N]：'
+  read -r answer || return 0
+  [[ "$answer" =~ ^[Yy]$ ]] || { ui_note '首轮复制已取消。'; return 0; }
+
+  ui_flow '开始17站首轮迁入；原有目标及旧 VPS 不会被自动覆盖或删除。'
+  if ! run_migration_live fresh-17site prepare "${fresh_args[@]}" --confirm PREPARE_FRESH_CP2_17_SITES; then
+    reason="$(json_field "$MIGRATION_PAYLOAD" reason 2>/dev/null || printf 'FRESH_PREPARE_NOT_COMPLETED')"
+    ui_bad "首轮迁入被阻止或未完成：$reason"
+    ui_note '不自动重试、不重新创建迁移任务、不冻结旧VPS、不修改 DNS。'
+    pause
+    return 0
+  fi
+  result="$MIGRATION_PAYLOAD"
+  state="$(json_field "$result" status 2>/dev/null || printf UNKNOWN)"
+  if [[ "$state" != 'FRESH_FIRST_COPY_COMPLETED_NOT_CUTOVER_READY' ]]; then
+    ui_bad '迁入未取得成功确认。请保留现有迁移记录。'
+  else
+    ui_good '17站首轮迁入已完成 ✓'
+    ui_note '此结果不代表最终一致性或正式切换批准；禁止直接修改 DNS。'
+    ui_note '后续仍需独立的最终同步、回滚证明和现场验收。'
+  fi
+  pause
 }
 
 single_site_in() {
@@ -757,8 +922,8 @@ migration_menu() {
     say "当前：${C_GREEN}这台新服务器（接收数据）${C_RESET}"
     ui_note '普通迁移只在新服务器操作；旧服务器只有真的被迁移流程冻结过，才显示恢复开关。'
     say
-    ui_menu_flow 1 '迁入整台旧服务器'
-    ui_note '     自动盘点旧服务器全部 CloudPanel 网站并迁入'
+    ui_menu_flow 1 '全新CP2迁入17站'
+    ui_note '     向导完成SSH连接、空目标检查、三库预检和首轮复制'
     say
     ui_menu_flow 2 '迁入一个网站'
     ui_note '     只迁入指定网站'
@@ -778,8 +943,8 @@ migration_menu() {
     read -r choice || return 0
     case "$choice" in
       1)
-        ensure_migration_dependencies || { pause; continue; }
         ensure_current_server_ready || { pause; continue; }
+        ensure_migration_dependencies || { pause; continue; }
         whole_server_in
         ;;
       2)

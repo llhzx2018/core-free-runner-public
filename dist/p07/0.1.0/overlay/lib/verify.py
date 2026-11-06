@@ -76,6 +76,99 @@ def canonical_sql_line(line: str) -> str:
     return _REDUNDANT_CHARSET_COLLATE_RE.sub(strip_redundant_charset, normalized)
 
 
+_SQL_SIDE_EFFECT_HEAD_RE = re.compile(
+    r"^(?:GRANT|REVOKE|FLUSH|RESET|SHUTDOWN|CALL|DO|"
+    r"PREPARE|EXECUTE|DEALLOCATE|UPDATE|DELETE|TRUNCATE|"
+    r"LOAD\s+(?:DATA|XML)|"
+    r"(?:CREATE|ALTER|DROP|RENAME)\s+(?:USER|ROLE)\b|"
+    r"SET\s+(?:GLOBAL\b|PERSIST(?:_ONLY)?\b|"
+    r"@@\s*(?:GLOBAL|PERSIST(?:_ONLY)?)\s*\.)|"
+    r"SELECT\b[^\r\n]*\bINTO\s+(?:OUTFILE|DUMPFILE)\b)",
+    re.I,
+)
+_SQL_VERSIONED_HEAD_RE = re.compile(r"^/\*(?:!|M!)[0-9]{5,6}\s+(.+?)\s*\*/;?$", re.I)
+
+
+def _sql_line_stacks_commands(line: str) -> bool:
+    """Detect an unquoted terminal semicolon followed by more SQL tokens."""
+    quote = ""
+    index = 0
+    while index < len(line):
+        char = line[index]
+        if quote:
+            if char == "\\":
+                index += 2
+                continue
+            if char == quote:
+                if index + 1 < len(line) and line[index + 1] == quote:
+                    index += 2
+                    continue
+                quote = ""
+        elif char in ("'", '"', chr(96)):
+            quote = char
+        elif char == ";" and line[index + 1:].strip():
+            return True
+        index += 1
+    return False
+
+
+def sql_unproven_side_effects(path: Path) -> bool:
+    """Reject privileged and stacked SQL before exact or logical parity.
+
+    Known session-only dynamic guard flows are exempt. Normal comments,
+    literals and the exact MariaDB sandbox banner are not SQL commands.
+    """
+    known_dynamic = _cross_engine_known_dynamic_guard_lines(path)
+    opener = gzip.open if path.name.endswith(".gz") else open
+    try:
+        with opener(path, "rt", encoding="utf-8", errors="strict") as handle:
+            in_comment = False
+            for number, raw in enumerate(handle, 1):
+                if number in known_dynamic:
+                    continue
+                line = raw.strip()
+                if not line:
+                    continue
+                if in_comment:
+                    if "*/" not in line:
+                        continue
+                    line = line.split("*/", 1)[1].strip()
+                    in_comment = False
+                if not line or line.startswith(("--", "#")):
+                    continue
+                if line == r"/*M!999999\- enable the sandbox mode */":
+                    continue
+                while line.startswith("/*") and not re.match(r"^/\*(?:!|M!)", line, re.I):
+                    if "*/" not in line:
+                        in_comment = True
+                        line = ""
+                        break
+                    line = line.split("*/", 1)[1].strip()
+                if not line:
+                    continue
+                match = _SQL_VERSIONED_HEAD_RE.fullmatch(line)
+                if match:
+                    line = match.group(1).strip()
+                elif re.match(r"^/\*(?:!|M!)[0-9]{5,6}\s+CREATE\s+TRIGGER\b", line, re.I):
+                    # A mysqldump multiline CREATE TRIGGER is verified by the
+                    # existing exact guarded DDL fingerprint, including its
+                    # body. Reject privileged lines inside it independently.
+                    continue
+                elif re.match(r"^/\*(?:!|M!)", line, re.I):
+                    return True
+                if _SQL_SIDE_EFFECT_HEAD_RE.match(line):
+                    return True
+                if re.match(
+                    r"^(?:SET|SELECT|INSERT|REPLACE|UPDATE|DELETE|"
+                    r"CREATE|ALTER|DROP|GRANT|REVOKE)\b",
+                    line, re.I,
+                ) and _sql_line_stacks_commands(line):
+                    return True
+        return in_comment
+    except (OSError, EOFError, UnicodeError) as exc:
+        raise RestoreVerifyError("SQL side-effect scan cannot be read") from exc
+
+
 def sql_fingerprint(path: Path) -> tuple[str, int]:
     digest = hashlib.sha256()
     statements = 0
@@ -536,12 +629,14 @@ _CROSS_ENGINE_TABLE_COUNT_RE = re.compile(
     r"'(?:''|[^'])*'\s+AND\s+TABLE_NAME\s*=\s*'(?:''|[^'])*'$", re.I,
 )
 _CROSS_ENGINE_SESSION_ONLY_SET_RE = re.compile(
-    r"^SET\s+(?:@[A-Za-z_][A-Za-z_0-9$]*"
-    r"|(?:(?:SESSION\s+|@@SESSION\.)?(?:"
+    r"^SET\s+(?:"
+    r"(?:(?:SESSION\s+|@@SESSION\.)?(?:"
     r"SQL_MODE|SQL_NOTES|TIME_ZONE|CHARACTER_SET_CLIENT|"
     r"CHARACTER_SET_RESULTS|COLLATION_CONNECTION|"
-    r"FOREIGN_KEY_CHECKS|UNIQUE_CHECKS|NAMES|AUTOCOMMIT)))"
-    r"(?:\s*=\s*[^;]+|\s+utf8mb4)$", re.I,
+    r"FOREIGN_KEY_CHECKS|UNIQUE_CHECKS|AUTOCOMMIT))"
+    r"\s*=\s*(?:[+-]?(?:0|[1-9][0-9]{0,17})|NULL|"
+    r"@[A-Za-z_][A-Za-z_0-9$]*|'[A-Za-z0-9_:,./+ -]{0,128}')"
+    r"|NAMES\s+utf8mb4)$", re.I,
 )
 _CROSS_ENGINE_NO_SIDE_EFFECT_SELECT_RE = re.compile(
     r"^SELECT\s+(?:0|1|NULL|@[A-Za-z_][A-Za-z_0-9$]*)"
@@ -549,11 +644,29 @@ _CROSS_ENGINE_NO_SIDE_EFFECT_SELECT_RE = re.compile(
 )
 
 
+_CROSS_ENGINE_SAFE_SESSION_MULTI_RE = re.compile(
+    r"^SET\s+@[A-Za-z_][A-Za-z_0-9$]*\s*=\s*"
+    r"(?:[+-]?(?:0|[1-9][0-9]{0,17})|NULL|@[A-Za-z_][A-Za-z_0-9$]*)"
+    r"(?:\s*,\s*@[A-Za-z_][A-Za-z_0-9$]*\s*=\s*"
+    r"(?:[+-]?(?:0|[1-9][0-9]{0,17})|NULL|@[A-Za-z_][A-Za-z_0-9$]*))*$", re.I,
+)
+
+
 def _cross_engine_safe_dynamic_branch(literal: str) -> bool:
-    # A SQL literal containing escapes, comments, multiple statements or
-    # side-effect keywords is not proof of a harmless session command.
+    # A *single terminal* SQL delimiter is a dump presentation difference,
+    # not a second SQL command. Reject every interior delimiter, comment,
+    # escape, newline, quoted expression or unknown SQL grammar. This is not
+    # a general-purpose dynamic SQL parser.
+    if not isinstance(literal, str) or len(literal) < 2 or literal[0] != "'" or literal[-1] != "'":
+        return False
     value = literal[1:-1].replace("''", "'").strip()
-    if len(value) > 4096 or any(x in value for x in ("\\", ";", "/*", "*/", "--", "#", "\r", "\n")):
+    if len(value) > 4096 or any(x in value for x in ("\\", "/*", "*/", "--", "#", "\r", "\n")):
+        return False
+    if ";" in value:
+        if value.count(";") != 1 or not value.endswith(";"):
+            return False
+        value = value[:-1].rstrip()
+    if not value:
         return False
     if re.search(
         r"\b(?:GLOBAL|PERSIST|PERSIST_ONLY|CREATE|ALTER|DROP|TRUNCATE|"
@@ -564,6 +677,7 @@ def _cross_engine_safe_dynamic_branch(literal: str) -> bool:
         return False
     return bool(
         _CROSS_ENGINE_SESSION_ONLY_SET_RE.fullmatch(value)
+        or _CROSS_ENGINE_SAFE_SESSION_MULTI_RE.fullmatch(value)
         or _CROSS_ENGINE_NO_SIDE_EFFECT_SELECT_RE.fullmatch(value)
     )
 

@@ -1,13 +1,12 @@
-# P07 · VF Server Ops · Product RPD V1.0
+# P07 · VF Server Ops · 需求开发书
 
-状态：CURRENT / V1 REAL PRE-PRODUCTION CLOSURE PASS / OWNER CUTOVER OPEN  
-日期：2026-09-06
+> 现行产品合同。工程实现、候选、分发与实机结果分别从 [项目 Current](CURRENT.md) 读取。
 
 ## 1. 产品定义
 
 VF Server Ops 是面向个人长期运营的 CloudPanel 服务器业务保护与可迁移工具。目标不是管理 Linux 的所有能力，而是确保业务资产能够被识别、备份、验证、恢复并直接迁移到新的 CloudPanel VPS。
 
-V1 用户主入口为纯终端 5 项菜单；Advanced CLI 只作为高级/自动化入口，不另造 Web UI。
+普通入口是一个中文终端工具箱。网络节点、服务器性能检测、网站与数据、服务器维护与安全是四个安装模块；独立的「新服务器初始化」菜单复用网站与数据模块。高级 CLI 服务诊断与自动化。站点日常管理继续由 CloudPanel 负责。
 
 ## 2. 用户问题
 
@@ -18,7 +17,7 @@ V1 用户主入口为纯终端 5 项菜单；Advanced CLI 只作为高级/自动
 - 换 VPS 时人工步骤多，容易漏配置、漏数据、漏验证；
 - “备份包已经在目标机后再恢复”不等于完整迁移，源机到目标机的安全传输必须属于迁移产品本身。
 
-## 3. V1 一级能力
+## 3. 核心产品能力
 
 ### 3.1 服务器检查
 
@@ -85,7 +84,7 @@ NEW SERVER（当前机器 / 接收端）
 
 - **Migration State Ownership**：主迁移状态、Migration ID、断点续传状态与目标事务标记全部由 NEW SERVER 持有；OLD SERVER 只能保留 Recovery Point、受控 helper 与 transient staging，不得成为主 Authority；
 - **Business Data Direction**：网站文件、VF/Press 隐藏业务数据、MySQL dump、SQLite snapshot、Cron/PM2 metadata 与所需 NVM Runtime 的业务传输必须由 NEW SERVER 发起并从 OLD SERVER 拉取；控制面为执行 helper 而上传的无业务 Secret 运行时代码不改变 Pull Model 语义；
-- **Target Bootstrap**：当前新服务器已有 CloudPanel 时绝不重装；仅当当前机通过“受支持 OS/架构 + ≥1 Core + 2 GB 级内存 + ≥10 GB 磁盘 + 无 CloudPanel/MySQL/MariaDB/Nginx/Apache + 无 80/443 Web 服务 + 无现有 htdocs”空机 Gate 时，才允许使用发布时固定的 CloudPanel 官方 installer URL + SHA256 安装，按 CloudPanel 官方 OS 兼容矩阵选择 MariaDB：Debian 13 使用 11.8（`MARIADB_11.8`），Debian 12 / Ubuntu 22.04、24.04 使用 10.11（`MARIADB_10.11`）；未验证的 OS/数据库组合 fail closed；仅限全新空机，已有 CloudPanel / MySQL / Percona / MariaDB 数据库不得被自动替换；
+- **目标机初始化**：从独立「新服务器初始化」入口处理符合条件的全新空机。迁移发现目标尚未就绪时提示完成初始化；安装器身份、系统和数据库组合按实际候选或分发合同逐项验证。已有 CloudPanel、数据库或业务服务不得自动重装、替换或原地换引擎；
 - **Lazy Dependency**：进入服务器迁移时才检查 OpenSSH client 与 rsync；OLD SERVER 如仅缺 rsync，只有用户确认开始迁移后才允许通过 apt 按需补齐；不得在 Toolbox 启动或其它 Slot 入口预装；
 - **No Overwrite**：NEW SERVER 上同域名、同 Site User、同数据库名或已存在 `/home/<site_user>` 任一冲突都必须在业务写入前阻断；只允许本次 transaction-owned 资源做清理/重试；
 - **Prepare No Double-run**：首轮迁入期间 OLD 保持在线，NEW 的 Cron / PM2 / system Cron 只暂存不得启动；
@@ -107,7 +106,7 @@ NEW SERVER（当前机器 / 接收端）
 
 ### 3.4.1 MySQL / MariaDB 双向迁移 · OWNER 已确认的增量要求
 
-状态：**产品需求已确认 / 实现与四方向机器验收尚未完成**。本节不改变当前已发布的 MariaDB-only 目标端门禁，也不使任何现有 Migration ID 自动转入继续状态。
+四个方向是已确认的产品要求。源和目标引擎、版本及现场端点按实际任务绑定。主分支、候选、发布与现场可用组合由 [Current](CURRENT.md) 分别读取。已创建的迁移任务仍由其原始引擎、主机和范围约束。
 
 - **四种方向**：MySQL → MySQL、MariaDB → MariaDB、MySQL → MariaDB、MariaDB → MySQL 均须有明确的目标能力、逐版本兼容性判定和独立验收；方向已获批准不等于任意版本组合已获认证。
 - **初始化可选引擎**：仅在经过空机与系统兼容检查的全新 CloudPanel 服务器上，允许 Owner 在执行安装前选择官方安装器实际支持且经 P07 版本固定验证的数据库引擎/版本；必须显示推荐值、兼容性风险和最终确认。系统未知或组合未经验证时 fail closed。已装有 CloudPanel、数据库或业务负载的服务器不得自动卸载、替换或原地改引擎。
@@ -141,7 +140,7 @@ NEW SERVER（当前机器 / 接收端）
 - 存储访问通过 rclone 等稳定 CLI 抽象，不把产品绑死在 CloudPanel Remote Backup UI；
 - Google 可用空间必须读取真实 quota；reserve 是配置，不假定每个账号永远有完整 15 GB 可用空间。
 
-Real Storage 已完成 Google Drive Pool + B2 + `rclone crypt` + `cryptcheck` + fresh fetch/verify 真实闭环。
+远端副本按目的地分别验证加密传输、远端完整性及回取验证。历史实机结果按原证据范围引用，参见 [用户验收](USER_ACCEPTANCE.md)。
 
 ## 5. Portable Backup Package 最低内容
 
@@ -159,7 +158,9 @@ verification result
 
 Secret 与私有数据在远程存储前必须具备加密路径。用于 SSH direct migration 的 package 通过 SSH 私密流传输，并在目标端再次 Fresh Verify。
 
-## 6. 迁移 Transport 安全合同
+## 6. 备份包传输安全合同
+
+本节适用于备份包迁移和旧单站兼容路径。普通服务器迁移仍使用目标机主动拉取。
 
 - 默认使用 SSH key / ssh-agent；产品不设计 SSH password 参数；
 - `BatchMode=yes`；
@@ -187,40 +188,18 @@ V1 不做：Web 后台、网站 CRUD、数据库/文件管理器、SSH Web Termi
 
 ## 9. 成功定义
 
-V1 pre-production 产品闭环必须达到：
+1. 网站、数据库、SQLite、外置资产与运行任务有完整分母、明确归属和独立校验。
+2. 本地或加密远端备份可校验。声称可恢复须有隔离恢复及数据回读；离线恢复、目标本机 HTTP/SNI 验证、公网验证各有结果。
+3. 准备、断点续传、最终同步、目标运行验证、人工 DNS 和公网验收分别记录。每阶段说明证据、阻断原因和允许的下一步。
+4. 同一产品支持迁入和受控恢复。旧服务器保留作为恢复副本，其处置和现有目标覆盖须另走高风险门禁。
 
-1. 一台现有 CloudPanel VPS 可以被准确盘点；
-2. 生成的备份包可以通过验证与恢复演练；
-3. 同一恢复引擎能够在全新 CloudPanel VPS 上重建业务；
-4. 用户在新服务器运行 P07 并输入旧服务器 IP 后，VF Server Ops 由新服务器主动完成旧机 → 新机 Pull 迁入，不要求回旧服务器运行迁移，也不要求人工搬备份包；
-5. 迁移完成后能够给出可审计的 `TECHNICAL_CUTOVER_READY`；
-6. DNS 与旧服务器处置仍保留给 OWNER 明确决定；
-7. runtime/secret/log/DR 等 required Real Gates 必须独立闭环。
+## 10. 扩张顺序
 
-上述 pre-production Real Gate 已于 2026-09-06 完成。Canonical evidence：`docs/evidence/P07_REAL_GATE_CLOSURE_20260906.md`。
+1. **先完善现有保护和迁移。** 统一源端与目标端的身份、事务所有权、私有备份、网站文件、数据库、SQLite、外置资产、Cron/PM2 及 HTTP 验证。优先解决重复运行会引起误覆盖、重复导入或双端写入的路径。
+2. **再完善跨引擎与多任务续迁。** 逐组合验证 MySQL/MariaDB 的逻辑导出、对象与数据语义、应用连接、失败恢复。复用已有任务和隔离证据。多任务合并先核对父任务、续迁任务及余站任务的来源与资产归属，再设计可回滚的最终执行；任何隔离恢复或候选演练均仅对其覆盖范围成立。
+3. **再按已观测瓶颈扩容。** 有批量站点、数据库体积或长耗时证据时，优先完善可继续执行、进度、容量和清理；只有出现独立运维需求才新增能力入口，继续复用 CloudPanel、既有安装模块和安全原语。
 
-## 10. 当前边界
-
-当前状态：
-
-```text
-V1_REAL_PREPRODUCTION_CLOSURE = PASS
-OWNER_CUTOVER                 = NOT_EXECUTED
-FORMAL_RELEASE                = NOT_RELEASED
-PRODUCTION                    = NOT_PRODUCTION
-```
-
-这意味着产品已经通过 required Real pre-production Gates，但**不**自动授权：
-
-- merge 到 `main`；
-- Tag / Release；
-- Production restore/migration；
-- DNS cutover；
-- old-server deletion；
-- existing Production overwrite。
-
-下一工程主线返回 L2 Product Optimization；任何 Release / Production 动作仍需单独 OWNER Gate。
-
+产品验收以 [验收矩阵](ACCEPTANCE_MATRIX.md) 为准。当前候选与发布状态从 [Current](CURRENT.md) 解析。
 
 ## 11. Terminal UI / Color System Contract
 
@@ -1091,4 +1070,3 @@ before any Restore-As write
 - DNS、SOURCE、existing target 均不自动修改。
 
 本合同 supersede release22/23 中“单一 live root Nginx master 即可作为网站 Nginx”的推断；release22/23 的 live-master / stabilization 逻辑仅在候选实例已证明是 site-serving Nginx 后继续适用。
-

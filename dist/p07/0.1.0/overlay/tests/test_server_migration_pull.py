@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import socket
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -1513,6 +1514,244 @@ class TargetPullContractTests(unittest.TestCase):
             result = pull.cutover_migration(mid, f"CUTOVER_PULL:{mid}")
         self.assertEqual(result["status"], "CUTOVER_PREP_READY")
 
+    def test_cutover_failure_with_unrecovered_db_mapping_is_partial(self) -> None:
+        mid = "pull-20261101T000000Z-1234abcd"
+        state = {
+            "migration_id": mid, "status": "CUTOVER_RUNNING",
+            "source_runtime_frozen": True, "target_runtime_activated": False,
+            "pre_cutover_reconciliation": {"status": "PASS"},
+            "source": {}, "sites": [], "external_assets": [],
+            "sqlite_assets": [],
+        }
+        with mock.patch.object(pull, "load_state", return_value=state), \
+             mock.patch.object(pull, "save_state"), \
+             mock.patch.object(pull, "require_mariadb_target"), \
+             mock.patch.object(pull, "require_non_destructive_final_db_plan"), \
+             mock.patch.object(pull, "freeze_old_server") as freeze, \
+             mock.patch.object(pull, "sync_external_assets", return_value=[]), \
+             mock.patch.object(pull, "sync_sqlite_assets", return_value=0), \
+             mock.patch.object(pull, "activate_target_runtime"), \
+             mock.patch.object(pull, "target_smoke",
+                               return_value={"pass": 0, "fail": 1, "failures": []}), \
+             mock.patch.object(pull, "deactivate_target_runtime",
+                               return_value=True), \
+             mock.patch.object(pull, "restore_old_server",
+                               return_value=True) as restore, \
+             mock.patch.object(
+                 pull, "recover_shadow_application_mappings_if_present",
+                 return_value=False,
+             ) as recover:
+            with self.assertRaises(pull.PullMigrationError):
+                pull.cutover_migration(mid, f"CUTOVER_PULL:{mid}")
+            recover.assert_called_once_with(state)
+            restore.assert_called_once_with(state)
+            freeze.assert_not_called()
+        self.assertEqual(state["status"], "CUTOVER_FAILED_ROLLBACK_PARTIAL")
+
+    def test_cutover_failure_never_unfreezes_source_while_target_still_active(self) -> None:
+        mid = "pull-20261101T000000Z-1234abcd"
+        state = {
+            "migration_id": mid, "status": "CUTOVER_RUNNING",
+            "source_runtime_frozen": True, "target_runtime_activated": True,
+            "pre_cutover_reconciliation": {"status": "PASS"},
+            "source": {}, "sites": [], "external_assets": [],
+            "sqlite_assets": [],
+        }
+        with (mock.patch.object(pull, "load_state", return_value=state),
+              mock.patch.object(pull, "save_state"),
+              mock.patch.object(pull, "require_mariadb_target"),
+              mock.patch.object(pull, "require_non_destructive_final_db_plan"),
+              mock.patch.object(pull, "sync_external_assets", return_value=[]),
+              mock.patch.object(pull, "sync_sqlite_assets", return_value=0),
+              mock.patch.object(pull, "target_smoke",
+                  return_value={"pass": 0, "fail": 1, "failures": []}),
+              mock.patch.object(pull, "deactivate_target_runtime",
+                  return_value=False) as stop,
+              mock.patch.object(pull, "restore_old_server") as source,
+              mock.patch.object(
+                  pull, "recover_shadow_application_mappings_if_present"
+              ) as db):
+            with self.assertRaises(pull.PullMigrationError):
+                pull.cutover_migration(mid, f"CUTOVER_PULL:{mid}")
+            stop.assert_called_once_with(state)
+            db.assert_not_called()
+            source.assert_not_called()
+        self.assertEqual(state["status"], "CUTOVER_FAILED_ROLLBACK_PARTIAL")
+        self.assertTrue(state["source_runtime_frozen"])
+        self.assertTrue(state["target_runtime_activated"])
+
+    def test_target_stop_failure_never_restarts_source_or_replays_db(self) -> None:
+        state = {
+            "migration_id": "pull-20261101T000000Z-1234abcd",
+            "status": "CUTOVER_RUNNING",
+            "target_runtime_activated": True,
+            "source_runtime_frozen": True,
+        }
+        with mock.patch.object(
+            pull, "deactivate_target_runtime", return_value=False
+        ) as stop, mock.patch.object(
+            pull, "recover_shadow_application_mappings_if_present"
+        ) as db, mock.patch.object(
+            pull, "restore_old_server"
+        ) as source:
+            result = pull.guarded_restore_cutover_boundary(state)
+        self.assertEqual(result, {
+            "target_stopped": False,
+            "database_mapping_restored": False,
+            "source_restored": False,
+        })
+        stop.assert_called_once()
+        db.assert_not_called()
+        source.assert_not_called()
+
+    def test_target_stop_claims_success_but_running_flag_denies_source(self) -> None:
+        state = {"target_runtime_activated": True}
+        with mock.patch.object(
+            pull, "deactivate_target_runtime", return_value=True
+        ), mock.patch.object(
+            pull, "restore_old_server"
+        ) as source:
+            result = pull.guarded_restore_cutover_boundary(state)
+        self.assertFalse(result["target_stopped"])
+        source.assert_not_called()
+
+    def test_target_deactivation_exception_is_fail_closed(self) -> None:
+        state = {"target_runtime_activated": True}
+        with mock.patch.object(
+            pull, "deactivate_target_runtime",
+            side_effect=RuntimeError("synthetic"),
+        ), mock.patch.object(
+            pull, "restore_old_server"
+        ) as source:
+            result = pull.guarded_restore_cutover_boundary(state)
+        self.assertFalse(any(result.values()))
+        source.assert_not_called()
+
+    def test_db_rollback_failure_can_recover_source_only_if_target_stopped(self) -> None:
+        state = {"target_runtime_activated": False}
+        with mock.patch.object(
+            pull, "deactivate_target_runtime", return_value=True
+        ), mock.patch.object(
+            pull, "recover_shadow_application_mappings_if_present",
+            return_value=False,
+        ), mock.patch.object(
+            pull, "restore_old_server", return_value=True
+        ) as source:
+            result = pull.guarded_restore_cutover_boundary(state)
+        self.assertEqual(result, {
+            "target_stopped": True,
+            "database_mapping_restored": False,
+            "source_restored": True,
+        })
+        source.assert_called_once_with(state)
+
+    def test_pre_dns_manual_rollback_requires_exact_old_server_dns(self) -> None:
+        state = {
+            "source": {"ip": "198.51.100.10"},
+            "sites": [{"domain": "site1.example.test"},
+                      {"domain": "site2.example.test"}],
+        }
+        def resolved(domain, port, *, type):
+            self.assertEqual(port, 443)
+            self.assertEqual(type, socket.SOCK_STREAM)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                     ("198.51.100.10", 443))]
+        with mock.patch.object(pull.socket, "getaddrinfo", side_effect=resolved) as dns:
+            pull.require_old_source_route_before_manual_rollback(state)
+            self.assertEqual(dns.call_count, 2)
+        def changed(domain, port, *, type):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                     ("203.0.113.20" if domain.startswith("site2") else "198.51.100.10", 443))]
+        with mock.patch.object(pull.socket, "getaddrinfo", side_effect=changed):
+            with self.assertRaisesRegex(
+                pull.PullMigrationError, "MANUAL_ROLLBACK_PRE_DNS_SOURCE_ROUTE_UNPROVEN"
+            ):
+                pull.require_old_source_route_before_manual_rollback(state)
+        with mock.patch.object(
+            pull.socket, "getaddrinfo", side_effect=OSError("DNS unavailable")
+        ):
+            with self.assertRaises(pull.PullMigrationError):
+                pull.require_old_source_route_before_manual_rollback(state)
+        with mock.patch.object(
+            pull.socket, "getaddrinfo",
+            return_value=[
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("198.51.100.10", 443)),
+                (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2001:db8::4", 443, 0, 0)),
+            ],
+        ):
+            with self.assertRaises(pull.PullMigrationError):
+                pull.require_old_source_route_before_manual_rollback(state)
+
+    def test_pre_dns_manual_rollback_blocks_before_any_mutation_if_route_ambiguous(self) -> None:
+        mid = "pull-20261101T000000Z-1234abcd"
+        state = {
+            "migration_id": mid, "status": "CUTOVER_PREP_READY",
+            "source_runtime_frozen": True,
+            "source": {"ip": "198.51.100.10"},
+            "sites": [{"domain": "site1.example.test"}],
+        }
+        with (mock.patch.object(pull, "load_state", return_value=state),
+              mock.patch.object(pull.socket, "getaddrinfo",
+                  return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "",
+                                 ("203.0.113.9", 443))]),
+              mock.patch.object(pull, "save_state") as write,
+              mock.patch.object(pull, "deactivate_target_runtime") as stop,
+              mock.patch.object(pull, "restore_old_server") as restore):
+            with self.assertRaisesRegex(
+                pull.PullMigrationError, "MANUAL_ROLLBACK_PRE_DNS_SOURCE_ROUTE_UNPROVEN"
+            ):
+                pull.rollback_migration(mid, f"ROLLBACK_PULL:{mid}")
+            stop.assert_not_called()
+            restore.assert_not_called()
+            write.assert_not_called()
+        self.assertEqual(state["status"], "CUTOVER_PREP_READY")
+
+    def test_manual_rollback_refuses_split_brain_when_target_stop_failed(self) -> None:
+        mid = "pull-20261101T000000Z-1234abcd"
+        state = {
+            "migration_id": mid, "status": "CUTOVER_RUNNING",
+            "target_runtime_activated": True, "source_runtime_frozen": True,
+        }
+        with mock.patch.object(
+            pull, "load_state", return_value=state
+        ), mock.patch.object(
+            pull, "save_state"
+        ), mock.patch.object(
+            pull, "deactivate_target_runtime", return_value=False
+        ), mock.patch.object(
+            pull, "restore_old_server"
+        ) as source:
+            with self.assertRaisesRegex(
+                pull.PullMigrationError, "rollback is partial"
+            ):
+                pull.rollback_migration(mid, f"ROLLBACK_PULL:{mid}")
+            source.assert_not_called()
+        self.assertEqual(state["status"], "ROLLBACK_PARTIAL")
+        self.assertTrue(state["source_runtime_frozen"])
+
+    def test_manual_rollback_with_unrecovered_shadow_is_partial(self) -> None:
+        mid = "pull-20261101T000000Z-1234abcd"
+        state = {
+            "migration_id": mid, "status": "CUTOVER_RUNNING",
+            "source_runtime_frozen": True, "sites": [], "source": {},
+        }
+        with mock.patch.object(pull, "load_state", return_value=state), \
+             mock.patch.object(pull, "save_state"), \
+             mock.patch.object(pull, "deactivate_target_runtime",
+                               return_value=True), \
+             mock.patch.object(pull, "restore_old_server",
+                               return_value=True), \
+             mock.patch.object(
+                 pull, "recover_shadow_application_mappings_if_present",
+                 return_value=False,
+             ) as recover:
+            with self.assertRaisesRegex(
+                pull.PullMigrationError, "rollback is partial"
+            ):
+                pull.rollback_migration(mid, f"ROLLBACK_PULL:{mid}")
+            recover.assert_called_once_with(state)
+        self.assertEqual(state["status"], "ROLLBACK_PARTIAL")
+
     def test_production_verify_rejects_404_when_source_was_200(self) -> None:
         state = {
             "source": {"host": "192.0.2.10"},
@@ -2154,7 +2393,7 @@ class TargetPullUiContractTests(unittest.TestCase):
             "服务器迁移",
             "当前：",
             "这台新服务器（接收数据）",
-            "迁入整台旧服务器",
+            "全新CP2迁入17站",
             "迁入一个网站",
             "继续未完成迁移",
             "旧服务器 IP",
@@ -2294,6 +2533,212 @@ class TargetPullUiContractTests(unittest.TestCase):
             pull.cleanup_probe_runtime(source, "/var/lib/vf-server-ops/pull-source/probe-unsafe/runtime")
         remote.assert_not_called()
 
+
+
+    def test_nonutf8_source_export_blocks_before_target_database_creation(self) -> None:
+        import gzip
+        state = {"migration_id": "pull-test", "source": {"ssh_user": "root"}}
+        site = {"domain": "private.example", "mysql_databases": ["private_db"],
+                "site_root": "/home/private"}
+        with tempfile.TemporaryDirectory() as directory:
+            def simulate_pull(_source, _remote, destination):
+                with gzip.open(destination, "wb") as out:
+                    out.write(b"CREATE TABLE demo (id INT);\n"
+                              b"INSERT INTO demo VALUES ('" + bytes([255]) + b"');\n")
+            with mock.patch.object(pull, "state_dir", return_value=Path(directory)), \
+                 mock.patch.object(pull, "source_export_database"), \
+                 mock.patch.object(pull, "pull_path", side_effect=simulate_pull), \
+                 mock.patch.object(pull, "source_remote"), \
+                 mock.patch.object(pull.legacy, "target_create_database_local") as create:
+                with self.assertRaisesRegex(
+                    pull.PullMigrationError, "SQL_SOURCE_IMPORT_ENCODING_UNPROVEN"
+                ):
+                    pull.sync_site_databases(state, site, phase="prepare")
+                create.assert_not_called()
+                self.assertNotIn("mysql_verification", site)
+
+    def test_source_sql_export_refuses_existing_dump_and_path_escape(self) -> None:
+        destination = Path(
+            "/var/lib/vf-server-ops/pull-source/pull-test/data/snapshot.sql.gz")
+        with mock.patch.object(pull.os.path, "lexists", return_value=True), \
+             mock.patch.object(pull.cloudpanel, "export_database") as export:
+            with self.assertRaisesRegex(
+                    pull.PullMigrationError, "already exists or path unsafe"):
+                pull.source_export_db("safe_db", destination)
+            export.assert_not_called()
+        for path in (
+            "/tmp/p07-external.sql.gz",
+            "/var/lib/vf-server-ops/pull-source/../../tmp/escape.sql.gz",
+            "/var/lib/vf-server-ops/pull-source/pull-test/data/export.txt",
+        ):
+            with self.subTest(path=path), \
+                 mock.patch.object(pull.cloudpanel, "export_database") as export:
+                with self.assertRaisesRegex(
+                        pull.PullMigrationError, "unsafe MySQL staging output"):
+                    pull.source_export_db("safe_db", Path(path))
+                export.assert_not_called()
+
+    def test_source_export_helper_retains_exact_schema_failure_class(self) -> None:
+        source = {"host": "old.example.test"}
+        state = {
+            "source": source,
+            "source_runtime_path": "/var/lib/vf-server-ops/pull-source/pull-test/runtime",
+        }
+        result = subprocess.CompletedProcess(
+            args=[], returncode=13, stdout="",
+            stderr="ERROR: SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA",
+        )
+        with mock.patch.object(pull, "source_python", return_value=result) as remote:
+            with self.assertRaisesRegex(
+                pull.PullMigrationError, "^SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA$"
+            ):
+                pull.source_export_database(
+                    state, "safe_db", "/var/lib/vf-server-ops/pull-source/pull-test/data/db.sql.gz"
+                )
+            self.assertIs(remote.call_args.kwargs["check"], False)
+
+    def test_source_export_helper_never_leaks_other_stderr_or_sql(self) -> None:
+        state = {
+            "source": {"host": "old.example.test"},
+            "source_runtime_path": "/var/lib/vf-server-ops/pull-source/pull-test/runtime",
+        }
+        result = subprocess.CompletedProcess(
+            args=[], returncode=13, stdout="private-source-sql",
+            stderr="ERROR: SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA\\nprivate-secret",
+        )
+        with mock.patch.object(pull, "source_python", return_value=result):
+            with self.assertRaises(pull.PullMigrationError) as context:
+                pull.source_export_database(
+                    state, "safe_db", "/var/lib/vf-server-ops/pull-source/pull-test/data/db.sql.gz"
+                )
+        self.assertEqual(str(context.exception), "old-server MySQL export failed: safe_db")
+        self.assertNotIn("private-secret", str(context.exception))
+        self.assertNotIn("private-source-sql", str(context.exception))
+
+    def test_source_python_can_return_safe_remote_failure_for_export_only(self) -> None:
+        source = {"host": "old.example.test", "ssh_user": "root"}
+        response = subprocess.CompletedProcess([], 13, "", "")
+        with mock.patch.object(pull, "source_base", return_value=["ssh"]) as base, \
+             mock.patch.object(pull.transport, "remote_priv", return_value="private") as remote, \
+             mock.patch.object(pull.transport, "run_ssh", return_value=response) as ssh:
+            outcome = pull.source_python(
+                source, "/var/lib/vf-server-ops/pull-source/pull-test/runtime",
+                "_source-export-db", timeout=20, check=False,
+            )
+            self.assertEqual(outcome.returncode, 13)
+            self.assertEqual(ssh.call_count, 1)
+            base.assert_called_once_with(source)
+            remote.assert_called_once()
+        # Other source operations remain fail-closed by default.
+        with mock.patch.object(pull, "source_base", return_value=["ssh"]), \
+             mock.patch.object(pull.transport, "remote_priv", return_value="private"), \
+             mock.patch.object(pull.transport, "run_ssh", return_value=response):
+            with self.assertRaisesRegex(pull.PullMigrationError, "old-server command failed"):
+                pull.source_python(
+                    source, "/var/lib/vf-server-ops/pull-source/pull-test/runtime",
+                    "_source-plan", timeout=20,
+                )
+
+
+class SourceFreezeFailureRecoveryTests(unittest.TestCase):
+    """An interrupted old-VPS pause must not leave an unhandled outage."""
+
+    MID = "pull-20261101T045943Z-923729a1"
+    CONTROL = Path(
+        "/var/lib/vf-server-ops/pull-source/"
+        "pull-20261101T045943Z-923729a1/data/freeze-control.json"
+    )
+
+    def test_partial_source_freeze_restores_and_hides_private_errors(self):
+        def interrupted(state):
+            state["source_nginx_frozen"] = True
+            state["source_pm2_stopped"] = [{"user": "siteuser", "stopped": True}]
+            raise pull.legacy.ServerMigrationError("private command failure")
+
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(Path, "read_text", return_value=json.dumps({
+                 "migration_id": self.MID, "sites": [],
+             })), \
+             mock.patch.object(pull.legacy, "state_path",
+                               return_value=Path(tmp) / "not-created.json"), \
+             mock.patch.object(pull.legacy, "save_state") as save, \
+             mock.patch.object(pull.legacy, "freeze_source_runtime",
+                               side_effect=interrupted) as freeze, \
+             mock.patch.object(pull.legacy, "restore_source_runtime",
+                               return_value=True) as recover:
+            root_before = pull.legacy.STATE_ROOT
+            with self.assertRaisesRegex(
+                pull.PullMigrationError, "source restored"
+            ) as caught:
+                pull.source_freeze(self.MID, self.CONTROL)
+            freeze.assert_called_once()
+            recover.assert_called_once()
+            self.assertEqual(
+                save.call_args.args[0]["status"],
+                "SOURCE_FREEZE_FAILED_RESTORED",
+            )
+            self.assertNotIn("private command failure", str(caught.exception))
+            self.assertEqual(pull.legacy.STATE_ROOT, root_before)
+
+    def test_failed_source_recovery_requires_intervention_not_success(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(Path, "read_text", return_value=json.dumps({
+                 "migration_id": self.MID, "sites": [],
+             })), \
+             mock.patch.object(pull.legacy, "state_path",
+                               return_value=Path(tmp) / "not-created.json"), \
+             mock.patch.object(pull.legacy, "save_state") as save, \
+             mock.patch.object(pull.legacy, "freeze_source_runtime",
+                               side_effect=pull.legacy.ServerMigrationError("secret")), \
+             mock.patch.object(pull.legacy, "restore_source_runtime",
+                               return_value=False) as recover:
+            with self.assertRaisesRegex(
+                pull.PullMigrationError, "source recovery required"
+            ) as caught:
+                pull.source_freeze(self.MID, self.CONTROL)
+            recover.assert_called_once()
+            self.assertEqual(
+                save.call_args.args[0]["status"],
+                "SOURCE_FREEZE_FAILED_RECOVERY_REQUIRED",
+            )
+            self.assertNotIn("secret", str(caught.exception))
+
+    def test_invalid_prior_recovery_does_not_trigger_blind_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            existing = Path(tmp) / "existing.json"
+            existing.write_text("{}", encoding="utf-8")
+            with mock.patch.object(Path, "read_text", return_value=json.dumps({
+                     "migration_id": self.MID, "sites": [],
+                 })), \
+                 mock.patch.object(pull.legacy, "state_path",
+                                   return_value=existing), \
+                 mock.patch.object(pull.legacy, "load_state",
+                                   side_effect=pull.legacy.ServerMigrationError(
+                                       "untrusted private state")), \
+                 mock.patch.object(pull.legacy, "restore_source_runtime") as recover, \
+                 mock.patch.object(pull.legacy, "freeze_source_runtime") as freeze:
+                with self.assertRaisesRegex(
+                    pull.PullMigrationError, "freeze preflight failed"
+                ):
+                    pull.source_freeze(self.MID, self.CONTROL)
+                recover.assert_not_called()
+                freeze.assert_not_called()
+
+    def test_normal_source_freeze_does_not_restore(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(Path, "read_text", return_value=json.dumps({
+                 "migration_id": self.MID, "sites": [],
+             })), \
+             mock.patch.object(pull.legacy, "state_path",
+                               return_value=Path(tmp) / "not-created.json"), \
+             mock.patch.object(pull.legacy, "save_state") as save, \
+             mock.patch.object(pull.legacy, "freeze_source_runtime") as freeze, \
+             mock.patch.object(pull.legacy, "restore_source_runtime") as recover:
+            result = pull.source_freeze(self.MID, self.CONTROL)
+            self.assertEqual(result["status"], "SOURCE_FROZEN")
+            freeze.assert_called_once()
+            recover.assert_not_called()
+            self.assertEqual(save.call_args.args[0]["status"], "SOURCE_FROZEN")
 
 
 if __name__ == "__main__":

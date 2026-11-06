@@ -273,6 +273,17 @@ class SqlDiffEvidenceTests(unittest.TestCase):
         self.assertEqual(unknown["target_reason"], "NONE")
         self.assertNotIn("private token", json.dumps(unknown))
 
+    def test_preimport_raw_encoding_refuses_nonutf8_dml(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / 'input.sql.gz'
+            with gzip.open(p, 'wb') as stream:
+                stream.write(b'CREATE TABLE demo (v BLOB);\nINSERT INTO demo VALUES (' + bytes([255]) + b');\n')
+            original = p.read_bytes()
+            self.assertEqual(evidence.require_nonempty_source_schema(p), 1)
+            with self.assertRaisesRegex(evidence.AdvisoryDiagnosticUnavailable, 'SQL_SOURCE_IMPORT_ENCODING_UNPROVEN'):
+                evidence.require_source_import_utf8_integrity(p)
+            self.assertEqual(p.read_bytes(), original)
+
     def test_source_export_sanity_rejects_empty_and_corrupt_gzip(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -298,6 +309,72 @@ class SqlDiffEvidenceTests(unittest.TestCase):
             corrupt.write_bytes(b"not a compressed SQL dump")
             with self.assertRaises(evidence.AdvisoryDiagnosticUnavailable):
                 evidence.require_nonempty_source_schema(corrupt)
+
+    def test_source_schema_presence_accepts_only_byte_preserved_inline_dml(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "byte-preserved.sql.gz"
+            data = (
+                b"SET NAMES utf8mb4;\n"
+                b"CREATE TABLE `first` (`id` INT);\n"
+                b"INSERT INTO `first` VALUES ('" + bytes([0xff]) + b"');\n"
+                b"CREATE TABLE `second` (`id` INT);\n"
+                b"REPLACE INTO `second` VALUES ('" + bytes([0xfe]) + b"');\n"
+            )
+            with gzip.open(path, "wb") as handle:
+                handle.write(data)
+            before = path.read_bytes()
+            self.assertEqual(evidence.require_nonempty_source_schema(path), 2)
+            self.assertEqual(path.read_bytes(), before)
+            # Ordinary cross-engine SQL diagnostics MUST still refuse the dump.
+            with self.assertRaisesRegex(
+                evidence.AdvisoryDiagnosticUnavailable,
+                "SQL_DIAGNOSTIC_INPUT_UNAVAILABLE",
+            ):
+                evidence._schema_statements(path)
+            with self.assertRaisesRegex(
+                evidence.AdvisoryDiagnosticUnavailable,
+                "SQL_DIAGNOSTIC_INPUT_UNAVAILABLE",
+            ):
+                evidence.dynamic_guard_syntax_counts(path)
+
+    def test_schema_presence_nonutf8_ddl_and_ambiguous_dml_fail_closed(self):
+        fixtures = (
+            b"CREATE TABLE `broken` (`id` " + bytes([255]) + b" INT);\n",
+            b"CREATE TABLE `partial` (\nINSERT INTO `other` VALUES ('" +
+            bytes([255]) + b"');\n);\n",
+            b"CREATE TABLE `ok` (`id` INT);\n" +
+            bytes([255]) + b"INSERT INTO `hidden` VALUES ('bad');\n",
+            b"CREATE TABLE `ok` (`id` INT);\n" +
+            b"UPDATE `ok` SET `id`='" + bytes([254]) + b"';\n",
+            b"CREATE TABLE `ok` (`id` INT);\n" +
+            b"INSERT INTO `ok` VALUES ('a');\n" +
+            b"some continuation " + bytes([255]) + b" data\n",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            for index, data in enumerate(fixtures):
+                with self.subTest(index=index):
+                    path = Path(directory) / f"unsafe-{index}.sql.gz"
+                    with gzip.open(path, "wb") as handle:
+                        handle.write(data)
+                    before = path.read_bytes()
+                    with self.assertRaises(evidence.AdvisoryDiagnosticUnavailable):
+                        evidence.require_nonempty_source_schema(path)
+                    self.assertEqual(before, path.read_bytes())
+
+    def test_schema_presence_rejects_corrupt_zip_and_header_only_after_invalid_rows(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "data-only.sql.gz"
+            with gzip.open(path, "wb") as handle:
+                handle.write(b"INSERT INTO `foo` VALUES ('" + bytes([255]) + b"');\n")
+            with self.assertRaisesRegex(
+                evidence.AdvisoryDiagnosticUnavailable,
+                "SQL_SOURCE_EXPORT_NO_TABLE_SCHEMA",
+            ):
+                evidence.require_nonempty_source_schema(path)
+            raw = path.read_bytes()
+            path.write_bytes(raw[:-5])
+            with self.assertRaises(evidence.AdvisoryDiagnosticUnavailable):
+                evidence.require_nonempty_source_schema(path)
 
     def test_source_export_sanity_rejects_data_only_without_ddl(self):
         with tempfile.TemporaryDirectory() as directory:
