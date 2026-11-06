@@ -14,7 +14,11 @@ spec.loader.exec_module(module)
 source = {"VERSION.txt": b"2.47.499\n", "app/thing.php": b"<?php return 1;\n"}
 target = {"VERSION.txt": b"2.47.500\n", "app/thing.php": b"<?php return 2;\n"}
 repair = module.build_repair(source, target, "")
-assert "$global=VfMaintenanceBarrier::globalExclusive(true);" in repair
+assert "return VfMaintenanceBarrier::globalExclusive(true);" in repair
+assert "$global=self::maintenanceLease();" in repair
+assert "hrtime(true)+1500000000" in repair
+assert "usleep(20000)" in repair
+assert "Atomic 维护锁等待超时，未执行更新。" in repair
 assert "$global=VfMaintenanceBarrier::globalExclusive();" not in repair
 assert "vf_request_global_barrier_release()" in repair
 for required in ("recoverInterrupted(", "snapshotDb(", "restoreDb(", "restoreFiles(",
