@@ -52,8 +52,24 @@ final class VfAtomicPackage
     public static function selfTest(): array {if(PHP_VERSION_ID<80000)throw new RuntimeException('PHP 8.0+ required.');$src=self::decode(self::SOURCE_MANIFEST);$tar=self::decode(self::TARGET_MANIFEST);$pay=self::decode(self::PAYLOAD);$removed=self::decode(self::REMOVED);if(!$src||!$tar||!$pay)throw new RuntimeException('Atomic metadata empty.');foreach($tar as $rel=>$hash){if(!isset($pay[$rel]))throw new RuntimeException('Atomic payload misses target file: '.$rel);$b=base64_decode((string)$pay[$rel],true);if($b===false||!hash_equals((string)$hash,hash('sha256',$b)))throw new RuntimeException('Atomic payload hash mismatch: '.$rel);}foreach($removed as $rel)self::rel((string)$rel);return ['ok'=>true,'source_files'=>count($src),'target_files'=>count($tar),'payload_files'=>count($pay),'removed_files'=>count($removed),'php_min'=>'8.0.0','global_barrier'=>true,'interruption_recovery'=>true];}
     public static function verifySource(string $root): array {return self::verifyManifest($root,self::decode(self::SOURCE_MANIFEST),true);}
     public static function verifyTarget(string $root): array {return self::verifyManifest($root,self::decode(self::TARGET_MANIFEST),false);}
+    private static function maintenanceLease() {
+        // The source runtime still owns this lock until target activation.
+        // Probe nonblocking EX for a bounded interval; never queue a writer
+        // behind live readers where a nested SH could cause a 524 deadlock.
+        $deadline=hrtime(true)+1500000000;
+        do{
+            try{return VfMaintenanceBarrier::globalExclusive(true);}
+            catch(RuntimeException $busy){
+                $message=$busy->getMessage();
+                if(strpos($message,'系统正在执行维护操作')===false &&
+                   strpos($message,'系统维护锁繁忙')===false)throw $busy;
+                if(hrtime(true)>=$deadline)throw new RuntimeException('Atomic 维护锁等待超时，未执行更新。',0,$busy);
+                usleep(20000);
+            }
+        }while(true);
+    }
     public static function run(string $root): array {
-        self::selfTest();$root=rtrim(realpath($root)?:$root,'/');if(!defined('VF_ROOT'))define('VF_ROOT',$root);if(!class_exists('VfMaintenanceBarrier',false)){require_once $root.'/app/Platform/Barrier.php';}if(function_exists('vf_request_global_barrier_release'))vf_request_global_barrier_release();$global=VfMaintenanceBarrier::globalExclusive();$stage='';$journal='';$sourceMeta=[];$rt=[];$configBytes='';$dbSnap='';
+        self::selfTest();$root=rtrim(realpath($root)?:$root,'/');if(!defined('VF_ROOT'))define('VF_ROOT',$root);if(!class_exists('VfMaintenanceBarrier',false)){require_once $root.'/app/Platform/Barrier.php';}if(function_exists('vf_request_global_barrier_release'))vf_request_global_barrier_release();$global=self::maintenanceLease();$stage='';$journal='';$sourceMeta=[];$rt=[];$configBytes='';$dbSnap='';
         try {
             $rt=self::runtime($root);$recovered=self::recoverInterrupted($root,$rt);$v=trim((string)@file_get_contents($root.'/VERSION.txt'));
             if($v===self::TARGET_VERSION){$t=self::verifyTarget($root);if(!$t['ok'])throw new RuntimeException('Target version files are inconsistent.');$dbv=self::dbVerify((string)$rt['db_file']);return ['ok'=>true,'already_current'=>true,'interrupted_recovered'=>$recovered,'schema'=>$dbv['schema'],'integrity'=>$dbv['integrity'],'fk'=>$dbv['foreign_key_errors']];}
