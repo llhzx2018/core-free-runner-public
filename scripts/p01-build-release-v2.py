@@ -53,7 +53,7 @@ final class VfAtomicPackage
     public static function verifySource(string $root): array {return self::verifyManifest($root,self::decode(self::SOURCE_MANIFEST),true);}
     public static function verifyTarget(string $root): array {return self::verifyManifest($root,self::decode(self::TARGET_MANIFEST),false);}
     public static function run(string $root): array {
-        self::selfTest();$root=rtrim(realpath($root)?:$root,'/');if(!defined('VF_ROOT'))define('VF_ROOT',$root);if(!class_exists('VfMaintenanceBarrier',false)){require_once $root.'/app/Platform/Barrier.php';}if(function_exists('vf_request_global_barrier_release'))vf_request_global_barrier_release();$global=VfMaintenanceBarrier::globalExclusive();$stage='';$journal='';$sourceMeta=[];$rt=[];$configBytes='';$dbSnap='';
+        self::selfTest();$root=rtrim(realpath($root)?:$root,'/');if(!defined('VF_ROOT'))define('VF_ROOT',$root);if(!class_exists('VfMaintenanceBarrier',false)){require_once $root.'/app/Platform/Barrier.php';}if(function_exists('vf_request_global_barrier_release'))vf_request_global_barrier_release();$global=VfMaintenanceBarrier::globalExclusive(true);$stage='';$journal='';$sourceMeta=[];$rt=[];$configBytes='';$dbSnap='';
         try {
             $rt=self::runtime($root);$recovered=self::recoverInterrupted($root,$rt);$v=trim((string)@file_get_contents($root.'/VERSION.txt'));
             if($v===self::TARGET_VERSION){$t=self::verifyTarget($root);if(!$t['ok'])throw new RuntimeException('Target version files are inconsistent.');$dbv=self::dbVerify((string)$rt['db_file']);return ['ok'=>true,'already_current'=>true,'interrupted_recovered'=>$recovered,'schema'=>$dbv['schema'],'integrity'=>$dbv['integrity'],'fk'=>$dbv['foreign_key_errors']];}
