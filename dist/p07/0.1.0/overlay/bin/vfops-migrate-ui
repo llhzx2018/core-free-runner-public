@@ -508,13 +508,61 @@ continue_migration() {
         ui_prompt '只执行此站的安全诊断？[y/N]：'
         read -r answer || return 0
         if [[ "$answer" =~ ^[Yy]$ ]]; then
-          if run_quiet_with_progress '核对受阻数据库（不重复迁入）' "$CORE" server-migrate diagnose-sql --migration-id "$mid" --domain "$blocked_site"; then
+          local capture_original_18=0
+          local -a diagnostic_args=(server-migrate diagnose-sql --migration-id "$mid" --domain "$blocked_site")
+          if [[ "$mid" == 'pull-20261106T065804Z-1aef6d0e' && "$blocked_site" == 'ilovem3u8.kewaro.com' ]]; then
+            diagnostic_args+=(--capture-private-repro)
+            capture_original_18=1
+          fi
+          if run_quiet_with_progress '受阻 SQL 私有取证（不重复迁入）' "$CORE" "${diagnostic_args[@]}"; then
             diagnostic="$WAIT_PAYLOAD"
             verification="$(json_field "$diagnostic" evidence.verification 2>/dev/null || printf UNKNOWN)"
             reasons="$(json_field "$diagnostic" evidence.dynamic_guard.unsafe_branch_reasons 2>/dev/null || printf UNAVAILABLE)"
             ui_note "校验资料状态：$verification（仅供诊断，非迁移放行）"
             ui_note "动态 SQL 拒绝原因分类：$reasons"
+            ui_note '以下仅展示固定结构分类与数量，不包含原始 SQL；任何分类均不代表安全放行。'
+            local branch_shapes
+            branch_shapes="$(json_field "$diagnostic" evidence.dynamic_guard.unsafe_branch_features 2>/dev/null || printf UNAVAILABLE)"
+            ui_note "被拒 SQL 的结构特征：$branch_shapes"
             ui_note '本诊断不更改任务状态，不重导数据库，不授予继续或切换权限。'
+            local repro_state repro_env repro_branch_json
+            if [[ "$capture_original_18" == 1 ]]; then
+              repro_state="$(json_field "$diagnostic" private_repro.status 2>/dev/null || printf UNAVAILABLE)"
+              if [[ "$repro_state" != PRIVATE_MINIMAL_REPRO_CAPTURED_NOT_VERIFIED ]]; then
+                ui_attention '本次私有最小复现未完整建立；保留原任务和 SQL 安全阻断。'
+                pause
+                return 0
+              fi
+              ui_good '原3组完整 SQL 控制语法已一次性保存在 CP2 私有目录（绝不上传或执行）。'
+              ui_note '下面仅显示去标识化语法骨架；不包含业务标识、SQL 原文、行值或凭据。'
+              ui_note "私有最小复现回放：$(json_field "$diagnostic" private_repro.reproduced_guard_flow 2>/dev/null || printf UNAVAILABLE)"
+              repro_env="$(json_field "$diagnostic" private_repro.environment 2>/dev/null || printf '{}')"
+              ui_note "导出/数据库版本：$repro_env"
+              repro_branch_json="$(json_field "$diagnostic" private_repro.branches 2>/dev/null || printf '[]')"
+              REPRO_BRANCH_JSON="$repro_branch_json" python3 - <<'PY'
+import json,os
+try:
+    rows=json.loads(os.environ["REPRO_BRANCH_JSON"])
+except (ValueError,TypeError):
+    rows=[]
+if not isinstance(rows,list) or len(rows)!=3:
+    print("复现结构：不可用；保留私有证据，不允许续迁")
+else:
+    for i,item in enumerate(rows,1):
+        for side in ("yes","no"):
+            b=item.get(side,{}) if isinstance(item,dict) else {}
+            tokens=b.get("tokens",[])
+            if not isinstance(tokens,list) or len(tokens)>100:
+                tokens=[]
+            verdict=b.get("guard_verdict","UNPROVEN")
+            print("组%d %s [%s]: %s" % (i,side.upper(),verdict," ".join(
+                str(t) for t in tokens if isinstance(t,str)
+            )))
+PY
+              ui_attention '真实 SQL 仍未得到安全证明；不得继续迁移、登记 DB 检查点或切换 DNS。'
+              pause
+              return 0
+            fi
             advisory="$(json_field "$diagnostic" evidence.guarded_export_comparison.status 2>/dev/null || printf UNAVAILABLE)"
             if [[ "$advisory" == 'MATCH_ADVISORY_NOT_MIGRATION_PASS' ]]; then
               ui_note '诊断仅为参考；下面的独立双次源端回读、原DB归属与配置验证仍可能拒绝恢复。'
