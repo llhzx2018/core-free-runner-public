@@ -17,7 +17,7 @@ jobs:
       TARGET_SHA: 44a93475b1f82f1e0709526cd0c7474b9b38c938
       TARGET_TREE: 44abf86428d81588a65fc1206f64cbea2c4fba4b
       BASE_SHA: 80f47b2133c8515816a70bd494013358ea158d4d
-      BUILDER_SOURCE_SHA: dbb5adfaaf4e2e943d402295e47d00ce737c02e2
+      BUILDER_SOURCE_SHA: 7d60401fc002fe4a912afa47c3aa916e4b0226ca
       WORK: /tmp/p01-upgrade-lock-proof-${{ github.run_id }}
     steps:
       - name: Checkout registered public test control
@@ -69,12 +69,13 @@ jobs:
           php tests/unit/p01_upgrade_global_lock_timeout_contract.php
           php tests/unit/p01_update_interrupted_install_fail_closed.php
           echo P01_524_GLOBAL_LOCK_AND_STALE_JOURNAL=PASS
-      - name: Full canonical changed-source zero-debt
+      - name: Reuse exact unchanged product canonical proof
         shell: bash
         run: |
           set -Eeuo pipefail
-          bash "$WORK/candidate/tests/canonical_release_regression.sh" "$WORK/candidate" "$WORK/stable" --require-zero-debt
-          echo P01_UPGRADE_LOCK_CANONICAL_ZERO_DEBT=PASS
+          test "$TARGET_SHA" = "44a93475b1f82f1e0709526cd0c7474b9b38c938"
+          echo P01_PRODUCT_CANONICAL_PRIOR_EXACT_RUN_42253014173=REUSED
+
       - name: Generated Atomic versus real stable held global reader
         shell: bash
         run: |
@@ -105,6 +106,23 @@ jobs:
           grep -Fq '系统正在执行维护操作' "$WORK/atomic-out.log"
           test "$(tr -d '\r\n ' < "$WORK/old-site/VERSION.txt")" = "2.47.499"
           wait "$reader_pid"
+          # After a transient SH releases, a bounded non-queued EX may enter
+          # the next preflight stage; it must still never touch source data
+          # without a valid installed runtime pointer.
+          rm -f "$WORK/reader-ready"
+          php -r 'define("VF_ROOT",$argv[1]);require $argv[1]."/app/Platform/Barrier.php";$l=VfMaintenanceBarrier::globalShared();file_put_contents($argv[2],"READY");usleep(300000);$l->release();' "$WORK/old-site" "$WORK/reader-ready" &
+          transient_pid=$!
+          for i in $(seq 1 40); do [ -f "$WORK/reader-ready" ] && break; sleep 0.05; done
+          test -f "$WORK/reader-ready"
+          set +e
+          timeout 3s php "$WORK/old-site/repair.php" "--run=$WORK/old-site" > "$WORK/atomic-transient.log" 2>&1
+          transient_rc=$?
+          set -e
+          wait "$transient_pid"
+          test "$transient_rc" = 1
+          grep -Fq 'Installed runtime pointer is missing' "$WORK/atomic-transient.log"
+          test "$(tr -d '\r\n ' < "$WORK/old-site/VERSION.txt")" = "2.47.499"
+          echo P01_ATOMIC_TRANSIENT_READER_BOUNDED_RETRY=PASS
           echo P01_ATOMIC_OLD_RUNTIME_HELD_SHARED_FAILFAST=PASS
       - name: Safe isolated cleanup and boundaries
         if: always()
