@@ -128,6 +128,68 @@ def _unsafe_branch_reason(literal: str) -> str:
     return "UNKNOWN_GRAMMAR"
 
 
+
+# These are observational syntax classes, not a second SQL policy engine.
+# Only fixed enum keys and integer counts leave the private parser. No SQL
+# fragments, identifiers, paths, or hashes are ever returned to the CLI.
+# Features can overlap; none grants migration resume or schema acceptance.
+_GUARD_BRANCH_FEATURES = (
+    "SINGLE_TERMINAL_SEMICOLON",
+    "MULTIPLE_OR_INTERIOR_SEMICOLONS",
+    "ESCAPE_COMMENT_OR_NEWLINE",
+    "SESSION_SET_VALUE_UNPROVEN",
+    "USER_SET_FUNCTION_OR_SUBQUERY",
+    "USER_SET_STRING_VALUE",
+    "USER_SET_MULTIPLE_ASSIGNMENTS",
+    "USER_SET_OTHER_UNPROVEN",
+    "GLOBAL_OR_PERSIST_SCOPE",
+    "READ_ONLY_GRAMMAR_UNPROVEN",
+    "DDL_OR_DATA_MUTATION",
+    "UNKNOWN_OTHER",
+)
+
+_REJECTED_SET_USER_RE = re.compile(r"^SET\s+@[A-Za-z_][A-Za-z_0-9$]*\s*=", re.I)
+_REJECTED_SET_SESSION_RE = re.compile(
+    r"^SET\s+(?:(?:SESSION|LOCAL)\s+|@@SESSION\.|@@LOCAL\.)", re.I
+)
+_REJECTED_SET_VALUE_CALL_RE = re.compile(
+    r"\b(?:SELECT|CASE)\b|\b[A-Za-z_][A-Za-z_0-9$]*\s*\(", re.I
+)
+
+
+def _redacted_rejected_branch_features(literal: str) -> tuple[str, ...]:
+    """Observational labels only, NEVER a safety verdict."""
+    value = literal[1:-1].replace("''", "'").strip()
+    features: list[str] = []
+    count = value.count(";")
+    if count == 1 and value.endswith(";"):
+        features.append("SINGLE_TERMINAL_SEMICOLON")
+    elif count:
+        features.append("MULTIPLE_OR_INTERIOR_SEMICOLONS")
+    if any(marker in value for marker in ("\\", "/*", "*/", "--", "#", "\r", "\n")):
+        features.append("ESCAPE_COMMENT_OR_NEWLINE")
+    if re.search(r"\b(?:GLOBAL|PERSIST|PERSIST_ONLY)\b", value, re.I):
+        features.append("GLOBAL_OR_PERSIST_SCOPE")
+    if _REJECTED_SET_SESSION_RE.match(value):
+        features.append("SESSION_SET_VALUE_UNPROVEN")
+    elif _REJECTED_SET_USER_RE.match(value):
+        if _REJECTED_SET_VALUE_CALL_RE.search(value):
+            features.append("USER_SET_FUNCTION_OR_SUBQUERY")
+        if re.search(r"=\s*'", value):
+            features.append("USER_SET_STRING_VALUE")
+        if re.search(r",\s*@[A-Za-z_][A-Za-z_0-9$]*\s*=", value):
+            features.append("USER_SET_MULTIPLE_ASSIGNMENTS")
+        if not any(name.startswith("USER_SET_") for name in features):
+            features.append("USER_SET_OTHER_UNPROVEN")
+    elif re.match(r"^(?:SELECT|SHOW|EXPLAIN)\b", value, re.I):
+        features.append("READ_ONLY_GRAMMAR_UNPROVEN")
+    elif re.match(r"^(?:CREATE|ALTER|DROP|RENAME|TRUNCATE|INSERT|UPDATE|DELETE|REPLACE|LOAD)\b", value, re.I):
+        features.append("DDL_OR_DATA_MUTATION")
+    if not features:
+        features.append("UNKNOWN_OTHER")
+    return tuple(features)
+
+
 def dynamic_guard_syntax_counts(source: Path) -> dict[str, Any]:
     """Classify guarded IF branches; classification never makes them safe."""
     counts: dict[str, Any] = {
@@ -135,6 +197,8 @@ def dynamic_guard_syntax_counts(source: Path) -> dict[str, Any]:
         "double_quoted_if": 0, "other_unknown_set": 0,
         "unsafe_yes_branches": 0, "unsafe_no_branches": 0,
         "unsafe_control_or_multi": 0,
+        # Counts are overlapping observational features, never SQL verdicts.
+        "unsafe_branch_features": {name: 0 for name in _GUARD_BRANCH_FEATURES},
         "unsafe_branch_classes": {name: 0 for name in _UNSAFE_BRANCH_CLASSES},
         "unsafe_branch_reasons": {
             name: 0 for name in (
@@ -160,6 +224,8 @@ def dynamic_guard_syntax_counts(source: Path) -> dict[str, Any]:
                 counts[f"unsafe_{part}_branches"] += 1
                 counts["unsafe_branch_classes"][_unsafe_branch_category(literal)] += 1
                 counts["unsafe_branch_reasons"][_unsafe_branch_reason(literal)] += 1
+                for feature in _redacted_rejected_branch_features(literal):
+                    counts["unsafe_branch_features"][feature] += 1
                 value = literal[1:-1]
                 if len(value) > 4096 or any(
                     char in value for char in ("\\", ";", "/*", "*/", "--", "#", "\r", "\n")

@@ -42,6 +42,7 @@ import server_migration as legacy
 import transport
 import verify as verify_engine
 import sql_diff_evidence as sql_diff_probe
+import migration_private_sql_repro
 
 SCHEMA = "vf-server-ops.server-migration.target-pull.v1"
 ROOT = Path(__file__).resolve().parents[1]
@@ -1357,7 +1358,8 @@ def guarded_export_comparison_advisory(
 
 
 def diagnose_sql_difference(
-    mid: str, domain: str, *, expected_source_tables: int | None = None
+    mid: str, domain: str, *, expected_source_tables: int | None = None,
+    capture_private_repro: bool = False,
 ) -> dict[str, Any]:
     """One selected DB, advisory read/export only; never resumes migration.
 
@@ -1389,6 +1391,26 @@ def diagnose_sql_difference(
         raise PullMigrationError("SQL_DIAGNOSTIC_DATABASE_INVALID")
     if not state.get("source_runtime_path") or not state.get("source"):
         raise PullMigrationError("SQL_DIAGNOSTIC_SOURCE_RUNTIME_UNAVAILABLE")
+    if capture_private_repro:
+        # Issue #287 owner-scoped capture, never a generic SQL extraction API.
+        # Reject before any old-VPS source export or DB interaction.
+        sites = state.get("sites")
+        guard = state.get("last_sql_guard_failure")
+        if (
+            mid != "pull-20261106T065804Z-1aef6d0e"
+            or domain != "ilovem3u8.kewaro.com"
+            or not isinstance(sites, list) or len(sites) != 18
+            or not isinstance(sites[7], dict) or sites[7].get("domain") != domain
+            or sites[7].get("stage_status") != "PENDING"
+            or not isinstance(guard, dict) or guard.get("reason") != "CONDITIONAL_DDL"
+            or state.get("source_runtime_frozen") is not False
+            or state.get("target_runtime_activated") is not False
+            or target_identity() != state.get("target_server_identity")
+        ):
+            raise PullMigrationError("SQL_PRIVATE_REPRO_ORIGINAL_18SITE_SCOPE_UNPROVEN")
+        capture_dir = state_dir(mid) / "private-sql-repro"
+        if capture_dir.exists() or capture_dir.is_symlink():
+            raise PullMigrationError("SQL_PRIVATE_REPRO_ALREADY_CAPTURED_NO_RETRY")
 
     # The helper on the source VPS may be an older, already-staged runtime.
     # Validate the received SQL locally before trusting its schema counters.
@@ -1398,6 +1420,7 @@ def diagnose_sql_difference(
     remote_files: list[str] = []
     diagnostic_state = state
     temporary_helper = ""
+    private_repro_evidence: dict[str, Any] | None = None
     try:
         # The stored helper can predate the receiver's SQL export sanity
         # protection. Diagnose with verified current source bytes, but never
@@ -1469,6 +1492,15 @@ def diagnose_sql_difference(
                     evidence["guarded_export_comparison"] = (
                         guarded_export_comparison_advisory(source_dump, target_dump)
                     )
+                    if capture_private_repro:
+                        try:
+                            private_repro_evidence = (
+                                migration_private_sql_repro.capture_private_repro(
+                                    state_dir(mid), source_dump, target_dump
+                                )
+                            )
+                        except migration_private_sql_repro.PrivateSqlReproBlocked as exc:
+                            raise PullMigrationError(str(exc)) from None
                     evidence["source_export_readback"] = {
                         "attempts": attempt + 1, "source_tables": count,
                     }
@@ -1558,6 +1590,7 @@ def diagnose_sql_difference(
         "dns_changed": False,
         "source_deleted": False,
         "evidence": evidence,
+        **({"private_repro": private_repro_evidence} if capture_private_repro else {}),
     }
 
 
@@ -5932,6 +5965,7 @@ def main() -> int:
     diagnose.add_argument("--migration-id", required=True)
     diagnose.add_argument("--domain", required=True)
     diagnose.add_argument("--expected-source-tables", type=int, default=None)
+    diagnose.add_argument("--capture-private-repro", action="store_true")
 
     status = sub.add_parser("status")
     status.add_argument("--migration-id", required=True)
@@ -6151,6 +6185,7 @@ def main() -> int:
             result = diagnose_sql_difference(
                 args.migration_id, args.domain,
                 expected_source_tables=args.expected_source_tables,
+                capture_private_repro=args.capture_private_repro,
             )
         elif args.command == "status":
             result = summary(load_state(args.migration_id))
