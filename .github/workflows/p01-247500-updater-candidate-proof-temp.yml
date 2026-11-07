@@ -1,0 +1,115 @@
+name: p01-247500-updater-candidate-proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-247500-updater-candidate-proof-temp.yml'
+permissions:
+  contents: read
+jobs:
+  p01-candidate-source-to-package:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      PRODUCT_BRANCH: main
+      TARGET_VERSION: 2.47.500
+      TARGET_SHA: 44c17a904077be70bae01c01d5fa657de4699e16
+      TARGET_TREE: 0ab5d7f89edfbd6858b842c06c1ab77e37ce3c29
+      SOURCE_VERSION: 2.47.499
+      SCHEMA_VERSION: 2026102201
+      WORK: /tmp/p01-247500-package-preflight-${{ github.run_id }}
+    steps:
+      - name: Checkout registered Public Runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Preflight exact lane and builder
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$WORK"/{source-release,prior-full,prior-repair,out1,out2}
+          python3 scripts/ephemeral_lane_spec.py validate --spec tests/lanes/p01_247500_updater_fix_candidate_temp.json > /dev/null
+          python3 scripts/ephemeral_lane_spec.py audit-rendered \
+            --spec tests/lanes/p01_247500_updater_fix_candidate_temp.json \
+            --input .github/workflows/p01-247500-updater-candidate-proof-temp.yml
+          python3 -m py_compile scripts/p01_updater_fix_release_candidate_temp.py scripts/p01_247500_candidate_asset_matrix_temp.py
+          python3 scripts/test_p01_atomic_builder_bounded_lock.py
+          sudo apt-get update -qq
+          sudo apt-get install -qq -y php-cli php-sqlite3 php-curl php-zip php-mbstring php-gd unzip >/dev/null
+          echo P01_247500_CANDIDATE_LANE_GOVERNANCE=PASS
+      - name: Transient exact source and official 499 baseline assets
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test -n "$READ_TOKEN"
+          remote="$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/heads/${PRODUCT_BRANCH}" | awk '{print $1}')"
+          test "$remote" = "$TARGET_SHA"
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "$WORK/candidate"
+          git -C "$WORK/candidate" fetch -q --depth 1 origin "$TARGET_SHA"
+          git -C "$WORK/candidate" checkout -q --detach "$TARGET_SHA"
+          git -C "$WORK/candidate" remote set-url origin "https://github.com/${PRODUCT_REPO}.git"
+          test "$(git -C "$WORK/candidate" rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C "$WORK/candidate" rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test "$(tr -d '\r\n ' < "$WORK/candidate/VERSION")" = "$TARGET_VERSION"
+          test "$(tr -d '\r\n ' < "$WORK/candidate/src/VERSION.txt")" = "$TARGET_VERSION"
+          gh release download "v${SOURCE_VERSION}" -R "$PRODUCT_REPO" -D "$WORK/source-release" \
+            -p "VF-Start-V${SOURCE_VERSION}-FULL.zip" -p "VF_Start_V${SOURCE_VERSION}_UPDATE.zip"
+          printf '%s  %s\n' \
+            eb8752f5ba448c2588fb1981e6a71ffa16b4cd8004bb55b0512c978784352904 "$WORK/source-release/VF-Start-V2.47.499-FULL.zip" \
+            85e0a112e2ef3baf13bbada4089165c490576d72f8fa7837005dfc26fcfaf209 "$WORK/source-release/VF_Start_V2.47.499_UPDATE.zip" \
+            | sha256sum -c -
+          unzip -qq "$WORK/source-release/VF-Start-V${SOURCE_VERSION}-FULL.zip" -d "$WORK/prior-full"
+          unzip -qq "$WORK/source-release/VF_Start_V${SOURCE_VERSION}_UPDATE.zip" -d "$WORK/prior-repair"
+          echo P01_247500_OFFICIAL499_SOURCE_FULL_UPDATE=PASS
+          echo P01_247500_PRODUCT_MAIN_SHA_TREE_EXACT=PASS
+      - name: Build deterministic candidate ZIPs twice from same exact inputs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for OUT in "$WORK/out1" "$WORK/out2"; do
+            python3 scripts/p01_updater_fix_release_candidate_temp.py \
+              --candidate "$WORK/candidate/src" \
+              --baseline-full "$WORK/prior-full" \
+              --baseline-repair "$WORK/prior-repair/repair-v${SOURCE_VERSION}.php" \
+              --out "$OUT" --version "$TARGET_VERSION" --source-version "$SOURCE_VERSION" \
+              --target-sha "$TARGET_SHA" --target-tree "$TARGET_TREE" > /dev/null
+          done
+          for ASSET in "VF-Start-V${TARGET_VERSION}-FULL.zip" "VF_Start_V${TARGET_VERSION}_UPDATE.zip"; do
+            cmp "$WORK/out1/$ASSET" "$WORK/out2/$ASSET"
+          done
+          cmp "$WORK/out1/P01_UPDATER_FIX_CANDIDATE_RECEIPT.json" "$WORK/out2/P01_UPDATER_FIX_CANDIDATE_RECEIPT.json"
+          python3 - "$WORK/out1/P01_UPDATER_FIX_CANDIDATE_RECEIPT.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          for k in ("source_version","version","full_bytes","full_sha256","update_bytes","update_sha256"):
+              print("P01_247500_"+k.upper()+"="+str(d[k]))
+          PY
+          echo P01_247500_DETERMINISTIC_PRE_RELEASE_FULL_AND_ATOMIC=PASS
+      - name: Actual candidate ZIP clean FULL, 499 Atomic and interrupted recovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/p01_247500_candidate_asset_matrix_temp.py \
+            --work "$WORK" \
+            --source-full "$WORK/source-release/VF-Start-V${SOURCE_VERSION}-FULL.zip" \
+            --source-update "$WORK/source-release/VF_Start_V${SOURCE_VERSION}_UPDATE.zip" \
+            --candidate-full "$WORK/out1/VF-Start-V${TARGET_VERSION}-FULL.zip" \
+            --candidate-update "$WORK/out1/VF_Start_V${TARGET_VERSION}_UPDATE.zip" \
+            --candidate-receipt "$WORK/out1/P01_UPDATER_FIX_CANDIDATE_RECEIPT.json" \
+            --source-commit "$TARGET_SHA" --source-tree "$TARGET_TREE"
+          echo P01_247500_PRE_RELEASE_INSTALLED_ASSET_GATE=PASS
+      - name: Evidence scope and transient private source cleanup
+        if: always()
+        shell: bash
+        run: |
+          echo P01_247500_GITHUB_RELEASE=NOT_PUBLISHED
+          echo P01_247500_CORE_UPDATES=UNCHANGED
+          echo P01_247500_PRODUCTION=UNCHANGED
+          echo P01_247500_PRIVATE_SOURCE_PUBLIC_ARTIFACT=NONE
+          case "$WORK" in /tmp/p01-247500-package-preflight-*) rm -rf -- "$WORK";; *) exit 66;; esac
