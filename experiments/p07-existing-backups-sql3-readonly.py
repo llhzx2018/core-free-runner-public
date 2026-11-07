@@ -205,38 +205,40 @@ def read_control_lines(sql, verify):
     probe_line = None
     for lineno, kind, name, other, line in matches:
         if kind == 'PROBE':
-            need(not probes, 'DYNAMIC_EVENT_BINDING_CHANGED')
+            need(not probes, 'BIND_PROBE_DUPLICATE')
             probes.add(name)
             probe_line = line
         elif kind == 'ASSIGN':
-            need(other in probes and name not in unconsumed,
-                 'DYNAMIC_EVENT_BINDING_CHANGED')
+            need(other in probes, 'BIND_ASSIGN_FLAG_NOT_PROBED')
+            need(name not in unconsumed, 'BIND_ASSIGN_PREVIOUS_VALUE_PENDING')
             group = {'assign': line, 'assign_at': lineno}
             groups.append(group)
             unconsumed[name] = len(groups) - 1
             used_probes.add(other)
         elif kind == 'PREPARE':
-            need(name not in active and other in unconsumed,
-                 'DYNAMIC_EVENT_BINDING_CHANGED')
+            need(name not in active, 'BIND_PREPARE_HANDLE_ALREADY_ACTIVE')
+            need(other in unconsumed, 'BIND_PREPARE_SOURCE_VARIABLE_UNAVAILABLE')
             group_id = unconsumed.pop(other)
             groups[group_id]['prepare'] = line
             active[name] = (group_id, False)
         elif kind == 'EXECUTE':
-            need(name in active and active[name][1] is False,
-                 'DYNAMIC_EVENT_BINDING_CHANGED')
+            need(name in active, 'BIND_EXECUTE_HANDLE_UNAVAILABLE')
+            need(active[name][1] is False, 'BIND_EXECUTE_ALREADY_USED')
             group_id = active[name][0]
             groups[group_id]['execute'] = line
             active[name] = (group_id, True)
         elif kind == 'DEALLOCATE':
-            need(name in active and active[name][1] is True,
-                 'DYNAMIC_EVENT_BINDING_CHANGED')
+            need(name in active, 'BIND_DEALLOCATE_HANDLE_UNAVAILABLE')
+            need(active[name][1] is True, 'BIND_DEALLOCATE_BEFORE_EXECUTE')
             group_id = active.pop(name)[0]
-            need(group_id not in completed, 'DYNAMIC_EVENT_BINDING_CHANGED')
+            need(group_id not in completed, 'BIND_GROUP_ALREADY_CLOSED')
             groups[group_id]['deallocate'] = line
             completed.add(group_id)
-    need(probes == used_probes and not unconsumed and not active
-         and len(completed) == 3 and len(groups) == 3,
-         'DYNAMIC_EVENT_BINDING_CHANGED')
+    need(probes == used_probes, 'BIND_PROBE_NOT_CONSUMED')
+    need(not unconsumed, 'BIND_UNCONSUMED_VARIABLE')
+    need(not active, 'BIND_PREPARED_HANDLE_STILL_ACTIVE')
+    need(len(completed) == 3 and len(groups) == 3,
+         'BIND_COMPLETED_GROUP_COUNT_MISMATCH')
     # Canonical arrangement is for classification only. Each original event
     # has already been verified in its actual source order above.
     canonical = [probe_line]
@@ -322,7 +324,14 @@ if __name__=='__main__':
                'TARGET_SQL_UNAVAILABLE','THIRTEEN_LINE_GRAMMAR_CHANGED','THIRTEEN_LINE_ORDER_CHANGED',
                'PREPARE_EXECUTE_BINDINGS_CHANGED','METADATA_QUERY_SHAPE_UNPROVEN',
                'GUARD_NO_BRANCH_CHANGED','SQL_SCAN_BOUND_EXCEEDED','DYNAMIC_EVENT_COUNT_CHANGED',
-               'DYNAMIC_EVENT_BINDING_CHANGED','SESSION_SAVE_SCAN_BOUND_EXCEEDED',
+               'BIND_PROBE_DUPLICATE','BIND_ASSIGN_FLAG_NOT_PROBED',
+               'BIND_ASSIGN_PREVIOUS_VALUE_PENDING','BIND_PREPARE_HANDLE_ALREADY_ACTIVE',
+               'BIND_PREPARE_SOURCE_VARIABLE_UNAVAILABLE','BIND_EXECUTE_HANDLE_UNAVAILABLE',
+               'BIND_EXECUTE_ALREADY_USED','BIND_DEALLOCATE_HANDLE_UNAVAILABLE',
+               'BIND_DEALLOCATE_BEFORE_EXECUTE','BIND_GROUP_ALREADY_CLOSED',
+               'BIND_PROBE_NOT_CONSUMED','BIND_UNCONSUMED_VARIABLE',
+               'BIND_PREPARED_HANDLE_STILL_ACTIVE','BIND_COMPLETED_GROUP_COUNT_MISMATCH',
+               'SESSION_SAVE_SCAN_BOUND_EXCEEDED',
                'DYNAMIC_EVENT_SCAN_BOUND_EXCEEDED',
                'THIRTEEN_CONTROL_LINES_NOT_FOUND'}
         val=str(exc)
