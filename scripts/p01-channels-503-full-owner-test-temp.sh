@@ -97,9 +97,9 @@ cat > "$WORK/failures.php" <<'PHP'
 <?php
 declare(strict_types=1);
 $site=getenv('P01_SITE_ROOT');
-require $site.'/app/bootstrap.php';
-require $site.'/app/Repository.php';
-require $site.'/app/SurfaceRepository.php';
+require_once $site.'/app/bootstrap.php';
+require_once $site.'/app/Repository.php';
+require_once $site.'/app/SurfaceRepository.php';
 $repo=new VfRepository(vf_db());
 $codes=['YT_ATOM_HTTP_404','YT_HTTP_403','YT_TIMEOUT','YT_CHANNEL_ID_UNRESOLVED'];
 $texts=['订阅源暂不可用','YouTube 拒绝访问','连接超时','频道 ID 无法识别'];
