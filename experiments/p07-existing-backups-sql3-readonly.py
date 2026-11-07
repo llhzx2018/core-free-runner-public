@@ -139,70 +139,118 @@ def parse_guarded_lines(lines, verify):
              'GUARD_NO_BRANCH_CHANGED')
     return details
 
-def read_control_lines(sql,verify):
-    """Select the ONE complete observed guarded flow, not every dump control.
+def read_control_lines(sql, verify):
+    """Locate exactly the 13 bound events, regardless of interleaving/order.
 
-    MySQL 8.x dumps contain other versioned SET/control statements. Those must
-    not count toward the known 1 probe + 3*(assignment/prepare/execute/dealloc)
-    sequence. Unknown/interleaved statements inside the candidate stop selection.
-    This is advisory-only: no match can grant SQL execution or migration.
+    The release115 verifier accepts prepare/execute/deallocate interleavings.
+    Other versioned dump SET commands are *not* part of this 13-event flow.
+    This analyzer does not approve or execute any SQL.
     """
-    guard=re.compile(r'^/\*!(\d{5,6})\s+(.+?)\s*\*/;?$',re.I)
-    stage=re.compile(r'^(?:SELECT\s+COUNT\s*\(|SET\s+@|PREPARE\s+|EXECUTE\s+|DEALLOCATE\s+PREPARE\s+)', re.I)
-    events=[]; all_saves=[]
-    total=0; lines=0
-    with gzip.open(sql,'rt',encoding='utf-8',errors='strict') as f:
-        for raw in f:
-            lines+=1;total+=len(raw)
-            need(lines<=2_000_000 and total<=1_000_000_000,'SQL_SCAN_BOUND_EXCEEDED')
-            if len(raw)>16384:continue
-            line=raw.strip()
-            matched_save=SAVE_RE.fullmatch(line)
-            if matched_save:
-                need(len(all_saves)<128,'SESSION_SAVE_SCAN_BOUND_EXCEEDED')
-                all_saves.append((lines,matched_save.group('var').upper(),
-                                  matched_save.group('source').upper()))
-            m=guard.fullmatch(line)
-            if not (m and 40000<=int(m.group(1))<80000):
+    guard = re.compile(r'^/\*!([0-9]{5,6})\s+(.+?)\s*\*/;?$', re.I)
+    stage = re.compile(r'^(?:SELECT\s+COUNT\s*\(|SET\s+@|PREPARE\s+|EXECUTE\s+|DEALLOCATE\s+PREPARE\s+)', re.I)
+    matches = []
+    saves = []
+    unrelated = 0
+    scanned = 0
+    total = 0
+    with gzip.open(sql, 'rt', encoding='utf-8', errors='strict') as f:
+        for number, raw in enumerate(f, 1):
+            scanned = number
+            total += len(raw)
+            need(number <= 2_000_000 and total <= 1_000_000_000,
+                 'SQL_SCAN_BOUND_EXCEEDED')
+            if len(raw) > 16384:
                 continue
-            body=m.group(2).strip()
-            if verify._CROSS_ENGINE_TABLE_COUNT_RE.fullmatch(body):
-                kind='PROBE'
-            elif verify._CROSS_ENGINE_DYNAMIC_IF_RE.fullmatch(body):
-                kind='ASSIGN'
-            elif verify._CROSS_ENGINE_PREPARE_RE.fullmatch(body):
-                kind='PREPARE'
-            elif verify._CROSS_ENGINE_EXECUTE_RE.fullmatch(body):
-                kind='EXECUTE'
-            elif verify._CROSS_ENGINE_DEALLOCATE_RE.fullmatch(body):
-                kind='DEALLOCATE'
-            elif stage.match(body):
-                kind='UNKNOWN_STAGE'
+            line = raw.strip()
+            versioned = guard.fullmatch(line)
+            body = None
+            if versioned and 40000 <= int(versioned.group(1)) < 80000:
+                body = versioned.group(2).strip()
+            saved = SAVE_RE.fullmatch(body if body is not None else line)
+            if saved:
+                need(len(saves) < 128, 'SESSION_SAVE_SCAN_BOUND_EXCEEDED')
+                saves.append((number, saved.group('var').upper(),
+                              saved.group('source').upper()))
+            if body is None:
+                continue
+            if found := verify._CROSS_ENGINE_TABLE_COUNT_RE.fullmatch(body):
+                event = ('PROBE', found.group('flag').upper(), '', line)
+            elif found := verify._CROSS_ENGINE_DYNAMIC_IF_RE.fullmatch(body):
+                event = ('ASSIGN', found.group('stmt').upper(),
+                         found.group('flag').upper(), line)
+            elif found := verify._CROSS_ENGINE_PREPARE_RE.fullmatch(body):
+                event = ('PREPARE', found.group(1).upper(),
+                         found.group(2).upper(), line)
+            elif found := verify._CROSS_ENGINE_EXECUTE_RE.fullmatch(body):
+                event = ('EXECUTE', found.group(1).upper(), '', line)
+            elif found := verify._CROSS_ENGINE_DEALLOCATE_RE.fullmatch(body):
+                event = ('DEALLOCATE', found.group(1).upper(), '', line)
             else:
+                if stage.match(body):
+                    unrelated += 1
                 continue
-            need(len(events)<1024,'CONTROL_EVENT_SCAN_BOUND_EXCEEDED')
-            events.append((kind,lines,line))
-    # Only the expected ordered flow is a candidate. Unrelated versioned
-    # controls before/after it remain counted but do not cause a false positive.
-    shape=['PROBE']+['ASSIGN','PREPARE','EXECUTE','DEALLOCATE']*3
-    matches=[]
-    for i,(kind,lineno,line) in enumerate(events):
-        if kind!='PROBE':
-            continue
-        window=events[i:i+13]
-        if len(window)==13 and [entry[0] for entry in window]==shape:
-            matches.append(window)
-    need(len(matches)==1,
-         'CONTROL_GROUP_AMBIGUOUS' if matches else 'THIRTEEN_CONTROL_LINES_NOT_FOUND')
-    matched=matches[0]
-    details=parse_guarded_lines([item[2] for item in matched],verify)
-    a,b,c=details
-    # The saved assignment must precede the selected guarded flow. This does
-    # not establish it ran or that its runtime value was safe.
-    saves={(name,source) for at,name,source in all_saves if at<matched[0][1]}
-    relation=(b['name'] is not None and b['name']==c['name'] and
-              c['value_name'] is not None and (c['value_name'],c['name']) in saves)
-    return details,relation,len(saves),len(events)-13
+            need(len(matches) < 128, 'DYNAMIC_EVENT_SCAN_BOUND_EXCEEDED')
+            matches.append((number, *event))
+    kinds = ['PROBE', 'ASSIGN', 'PREPARE', 'EXECUTE', 'DEALLOCATE']
+    counts = {k: sum(x[1] == k for x in matches) for k in kinds}
+    need(counts == {'PROBE': 1, 'ASSIGN': 3, 'PREPARE': 3,
+                    'EXECUTE': 3, 'DEALLOCATE': 3},
+         'DYNAMIC_EVENT_COUNT_CHANGED')
+    probes = set()
+    used_probes = set()
+    unconsumed = {}
+    active = {}
+    completed = set()
+    groups = []
+    probe_line = None
+    for lineno, kind, name, other, line in matches:
+        if kind == 'PROBE':
+            need(not probes, 'DYNAMIC_EVENT_BINDING_CHANGED')
+            probes.add(name)
+            probe_line = line
+        elif kind == 'ASSIGN':
+            need(other in probes and name not in unconsumed,
+                 'DYNAMIC_EVENT_BINDING_CHANGED')
+            group = {'assign': line, 'assign_at': lineno}
+            groups.append(group)
+            unconsumed[name] = len(groups) - 1
+            used_probes.add(other)
+        elif kind == 'PREPARE':
+            need(name not in active and other in unconsumed,
+                 'DYNAMIC_EVENT_BINDING_CHANGED')
+            group_id = unconsumed.pop(other)
+            groups[group_id]['prepare'] = line
+            active[name] = (group_id, False)
+        elif kind == 'EXECUTE':
+            need(name in active and active[name][1] is False,
+                 'DYNAMIC_EVENT_BINDING_CHANGED')
+            group_id = active[name][0]
+            groups[group_id]['execute'] = line
+            active[name] = (group_id, True)
+        elif kind == 'DEALLOCATE':
+            need(name in active and active[name][1] is True,
+                 'DYNAMIC_EVENT_BINDING_CHANGED')
+            group_id = active.pop(name)[0]
+            need(group_id not in completed, 'DYNAMIC_EVENT_BINDING_CHANGED')
+            groups[group_id]['deallocate'] = line
+            completed.add(group_id)
+    need(probes == used_probes and not unconsumed and not active
+         and len(completed) == 3 and len(groups) == 3,
+         'DYNAMIC_EVENT_BINDING_CHANGED')
+    # Canonical arrangement is for classification only. Each original event
+    # has already been verified in its actual source order above.
+    canonical = [probe_line]
+    for group in groups:
+        canonical.extend(group[x] for x in ('assign', 'prepare',
+                                           'execute', 'deallocate'))
+    details = parse_guarded_lines(canonical, verify)
+    a, b, c = details
+    preceding = {(name, src) for at, name, src in saves
+                 if at < groups[2]['assign_at']}
+    save_relation = (b['name'] is not None and b['name'] == c['name']
+                     and c['value_name'] is not None
+                     and (c['value_name'], c['name']) in preceding)
+    return details, save_relation, len(preceding), unrelated
 
 def main():
     need(os.geteuid()==0,'CP2_ROOT_REQUIRED')
@@ -273,8 +321,9 @@ if __name__=='__main__':
                'TARGET_PACKAGE_PROVENANCE_CHANGED','TARGET_DB_CHANGED','TARGET_SQL_PATH_UNSAFE',
                'TARGET_SQL_UNAVAILABLE','THIRTEEN_LINE_GRAMMAR_CHANGED','THIRTEEN_LINE_ORDER_CHANGED',
                'PREPARE_EXECUTE_BINDINGS_CHANGED','METADATA_QUERY_SHAPE_UNPROVEN',
-               'GUARD_NO_BRANCH_CHANGED','SQL_SCAN_BOUND_EXCEEDED','CONTROL_GROUP_AMBIGUOUS',
-               'SESSION_SAVE_SCAN_BOUND_EXCEEDED','CONTROL_EVENT_SCAN_BOUND_EXCEEDED',
+               'GUARD_NO_BRANCH_CHANGED','SQL_SCAN_BOUND_EXCEEDED','DYNAMIC_EVENT_COUNT_CHANGED',
+               'DYNAMIC_EVENT_BINDING_CHANGED','SESSION_SAVE_SCAN_BOUND_EXCEEDED',
+               'DYNAMIC_EVENT_SCAN_BOUND_EXCEEDED',
                'THIRTEEN_CONTROL_LINES_NOT_FOUND'}
         val=str(exc)
         out('CHECK_BLOCKED',val if val in codes else 'PRIVATE_ANALYSIS_UNAVAILABLE')
