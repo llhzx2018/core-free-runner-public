@@ -48,7 +48,7 @@ def source_manifest(repair_file, official_full):
     m=re.search(r"private const TARGET_MANIFEST='([^']+)';", raw)
     require(bool(m), "prior official target manifest is missing")
     obj=json.loads(base64.b64decode(m.group(1)))
-    require(isinstance(obj,dict) and len(obj)>500, "prior official manifest inventory too small")
+    require(isinstance(obj,dict) and len(obj)>10 and "VERSION.txt" in obj and "app/bootstrap.php" in obj, "prior official target manifest identity missing")
     source={}
     for rel,digest in obj.items():
         p=official_full/rel
@@ -174,7 +174,6 @@ def main():
         unpack_bundle(srczip,srcfull);unpack_bundle(updatezip,srcupdate)
         source=source_manifest(srcupdate/f"repair-v{srcver}.php",srcfull)
         # Match official manifest scoped files, not release-only full package notes.
-        extra=set(srcfull.relative_to(x) for x in []) # intentionally empty
         repair=make_repair(engine,maintenance,source,target_files,srcver,
                            wk/f"derived-from-{srcver}-repair.php")
         oldsite=wk/("success-"+srcver)
