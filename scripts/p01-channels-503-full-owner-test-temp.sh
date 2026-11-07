@@ -101,6 +101,7 @@ require_once $site.'/app/bootstrap.php';
 require_once $site.'/app/Repository.php';
 require_once $site.'/app/SurfaceRepository.php';
 $repo=new VfRepository(vf_db());
+$surface=new VfSurfaceRepository(vf_db());
 $codes=['YT_ATOM_HTTP_404','YT_HTTP_403','YT_TIMEOUT','YT_CHANNEL_ID_UNRESOLVED'];
 $texts=['订阅源暂不可用','YouTube 拒绝访问','连接超时','频道 ID 无法识别'];
 $cache=[];
@@ -111,6 +112,7 @@ foreach($codes as $i=>$code){
     'description'=>'test only','is_private'=>1,'is_pending'=>0]);
   $id=(int)$r['id'];
   if($id<=0)throw new RuntimeException('Synthetic seed failed');
+  $surface->upsertProfile($id,['surface'=>'channels','resource_kind'=>'频道']);
   $cache[(string)$id]=['url_hash'=>hash('sha256',$url),'attempted_at'=>time()-600,
     'error_code'=>$code,'error'=>$texts[$i],'checked_at'=>0,'items'=>[],'new_count'=>0];
 }
