@@ -140,9 +140,16 @@ def parse_guarded_lines(lines, verify):
     return details
 
 def read_control_lines(sql,verify):
+    """Select the ONE complete observed guarded flow, not every dump control.
+
+    MySQL 8.x dumps contain other versioned SET/control statements. Those must
+    not count toward the known 1 probe + 3*(assignment/prepare/execute/dealloc)
+    sequence. Unknown/interleaved statements inside the candidate stop selection.
+    This is advisory-only: no match can grant SQL execution or migration.
+    """
     guard=re.compile(r'^/\*!(\d{5,6})\s+(.+?)\s*\*/;?$',re.I)
     stage=re.compile(r'^(?:SELECT\s+COUNT\s*\(|SET\s+@|PREPARE\s+|EXECUTE\s+|DEALLOCATE\s+PREPARE\s+)', re.I)
-    captured=[];saves=[]
+    events=[]; all_saves=[]
     total=0; lines=0
     with gzip.open(sql,'rt',encoding='utf-8',errors='strict') as f:
         for raw in f:
@@ -150,20 +157,52 @@ def read_control_lines(sql,verify):
             need(lines<=2_000_000 and total<=1_000_000_000,'SQL_SCAN_BOUND_EXCEEDED')
             if len(raw)>16384:continue
             line=raw.strip()
-            if len(captured)<13:
-                m=SAVE_RE.fullmatch(line)
-                if m and len(saves)<128:
-                    saves.append((m.group('var').upper(),m.group('source').upper()))
+            matched_save=SAVE_RE.fullmatch(line)
+            if matched_save:
+                need(len(all_saves)<128,'SESSION_SAVE_SCAN_BOUND_EXCEEDED')
+                all_saves.append((lines,matched_save.group('var').upper(),
+                                  matched_save.group('source').upper()))
             m=guard.fullmatch(line)
-            if m and 40000<=int(m.group(1))<80000 and stage.match(m.group(2).strip()):
-                captured.append(line)
-                need(len(captured)<=13,'MORE_THAN_THIRTEEN_CONTROL_LINES')
-    need(len(captured)==13,'THIRTEEN_CONTROL_LINES_NOT_FOUND')
-    details=parse_guarded_lines(captured,verify)
+            if not (m and 40000<=int(m.group(1))<80000):
+                continue
+            body=m.group(2).strip()
+            if verify._CROSS_ENGINE_TABLE_COUNT_RE.fullmatch(body):
+                kind='PROBE'
+            elif verify._CROSS_ENGINE_DYNAMIC_IF_RE.fullmatch(body):
+                kind='ASSIGN'
+            elif verify._CROSS_ENGINE_PREPARE_RE.fullmatch(body):
+                kind='PREPARE'
+            elif verify._CROSS_ENGINE_EXECUTE_RE.fullmatch(body):
+                kind='EXECUTE'
+            elif verify._CROSS_ENGINE_DEALLOCATE_RE.fullmatch(body):
+                kind='DEALLOCATE'
+            elif stage.match(body):
+                kind='UNKNOWN_STAGE'
+            else:
+                continue
+            need(len(events)<1024,'CONTROL_EVENT_SCAN_BOUND_EXCEEDED')
+            events.append((kind,lines,line))
+    # Only the expected ordered flow is a candidate. Unrelated versioned
+    # controls before/after it remain counted but do not cause a false positive.
+    shape=['PROBE']+['ASSIGN','PREPARE','EXECUTE','DEALLOCATE']*3
+    matches=[]
+    for i,(kind,lineno,line) in enumerate(events):
+        if kind!='PROBE':
+            continue
+        window=events[i:i+13]
+        if len(window)==13 and [entry[0] for entry in window]==shape:
+            matches.append(window)
+    need(len(matches)==1,
+         'CONTROL_GROUP_AMBIGUOUS' if matches else 'THIRTEEN_CONTROL_LINES_NOT_FOUND')
+    matched=matches[0]
+    details=parse_guarded_lines([item[2] for item in matched],verify)
     a,b,c=details
+    # The saved assignment must precede the selected guarded flow. This does
+    # not establish it ran or that its runtime value was safe.
+    saves={(name,source) for at,name,source in all_saves if at<matched[0][1]}
     relation=(b['name'] is not None and b['name']==c['name'] and
               c['value_name'] is not None and (c['value_name'],c['name']) in saves)
-    return details,relation,len(saves)
+    return details,relation,len(saves),len(events)-13
 
 def main():
     need(os.geteuid()==0,'CP2_ROOT_REQUIRED')
@@ -200,10 +239,11 @@ def main():
          'PACKAGE_SCOPE_CHANGED')
     source_sql=package_sql(cp2source,package_core,db,transfer,'SOURCE')
     _=package_sql(cp2target,package_core,db,target,'TARGET')
-    details,save_relation,save_count=read_control_lines(source_sql,verify)
+    details,save_relation,save_count,other_controls=read_control_lines(source_sql,verify)
     out('TWO_BACKUPS_REVALIDATED','PASS')
     out('SOURCE_CP2_COPY_INTEGRITY','PASS')
     out('CONTROL_LINES',13)
+    out('OTHER_VERSIONED_CONTROL_LINES',other_controls)
     out('DYNAMIC_SQL_GROUPS',3)
     for i,v in enumerate(details,1):
         out(f'G{i}_CATEGORY', v.get('kind',v.get('class')))
@@ -233,7 +273,8 @@ if __name__=='__main__':
                'TARGET_PACKAGE_PROVENANCE_CHANGED','TARGET_DB_CHANGED','TARGET_SQL_PATH_UNSAFE',
                'TARGET_SQL_UNAVAILABLE','THIRTEEN_LINE_GRAMMAR_CHANGED','THIRTEEN_LINE_ORDER_CHANGED',
                'PREPARE_EXECUTE_BINDINGS_CHANGED','METADATA_QUERY_SHAPE_UNPROVEN',
-               'GUARD_NO_BRANCH_CHANGED','SQL_SCAN_BOUND_EXCEEDED','MORE_THAN_THIRTEEN_CONTROL_LINES',
+               'GUARD_NO_BRANCH_CHANGED','SQL_SCAN_BOUND_EXCEEDED','CONTROL_GROUP_AMBIGUOUS',
+               'SESSION_SAVE_SCAN_BOUND_EXCEEDED','CONTROL_EVENT_SCAN_BOUND_EXCEEDED',
                'THIRTEEN_CONTROL_LINES_NOT_FOUND'}
         val=str(exc)
         out('CHECK_BLOCKED',val if val in codes else 'PRIVATE_ANALYSIS_UNAVAILABLE')
