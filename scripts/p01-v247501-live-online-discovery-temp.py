@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Owner-approved P01 v500: isolated installed v500 end-to-end real GitHub online discovery.
+"""Owner-approved P01 v501: isolated installed v500 end-to-end real GitHub online discovery.
 All files and SQLite are synthetic in disposable Public Runner. No Production traffic/writes.
 Token is injected in the child PHP process only, never printed or copied into Public Artifact.
 """
@@ -25,12 +25,12 @@ def main():
     helper.unpack_bundle(Path(a.source_full).resolve(),site)
     helper.synthetic_setup(site,18963)
     ident=helper.sentinel(site,"Public Runner real remote discovery synthetic private record")
-    must((site/"VERSION.txt").read_text().strip()=="2.47.500","not official 499 installed")
+    must((site/"VERSION.txt").read_text().strip()=="2.47.500","not official 500 installed")
     token=os.environ.get("VF_PRIVATE_READ_TOKEN","")
     must(len(token)>20,"read-only token capability unavailable")
-    # Use PRODUCT INSTALLED 499 update manager, not a mocked adapter or preloaded JSON.
+    # Use PRODUCT INSTALLED 500 update manager, not a mocked adapter or preloaded JSON.
     # It makes an actual GitHub REST GET of core-updates/main/projects/P01.json,
-    # retrieves the live official 500 Release asset via GitHubClient, verifies
+    # retrieves the live official 501 Release asset via GitHubClient, verifies
     # the bytes & SHA, makes a synthetic backup and applies Atomic.
     php=(
         'require $argv[1]."/app/bootstrap.php";'
@@ -52,7 +52,7 @@ def main():
         'if(empty($done["ok"])||empty($done["updated"])'
         '||$done["from_version"]!=="2.47.500"||$done["to_version"]!=="2.47.501")'
         '{fwrite(STDERR,"ACTUAL_ONLINE_ATOMIC_FAILED\\n");exit(75);}'
-        'echo "P01_V501_REAL_EXISTING_499_ONLINE_ATOMIC_INSTALL=PASS\\n";'
+        'echo "P01_V501_REAL_EXISTING_500_ONLINE_ATOMIC_INSTALL=PASS\\n";'
     )
     env=os.environ.copy()
     proc=subprocess.run(["php","-r",php,str(site)],cwd=site,env=env,
@@ -63,10 +63,10 @@ def main():
         raise SystemExit(40)
     for marker in ["P01_V501_LIVE_GITHUB_CHANNEL_DISCOVERY_500_TO_501=PASS",
                    "P01_V501_REAL_RELEASE_DOWNLOAD_HASH_BACKUP_PREPARE=PASS",
-                   "P01_V501_REAL_EXISTING_499_ONLINE_ATOMIC_INSTALL=PASS"]:
+                   "P01_V501_REAL_EXISTING_500_ONLINE_ATOMIC_INSTALL=PASS"]:
         must(marker in proc.stdout,"missing manager proof "+marker)
         print(marker,flush=True)
-    must((site/"VERSION.txt").read_text().strip()=="2.47.501","actual channel install did not install 500")
+    must((site/"VERSION.txt").read_text().strip()=="2.47.501","actual channel install did not install 501")
     verify=subprocess.run(["php",str(site/"cli/verify.php")],cwd=site,env=env,
                           stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=40)
     must(verify.returncode==0 and "VERIFY_PASS=YES" in verify.stdout,
