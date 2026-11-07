@@ -7,7 +7,7 @@ Existing candidate package, regression and rollback PASS are reused, not re-run.
 """
 from __future__ import annotations
 import argparse
-import http.cookiejar
+from http.cookiejar import CookieJar
 import json
 import os
 from pathlib import Path
@@ -76,7 +76,7 @@ def sql_check(db):
     finally:con.close()
 
 def installed_reentry_and_guest_denials(site,port):
-    op=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+    op=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
     server,url=http_server(site,port)
     try:
         code,page=http(op,url+"/setup.php")
