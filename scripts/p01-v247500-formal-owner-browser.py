@@ -201,9 +201,100 @@ def owner_chromium_ui(site,port):
         require(result.get("status") in (400,401,403,419,422,429),
                 "CSRF-less Owner update_prepare was accepted: "+str(result))
         print("P01_247500_AUTHENTICATED_OWNER_NO_CSRF_PREPARE_DENIED=PASS",flush=True)
+
+        # Synthetic orphan v498->499 journal without any later verified
+        # success must remain immutable and visible in the real V500 UI.
+        root=run("php","-r",
+                 'require $argv[1]."/app/bootstrap.php";echo VF_PRIVATE_ROOT;',
+                 str(site),cwd=site).stdout.strip()
+        require(bool(root) and Path(root).is_dir(),"synthetic private root missing")
+        journal_dir=Path(root)/"updates"/"journals"
+        journal_dir.mkdir(parents=True,exist_ok=True)
+        old_id="20261106151526-1234567890abcdef"
+        old={
+            "operation_id":old_id,"package_id":"vf-start","result":"installing",
+            "from_version":"2.47.498","to_version":"2.47.499",
+            "started_at":"2026-11-06T15:15:26+00:00","completed_at":"",
+            "release_manifest_sha256":"a"*64,"update_package_sha256":"b"*64
+        }
+        journal=journal_dir/(old_id+".json")
+        require(not journal.exists(),"unexpected old synthetic journal")
+        old_bytes=json.dumps(old,separators=(",",":")).encode()
+        journal.write_bytes(old_bytes)
+        driver.get(url+"/")
+        w.until(lambda d:bool(d.find_elements(By.CSS_SELECTOR,"[data-vf-global-manage-open]")))
+        driver.find_element(By.CSS_SELECTOR,"[data-vf-global-manage-open]").click()
+        w.until(lambda d:d.find_element(By.CSS_SELECTOR,"#vf-local-management").get_attribute("open") is not None)
+        driver.find_element(By.CSS_SELECTOR,'[data-vf-global-group="update"]').click()
+        w.until(lambda d:"上次升级" in d.find_element(By.CSS_SELECTOR,"#updateState").text)
+        state=driver.find_element(By.CSS_SELECTOR,"#updateState").text
+        require("上次升级" in state,"interrupted warning missing")
+        install=driver.find_element(By.CSS_SELECTOR,"#installUpdate")
+        require(bool(driver.execute_script("return arguments[0].hidden || arguments[0].disabled",install)),
+                "interrupted Atomic mistakenly offers install")
+        require(journal.read_bytes()==old_bytes,"old journal was silently rewritten")
+        response=driver.execute_async_script(
+            'var cb=arguments[arguments.length-1];'
+            'fetch("api.php?action=update_status",{credentials:"same-origin",cache:"no-store"})'
+            '.then(async r=>cb({status:r.status,body:await r.text()}))'
+            '.catch(e=>cb({error:String(e)}));')
+        require(response.get("status")==200,"status endpoint not responding")
+        obj=json.loads(response["body"])
+        require(obj["status"]["install_recovery"]["required"] is True,
+                "real status not blocking prior unverified crash")
+        require(root not in response["body"] and PASSWORD not in response["body"],
+                "private paths or credentials leaked in update status")
+        require(journal.read_bytes()==old_bytes,
+                "read-only interrupted status mutated synthetic journal")
+        print("P01_247500_REAL_CHROMIUM_INTERRUPTED_JOURNAL_VISIBLE_NO_RETRY=PASS",flush=True)
+        print("P01_247500_UPDATE_STATUS_PRIVATE_LOG_REDACTION=PASS",flush=True)
+        journal.unlink()
+
     finally:
         if driver is not None:driver.quit()
         terminate(server)
+
+def real_chromium_clean_full_first_setup(site,port):
+    from selenium import webdriver
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.support.ui import WebDriverWait
+    browser=shutil.which("google-chrome") or shutil.which("chromium")
+    binary=shutil.which("chromedriver")
+    require(browser is not None and binary is not None,"Chrome/driver not available")
+    srv,url=http_server(site,port)
+    opts=Options();opts.binary_location=browser
+    for arg in ("--headless=new","--no-sandbox","--disable-dev-shm-usage","--window-size=1440,900"):
+        opts.add_argument(arg)
+    driver=None
+    try:
+        driver=webdriver.Chrome(service=Service(binary),options=opts)
+        driver.set_page_load_timeout(20)
+        driver.get(url+"/")
+        wait=WebDriverWait(driver,13)
+        wait.until(lambda d:bool(d.find_elements(By.CSS_SELECTOR,'input[name="setup_csrf"]')))
+        require("/setup.php" in driver.current_url,"clean browser first request failed to route to Setup")
+        driver.find_element(By.CSS_SELECTOR,'input[name="admin_password"]').send_keys(PASSWORD)
+        driver.find_element(By.CSS_SELECTOR,'input[name="admin_password_confirm"]').send_keys(PASSWORD)
+        driver.find_element(By.CSS_SELECTOR,'form button[type=submit]').click()
+        wait.until(lambda d:"VF Start 安装完成" in d.page_source)
+        print("P01_247500_REAL_CHROMIUM_CLEAN_FULL_FIRST_SETUP=PASS",flush=True)
+        driver.find_element(By.CSS_SELECTOR,'a[href="/"]').click()
+        wait.until(lambda d:bool(d.find_elements(By.CSS_SELECTOR,"[data-vf-auth-login]")))
+        driver.find_element(By.CSS_SELECTOR,"[data-vf-auth-login]").click()
+        wait.until(lambda d:bool(d.find_elements(By.CSS_SELECTOR,'[data-vf-auth-dialog] input[name=password]')))
+        driver.find_element(By.CSS_SELECTOR,'[data-vf-auth-dialog] input[name=password]').send_keys(PASSWORD)
+        driver.find_element(By.CSS_SELECTOR,'[data-vf-auth-dialog] [data-vf-auth-submit]').click()
+        wait.until(lambda d:bool(d.find_elements(By.CSS_SELECTOR,"[data-vf-global-manage-open]")))
+        driver.get(url+"/setup.php")
+        wait.until(lambda d:"/setup.php" not in d.current_url)
+        run("php",str(site/"cli/verify.php"),cwd=site,timeout=30)
+        sql_check(locate_db(site))
+        print("P01_247500_REAL_CHROMIUM_FIRST_ADMIN_LOGIN_SETUP_REVISIT_LOCK=PASS",flush=True)
+    finally:
+        if driver is not None:driver.quit()
+        terminate(srv)
 
 def main():
     ap=argparse.ArgumentParser()
@@ -223,6 +314,7 @@ def main():
     for arc,dest in [(args.source_full,src),(args.candidate_full,tar),
                      (args.candidate_update,upd)]:
         t.unpack_bundle(Path(arc),dest)
+    real_chromium_clean_full_first_setup(tar,18944)
     repair=upd/"repair-v2.47.500.php"
     require(repair.is_file(),"target Atomic missing")
     site=work/"focused-upgraded-site"
