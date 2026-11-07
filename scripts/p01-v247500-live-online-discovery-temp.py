@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""Owner-approved P01 v500: isolated installed v499 end-to-end real GitHub online discovery.
+All files and SQLite are synthetic in disposable Public Runner. No Production traffic/writes.
+Token is injected in the child PHP process only, never printed or copied into Public Artifact.
+"""
+from __future__ import annotations
+import argparse
+import importlib.util
+import os
+from pathlib import Path
+import subprocess
+
+def must(x,s):
+    if not x:raise AssertionError(s)
+
+def main():
+    p=argparse.ArgumentParser()
+    p.add_argument("--source-full",required=True)
+    p.add_argument("--work",required=True)
+    a=p.parse_args()
+    work=Path(a.work).resolve()
+    spec=importlib.util.spec_from_file_location("synthetic",Path(__file__).with_name("p01-v247500-channel-live-synthetic-helper.py"))
+    helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(helper)
+    site=work/"actual-online-v499"
+    helper.unpack_bundle(Path(a.source_full).resolve(),site)
+    helper.synthetic_setup(site,18963)
+    ident=helper.sentinel(site,"Public Runner real remote discovery synthetic private record")
+    must((site/"VERSION.txt").read_text().strip()=="2.47.499","not official 499 installed")
+    token=os.environ.get("VF_PRIVATE_READ_TOKEN","")
+    must(len(token)>20,"read-only token capability unavailable")
+    # Use PRODUCT INSTALLED 499 update manager, not a mocked adapter or preloaded JSON.
+    # It makes an actual GitHub REST GET of core-updates/main/projects/P01.json,
+    # retrieves the live official 500 Release asset via GitHubClient, verifies
+    # the bytes & SHA, makes a synthetic backup and applies Atomic.
+    php=(
+        'require $argv[1]."/app/bootstrap.php";'
+        'require_once $argv[1]."/app/UpdateManager.php";'
+        '$m=new VfUpdateManager(vf_db(),["root"=>$argv[1],"private_root"=>VF_PRIVATE_ROOT,"current_version"=>"2.47.499"]);'
+        '$check=$m->check(true);'
+        'if(empty($check["ok"])||empty($check["available"])||empty($check["can_update"])'
+        '||$check["current_version"]!=="2.47.499"||$check["latest_version"]!=="2.47.500")'
+        '{fwrite(STDERR,"DISCOVERY_CHECK_FAILED\\n");exit(73);}'
+        'echo "P01_V500_LIVE_GITHUB_CHANNEL_DISCOVERY_499_TO_500=PASS\\n";'
+        '$prepared=$m->prepare();'
+        'if(empty($prepared["ok"])||empty($prepared["operation_id"])'
+        '||$prepared["to_version"]!=="2.47.500"'
+        '||$prepared["update_package_sha256"]!=="26d8b2261413883eee452868357c8d79a8972c60c854f8a25b27ace7377e7c9d"'
+        '||$prepared["update_package_bytes"]!==3785946)'
+        '{fwrite(STDERR,"PREPARE_CHECK_FAILED\\n");exit(74);}'
+        'echo "P01_V500_REAL_RELEASE_DOWNLOAD_HASH_BACKUP_PREPARE=PASS\\n";'
+        '$done=$m->install($prepared["operation_id"]);'
+        'if(empty($done["ok"])||empty($done["updated"])'
+        '||$done["from_version"]!=="2.47.499"||$done["to_version"]!=="2.47.500")'
+        '{fwrite(STDERR,"ACTUAL_ONLINE_ATOMIC_FAILED\\n");exit(75);}'
+        'echo "P01_V500_REAL_EXISTING_499_ONLINE_ATOMIC_INSTALL=PASS\\n";'
+    )
+    env=os.environ.copy()
+    proc=subprocess.run(["php","-r",php,str(site)],cwd=site,env=env,
+                        stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=160)
+    if proc.returncode:
+        print("P01_V500_LIVE_MANAGER_RESULT=FAIL:"+str(proc.returncode),flush=True)
+        print("P01_V500_LIVE_MANAGER_PUBLIC_DIAGNOSTIC="+proc.stderr[-250:].replace(token,"[redacted]"),flush=True)
+        raise SystemExit(40)
+    for marker in ["P01_V500_LIVE_GITHUB_CHANNEL_DISCOVERY_499_TO_500=PASS",
+                   "P01_V500_REAL_RELEASE_DOWNLOAD_HASH_BACKUP_PREPARE=PASS",
+                   "P01_V500_REAL_EXISTING_499_ONLINE_ATOMIC_INSTALL=PASS"]:
+        must(marker in proc.stdout,"missing manager proof "+marker)
+        print(marker,flush=True)
+    must((site/"VERSION.txt").read_text().strip()=="2.47.500","actual channel install did not install 500")
+    verify=subprocess.run(["php",str(site/"cli/verify.php")],cwd=site,env=env,
+                          stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True,timeout=40)
+    must(verify.returncode==0 and "VERIFY_PASS=YES" in verify.stdout,
+         "post-online-update SQLite verification failed")
+    helper.check_sentinel(site,ident,"Public Runner real remote discovery synthetic private record")
+    print("P01_V500_REAL_GITHUB_ONLINE_499_TO_500_PRIVATE_DATA_PRESERVED=PASS",flush=True)
+    print("P01_V500_PRODUCTION=UNCHANGED",flush=True)
+
+if __name__=="__main__":main()
