@@ -334,6 +334,49 @@ def main():
     owner_chromium_ui(site,18943)
     t.check_sentinel(site,sent,"Owner browser security synthetic private sentinel")
     sql_check(locate_db(site))
+    repeat=json.loads(run("php",str(repair),"--run="+str(site),cwd=site,timeout=120).stdout)
+    require(repeat.get("ok") is True and repeat.get("already_current") is True,
+            "formal Atomic fails idempotence")
+    print("P01_247500_FORMAL_BYTES_ATOMIC_IDEMPOTENCE=PASS",flush=True)
+
+    # Formal publication archives must pass a fresh rollback/hard-PHP-exit
+    # proof; earlier test-only packages are not the same bytes.
+    rollback=work/"formal-rollback-499"
+    shutil.copytree(src,rollback)
+    t.synthetic_setup(rollback,18945)
+    rollback_label="Formal release rollback synthetic private"
+    rid=t.sentinel(rollback,rollback_label)
+    env=os.environ.copy();env["VF_ATOMIC_TEST_FAIL_AFTER_APPLY"]="1"
+    failed=run("php",str(repair),"--run="+str(rollback),cwd=rollback,
+               timeout=150,expect=None,env=env)
+    require(failed.returncode!=0,"formal fault injection unexpectedly succeeded")
+    require((rollback/"VERSION.txt").read_text().strip()=="2.47.499",
+            "formal fault rollback did not restore 499")
+    t.check_sentinel(rollback,rid,rollback_label)
+    sql_check(locate_db(rollback))
+    verify=run("php",str(rollback/"cli/verify.php"),cwd=rollback,timeout=30)
+    require("VERIFY_PASS=YES" in verify.stdout,"formal rolled back install failed integrity verification")
+    print("P01_247500_FORMAL_BYTES_FAULT_ROLLBACK_PRIVATE_SQLITE=PASS",flush=True)
+
+    interrupted=work/"formal-hard-interrupted-499"
+    shutil.copytree(src,interrupted)
+    t.synthetic_setup(interrupted,18946)
+    interrupted_label="Formal release hard-exit synthetic private"
+    iid=t.sentinel(interrupted,interrupted_label)
+    env2=os.environ.copy();env2["VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY"]="1"
+    killed=run("php",str(repair),"--run="+str(interrupted),cwd=interrupted,
+               timeout=150,expect=None,env=env2)
+    require(killed.returncode!=0,"hard-exit test did not interrupt Atomic")
+    resumed=json.loads(run("php",str(repair),"--run="+str(interrupted),
+                           cwd=interrupted,timeout=150).stdout)
+    require(resumed.get("ok") is True,"formal Atomic hard-exit recovery + apply failed")
+    require((interrupted/"VERSION.txt").read_text().strip()=="2.47.500",
+            "recovered instance version incorrect")
+    t.check_sentinel(interrupted,iid,interrupted_label)
+    sql_check(locate_db(interrupted))
+    verify=run("php",str(interrupted/"cli/verify.php"),cwd=interrupted,timeout=30)
+    require("VERIFY_PASS=YES" in verify.stdout,"formal hard-exit recovered site not verified")
+    print("P01_247500_FORMAL_BYTES_HARD_EXIT_RECOVERY_REAPPLY=PASS",flush=True)
     print("P01_247500_PRIVATE_SQLITE_INTEGRITY_POST_BROWSER_NEGATIVES=PASS",flush=True)
     print("P01_247500_FOCUSED_NEGATIVE_AND_REAL_OWNER_BROWSER=PASS",flush=True)
     print("P01_247500_FORMAL_RELEASE=NOT_EXECUTED",flush=True)
