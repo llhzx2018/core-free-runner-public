@@ -260,7 +260,7 @@ def main() -> None:
         ("SOURCE_ALTERNATES", {}),
     ):
         repair = replace_private(repair, name, obj)
-    for guard in ("recoverInterrupted", "journalPath", "VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY", "maintenanceLease", "GLOBAL_LOCK_WAIT_MS"):
+    for guard in ("recoverInterrupted", "journalPath", "VF_ATOMIC_TEST_HARD_EXIT_AFTER_APPLY", "maintenanceLease", "Atomic 维护锁等待超时"):
         if guard not in repair:
             die("Atomic interruption recovery engine missing: " + guard)
 
