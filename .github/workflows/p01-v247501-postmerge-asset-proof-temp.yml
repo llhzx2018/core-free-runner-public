@@ -1,0 +1,122 @@
+name: p01-v247501-postmerge-exact-package-proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247501-postmerge-asset-proof-temp.yml'
+permissions:
+  contents: read
+jobs:
+  postmerge-v501-exact-metadata-and-install:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    env:
+      SOURCE_SHA: 11d2fe8554fb45c3365c771ab686343207dcde81
+      SOURCE_TREE: 6d8d69957039894ee628db776b054ff402d22b29
+      WORK: /tmp/p01-v247501-merged-${{ github.run_id }}
+    steps:
+      - name: Checkout registered Public Runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prepare ephemeral native PHP and SQLite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$WORK"/{v500,official-full,official-update,out1,out2}
+          python3 -m py_compile scripts/p01-maintenance-release.py scripts/p01-v247501-synthetic-helper-temp.py
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-mbstring php-gd unzip >/dev/null
+          echo P01_V501_POSTMERGE_NATIVE_ENV=PASS
+      - name: Read real merged source and formally published 500 assets
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test -n "$READ_TOKEN"
+          remote="$(git ls-remote "https://x-access-token:$READ_TOKEN@github.com/llhzx2018/vf-start.git" refs/heads/main | awk '{print $1}')"
+          test "$remote" = "$SOURCE_SHA"
+          git clone -q --no-checkout "https://x-access-token:$READ_TOKEN@github.com/llhzx2018/vf-start.git" "$WORK/product"
+          git -C "$WORK/product" fetch -q --depth 2 origin "$SOURCE_SHA"
+          git -C "$WORK/product" checkout -q --detach "$SOURCE_SHA"
+          git -C "$WORK/product" remote set-url origin https://github.com/llhzx2018/vf-start.git
+          test "$(git -C "$WORK/product" rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          test "$(tr -d '\r\n ' < "$WORK/product/VERSION")" = 2.47.501
+          test "$(tr -d '\r\n ' < "$WORK/product/src/VERSION.txt")" = 2.47.501
+          grep -Fq "define('VF_VERSION', '2.47.501');" "$WORK/product/src/app/bootstrap.php"
+          gh release download v2.47.500 -R llhzx2018/vf-start -D "$WORK/v500" \
+            -p VF-Start-V2.47.500-FULL.zip -p VF_Start_V2.47.500_UPDATE.zip
+          printf '%s  %s\n' \
+            9a712e7cc1202babb2518670377171b0f2a7705286bdd1dc8ebbb7b55be59227 "$WORK/v500/VF-Start-V2.47.500-FULL.zip" \
+            26d8b2261413883eee452868357c8d79a8972c60c854f8a25b27ace7377e7c9d "$WORK/v500/VF_Start_V2.47.500_UPDATE.zip" | sha256sum -c -
+          unzip -qq "$WORK/v500/VF-Start-V2.47.500-FULL.zip" -d "$WORK/official-full"
+          unzip -qq "$WORK/v500/VF_Start_V2.47.500_UPDATE.zip" -d "$WORK/official-update"
+          echo P01_V501_EXACT_FINAL_MAIN_AND_SIGNED500_SOURCE=PASS
+      - name: Build final-HEAD candidate twice and verify final SHA/Tree in metadata
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for out in out1 out2; do
+            python3 scripts/p01-maintenance-release.py \
+              --candidate "$WORK/product/src" \
+              --baseline-full "$WORK/official-full" \
+              --baseline-repair "$WORK/official-update/repair-v2.47.500.php" \
+              --out "$WORK/$out" --version 2.47.501 --source-version 2.47.500 \
+              --target-sha "$SOURCE_SHA" --target-tree "$SOURCE_TREE" >/dev/null
+          done
+          cmp "$WORK/out1/VF-Start-V2.47.501-FULL.zip" "$WORK/out2/VF-Start-V2.47.501-FULL.zip"
+          cmp "$WORK/out1/VF_Start_V2.47.501_UPDATE.zip" "$WORK/out2/VF_Start_V2.47.501_UPDATE.zip"
+          python3 - "$WORK/out1/VF-Start-V2.47.501-FULL.zip" <<'PY'
+          import json,sys,zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              m=json.loads(z.read('release-manifest.json'))
+              assert m['source_commit']=='11d2fe8554fb45c3365c771ab686343207dcde81'
+              assert m['source_tree']=='6d8d69957039894ee628db776b054ff402d22b29'
+              assert m['version']=='2.47.501' and m['source_version']=='2.47.500'
+              assert m['schema_version']=='2026102201' and not m['schema_change']
+              assert m['maintenance_release']['updater_mechanism_unchanged'] is True
+          print('P01_V501_FINAL_HEAD_MANIFEST_EXACT=PASS')
+          PY
+          sha256sum "$WORK/out1/VF-Start-V2.47.501-FULL.zip" "$WORK/out1/VF_Start_V2.47.501_UPDATE.zip" | sed "s#$WORK/out1/##"
+          echo P01_V501_FINAL_HEAD_DETERMINISTIC_TEST_ONLY_BYTES=PASS
+      - name: Apply post-merge exact package to a synthetic official 500 instance
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$WORK" <<'PY'
+          import importlib.util,json,pathlib,subprocess,sys,zipfile
+          p=pathlib.Path(sys.argv[1])
+          helper=pathlib.Path('scripts/p01-v247501-synthetic-helper-temp.py')
+          spec=importlib.util.spec_from_file_location('p01_synthetic',helper)
+          mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+          root=p/'official500-installed'
+          mod.unpack_bundle(p/'v500'/'VF-Start-V2.47.500-FULL.zip',root)
+          mod.synthetic_setup(root,19516)
+          item=mod.sentinel(root,'final SHA v501 synthetic private retained')
+          with zipfile.ZipFile(p/'out1'/'VF_Start_V2.47.501_UPDATE.zip') as z:
+              assert z.namelist()==['repair-v2.47.501.php']
+              repair=p/'repair-v2.47.501.php'
+              repair.write_bytes(z.read(z.namelist()[0]))
+          sub=subprocess.run(['php',str(repair),'--run='+str(root)],cwd=root,
+                             text=True,capture_output=True,timeout=150)
+          if sub.returncode:raise SystemExit('postmerge Atomic failed '+sub.stderr[-280:])
+          result=json.loads(sub.stdout)
+          assert result.get('ok') is True and (root/'VERSION.txt').read_text().strip()=='2.47.501'
+          mod.check_sentinel(root,item,'final SHA v501 synthetic private retained')
+          verify=subprocess.run(['php',str(root/'cli'/'verify.php')],cwd=root,
+                                text=True,capture_output=True,timeout=50)
+          assert verify.returncode==0 and 'VERIFY_PASS=YES' in verify.stdout
+          print('P01_V501_FINAL_HEAD_500_TO_501_ATOMIC_PRIVATE_SQLITE=PASS')
+          PY
+      - name: Cleanup private source
+        if: always()
+        shell: bash
+        run: |
+          echo P01_V501_FINAL_REBUILD_FORMAL_RELEASE=NOT_EXECUTED
+          echo P01_V501_FINAL_REBUILD_PRODUCTION=UNCHANGED
+          echo P01_V501_PUBLIC_PRIVATE_SOURCE_ARTIFACT=NONE
+          case "$WORK" in /tmp/p01-v247501-merged-*) rm -rf -- "$WORK";; *) exit 87;; esac
