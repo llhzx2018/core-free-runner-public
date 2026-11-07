@@ -1,0 +1,141 @@
+name: p01-v247501-consolidated-candidate-machine-gate
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-v247501-consolidated-gate-temp.yml'
+      - 'scripts/p01-v247501-artifacts-browser-gate-temp.py'
+permissions:
+  contents: read
+jobs:
+  p01-v501-canonical-package-real-chrome:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      SOURCE_SHA: ceb4a009dbf1219b15c776298badd806da244546
+      SOURCE_TREE: 6d8d69957039894ee628db776b054ff402d22b29
+      P01_BASE_SHA: 5e1d0c5f2d1f89f7d361aa9de66569e4f4346ab6
+      OFFICIAL_V500_TAG_SHA: e8b13aeb13f5fbc9c3f2808acccab69fd05e542a
+      WORK: /tmp/p01-v247501-candidate-${{ github.run_id }}
+    steps:
+      - name: Checkout registered Public Runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Isolated PHP, SQLite, Chromium and Python test tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$WORK"/{v500-assets,official-full,official-update,out1,out2}
+          python3 -m py_compile scripts/p01-maintenance-release.py scripts/p01-v247501-artifacts-browser-gate-temp.py scripts/p01-v247501-synthetic-helper-temp.py
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-zip php-mbstring php-gd unzip >/dev/null
+          python3 -m venv "$WORK/venv"
+          "$WORK/venv/bin/python" -m pip -q install selenium
+          echo P01_V501_REQUIRED_TEST_RUNTIME=PASS
+      - name: Fetch exact Candidate PR SHA and official v500 Git baseline
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test -n "$READ_TOKEN"
+          remote="$(git ls-remote "https://x-access-token:$READ_TOKEN@github.com/llhzx2018/vf-start.git" refs/heads/release-candidate/p01-v247501-channel-reauth-ux-20261107 | awk '{print $1}')"
+          test "$remote" = "$SOURCE_SHA"
+          git clone -q --no-checkout "https://x-access-token:$READ_TOKEN@github.com/llhzx2018/vf-start.git" "$WORK/candidate"
+          git -C "$WORK/candidate" fetch -q --depth 12 origin "$SOURCE_SHA"
+          git -C "$WORK/candidate" checkout -q --detach "$SOURCE_SHA"
+          git -C "$WORK/candidate" remote set-url origin https://github.com/llhzx2018/vf-start.git
+          test "$(git -C "$WORK/candidate" rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git -C "$WORK/candidate" rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          git -C "$WORK/candidate" merge-base --is-ancestor "$P01_BASE_SHA" "$SOURCE_SHA"
+          test "$(git -C "$WORK/candidate" diff --name-only "$P01_BASE_SHA" "$SOURCE_SHA")" = "$(printf 'VERSION\nsrc/VERSION.txt\nsrc/app/bootstrap.php')"
+          test "$(tr -d '\r\n ' < "$WORK/candidate/VERSION")" = 2.47.501
+          test "$(tr -d '\r\n ' < "$WORK/candidate/src/VERSION.txt")" = 2.47.501
+          grep -Fq "define('VF_VERSION', '2.47.501');" "$WORK/candidate/src/app/bootstrap.php"
+          git clone -q --no-checkout "https://x-access-token:$READ_TOKEN@github.com/llhzx2018/vf-start.git" "$WORK/baseline"
+          git -C "$WORK/baseline" fetch -q --depth 1 origin "$OFFICIAL_V500_TAG_SHA"
+          git -C "$WORK/baseline" checkout -q --detach "$OFFICIAL_V500_TAG_SHA"
+          git -C "$WORK/baseline" remote set-url origin https://github.com/llhzx2018/vf-start.git
+          test "$(git -C "$WORK/baseline" rev-parse HEAD)" = "$OFFICIAL_V500_TAG_SHA"
+          gh release download v2.47.500 -R llhzx2018/vf-start -D "$WORK/v500-assets" \
+            -p VF-Start-V2.47.500-FULL.zip -p VF_Start_V2.47.500_UPDATE.zip
+          printf '%s  %s\n' \
+            9a712e7cc1202babb2518670377171b0f2a7705286bdd1dc8ebbb7b55be59227 "$WORK/v500-assets/VF-Start-V2.47.500-FULL.zip" \
+            26d8b2261413883eee452868357c8d79a8972c60c854f8a25b27ace7377e7c9d "$WORK/v500-assets/VF_Start_V2.47.500_UPDATE.zip" | sha256sum -c -
+          unzip -qq "$WORK/v500-assets/VF-Start-V2.47.500-FULL.zip" -d "$WORK/official-full"
+          unzip -qq "$WORK/v500-assets/VF_Start_V2.47.500_UPDATE.zip" -d "$WORK/official-update"
+          echo P01_V501_EXACT_PRODUCT_SOURCE_BASE_AND_SIGNED500=PASS
+      - name: Entire PHP Canonical regression on candidate vs real official tag
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash "$WORK/candidate/tests/canonical_release_regression.sh" \
+            "$WORK/candidate" "$WORK/baseline" --require-zero-debt
+          echo P01_V501_CANONICAL_ZERO_NEW_REGRESSION=PASS
+      - name: Run changed UI behavior and canonical security contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$WORK/candidate"
+          node tests/unit/p01_ia5_remote_channels_r34_contract.cjs
+          node tests/unit/p01_ia6_recent_auth_r21_contract.cjs
+          php tests/unit/p01_ia6_retired_gui_security_successor_contract.php
+          node --check src/assets/global-remote-channels.js
+          node --check src/assets/local-subsite-management.js
+          node --check src/assets/frontstage-recent-auth.js
+          php -l src/app/bootstrap.php >/dev/null
+          php -l src/app/FrontstageRecentAuth.php >/dev/null
+          echo P01_V501_EXACT_CHANNEL_AND_RECENT_AUTH_SECURITY_REGRESSION=PASS
+      - name: Build 501 from official v500 signed FULL and Atomic; verify deterministic bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for target in out1 out2; do
+            python3 scripts/p01-maintenance-release.py \
+              --candidate "$WORK/candidate/src" \
+              --baseline-full "$WORK/official-full" \
+              --baseline-repair "$WORK/official-update/repair-v2.47.500.php" \
+              --out "$WORK/$target" \
+              --version 2.47.501 --source-version 2.47.500 \
+              --target-sha "$SOURCE_SHA" --target-tree "$SOURCE_TREE" >/dev/null
+          done
+          cmp "$WORK/out1/VF-Start-V2.47.501-FULL.zip" "$WORK/out2/VF-Start-V2.47.501-FULL.zip"
+          cmp "$WORK/out1/VF_Start_V2.47.501_UPDATE.zip" "$WORK/out2/VF_Start_V2.47.501_UPDATE.zip"
+          unzip -t "$WORK/out1/VF-Start-V2.47.501-FULL.zip" >/dev/null
+          unzip -t "$WORK/out1/VF_Start_V2.47.501_UPDATE.zip" >/dev/null
+          python3 - "$WORK/out1/VF-Start-V2.47.501-FULL.zip" <<'PY'
+          import json,sys,zipfile
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              m=json.loads(archive.read('release-manifest.json'))
+              assert m['version']=='2.47.501' and m['source_version']=='2.47.500'
+              assert m['source_commit']=='ceb4a009dbf1219b15c776298badd806da244546'
+              assert m['source_tree']=='6d8d69957039894ee628db776b054ff402d22b29'
+              assert m['maintenance_release']['updater_mechanism_unchanged'] is True
+              assert m['schema_version']=='2026102201' and m['schema_change'] is False
+          print('P01_V501_MAINTENANCE_PACKAGE_IDENTITY_AND_SCHEMA=PASS')
+          PY
+          sha256sum "$WORK/out1/VF-Start-V2.47.501-FULL.zip" \
+                    "$WORK/out1/VF_Start_V2.47.501_UPDATE.zip" | sed "s#$WORK/out1/##"
+          echo P01_V501_TWICE_DETERMINISTIC_PACKAGE_BUILT_FROM_OFFICIAL500=PASS
+      - name: Real browser first FULL; real 500-to-501 Atomic, rollback, hard interruption, UI
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          "$WORK/venv/bin/python" scripts/p01-v247501-artifacts-browser-gate-temp.py \
+            --work "$WORK" \
+            --source-full "$WORK/v500-assets/VF-Start-V2.47.500-FULL.zip" \
+            --candidate-full "$WORK/out1/VF-Start-V2.47.501-FULL.zip" \
+            --candidate-update "$WORK/out1/VF_Start_V2.47.501_UPDATE.zip"
+          echo P01_V501_EXACT_CANDIDATE_ALL_REQUIRED_INSTALL_UPGRADE_UI=PASS
+      - name: Cleanup ephemeral private files
+        if: always()
+        shell: bash
+        run: |
+          echo P01_V501_FORMAL_RELEASE=NOT_EXECUTED
+          echo P01_V501_PRODUCTION=UNCHANGED
+          echo P01_V501_PUBLIC_PRIVATE_SOURCE_ARTIFACT=NONE
+          case "$WORK" in /tmp/p01-v247501-candidate-*) rm -rf -- "$WORK";; *) exit 86;; esac
