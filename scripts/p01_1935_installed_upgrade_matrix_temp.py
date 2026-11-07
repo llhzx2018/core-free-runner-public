@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Isolated 2.47.498/499 -> DERIVED 2.47.500 installed upgrade smoke.
-Not a Formal Release artifact or exact target release-tree proof.
+"""Isolated 2.47.498/499 -> EXACT code V2.47.500 installed upgrade smoke.
+Not an official Formal Release artifact; installed runtime is bound to exact Git source.
 Only synthetic users/SQLite and temporary release extract paths are allowed.
 """
 from __future__ import annotations
@@ -143,15 +143,14 @@ def main():
     engine=load_python(public/"p01-build-release-v2.py","p01_atomic_builder")
     maintenance=load_python(public/"p01-maintenance-release.py","p01_maintenance_helper")
     target_files=base.collect(cand/"src")
-    require(target_files["VERSION.txt"].strip()==b"2.47.499","candidate exact version shifted")
-    target_files["VERSION.txt"]=(TARGET_VERSION+"\n").encode()
-    old=target_files["app/bootstrap.php"]
-    updated=old.replace(b"define('VF_VERSION', '2.47.499');",b"define('VF_VERSION', '2.47.500');")
-    require(updated!=old,"bootstrap target-version binding missing")
-    target_files["app/bootstrap.php"]=updated
+    require(target_files["VERSION.txt"].strip()==TARGET_VERSION.encode(),"exact candidate source VERSION mismatch")
+    require((cand/"VERSION").read_text().strip()==TARGET_VERSION,"root candidate VERSION mismatch")
+    require(b"define('VF_VERSION', '2.47.500');" in target_files["app/bootstrap.php"],
+            "bootstrap target-version binding missing")
+    print("P01_1935_EXACT_CANDIDATE_RUNTIME_BYTES=PASS",flush=True)
     require(not any(x.endswith(".sqlite") or ".runtime.php" in x for x in target_files),"private data in target")
-    # Isolated FULL is derived from exact product source, not an official signed asset.
-    new_full=wk/"derived-target-full"
+    # Isolated FULL contains exact runtime source bytes, but is not a signed Release asset.
+    new_full=wk/"exact-runtime-test-full"
     new_full.mkdir()
     for relpath,blob in target_files.items():
         f=new_full/relpath;f.parent.mkdir(parents=True,exist_ok=True);f.write_bytes(blob)
@@ -160,11 +159,11 @@ def main():
               "test_derivation_only":True,
               "runtime_files":{k:hashlib.sha256(v).hexdigest() for k,v in target_files.items()}}
     (new_full/"release-manifest.json").write_text(json.dumps(manifest),encoding="utf-8")
-    target_install=wk/"clean-target"
+    target_install=wk/"clean-exact-target"
     shutil.copytree(new_full,target_install)
     synthetic_setup(target_install,18750)
     require((target_install/"VERSION.txt").read_text().strip()==TARGET_VERSION,"clean FULL version mismatch")
-    print("P01_1935_DERIVED_TARGET_CLEAN_FULL_INSTALL=PASS",flush=True)
+    print("P01_1935_EXACT_TARGET_RUNTIME_CLEAN_FULL_INSTALL=PASS",flush=True)
     for index,srcver in enumerate(SRC_VERSIONS):
         srczip=rel/f"VF-Start-V{srcver}-FULL.zip"
         updatezip=rel/f"VF_Start_V{srcver}_UPDATE.zip"
@@ -206,7 +205,7 @@ def main():
         require("VERIFY_PASS=YES" in back.stdout,"post-rollback site verify failed")
         check_sentinel(rollbacksite,rollback_id,"Synthetic rollback "+srcver)
         print("P01_1935_ROLLBACK_"+srcver.replace(".","_")+"_FROM_DERIVED_TARGET=PASS",flush=True)
-    print("P01_1935_FORMAL_RELEASE_PROOF=NOT_PROVEN_DERIVED_TARGET",flush=True)
+    print("P01_1935_FORMAL_RELEASE_PROOF=NOT_PROVEN_TEST_ONLY_BUNDLE",flush=True)
     print("P01_1935_PRODUCTION_WRITE=NONE",flush=True)
 
 if __name__=="__main__":
