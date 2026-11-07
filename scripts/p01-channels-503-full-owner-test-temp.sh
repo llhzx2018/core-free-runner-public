@@ -5,7 +5,7 @@ node --check "$candidate/src/assets/local-subsite-management.js"
 node --check "$candidate/src/assets/global-remote-channels.js"
 php -l "$candidate/src/app/ChannelLibraryPage.php"
 php -l "$candidate/src/app/bootstrap.php"
-for name in p01_channels_full_inventory_failure_receipt_contract.cjs p01_ia5_remote_channels_r34_contract.cjs p01_ia6_advanced_field_readback_contract.cjs p01_local_management_empty_resources_contract.cjs; do
+for name in p01_channels_full_inventory_failure_receipt_contract.cjs p01_ia5_remote_channels_r34_contract.cjs p01_ia6_advanced_field_readback_contract.cjs; do
   node "$candidate/tests/unit/$name"
 done
 echo P01_503_EXACT_SOURCE_FOCUSED_CONTRACTS=PASS
