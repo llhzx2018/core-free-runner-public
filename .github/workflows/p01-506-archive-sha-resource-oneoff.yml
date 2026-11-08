@@ -1,0 +1,112 @@
+name: P01 506 archive SHA bounded resource only
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-506-archive-sha-resource-oneoff.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-sha-only:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'llhzx2018' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Checkout exact candidate transiently without retaining token
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: d5fa0c599da3effe4695830e613098c7f38a68b1
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+
+      - name: Verify source, then run bounded synthetic-only SHA benchmark
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = d5fa0c599da3effe4695830e613098c7f38a68b1
+          test "$(git -C candidate rev-parse HEAD^{tree})" = 5d60229e1789e3ea0b5cce7016ec50fcc5a94989
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 >/dev/null
+          php -m | grep -Fxi pdo_sqlite
+          php -l candidate/src/app/DisasterRecovery.php >/dev/null
+          php -d memory_limit=128M <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $root=sys_get_temp_dir().'/p01-v506-sha-only-'.bin2hex(random_bytes(8));
+          if(!mkdir($root,0700))throw new RuntimeException('Cannot make disposable private dir');
+          define('VF_DISASTER_DIR',$root);
+          require getcwd().'/candidate/src/app/DisasterRecovery.php';
+          $db=new PDO('sqlite::memory:',null,null,[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
+          $db->exec('CREATE TABLE disaster_recovery_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            package_key TEXT UNIQUE NOT NULL,
+            file_name TEXT NOT NULL,
+            byte_size INTEGER NOT NULL,
+            sha256 TEXT NOT NULL,
+            validation_status TEXT NOT NULL,
+            manifest_json TEXT NOT NULL,
+            is_protected INTEGER NOT NULL
+          )');
+          $insert=$db->prepare("INSERT INTO disaster_recovery_records
+            (package_key,file_name,byte_size,sha256,validation_status,manifest_json,is_protected)
+            VALUES(?,?,?,?,?,?,1)");
+          $mgr=new VfDisasterRecovery($db);
+          try {
+            $limit=209715200; // exactly 200 MiB
+            $key='synthetic-limit-001';
+            $file=$root.'/'.$key.'.tar.gz';
+            $fp=fopen($file,'wb');
+            if(!is_resource($fp))throw new RuntimeException('Cannot open synthetic sparse file');
+            try { if(!ftruncate($fp,$limit))throw new RuntimeException('Sparse ftruncate failed'); }
+            finally { fclose($fp); }
+            clearstatcache(true,$file);
+            if(filesize($file)!==$limit)throw new RuntimeException('Wrong synthetic size');
+            $sha=hash_file('sha256',$file);
+            if(!is_string($sha)||strlen($sha)!==64)throw new RuntimeException('Unable to prepare digest');
+            $insert->execute([$key,$key.'.tar.gz',$limit,$sha,'valid','{}']);
+            $started=hrtime(true);
+            $result=$mgr->setProtected($key,false);
+            $secs=(hrtime(true)-$started)/1000000000;
+            $peak=memory_get_peak_usage(true);
+            if((int)$result['is_protected']!==0)throw new RuntimeException('Boundary-size synthetic unprotect failed');
+            if($secs>15)throw new RuntimeException('Bounded SHA slower than 15s');
+            if($peak>128*1048576)throw new RuntimeException('Memory exceeded 128 MiB');
+            echo 'P01_SYNTHETIC_SHA_200MIB_SECONDS='.number_format($secs,3,'.','').PHP_EOL;
+            echo 'P01_SYNTHETIC_SHA_MEMORY_PEAK_MIB='.number_format($peak/1048576,2,'.','').PHP_EOL;
+            echo 'P01_V506_VALID_MAX_SIZE_SHA_BOUND_PASS=PASS'.PHP_EOL;
+            $overkey='synthetic-over-001';
+            $over=$root.'/'.$overkey.'.tar.gz';
+            $f=fopen($over,'wb');
+            if(!is_resource($f))throw new RuntimeException('Cannot create over-limit fixture');
+            try { if(!ftruncate($f,$limit+1))throw new RuntimeException('Over-limit ftruncate failed'); }
+            finally { fclose($f); }
+            $insert->execute([$overkey,$overkey.'.tar.gz',$limit+1,str_repeat('a',64),'valid','{}']);
+            try {
+              $mgr->setProtected($overkey,false);
+              throw new RuntimeException('Unsafe oversized release allowed');
+            } catch (RuntimeException $e) {
+              if(!str_contains($e->getMessage(),'暂不能取消保护'))throw $e;
+            }
+            $q=$db->prepare('SELECT is_protected FROM disaster_recovery_records WHERE package_key=?');
+            $q->execute([$overkey]);
+            if((int)$q->fetchColumn()!==1)throw new RuntimeException('Over-limit record unprotected');
+            echo 'P01_V506_OVERSIZE_FAIL_CLOSED_AND_PROTECTED=PASS'.PHP_EOL;
+            echo 'P01_V506_REAL_RESTORE_PERFORMED=NO'.PHP_EOL;
+            echo 'P01_V506_UNKNOWN_IMPORT_BROWSER_PERFORMED=NO'.PHP_EOL;
+          } finally {
+            foreach(glob($root.'/*')?:[] as $p)if(is_file($p)||is_link($p))@unlink($p);
+            @rmdir($root);
+          }
+          PHP
+
+      - name: Remove private source regardless of result
+        if: always()
+        shell: bash
+        run: |
+          rm -rf candidate
+          echo P01_V506_PRIVATE_SOURCE_PERSISTED=NO
+          echo P01_V506_FORMAL_RELEASE_PERFORMED=NO
