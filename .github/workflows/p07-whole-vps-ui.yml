@@ -1,16 +1,16 @@
-name: P07 free exact-source MySQL84 MariaDB118 isolated machine proof
+name: P07 free real SSH rsync SQLite and static website transfer proof
 on:
   pull_request:
     paths: ['.github/workflows/p07-whole-vps-ui.yml']
 permissions:
   contents: read
 jobs:
-  real-engine-synthetic:
+  synthetic-ssh:
     if: ${{ github.repository == 'llhzx2018/core-free-runner-public' && github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - name: Checkout exactly current private product, ephemeral only
+      - name: Exact private product in temporary workspace
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-server-ops
@@ -19,58 +19,119 @@ jobs:
           persist-credentials: false
           path: product
           fetch-depth: 1
-      - name: Start two independent disposable real database engines and test
+      - name: Actual SSH transfer through P07 pull_path and consistent SQLite backup
         shell: bash
         run: |
           set -Eeuo pipefail
           set +x
           test "$(git -C product rev-parse HEAD)" = 4833dc4cab7e1bc17ba82748bf928f0826553b68
-          # Never touch a real business database. All test credentials are
-          # generated inside the ephemeral job; no credential in Git or logs.
-          P07_CI_SYNTH_PWD="$(openssl rand -hex 24)"
-          export P07_SYNTHETIC_DB_RESTORE_ONLY=1
-          export P07_SYNTHETIC_DB_HOST=127.0.0.1
-          export P07_SYNTHETIC_MYSQL_PASSWORD="$P07_CI_SYNTH_PWD"
-          export P07_SYNTHETIC_MARIADB_PASSWORD="$P07_CI_SYNTH_PWD"
-          export P07_SYNTHETIC_MARIADB=1
-          export P07_DB_TEST_HOST=127.0.0.1
-          export P07_DB_TEST_PORT=3309
-          export P07_DB_TEST_PASSWORD="$P07_CI_SYNTH_PWD"
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsync openssh-client >/dev/null
           cleanup() {
-            docker rm -f p07-synthetic-mysql84 p07-synthetic-mariadb118 >/dev/null 2>&1 || true
-            unset P07_CI_SYNTH_PWD P07_SYNTHETIC_MYSQL_PASSWORD P07_SYNTHETIC_MARIADB_PASSWORD P07_DB_TEST_PASSWORD
+            docker rm -f p07-synthetic-ssh-source >/dev/null 2>&1 || true
+            rm -f -- "$RUNNER_TEMP/p07_ssh_key" "$RUNNER_TEMP/p07_ssh_key.pub"
           }
           trap cleanup EXIT
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mariadb-client >/dev/null
-          docker run --rm -d --name p07-synthetic-mysql84 \
-            -e MYSQL_ROOT_PASSWORD="$P07_CI_SYNTH_PWD" -e MYSQL_ROOT_HOST=% \
-            -p 127.0.0.1:3307:3306 mysql:8.4 >/dev/null
-          docker run --rm -d --name p07-synthetic-mariadb118 \
-            -e MARIADB_ROOT_PASSWORD="$P07_CI_SYNTH_PWD" -e MARIADB_ROOT_HOST=% \
-            -p 127.0.0.1:3306:3306 -p 127.0.0.1:3308:3306 \
-            -p 127.0.0.1:3309:3306 mariadb:11.8 >/dev/null
+          docker run -d --rm --name p07-synthetic-ssh-source \
+            -p 127.0.0.1:2222:22 ubuntu:24.04 sleep infinity >/dev/null
+          docker exec p07-synthetic-ssh-source bash -lc \
+            'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server rsync python3 >/dev/null && install -d -m 0755 /run/sshd && install -d -m 0700 /root/.ssh'
+          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/p07_ssh_key"
+          docker cp "$RUNNER_TEMP/p07_ssh_key.pub" \
+            p07-synthetic-ssh-source:/root/.ssh/authorized_keys
+          docker exec p07-synthetic-ssh-source bash -lc \
+            'chmod 0600 /root/.ssh/authorized_keys && printf "PermitRootLogin prohibit-password\nPasswordAuthentication no\n" >/etc/ssh/sshd_config.d/p07-synthetic.conf && /usr/sbin/sshd'
+          docker exec -i p07-synthetic-ssh-source python3 - <<'PY'
+          from pathlib import Path
+          import sqlite3
+          root = Path("/tmp/p07-synthetic-source")
+          site = root / "site"
+          site.mkdir(parents=True)
+          (site / "index.html").write_text("<h1>P07 source static page</h1>\n",encoding="utf-8")
+          (site / "site.css").write_text("h1 {color: teal}\n", encoding="utf-8")
+          sql_dir = root / "sqlite"
+          sql_dir.mkdir()
+          c = sqlite3.connect(sql_dir / "live.db")
+          c.execute("CREATE TABLE entries (id INTEGER PRIMARY KEY, title TEXT)")
+          c.executemany("INSERT INTO entries VALUES (?,?)", [(1, "alpha"),(2, "beta"),(3, "你好")])
+          c.commit()
+          c.close()
+          PY
           ready=0
-          for attempt in $(seq 1 90); do
-            if MYSQL_PWD="$P07_CI_SYNTH_PWD" mariadb --no-defaults --protocol=tcp --host=127.0.0.1 --port=3307 --user=root -N -e 'SELECT 1' >/dev/null 2>&1 \
-              && MYSQL_PWD="$P07_CI_SYNTH_PWD" mariadb --no-defaults --protocol=tcp --host=127.0.0.1 --port=3308 --user=root -N -e 'SELECT 1' >/dev/null 2>&1; then
-              ready=1
-              break
-            fi
-            sleep 2
+          for i in $(seq 1 30); do
+            if ssh -p 2222 -i "$RUNNER_TEMP/p07_ssh_key" \
+              -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+              root@127.0.0.1 true >/dev/null 2>&1; then ready=1; break; fi
+            sleep 1
           done
-          test "$ready" = 1 || { echo 'P07_SYNTHETIC_REAL_ENGINES_NOT_READY'; exit 1; }
-          echo 'P07_SYNTHETIC_MYSQL84_AND_MARIADB118_READY'
-          export PYTHONPATH="$PWD/product:$PWD/product/lib"
-          PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s product/tests/integration -p test_dual_engine_restore_drill.py -v
-          PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s product/tests -p test_migration_laravel_mariadb_engine.py -v
-          PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s product/tests -p test_migration_laravel_readonly_engine.py -v
-          echo 'P07_SYNTHETIC_CROSS_ENGINE_RESTORE_AND_APP_CONNECTION_PASS'
-      - name: Delete transient source and test state
+          test "$ready" = 1 || { echo "P07_TEST_SOURCE_SSH_UNAVAILABLE"; exit 1; }
+          echo P07_REAL_SSH_KEY_AUTH_PASS
+          P07_TEST_SSH_KEY="$RUNNER_TEMP/p07_ssh_key" \
+            PYTHONPATH="$PWD/product/lib:$PWD/product" \
+            PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PY'
+          import os, sqlite3, shlex, hashlib, threading, urllib.request
+          from pathlib import Path
+          from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
+          from functools import partial
+          import server_migration_pull as pull
+          source = {
+            "host":"127.0.0.1","ip":"127.0.0.1",
+            "ssh_user":"root","ssh_port":2222,
+            "identity_file":os.environ["P07_TEST_SSH_KEY"],"ssh":"ssh",
+          }
+          target = Path(os.environ["RUNNER_TEMP"])/"p07-fresh-target"
+          site = target/"site"
+          site.mkdir(parents=True)
+          pull.pull_path(source, "/tmp/p07-synthetic-source/site/", site, delete=False)
+          assert (site/"index.html").read_text() == "<h1>P07 source static page</h1>\n"
+          assert (site/"site.css").read_text() == "h1 {color: teal}\n"
+          assert hashlib.sha256((site/"index.html").read_bytes()).hexdigest() == hashlib.sha256(b"<h1>P07 source static page</h1>\n").hexdigest()
+          print("P07_REAL_SSH_RSYNC_STATIC_TRANSFER_SHA256_PASS",flush=True)
+
+          code = (
+            "import sqlite3;"
+            "src=sqlite3.connect('/tmp/p07-synthetic-source/sqlite/live.db');"
+            "dst=sqlite3.connect('/tmp/p07-synthetic-source/sqlite/snapshot.db');"
+            "src.backup(dst);dst.close();src.close()"
+          )
+          pull.source_remote(source, "python3 -c " + shlex.quote(code), timeout=30)
+          sqlite_path = target/"snapshot.db"
+          pull.pull_path(source, "/tmp/p07-synthetic-source/sqlite/snapshot.db",sqlite_path)
+          con = sqlite3.connect(f"file:{sqlite_path}?mode=ro",uri=True)
+          try:
+            assert con.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+            assert con.execute("SELECT COUNT(*) FROM entries").fetchone()[0] == 3
+            assert con.execute("SELECT title FROM entries WHERE id=3").fetchone()[0] == "你好"
+          finally:
+            con.close()
+          print("P07_REAL_SSH_SQLITE_ONLINE_BACKUP_TRANSFER_INTEGRITY_PASS",flush=True)
+
+          server = ThreadingHTTPServer(("127.0.0.1",0),partial(SimpleHTTPRequestHandler,directory=str(site)))
+          t = threading.Thread(target=server.serve_forever,daemon=True)
+          t.start()
+          try:
+            req = urllib.request.Request(f"http://127.0.0.1:{server.server_port}/",headers={"Host":"site.example.test"})
+            body = urllib.request.urlopen(req,timeout=5).read()
+            assert b"P07 source static page" in body
+          finally:
+            server.shutdown()
+            server.server_close()
+          print("P07_TRANSFERRED_STATIC_WEBSITE_HTTP_HOST_PASS",flush=True)
+          try:
+            pull.pull_path(source, "../relative-refused",target/"must-not-exist")
+          except pull.PullMigrationError:
+            pass
+          else:
+            raise AssertionError("RELATIVE_REMOTE_PATH_NOT_REJECTED")
+          assert not (target/"must-not-exist").exists()
+          print("P07_SSH_REMOTE_PATH_ESCAPE_REFUSED_PASS",flush=True)
+          PY
+      - name: Always clean isolated SSH source and private product
         if: always()
         shell: bash
         run: |
           set +e
-          docker rm -f p07-synthetic-mysql84 p07-synthetic-mariadb118 >/dev/null 2>&1
-          rm -rf -- product
-          echo P07_EPHEMERAL_ENGINE_AND_PRIVATE_SOURCE_CLEANED
+          docker rm -f p07-synthetic-ssh-source >/dev/null 2>&1
+          rm -rf -- product "$RUNNER_TEMP/p07-fresh-target"
+          rm -f -- "$RUNNER_TEMP/p07_ssh_key" "$RUNNER_TEMP/p07_ssh_key.pub"
+          echo P07_SYNTHETIC_SSH_SOURCE_PRIVATE_CHECKOUT_CLEANED
