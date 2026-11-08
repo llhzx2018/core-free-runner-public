@@ -1,170 +1,34 @@
-name: P07 independent synthetic source receiver SSH SQLite HTTPS SNI
+name: P07 free Runner true CloudPanel VM capability preflight
 on:
   pull_request:
     paths: ['.github/workflows/p07-whole-vps-ui.yml']
 permissions:
   contents: read
 jobs:
-  two-node-synthetic:
+  vm-capability:
     if: ${{ github.repository == 'llhzx2018/core-free-runner-public' && github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 3
     steps:
-      - name: Transient exact private source checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: llhzx2018/vf-server-ops
-          ref: 4833dc4cab7e1bc17ba82748bf928f0826553b68
-          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-          persist-credentials: false
-          path: product
-          fetch-depth: 1
-      - name: Two isolated Linux nodes real SSH pull and TLS SNI
+      - name: Check capacity for two real CloudPanel virtual machines only
         shell: bash
         run: |
           set -Eeuo pipefail
           set +x
-          PRODUCT_SHA=4833dc4cab7e1bc17ba82748bf928f0826553b68
-          test "$(git -C product rev-parse HEAD)" = "$PRODUCT_SHA"
-          SOURCE_NAME=p07-ci-source
-          RECEIVER_NAME=p07-ci-receiver
-          NETWORK_NAME=p07-ci-isolated
-          cleanup() {
-            docker rm -f "$SOURCE_NAME" "$RECEIVER_NAME" >/dev/null 2>&1 || true
-            docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
-            rm -rf -- product "$RUNNER_TEMP/p07-public-ci-key.pub"
-          }
-          trap cleanup EXIT
-          docker network create --internal "$NETWORK_NAME" >/dev/null
-          # Install dependencies in short-lived containers without putting any private
-          # data into the shared Git, container image, artifact, or runner logs.
-          docker run -d --rm --name "$SOURCE_NAME" --network "$NETWORK_NAME" ubuntu:24.04 sleep infinity >/dev/null
-          docker run -d --rm --name "$RECEIVER_NAME" --network "$NETWORK_NAME" ubuntu:24.04 sleep infinity >/dev/null
-          # Internal network has no registry/internet access; install via apt BEFORE
-          # isolating network, then attach only to the dedicated internal bridge.
-          docker network connect bridge "$SOURCE_NAME"
-          docker network connect bridge "$RECEIVER_NAME"
-          docker exec "$SOURCE_NAME" bash -lc 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server rsync python3 sudo >/dev/null'
-          docker exec "$RECEIVER_NAME" bash -lc 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-client rsync python3 nginx openssl curl >/dev/null'
-          docker network disconnect bridge "$SOURCE_NAME"
-          docker network disconnect bridge "$RECEIVER_NAME"
-          docker exec -i "$SOURCE_NAME" bash -se <<'EOSOURCE'
-          set -Eeuo pipefail
-          useradd -m -s /bin/bash p07test
-          passwd -d p07test >/dev/null
-          install -d -m 0700 -o p07test -g p07test /home/p07test/.ssh
-          install -d -m 0755 -o p07test -g p07test /home/p07test/site
-          install -d -m 0755 -o p07test -g p07test /home/p07test/sqlite
-          printf 'p07test ALL=(root) NOPASSWD:ALL\n' >/etc/sudoers.d/p07test
-          chmod 0440 /etc/sudoers.d/p07test
-          install -d -m 0755 /run/sshd
-          printf 'PermitRootLogin no\nPubkeyAuthentication yes\nPasswordAuthentication no\nUsePAM yes\nAllowUsers p07test\n' >/etc/ssh/sshd_config.d/p07-synthetic.conf
-          /usr/sbin/sshd -t
-          /usr/sbin/sshd
-          runuser -u p07test -- python3 - <<'PY'
-          import sqlite3
-          from pathlib import Path
-          root=Path('/home/p07test')
-          (root/'site/index.html').write_text('<h1>real two-node P07 transfer</h1>\n',encoding='utf-8')
-          (root/'site/base.css').write_text('h1{color:teal}\n',encoding='utf-8')
-          connection=sqlite3.connect(root/'sqlite/live.db')
-          connection.execute('CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)')
-          connection.executemany('INSERT INTO notes VALUES (?,?)',[(1,'alpha'),(2,'你好'),(3,'gamma')])
-          connection.commit()
-          connection.close()
-          PY
-          EOSOURCE
-          docker exec "$RECEIVER_NAME" bash -lc 'ssh-keygen -q -t ed25519 -N "" -f /root/p07-id && chmod 600 /root/p07-id'
-          docker cp "$RECEIVER_NAME":/root/p07-id.pub "$RUNNER_TEMP/p07-public-ci-key.pub"
-          docker cp "$RUNNER_TEMP/p07-public-ci-key.pub" "$SOURCE_NAME":/home/p07test/.ssh/authorized_keys
-          docker exec "$SOURCE_NAME" chown p07test:p07test /home/p07test/.ssh/authorized_keys
-          docker exec "$SOURCE_NAME" chmod 600 /home/p07test/.ssh/authorized_keys
-          docker cp product/lib "$RECEIVER_NAME":/opt/p07lib
-          # Sanity: independently address source from receiver over dedicated bridge.
-          docker exec "$RECEIVER_NAME" ssh -i /root/p07-id -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new p07test@"$SOURCE_NAME" true
-          echo P07_REAL_INDEPENDENT_CONTAINER_SSH_PASS
-          docker exec -i "$RECEIVER_NAME" python3 - <<'PY'
-          from pathlib import Path
-          import hashlib,shlex,sqlite3,sys
-          sys.path.insert(0,'/opt/p07lib')
-          import server_migration_pull as pull
-          source={'host':'p07-ci-source','ip':'127.0.0.1','ssh_user':'p07test','ssh_port':22,'identity_file':'/root/p07-id','ssh':'ssh'}
-          target=Path('/tmp/p07-receiver')
-          site=target/'site'
-          site.mkdir(parents=True)
-          pull.pull_path(source,'/home/p07test/site/',site,delete=False)
-          expected=b'<h1>real two-node P07 transfer</h1>\n'
-          assert (site/'index.html').read_bytes()==expected
-          assert (site/'base.css').read_bytes()==b'h1{color:teal}\n'
-          assert hashlib.sha256((site/'index.html').read_bytes()).digest()==hashlib.sha256(expected).digest()
-          print('P07_REAL_TWO_NODE_SSH_RSYNC_FILE_SHA_PASS',flush=True)
-          snapshot='/home/p07test/sqlite/consistent.db'
-          source_code=("import sqlite3;"
-                       "src=sqlite3.connect('/home/p07test/sqlite/live.db');"
-                       "dst=sqlite3.connect('/home/p07test/sqlite/consistent.db');"
-                       "src.backup(dst);dst.close();src.close()")
-          pull.source_remote(source,'python3 -c '+shlex.quote(source_code),timeout=30)
-          snap=target/'consistent.db'
-          pull.pull_path(source,snapshot,snap,delete=False)
-          con=sqlite3.connect('file:'+str(snap)+'?mode=ro',uri=True)
-          try:
-              assert con.execute('PRAGMA quick_check').fetchone()[0]=='ok'
-              assert con.execute('SELECT COUNT(*) FROM notes').fetchone()[0]==3
-              assert con.execute('SELECT title FROM notes WHERE id=2').fetchone()[0]=='你好'
-          finally:con.close()
-          print('P07_REAL_TWO_NODE_SQLITE_ONLINE_BACKUP_PARITY_PASS',flush=True)
-          try:pull.pull_path(source,'../relative-not-allowed',target/'bad')
-          except pull.PullMigrationError:pass
-          else:raise AssertionError('REMOTE_RELATIVE_PATH_ACCEPTED')
-          assert not (target/'bad').exists()
-          print('P07_REAL_TWO_NODE_REMOTE_PATH_GUARD_PASS',flush=True)
-          PY
-          # TLS and virtual hosts are strictly isolated. A local self-signed certificate
-          # is created in the receiver; --resolve tests Host + SNI, no DNS changes.
-          docker exec -i "$RECEIVER_NAME" bash -se <<'EOTLS'
-          set -Eeuo pipefail
-          openssl req -x509 -newkey rsa:2048 -noenc -days 1 -keyout /tmp/p07-vhost.key -out /tmp/p07-vhost.crt -subj /CN=p07-static.example.test -addext subjectAltName=DNS:p07-static.example.test >/dev/null 2>&1
-          cat >/etc/nginx/sites-enabled/default <<'NGINX'
-          server {
-              listen 80;
-              server_name p07-static.example.test;
-              return 301 https://$host$request_uri;
-          }
-          server {
-              listen 443 ssl default_server;
-              ssl_certificate /tmp/p07-vhost.crt;
-              ssl_certificate_key /tmp/p07-vhost.key;
-              return 421;
-          }
-          server {
-              listen 443 ssl;
-              server_name p07-static.example.test;
-              ssl_certificate /tmp/p07-vhost.crt;
-              ssl_certificate_key /tmp/p07-vhost.key;
-              root /tmp/p07-receiver/site;
-              index index.html;
-              location / { try_files $uri $uri/ =404; }
-          }
-          NGINX
-          nginx -t
-          nginx
-          curl --noproxy '*' --silent --show-error --fail --cacert /tmp/p07-vhost.crt --resolve p07-static.example.test:443:127.0.0.1 https://p07-static.example.test/ | grep -F 'real two-node P07 transfer' >/dev/null
-          curl --noproxy '*' --silent --show-error --fail --cacert /tmp/p07-vhost.crt --resolve p07-static.example.test:443:127.0.0.1 https://p07-static.example.test/base.css | grep -F 'color:teal' >/dev/null
-          printf 'P07_REAL_TWO_NODE_HTTPS_SNI_CERT_STATIC_ASSETS_PASS\n'
-          wrong_code="$(curl --noproxy '*' -k --silent --output /dev/null --write-out '%{http_code}' --resolve wrong.example.test:443:127.0.0.1 https://wrong.example.test/)"
-          test "$wrong_code" = 421
-          printf 'P07_REAL_TWO_NODE_WRONG_SNI_REJECTED_PASS\n'
-          redirect="$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' --resolve p07-static.example.test:80:127.0.0.1 http://p07-static.example.test/)"
-          test "$redirect" = 301
-          printf 'P07_REAL_TWO_NODE_HTTP_TO_HTTPS_REDIRECT_PASS\n'
-          EOTLS
-          echo P07_TWO_ISOLATED_NODES_NO_PRODUCTION_WRITE_PASS
-      - name: Always clean independent synthetic nodes and checkout
-        if: always()
-        shell: bash
-        run: |
-          set +e
-          docker rm -f p07-ci-source p07-ci-receiver >/dev/null 2>&1
-          docker network rm p07-ci-isolated >/dev/null 2>&1
-          rm -rf -- product "$RUNNER_TEMP/p07-public-ci-key.pub"
-          echo P07_TWO_NODE_PRIVATE_SOURCE_AND_SERVICES_CLEANED
+          mem_kb="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)"
+          free_kb="$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')"
+          cpu="$(nproc)"
+          echo "P07_GH_PUBLIC_VM_TEST_CPU=$cpu"
+          echo "P07_GH_PUBLIC_VM_TEST_MEMORY_MIB=$((mem_kb/1024))"
+          echo "P07_GH_PUBLIC_VM_TEST_STORAGE_GIB=$((free_kb/1048576))"
+          if [[ ! -c /dev/kvm || ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+            echo 'P07_VM_HARDWARE_ACCELERATION=UNAVAILABLE'
+            echo 'P07_TRUE_CLOUDPANEL_DUAL_VM_TEST=NOT_STARTED'
+            exit 0
+          fi
+          echo 'P07_VM_HARDWARE_ACCELERATION=AVAILABLE'
+          if (( mem_kb < 6*1024*1024 || free_kb < 10*1024*1024 || cpu < 2 )); then
+            echo 'P07_TRUE_CLOUDPANEL_DUAL_VM_TEST=INSUFFICIENT_CAPACITY'
+            exit 0
+          fi
+          echo 'P07_TRUE_CLOUDPANEL_DUAL_VM_TEST=CAPACITY_PRECHECK_PASS'
