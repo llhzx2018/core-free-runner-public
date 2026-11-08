@@ -1,0 +1,109 @@
+name: P07 #293 Transient RC Packaging Install Test (NO Artifacts)
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/p07-293-transient-rc-install.yml'
+permissions:
+  contents: read
+jobs:
+  p07-rc-install:
+    if: ${{ github.repository == 'llhzx2018/core-free-runner-public' && github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Exact P07 private product checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 942bd9072f0f99519008b1d0610cc86309593cab
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+          fetch-depth: 1
+      - name: Exact existing public release baseline checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: 7c3f685465b0da9a4414a13b629ea599006019ae
+          persist-credentials: false
+          path: public-baseline
+          fetch-depth: 1
+      - name: Build isolated RC from existing published installer with complete runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          export PYTHONDONTWRITEBYTECODE=1
+          export PYTHONPATH="$PWD/product${PYTHONPATH:+:$PYTHONPATH}"
+          test "$(git -C product rev-parse HEAD)" = 942bd9072f0f99519008b1d0610cc86309593cab
+          test "$(git -C public-baseline rev-parse HEAD)" = 7c3f685465b0da9a4414a13b629ea599006019ae
+          python3 -B -m unittest discover -s product/tests -p 'test_p07_bundle_identity.py' -q
+          python3 -B product/scripts/p07_candidate_bundle.py \
+            --product-root "$PWD/product" \
+            --public-root "$PWD/public-baseline" \
+            --output "$RUNNER_TEMP/p07-293-candidate" \
+            --product-sha 942bd9072f0f99519008b1d0610cc86309593cab \
+            --build 0.1.0-release116-rc1 --care 0.1.0-rc83
+          python3 -B - <<'PY'
+          import json
+          import pathlib
+          import hashlib
+          import os
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'p07-293-candidate'
+          att=json.loads((root/'candidate_attestation.json').read_text())
+          runtime=(root/'dist/p07/0.1.0/overlay/RUNTIME.gitblob').read_text()
+          for path in ('lib/migration_failed_prepare_audit.py',
+                       'lib/migration_failed_laravel_recovery.py',
+                       'lib/migration_laravel_db_agent.py',
+                       'lib/migration_laravel_live_parity.py'):
+              assert ('  '+path+'\n') in runtime, "MISSING_REQUIRED_RECOVERY_MODULE"
+          assert att['product_source_sha']=='942bd9072f0f99519008b1d0610cc86309593cab'
+          assert att['product_build']=='0.1.0-release116-rc1'
+          assert att['status']=='CANDIDATE_ONLY_NOT_PUBLISHED'
+          print('P07_RC293_INSTALLED_RUNTIME_MODULES_PRESENT=4/4')
+          print('P07_RC293_EXACT_SOURCE_SHA='+att['product_source_sha'])
+          print('P07_RC293_RUNTIME_MANIFEST_BLOB='+att['runtime_manifest_blob'])
+          PY
+      - name: Install release115 then atomically upgrade in isolated temporary root
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          export P07_INSTALL_DIR="$RUNNER_TEMP/p07-owner-sim/installed"
+          export P07_PREVIOUS_DIR="$RUNNER_TEMP/p07-owner-sim/previous"
+          export P07_BIN_LINK="$RUNNER_TEMP/p07-owner-sim/bin/vfops"
+          mkdir -p "$(dirname "$P07_BIN_LINK")"
+          export P07_PUBLIC_ROOT="file://$PWD/public-baseline"
+          bash public-baseline/installers/p07.sh
+          test "$("$P07_BIN_LINK" --build-id)" = "0.1.0-release115"
+          export P07_PUBLIC_ROOT="file://$RUNNER_TEMP/p07-293-candidate"
+          bash "$RUNNER_TEMP/p07-293-candidate/installers/p07.sh"
+          test "$("$P07_BIN_LINK" --build-id)" = "0.1.0-release116-rc1"
+          test "$(cat "$P07_PREVIOUS_DIR/BUILD_ID")" = "0.1.0-release115"
+          for name in migration_failed_prepare_audit migration_failed_laravel_recovery migration_laravel_db_agent migration_laravel_live_parity; do
+            test -f "$P07_INSTALL_DIR/lib/$name.py"
+          done
+          "$P07_BIN_LINK" server-migrate laravel-live-parity --help | grep -F -- '--domain'
+          echo 'P07_RC293_ISOLATED_RELEASE115_TO116_RC1_UPGRADE_PASS'
+          echo 'P07_RC293_RETAINED_PREVIOUS_RELEASE115=YES'
+      - name: Package private candidate with integrity digest
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          cd "$RUNNER_TEMP"
+          tar --sort=name --mtime='UTC 2026-01-01' --owner=0 --group=0 --numeric-owner -czf p07-293-rc1-private.tar.gz -C p07-293-candidate .
+          sha256sum p07-293-rc1-private.tar.gz > p07-293-rc1-private.tar.gz.sha256
+          echo 'P07_RC293_PACKAGE_SHA256='$(cut -d' ' -f1 p07-293-rc1-private.tar.gz.sha256)
+          echo 'P07_RC293_PACKAGE_PRIVATE_ONLY=YES'
+          echo 'P07_RC293_PUBLIC_RELEASE_OR_PRODUCTION=NO'
+      - name: Cleanup private candidate and temporary installed roots
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- "$RUNNER_TEMP/p07-293-candidate" "$RUNNER_TEMP/p07-owner-sim"
+          rm -f -- "$RUNNER_TEMP/p07-293-rc1-private.tar.gz" "$RUNNER_TEMP/p07-293-rc1-private.tar.gz.sha256"
+          rm -rf -- product public-baseline
+          echo 'P07_RC293_PRIVATE_CHECKOUT_AND_STAGE_CLEANED'
