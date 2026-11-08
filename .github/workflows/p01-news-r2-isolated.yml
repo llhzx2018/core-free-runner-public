@@ -1,4 +1,4 @@
-name: P01 News R6 canonical zero-debt closure
+name: P01 News R7 dual-candidate compatibility proof
 
 on:
   push:
@@ -9,82 +9,113 @@ permissions:
   contents: read
 
 concurrency:
-  group: p01-news-r6-canonical-zero-debt
+  group: p01-news-r7-dual-candidate
   cancel-in-progress: false
 
 jobs:
-  news-r6:
+  source-bridge:
     runs-on: ubuntu-24.04
     timeout-minutes: 16
     env:
-      PRODUCT_SHA: e0af96915803ec4bb628296cba7880494a78b2a0
-      BASELINE_SHA: 62c96967a0c69417432c05625f4504f8480beb4f
+      NEWS_SHA: 018fd232778213843f2be420dba3b0f0896d12ea
+      SECURITY_SHA: 7df9795815bc8b448ae765b5823b7797d9c72635
+      MAIN_SHA: 62c96967a0c69417432c05625f4504f8480beb4f
     steps:
-      - name: Prepare isolated PHP SQLite runtime
+      - name: Prepare public-safe PHP native test dependencies
         shell: bash
         run: |
           set -Eeuo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq php-cli php-curl php-xml php-mbstring php-sqlite3 php-zip php-gd unzip >/dev/null
+          sudo apt-get install -y -qq php-cli php-curl php-xml php-mbstring php-sqlite3 php-zip php-gd >/dev/null
           php -m | grep -Fx pdo_sqlite
-          echo P01_NEWS_R6_PHP_RUNTIME=PASS
+          echo P01_NEWS_R7_RUNTIME=PASS
 
-      - name: Checkout exact candidate temporarily
+      - name: Checkout exact private News source in ephemeral workspace
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-start
-          ref: ${{ env.PRODUCT_SHA }}
+          ref: ${{ env.NEWS_SHA }}
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-          path: p01-exact
+          path: p01-news
           persist-credentials: false
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: Checkout exact main baseline temporarily
+      - name: Checkout separate security candidate for read-only merge-tree comparison
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-start
-          ref: ${{ env.BASELINE_SHA }}
+          ref: ${{ env.SECURITY_SHA }}
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-          path: p01-stable
+          path: p01-security
           persist-credentials: false
-          fetch-depth: 1
+          fetch-depth: 0
 
-      - name: Identify stale prior channel test and prove current implementation
+      - name: Verify exact identities and cross-candidate common contract
         shell: bash
         run: |
           set -Eeuo pipefail
-          test "$(git -C p01-exact rev-parse HEAD)" = "$PRODUCT_SHA"
-          test "$(git -C p01-stable rev-parse HEAD)" = "$BASELINE_SHA"
-          test "$(tr -d '\r\n ' < p01-exact/VERSION)" = "2.47.505"
-          test "$(tr -d '\r\n ' < p01-exact/src/VERSION.txt)" = "2.47.505"
-          cmp -s p01-exact/src/app/ChannelLibraryPage.php p01-stable/src/app/ChannelLibraryPage.php
+          test "$(git -C p01-news rev-parse HEAD)" = "$NEWS_SHA"
+          test "$(git -C p01-security rev-parse HEAD)" = "$SECURITY_SHA"
+          test "$(tr -d '\r\n ' < p01-news/VERSION)" = 2.47.505
+          test "$(tr -d '\r\n ' < p01-security/VERSION)" = 2.47.506
+          cmp -s p01-news/src/app/ChannelLibraryPage.php p01-security/src/app/ChannelLibraryPage.php
+          cmp -s p01-news/tests/unit/channels_guest_readonly_layout_v247390_contract.php p01-security/tests/unit/channels_guest_readonly_layout_v247390_contract.php
+          echo P01_NEWS_R7_SHARED_CHANNEL_SOURCE_AND_TEST_IDENTICAL=PASS
+          php p01-news/tests/unit/p01_news_channel_candidate_bridge_contract.php
+          echo P01_NEWS_R7_SEPARATE_TEST_COMPATIBILITY=PASS
+
+      - name: Non-mutating combined source merge-tree and News-only unit smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          git -C p01-news fetch -q --no-tags "$(pwd)/p01-security" "$SECURITY_SHA"
+          git -C p01-news cat-file -e "$SECURITY_SHA^{commit}"
+          common="$(git -C p01-news merge-base "$NEWS_SHA" "$SECURITY_SHA")"
+          test -n "$common"
           set +e
-          php p01-stable/tests/unit/channels_guest_readonly_layout_v247390_contract.php >/dev/null 2>&1
-          baseline_rc=$?
+          merge_output="$(git -C p01-news merge-tree --write-tree --messages "$NEWS_SHA" "$SECURITY_SHA" 2>&1)"
+          merge_rc=$?
           set -e
-          test "$baseline_rc" -ne 0
-          echo P01_NEWS_R6_BASELINE_LEGACY_TEST_FAILURE_CONFIRMED=YES
-          php p01-exact/tests/unit/channels_guest_readonly_layout_v247390_contract.php
-          node p01-exact/tests/browser/p01_news_r5_navigation_contract.cjs
-          echo P01_NEWS_R6_CHANNEL_BOTH_PAGINATION_MODES=PASS
+          if [ "$merge_rc" -ne 0 ]; then
+            echo P01_NEWS_R7_MERGE_TREE=CONFLICT
+            echo "$merge_output" | sed -n '/^CONFLICT /p' | cut -c1-240
+            exit 9
+          fi
+          merged_tree="$(printf '%s\n' "$merge_output" | head -1 | tr -d '\r\n')"
+          test "${#merged_tree}" -eq 40
+          mkdir -p p01-integrated
+          git -C p01-news archive "$merged_tree" | tar -x -C p01-integrated
+          test "$(tr -d '\r\n ' < p01-integrated/VERSION)" = 2.47.506
+          test "$(tr -d '\r\n ' < p01-integrated/src/VERSION.txt)" = 2.47.506
+          grep -F "define('VF_VERSION', '2.47.506');" p01-integrated/src/app/bootstrap.php >/dev/null
+          cmp -s p01-integrated/src/app/DisasterRecovery.php p01-security/src/app/DisasterRecovery.php
+          cmp -s p01-integrated/src/app/ChannelLibraryPage.php p01-security/src/app/ChannelLibraryPage.php
+          cmp -s p01-integrated/tests/unit/channels_guest_readonly_layout_v247390_contract.php p01-security/tests/unit/channels_guest_readonly_layout_v247390_contract.php
+          test -s p01-integrated/src/news.php
+          grep -F '| NEWS-06 |' p01-integrated/docs/authority/ACCEPTANCE_MATRIX.md >/dev/null
+          grep -F '| RP-07I |' p01-integrated/docs/authority/ACCEPTANCE_MATRIX.md >/dev/null
+          for check in p01_news_feed_normalizer_contract p01_news_feed_service_contract p01_news_source_preferences_contract p01_news_channel_candidate_bridge_contract channels_guest_readonly_layout_v247390_contract; do
+            php "p01-integrated/tests/unit/$check.php" | tail -1
+          done
+          echo P01_NEWS_R7_SYNTHETIC_COMBINED_SOURCE=PASS
+          echo P01_NEWS_R7_MERGE_TREE=PASS
 
-      - name: Full canonical regression strict no-debt on exact candidate
+      - name: Strict canonical comparison against current unchanged main
         shell: bash
-        timeout-minutes: 11
+        timeout-minutes: 10
         run: |
           set -Eeuo pipefail
-          bash p01-exact/tests/canonical_release_regression.sh p01-exact p01-stable --require-zero-debt | tee /tmp/p01-news-r6-canonical.txt
-          grep -Fx 'P01_CANONICAL_NEW_REGRESSION_COUNT=0' /tmp/p01-news-r6-canonical.txt
-          grep -Fx 'P01_CANONICAL_CHANGED_FAILURE_COUNT=0' /tmp/p01-news-r6-canonical.txt
-          grep -Fx 'P01_CANONICAL_REMOVED_BASELINE_TEST_COUNT=0' /tmp/p01-news-r6-canonical.txt
-          grep -Fx 'P01_CANONICAL_CURRENT_FAILURE_COUNT=0' /tmp/p01-news-r6-canonical.txt
-          grep -Fx 'P01_CANONICAL_RESOLVED_DEBT_COUNT=1' /tmp/p01-news-r6-canonical.txt
-          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-news-r6-canonical.txt
-          echo P01_NEWS_R6_EXACT_SOURCE_FULL_CANONICAL=PASS
+          git -C p01-news worktree add -q --detach "$(pwd)/p01-main" "$MAIN_SHA"
+          test "$(git -C p01-main rev-parse HEAD)" = "$MAIN_SHA"
+          bash p01-news/tests/canonical_release_regression.sh p01-news p01-main --require-zero-debt | tee /tmp/p01-news-r7-canonical.out
+          grep -Fx 'P01_CANONICAL_NEW_REGRESSION_COUNT=0' /tmp/p01-news-r7-canonical.out
+          grep -Fx 'P01_CANONICAL_CURRENT_FAILURE_COUNT=0' /tmp/p01-news-r7-canonical.out
+          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-news-r7-canonical.out
+          echo P01_NEWS_R7_STANDALONE_CANONICAL=PASS
 
-      - name: Always cleanup transient private worktrees
+      - name: Always clean ephemeral private checkouts
         if: always()
         shell: bash
         run: |
-          rm -rf p01-exact p01-stable
-          echo P01_NEWS_R6_PRIVATE_SOURCE_CLEANUP=COMPLETE
+          rm -rf p01-integrated p01-main p01-news p01-security
+          echo P01_NEWS_R7_PRIVATE_CHECKOUT_CLEANUP=COMPLETE
