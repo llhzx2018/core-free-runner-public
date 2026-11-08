@@ -1,0 +1,146 @@
+name: P07 #293 Paired MySQL8 MariaDB11 Native Parity Evidence
+on:
+  pull_request:
+    paths: ['.github/workflows/p07-293-catalog-completeness.yml']
+permissions:
+  contents: read
+jobs:
+  exact-source-paired-proof:
+    if: ${{ github.repository == 'llhzx2018/core-free-runner-public' && github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: p07-ephemeral
+          MYSQL_ROOT_HOST: "%"
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h127.0.0.1 -uroot -pp07-ephemeral --silent"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: p07-ephemeral
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd "mariadb-admin ping -h127.0.0.1 -uroot -pp07-ephemeral --silent"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+    steps:
+      - name: Install native SQL client
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          if ! command -v mariadb >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mariadb-client
+          fi
+      - name: Ephemeral exact private candidate checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 549914465440d91deae9e352f8d79d4e683d9d9a
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p07-exact
+          fetch-depth: 1
+      - name: Prove actual paired MySQL8 to MariaDB11 row evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          cd p07-exact
+          test "$(git rev-parse HEAD)" = 549914465440d91deae9e352f8d79d4e683d9d9a
+          export PYTHONDONTWRITEBYTECODE=1
+          python3 -B - <<'PY'
+          import json
+          import os
+          import shutil
+          import subprocess
+          import sys
+          from unittest import mock
+          sys.path.insert(0, "lib")
+          import migration_laravel_db_agent as agent
+          client=shutil.which("mariadb")
+          assert client is not None
+          password="p07-ephemeral"
+          name="p07_paired_fixture"
+          reader="p07_pair_reader"
+          readpw="fixture-only"
+          schema=(
+              f"CREATE DATABASE {name} CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+              f"CREATE USER '{reader}'@'%' IDENTIFIED BY '{readpw}';"
+              f"GRANT ALL PRIVILEGES ON {name}.* TO '{reader}'@'%';"
+              f"CREATE TABLE {name}.t (id INT PRIMARY KEY, note VARCHAR(60) NULL,"
+              " value_dec DECIMAL(10,2) NOT NULL) ENGINE=InnoDB;"
+              f"CREATE INDEX idx_note ON {name}.t(note);"
+              f"INSERT INTO {name}.t VALUES (1,NULL,15.10),(2,'equal',0.20);"
+          )
+          def run(port,user,pwd,sql):
+              env=os.environ.copy()
+              env["MYSQL_PWD"]=pwd
+              p=subprocess.run(
+                  [client,"--no-defaults","--protocol=tcp","--host=127.0.0.1",
+                   f"--port={port}",f"--user={user}","--batch","--raw",
+                   "--skip-column-names","--default-character-set=utf8mb4",
+                   "--execute",sql],
+                  env=env,capture_output=True,text=True,timeout=90)
+              if p.returncode:
+                  raise AssertionError("PAIR_DATABASE_QUERY_FAILED")
+              return p.stdout
+          run(3306,"root",password,schema)
+          run(3307,"root",password,schema)
+          def snapshot(port):
+              with mock.patch.object(agent,"_mysql",side_effect=lambda d,u,p,q: run(port,u,p,q)):
+                  return agent.snapshot(name,reader,readpw)
+          before=snapshot(3306)
+          after=snapshot(3307)
+          assert before["rows"]==after["rows"],"CROSS_ENGINE_ROW_CONTENT_MISMATCH"
+          assert before["tables"]==after["tables"]==1
+          print("P07_REAL_CROSS_ENGINE_ROWS_EQUAL=YES")
+          print("P07_REAL_CROSS_ENGINE_SCHEMA_METADATA_EQUAL="+("YES" if before["meta"]==after["meta"] else "NO"))
+          if before["meta"]!=after["meta"]:
+              counts={k:sum(a!=b for a,b in zip(before["meta"][k],after["meta"][k])) for k in before["meta"]}
+              print("P07_CROSS_ENGINE_METADATA_DIFFERENT_CLASS_COUNTS="+json.dumps(counts,sort_keys=True))
+              lengths={k:[len(before["meta"][k]),len(after["meta"][k])] for k in before["meta"]}
+              print("P07_SYNTHETIC_METADATA_CLASS_LENGTHS="+json.dumps(lengths,sort_keys=True))
+
+              for left,right in zip(before["meta"]["columns"],after["meta"]["columns"]):
+                  keys=["table","column","data_type","column_type","nullable","default","extra","charset","collation"]
+                  differences={key:[a,b] for key,a,b in zip(keys,left,right) if a!=b}
+                  if differences:
+                      print("P07_SYNTHETIC_COLUMN_DIFFERENCE="+json.dumps(differences,sort_keys=True))
+
+          run(3307,"root",password,f"UPDATE {name}.t SET value_dec=0.29 WHERE id=2")
+          altered=snapshot(3307)
+          assert altered["rows"]!=before["rows"],"CROSS_ENGINE_CHANGED_ROW_NOT_DETECTED"
+          print("P07_REAL_CROSS_ENGINE_CHANGED_ROW_DETECTED=YES")
+          print("P07_SOURCE_TARGET_REAL_OWNER_DATA_CHECKED=NO")
+          PY
+      - name: Bounded complete audit and failure-recovery regression on MySQL 8.4
+        shell: bash
+        env:
+          P07_SYNTHETIC_MARIADB: '1'
+          P07_DB_TEST_PASSWORD: p07-ephemeral
+        run: |
+          set -Eeuo pipefail
+          set +x
+          cd p07-exact
+          export PYTHONDONTWRITEBYTECODE=1
+          python3 -B -m unittest -q \
+            tests.test_migration_laravel_live_parity \
+            tests.test_migration_laravel_readonly_engine \
+            tests.test_migration_failed_laravel_recovery \
+            tests.test_migration_failed_prepare_audit
+          echo 'P07_293_CROSS_ENGINE_EXACT_SOURCE_REGRESSION_PASS'
+      - name: Remove ephemeral private checkout
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- p07-exact
+          echo 'P07_PAIRED_PRIVATE_CHECKOUT_CLEANED'
