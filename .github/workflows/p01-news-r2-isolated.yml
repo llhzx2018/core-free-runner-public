@@ -99,6 +99,68 @@ jobs:
           grep -F 'P01_NEWS_R4_CHROMIUM=PASS checks=50' /tmp/p01-news-506-browser.txt
           echo P01_NEWS_506_COMBINED_BROWSER=PASS
 
+      - name: Verify ephemeral combined package bytes without install or restore
+        shell: bash
+        timeout-minutes: 9
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          WORK="$(mktemp -d "/tmp/p01-news-package-${GITHUB_RUN_ID}-XXXXXXXX")"
+          trap 'rm -rf -- "$WORK"' EXIT
+          mkdir -p "$WORK"/{baseline,prior-update,candidate,out}
+          gh release download v2.47.505 -R llhzx2018/vf-start -D "$WORK" \
+            -p 'VF-Start-V2.47.505-FULL.zip' \
+            -p 'VF_Start_V2.47.505_UPDATE.zip'
+          unzip -q "$WORK/VF-Start-V2.47.505-FULL.zip" -d "$WORK/baseline"
+          unzip -q "$WORK/VF_Start_V2.47.505_UPDATE.zip" -d "$WORK/prior-update"
+          test -s "$WORK/prior-update/repair-v2.47.505.php"
+          test "$(tr -d '\r\n ' < p01-news/src/VERSION.txt)" = "2.47.506"
+          cp -a p01-news/src/. "$WORK/candidate/"
+          python3 - "$WORK/candidate" <<'PY'
+          import pathlib,sys
+          root=pathlib.Path(sys.argv[1])
+          v=root/'VERSION.txt'
+          assert v.read_text().strip()=='2.47.506'
+          v.write_text('2.99.999\n')
+          file=root/'app/bootstrap.php'
+          src=file.read_text()
+          previous="define('VF_VERSION', '2.47.506');"
+          assert src.count(previous)==1
+          file.write_text(src.replace(previous,"define('VF_VERSION', '2.99.999');"))
+          PY
+          ZERO=0000000000000000000000000000000000000000
+          python3 scripts/p01-maintenance-release.py \
+            --candidate "$WORK/candidate" \
+            --baseline-full "$WORK/baseline" \
+            --baseline-repair "$WORK/prior-update/repair-v2.47.505.php" \
+            --out "$WORK/out" --version 2.99.999 --source-version 2.47.505 \
+            --target-sha "$ZERO" --target-tree "$ZERO" >/dev/null
+          FULL="$WORK/out/VF-Start-V2.99.999-FULL.zip"
+          UPDATE="$WORK/out/VF_Start_V2.99.999_UPDATE.zip"
+          unzip -t "$FULL" >/dev/null
+          unzip -t "$UPDATE" >/dev/null
+          test "$(unzip -Z1 "$UPDATE")" = "repair-v2.99.999.php"
+          for entry in news.php news-feed.php news-preferences.php \
+            app/NewsFeedPage.php app/NewsFeedService.php app/NewsSourcePreferences.php \
+            assets/news-feed.js assets/news-feed.css app/DisasterRecovery.php app/ChannelLibraryPage.php; do
+            unzip -Z1 "$FULL" | grep -Fx "$entry" >/dev/null
+            cmp -s <(unzip -p "$FULL" "$entry") "p01-news/src/$entry" || \
+              { echo "P01_NEWS_506_PACKAGE_FILE_MISMATCH=$entry"; exit 12; }
+          done
+          if unzip -Z1 "$FULL" | grep -Ei '(^|/)(\.runtime\.php|.*\.sqlite3?|.*\.db|news-cache/|private/|backups?/|sessions?/|tokens?/)' >/dev/null; then
+            echo P01_NEWS_506_PACKAGE_PRIVATE_PAYLOAD=FAIL
+            exit 13
+          fi
+          unzip -q "$UPDATE" -d "$WORK/updater"
+          php -l "$WORK/updater/repair-v2.99.999.php" >/dev/null
+          php "$WORK/updater/repair-v2.99.999.php" --self-test | grep -F '"ok":true' >/dev/null
+          echo P01_NEWS_506_SYNTHETIC_FULL_ATOMIC_STRUCTURAL=PASS
+          echo P01_NEWS_506_OFFICIAL_ASSETS=NOT_BUILT
+          echo P01_NEWS_506_DISASTER_RESTORE=NOT_EXECUTED
+          echo P01_NEWS_506_PRODUCTION_WRITE=NO
+
       - name: Clean all transient private inputs
         if: always()
         shell: bash
