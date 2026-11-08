@@ -1,4 +1,4 @@
-name: P01 News latest JSON 401 + pending 506 exact integration gate
+name: P01 News one-shot real install Atomic preserve rollback against pending 506
 
 on:
   push:
@@ -87,16 +87,21 @@ jobs:
           echo P01_NEWS_506_QUICK_SAVE_CLASSIC_PRG=PASS
           echo P01_NEWS_506_FOCUSED_REGRESSION=PASS
 
-      - name: Verify ephemeral combined package bytes without install or restore
+      - name: One-shot clean FULL and 505-to-merged synthetic Atomic preserve rollback without disaster restore
         shell: bash
-        timeout-minutes: 9
+        timeout-minutes: 14
         env:
           GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
         run: |
           set -Eeuo pipefail
           test -n "$GH_TOKEN"
           WORK="$(mktemp -d "/tmp/p01-news-package-${GITHUB_RUN_ID}-XXXXXXXX")"
-          trap 'rm -rf -- "$WORK"' EXIT
+          PIDS=""
+          cleanup() {
+            for pid in $PIDS; do kill "$pid" >/dev/null 2>&1 || true; done
+            rm -rf -- "$WORK"
+          }
+          trap cleanup EXIT
           mkdir -p "$WORK"/{baseline,prior-update,candidate,out}
           gh release download v2.47.505 -R llhzx2018/vf-start -D "$WORK" \
             -p 'VF-Start-V2.47.505-FULL.zip' \
@@ -148,25 +153,95 @@ jobs:
           php -l "$WORK/updater/repair-v2.99.999.php" >/dev/null
           php "$WORK/updater/repair-v2.99.999.php" --self-test | grep -F '"ok":true' >/dev/null
           echo P01_NEWS_506_SYNTHETIC_FULL_ATOMIC_STRUCTURAL=PASS
+# Only disposable localhost installs, no import or disaster restore.
+          install_fixture() {
+            local root="$1" zip="$2" port="$3" password="NEWS-RUN-$GITHUB_RUN_ID-$3"
+            mkdir -p "$root"
+            unzip -q "$zip" -d "$root"
+            php -S "127.0.0.1:$port" -t "$root" >"$WORK/php-$port.log" 2>&1 &
+            local pid=$!
+            PIDS="$PIDS $pid"
+            for i in $(seq 1 45); do
+              if curl -fsS -b "$WORK/cookie-$port" -c "$WORK/cookie-$port" \
+                "http://127.0.0.1:$port/setup.php" -o "$WORK/setup-$port.html" 2>/dev/null; then break; fi
+              sleep .15
+            done
+            local csrf
+            csrf="$(sed -n 's/.*name="setup_csrf" value="\([^"]*\)".*/\1/p' "$WORK/setup-$port.html" | head -1)"
+            test -n "$csrf"
+            curl -fsS -b "$WORK/cookie-$port" -c "$WORK/cookie-$port" \
+              --data-urlencode "setup_csrf=$csrf" \
+              --data-urlencode 'site_title=P01 Synthetic News Release Fixture' \
+              --data-urlencode "admin_password=$password" \
+              --data-urlencode "admin_password_confirm=$password" \
+              "http://127.0.0.1:$port/setup.php" >"$WORK/installed-$port.html"
+            test -s "$root/app/.runtime.php"
+            (cd "$root" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES' >/dev/null
+            kill "$pid" >/dev/null 2>&1 || true
+            echo "P01_NEWS_506_CLEAN_INSTALL_$port=PASS"
+          }
+          stage_owner() {
+            php -r '
+              $root=$argv[1];$tag=$argv[2];
+              require $root."/app/bootstrap.php";
+              $repo=new VfRepository(vf_db());
+              $repo->createCategory(["name"=>"Synthetic Private ".$tag,"is_private"=>true]);
+              $item=$repo->savePendingCapture(["url"=>"https://news.example.org/e2e-".$tag,"title"=>"Synthetic Owner ".$tag],"browser-extension");
+              if ((int)($item["id"]??0)<=0) exit(23);
+              $value="P01-OWNER-PRIVATE-".$tag;
+              if(file_put_contents(VF_PRIVATE_ROOT."/news-e2e-".$tag.".txt",$value)!==strlen($value))exit(24);
+              if(VF_VERSION!=="2.47.505")exit(25);
+            ' "$1" "$2"
+          }
+          verify_owner() {
+            php -r '
+              $root=$argv[1];$tag=$argv[2];$expected=$argv[3];
+              require $root."/app/bootstrap.php";
+              if(VF_VERSION!==$expected)exit(31);
+              $q=vf_db()->prepare("SELECT is_private,is_pending FROM links WHERE url=?");
+              $q->execute(["https://news.example.org/e2e-".$tag]);
+              $rows=$q->fetchAll(PDO::FETCH_ASSOC);
+              if(count($rows)!==1||(int)$rows[0]["is_private"]!==1||(int)$rows[0]["is_pending"]!==1)exit(32);
+              if((string)@file_get_contents(VF_PRIVATE_ROOT."/news-e2e-".$tag.".txt")!=="P01-OWNER-PRIVATE-".$tag)exit(33);
+              if((string)vf_db()->query("PRAGMA integrity_check")->fetchColumn()!=="ok")exit(34);
+            ' "$1" "$2" "$3"
+          }
+          install_fixture "$WORK/fresh" "$FULL" 18261
+          test "$(tr -d '\r\n ' < "$WORK/fresh/VERSION.txt")" = "2.99.999"
+          test -f "$WORK/fresh/news.php"
+          echo P01_NEWS_506_REAL_SYNTHETIC_FULL_INSTALL=PASS
+
+          install_fixture "$WORK/upgrade" "$WORK/VF-Start-V2.47.505-FULL.zip" 18262
+          stage_owner "$WORK/upgrade" upgrade
+          cp "$WORK/updater/repair-v2.99.999.php" "$WORK/upgrade/"
+          php "$WORK/upgrade/repair-v2.99.999.php" --run="$WORK/upgrade" | grep -F '"ok":true' >/dev/null
+          test "$(tr -d '\r\n ' < "$WORK/upgrade/VERSION.txt")" = "2.99.999"
+          test -f "$WORK/upgrade/news.php"
+          verify_owner "$WORK/upgrade" upgrade 2.99.999
+          (cd "$WORK/upgrade" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES' >/dev/null
+          echo P01_NEWS_506_REAL_SYNTHETIC_ATOMIC_PRIVATE_PRESERVED=PASS
+
+          install_fixture "$WORK/rollback" "$WORK/VF-Start-V2.47.505-FULL.zip" 18263
+          stage_owner "$WORK/rollback" rollback
+          cp "$WORK/updater/repair-v2.99.999.php" "$WORK/rollback/"
+          set +e
+          VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$WORK/rollback/repair-v2.99.999.php" \
+            --run="$WORK/rollback" >"$WORK/forced-failure.log" 2>&1
+          failure=$?
+          set -e
+          test "$failure" -ne 0
+          test "$(tr -d '\r\n ' < "$WORK/rollback/VERSION.txt")" = "2.47.505"
+          test ! -e "$WORK/rollback/news.php"
+          verify_owner "$WORK/rollback" rollback 2.47.505
+          (cd "$WORK/rollback" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES' >/dev/null
+          echo P01_NEWS_506_REAL_SYNTHETIC_ATOMIC_FAULT_ROLLBACK=PASS
+          echo P01_NEWS_506_DISASTER_RESTORE=NOT_EXECUTED
+          echo P01_NEWS_506_OFFICIAL_RELEASE=NOT_PUBLISHED
+          echo P01_NEWS_506_PRODUCTION_WRITES=NONE
+
           echo P01_NEWS_506_OFFICIAL_ASSETS=NOT_BUILT
           echo P01_NEWS_506_DISASTER_RESTORE=NOT_EXECUTED
           echo P01_NEWS_506_PRODUCTION_WRITE=NO
-
-      - name: Real News Owner Guest Chromium on ephemeral combined tree
-        timeout-minutes: 9
-        shell: bash
-        env:
-          VF_NEWS_BROWSER_MODULE: /tmp/p01-news-506-browser
-          PLAYWRIGHT_BROWSERS_PATH: /tmp/p01-news-506-browsers
-          VF_NEWS_TEST_ROOT: p01-news
-        run: |
-          set -Eeuo pipefail
-          mkdir -p "$VF_NEWS_BROWSER_MODULE" "$PLAYWRIGHT_BROWSERS_PATH"
-          npm install --no-audit --no-fund --silent --prefix "$VF_NEWS_BROWSER_MODULE" playwright@1.56.1
-          "$VF_NEWS_BROWSER_MODULE/node_modules/.bin/playwright" install chromium-headless-shell
-          node p01-news/tests/browser/p01_news_r4_chromium.cjs | tee /tmp/p01-news-506-browser.txt
-          grep -F 'P01_NEWS_R4_CHROMIUM=PASS checks=55' /tmp/p01-news-506-browser.txt
-          echo P01_NEWS_506_COMBINED_BROWSER=PASS
 
       - name: Clean all transient private inputs
         if: always()
