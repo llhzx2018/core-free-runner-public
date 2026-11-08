@@ -1,16 +1,16 @@
-name: P07 free loopback SSH rsync SQLite static transfer machine proof
+name: P07 independent synthetic source receiver SSH SQLite HTTPS SNI
 on:
   pull_request:
     paths: ['.github/workflows/p07-whole-vps-ui.yml']
 permissions:
   contents: read
 jobs:
-  synthetic-ssh:
+  two-node-synthetic:
     if: ${{ github.repository == 'llhzx2018/core-free-runner-public' && github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - name: Exact private product transient checkout
+      - name: Transient exact private source checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-server-ops
@@ -19,149 +19,152 @@ jobs:
           persist-credentials: false
           path: product
           fetch-depth: 1
-      - name: Real loopback sshd and P07 SSH/rsync/SQLite/HTTP synthetic test
+      - name: Two isolated Linux nodes real SSH pull and TLS SNI
         shell: bash
         run: |
           set -Eeuo pipefail
           set +x
-          test "$(git -C product rev-parse HEAD)" = 4833dc4cab7e1bc17ba82748bf928f0826553b68
-          sudo apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server openssh-client rsync >/dev/null
-          SSHD_ROOT="$RUNNER_TEMP/p07-private-sshd"
-          SOURCE_ROOT="$RUNNER_TEMP/p07-synthetic-source"
-          mkdir -p "$SSHD_ROOT" "$SOURCE_ROOT"
-          chmod 700 "$SSHD_ROOT"
-          ssh-keygen -q -t ed25519 -N '' -f "$SSHD_ROOT/client_key"
-          ssh-keygen -q -t ed25519 -N '' -f "$SSHD_ROOT/host_key"
-          cp -- "$SSHD_ROOT/client_key.pub" "$SSHD_ROOT/authorized_keys"
-          chmod 600 "$SSHD_ROOT/client_key" "$SSHD_ROOT/host_key" "$SSHD_ROOT/authorized_keys"
-          TEST_USER="$(id -un)"
-          {
-            printf 'Port 2222\nListenAddress 127.0.0.1\n'
-            printf 'HostKey %s\n' "$SSHD_ROOT/host_key"
-            printf 'PidFile %s\n' "$SSHD_ROOT/sshd.pid"
-            printf 'AuthorizedKeysFile %s\n' "$SSHD_ROOT/authorized_keys"
-            printf 'AllowUsers %s\n' "$TEST_USER"
-            printf 'PubkeyAuthentication yes\nPasswordAuthentication no\nKbdInteractiveAuthentication no\n'
-            # Hosted runner user can have a locked password (key login still
-            # permitted via PAM account checks). Use default Ubuntu PAM.
-            printf 'PermitRootLogin no\nUsePAM yes\nStrictModes no\n'
-            printf 'AllowTcpForwarding no\nX11Forwarding no\nPermitTunnel no\n'
-            printf 'LogLevel ERROR\n'
-          } > "$SSHD_ROOT/sshd_config"
-          chmod 600 "$SSHD_ROOT/sshd_config"
-          sudo install -d -m 0755 /run/sshd
-          sudo /usr/sbin/sshd -t -f "$SSHD_ROOT/sshd_config"
-          # Fail if the custom test sshd did not take the identity binding.
-          effective="$(sudo /usr/sbin/sshd -T -f "$SSHD_ROOT/sshd_config")"
-          grep -F "authorizedkeysfile $SSHD_ROOT/authorized_keys" <<<"$effective" >/dev/null
-          grep -F "usepam yes" <<<"$effective" >/dev/null
-          sudo /usr/sbin/sshd -f "$SSHD_ROOT/sshd_config" -E "$SSHD_ROOT/sshd.log"
-          if ! ssh -p 2222 -i "$SSHD_ROOT/client_key" \
-            -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-            -o "UserKnownHostsFile=$SSHD_ROOT/known_hosts" \
-            "$TEST_USER@127.0.0.1" true >/dev/null; then
-            # sshd log is in this temporary workspace and contains no keys;
-            # print only bounded allowlisted auth failure reasons.
-            if grep -E -q 'account is locked|not allowed|invalid user' "$SSHD_ROOT/sshd.log"; then
-              echo P07_TEST_SSH_ACCOUNT_POLICY_BLOCKED
-            else
-              echo P07_TEST_SSH_PUBLICKEY_UNACCEPTED
-            fi
-            exit 1
-          fi
-          echo P07_LOOPBACK_REAL_SSH_KEY_AUTH_PASS
-          P07_TEST_SSH_KEY="$SSHD_ROOT/client_key" \
-          P07_TEST_SSH_USER="$TEST_USER" \
-          P07_TEST_SOURCE_DIR="$SOURCE_ROOT" \
-          PYTHONPATH="$PWD/product/lib:$PWD/product" \
-          PYTHONDONTWRITEBYTECODE=1 python3 -B - <<'PY'
-          import hashlib
-          import os
-          from functools import partial
-          from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
-          from pathlib import Path
-          import shlex
+          PRODUCT_SHA=4833dc4cab7e1bc17ba82748bf928f0826553b68
+          test "$(git -C product rev-parse HEAD)" = "$PRODUCT_SHA"
+          SOURCE_NAME=p07-ci-source
+          RECEIVER_NAME=p07-ci-receiver
+          NETWORK_NAME=p07-ci-isolated
+          cleanup() {
+            docker rm -f "$SOURCE_NAME" "$RECEIVER_NAME" >/dev/null 2>&1 || true
+            docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
+            rm -rf -- product "$RUNNER_TEMP/p07-public-ci-key.pub"
+          }
+          trap cleanup EXIT
+          docker network create --internal "$NETWORK_NAME" >/dev/null
+          # Install dependencies in short-lived containers without putting any private
+          # data into the shared Git, container image, artifact, or runner logs.
+          docker run -d --rm --name "$SOURCE_NAME" --network "$NETWORK_NAME" ubuntu:24.04 sleep infinity >/dev/null
+          docker run -d --rm --name "$RECEIVER_NAME" --network "$NETWORK_NAME" ubuntu:24.04 sleep infinity >/dev/null
+          # Internal network has no registry/internet access; install via apt BEFORE
+          # isolating network, then attach only to the dedicated internal bridge.
+          docker network connect bridge "$SOURCE_NAME"
+          docker network connect bridge "$RECEIVER_NAME"
+          docker exec "$SOURCE_NAME" bash -lc 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server rsync python3 sudo >/dev/null'
+          docker exec "$RECEIVER_NAME" bash -lc 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-client rsync python3 nginx openssl curl >/dev/null'
+          docker network disconnect bridge "$SOURCE_NAME"
+          docker network disconnect bridge "$RECEIVER_NAME"
+          docker exec -i "$SOURCE_NAME" bash -se <<'EOSOURCE'
+          set -Eeuo pipefail
+          useradd -m -s /bin/bash p07test
+          passwd -d p07test >/dev/null
+          install -d -m 0700 -o p07test -g p07test /home/p07test/.ssh
+          install -d -m 0755 -o p07test -g p07test /home/p07test/site
+          install -d -m 0755 -o p07test -g p07test /home/p07test/sqlite
+          printf 'p07test ALL=(root) NOPASSWD:ALL\n' >/etc/sudoers.d/p07test
+          chmod 0440 /etc/sudoers.d/p07test
+          install -d -m 0755 /run/sshd
+          printf 'PermitRootLogin no\nPubkeyAuthentication yes\nPasswordAuthentication no\nUsePAM yes\nAllowUsers p07test\n' >/etc/ssh/sshd_config.d/p07-synthetic.conf
+          /usr/sbin/sshd -t
+          /usr/sbin/sshd
+          runuser -u p07test -- python3 - <<'PY'
           import sqlite3
-          import threading
-          import urllib.request
-          import server_migration_pull as pull
-
-          root = Path(os.environ["P07_TEST_SOURCE_DIR"])
-          src = root / "site"
-          src.mkdir(parents=True)
-          (src / "index.html").write_text("<h1>P07 source static page</h1>\n", encoding="utf-8")
-          (src / "site.css").write_text("h1 {color: teal}\n", encoding="utf-8")
-          dbdir = root / "sqlite"
-          dbdir.mkdir()
-          live = dbdir / "live.db"
-          con = sqlite3.connect(live)
-          con.execute("CREATE TABLE entries (id INTEGER PRIMARY KEY, title TEXT)")
-          con.executemany("INSERT INTO entries VALUES (?,?)", [(1, "alpha"), (2, "beta"), (3, "你好")])
-          con.commit()
-          con.close()
-
-          source = {"host":"127.0.0.1", "ip":"127.0.0.1",
-                    "ssh_user":os.environ["P07_TEST_SSH_USER"], "ssh_port":2222,
-                    "identity_file":os.environ["P07_TEST_SSH_KEY"], "ssh":"ssh"}
-          target = Path(os.environ["RUNNER_TEMP"]) / "p07-isolated-receiver"
-          site = target / "site"
-          site.mkdir(parents=True)
-          pull.pull_path(source, str(src) + "/", site, delete=False)
-          assert (site / "index.html").read_bytes() == (src / "index.html").read_bytes()
-          assert (site / "site.css").read_bytes() == (src / "site.css").read_bytes()
-          assert hashlib.sha256((site / "index.html").read_bytes()).digest() == hashlib.sha256((src / "index.html").read_bytes()).digest()
-          print("P07_REAL_SSH_RSYNC_FILE_CONTENT_AND_SHA256_PASS", flush=True)
-
-          snap = dbdir / "consistent-snapshot.db"
-          code = ("import sqlite3;"
-                  f"src=sqlite3.connect({str(live)!r});"
-                  f"dst=sqlite3.connect({str(snap)!r});"
-                  "src.backup(dst);dst.close();src.close()")
-          pull.source_remote(source, "python3 -c " + shlex.quote(code), timeout=30)
-          local_snap = target / "consistent-snapshot.db"
-          pull.pull_path(source, str(snap), local_snap)
-          con = sqlite3.connect(f"file:{local_snap}?mode=ro", uri=True)
-          try:
-              assert con.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-              assert con.execute("SELECT COUNT(*) FROM entries").fetchone()[0] == 3
-              assert con.execute("SELECT title FROM entries WHERE id=3").fetchone()[0] == "你好"
-          finally:
-              con.close()
-          print("P07_REAL_SSH_SQLITE_CONSISTENT_BACKUP_TRANSFER_PASS", flush=True)
-
-          server = ThreadingHTTPServer(("127.0.0.1",0),partial(SimpleHTTPRequestHandler,directory=str(site)))
-          th = threading.Thread(target=server.serve_forever, daemon=True)
-          th.start()
-          try:
-              req = urllib.request.Request(
-                  f"http://127.0.0.1:{server.server_port}/",
-                  headers={"Host":"site.example.test"},
-              )
-              body = urllib.request.urlopen(req, timeout=5).read()
-              assert b"P07 source static page" in body
-          finally:
-              server.shutdown()
-              server.server_close()
-          print("P07_TRANSFERRRED_STATIC_HTTP_HOST_HEADER_PASS",flush=True)
-
-          try:
-              pull.pull_path(source, "relative-refused", target / "should-not-exist")
-          except pull.PullMigrationError:
-              pass
-          else:
-              raise AssertionError("RELATIVE_REMOTE_PATH_NOT_REJECTED")
-          assert not (target / "should-not-exist").exists()
-          print("P07_UNSAFE_REMOTE_PATH_REJECTED_PASS", flush=True)
+          from pathlib import Path
+          root=Path('/home/p07test')
+          (root/'site/index.html').write_text('<h1>real two-node P07 transfer</h1>\n',encoding='utf-8')
+          (root/'site/base.css').write_text('h1{color:teal}\n',encoding='utf-8')
+          connection=sqlite3.connect(root/'sqlite/live.db')
+          connection.execute('CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)')
+          connection.executemany('INSERT INTO notes VALUES (?,?)',[(1,'alpha'),(2,'你好'),(3,'gamma')])
+          connection.commit()
+          connection.close()
           PY
-      - name: Always remove private source and ephemeral sshd
+          EOSOURCE
+          docker exec "$RECEIVER_NAME" bash -lc 'ssh-keygen -q -t ed25519 -N "" -f /root/p07-id && chmod 600 /root/p07-id'
+          docker cp "$RECEIVER_NAME":/root/p07-id.pub "$RUNNER_TEMP/p07-public-ci-key.pub"
+          docker cp "$RUNNER_TEMP/p07-public-ci-key.pub" "$SOURCE_NAME":/home/p07test/.ssh/authorized_keys
+          docker exec "$SOURCE_NAME" chown p07test:p07test /home/p07test/.ssh/authorized_keys
+          docker exec "$SOURCE_NAME" chmod 600 /home/p07test/.ssh/authorized_keys
+          docker cp product/lib "$RECEIVER_NAME":/opt/p07lib
+          # Sanity: independently address source from receiver over dedicated bridge.
+          docker exec "$RECEIVER_NAME" ssh -i /root/p07-id -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=accept-new p07test@"$SOURCE_NAME" true
+          echo P07_REAL_INDEPENDENT_CONTAINER_SSH_PASS
+          docker exec -i "$RECEIVER_NAME" python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,shlex,sqlite3,sys
+          sys.path.insert(0,'/opt/p07lib')
+          import server_migration_pull as pull
+          source={'host':'p07-ci-source','ip':'127.0.0.1','ssh_user':'p07test','ssh_port':22,'identity_file':'/root/p07-id','ssh':'ssh'}
+          target=Path('/tmp/p07-receiver')
+          site=target/'site'
+          site.mkdir(parents=True)
+          pull.pull_path(source,'/home/p07test/site/',site,delete=False)
+          expected=b'<h1>real two-node P07 transfer</h1>\n'
+          assert (site/'index.html').read_bytes()==expected
+          assert (site/'base.css').read_bytes()==b'h1{color:teal}\n'
+          assert hashlib.sha256((site/'index.html').read_bytes()).digest()==hashlib.sha256(expected).digest()
+          print('P07_REAL_TWO_NODE_SSH_RSYNC_FILE_SHA_PASS',flush=True)
+          snapshot='/home/p07test/sqlite/consistent.db'
+          source_code=("import sqlite3;"
+                       "src=sqlite3.connect('/home/p07test/sqlite/live.db');"
+                       "dst=sqlite3.connect('/home/p07test/sqlite/consistent.db');"
+                       "src.backup(dst);dst.close();src.close()")
+          pull.source_remote(source,'python3 -c '+shlex.quote(source_code),timeout=30)
+          snap=target/'consistent.db'
+          pull.pull_path(source,snapshot,snap,delete=False)
+          con=sqlite3.connect('file:'+str(snap)+'?mode=ro',uri=True)
+          try:
+              assert con.execute('PRAGMA quick_check').fetchone()[0]=='ok'
+              assert con.execute('SELECT COUNT(*) FROM notes').fetchone()[0]==3
+              assert con.execute('SELECT title FROM notes WHERE id=2').fetchone()[0]=='你好'
+          finally:con.close()
+          print('P07_REAL_TWO_NODE_SQLITE_ONLINE_BACKUP_PARITY_PASS',flush=True)
+          try:pull.pull_path(source,'../relative-not-allowed',target/'bad')
+          except pull.PullMigrationError:pass
+          else:raise AssertionError('REMOTE_RELATIVE_PATH_ACCEPTED')
+          assert not (target/'bad').exists()
+          print('P07_REAL_TWO_NODE_REMOTE_PATH_GUARD_PASS',flush=True)
+          PY
+          # TLS and virtual hosts are strictly isolated. A local self-signed certificate
+          # is created in the receiver; --resolve tests Host + SNI, no DNS changes.
+          docker exec -i "$RECEIVER_NAME" bash -se <<'EOTLS'
+          set -Eeuo pipefail
+          openssl req -x509 -newkey rsa:2048 -noenc -days 1 -keyout /tmp/p07-vhost.key -out /tmp/p07-vhost.crt -subj /CN=p07-static.example.test -addext subjectAltName=DNS:p07-static.example.test >/dev/null 2>&1
+          cat >/etc/nginx/sites-enabled/default <<'NGINX'
+          server {
+              listen 80;
+              server_name p07-static.example.test;
+              return 301 https://$host$request_uri;
+          }
+          server {
+              listen 443 ssl default_server;
+              ssl_certificate /tmp/p07-vhost.crt;
+              ssl_certificate_key /tmp/p07-vhost.key;
+              return 421;
+          }
+          server {
+              listen 443 ssl;
+              server_name p07-static.example.test;
+              ssl_certificate /tmp/p07-vhost.crt;
+              ssl_certificate_key /tmp/p07-vhost.key;
+              root /tmp/p07-receiver/site;
+              index index.html;
+              location / { try_files $uri $uri/ =404; }
+          }
+          NGINX
+          nginx -t
+          nginx
+          curl --noproxy '*' --silent --show-error --fail --cacert /tmp/p07-vhost.crt --resolve p07-static.example.test:443:127.0.0.1 https://p07-static.example.test/ | grep -F 'real two-node P07 transfer' >/dev/null
+          curl --noproxy '*' --silent --show-error --fail --cacert /tmp/p07-vhost.crt --resolve p07-static.example.test:443:127.0.0.1 https://p07-static.example.test/base.css | grep -F 'color:teal' >/dev/null
+          printf 'P07_REAL_TWO_NODE_HTTPS_SNI_CERT_STATIC_ASSETS_PASS\n'
+          wrong_code="$(curl --noproxy '*' -k --silent --output /dev/null --write-out '%{http_code}' --resolve wrong.example.test:443:127.0.0.1 https://wrong.example.test/)"
+          test "$wrong_code" = 421
+          printf 'P07_REAL_TWO_NODE_WRONG_SNI_REJECTED_PASS\n'
+          redirect="$(curl --noproxy '*' --silent -o /dev/null -w '%{http_code}' --resolve p07-static.example.test:80:127.0.0.1 http://p07-static.example.test/)"
+          test "$redirect" = 301
+          printf 'P07_REAL_TWO_NODE_HTTP_TO_HTTPS_REDIRECT_PASS\n'
+          EOTLS
+          echo P07_TWO_ISOLATED_NODES_NO_PRODUCTION_WRITE_PASS
+      - name: Always clean independent synthetic nodes and checkout
         if: always()
         shell: bash
         run: |
           set +e
-          SSHD_ROOT="$RUNNER_TEMP/p07-private-sshd"
-          if [[ -f "$SSHD_ROOT/sshd.pid" ]]; then
-            sudo kill -TERM "$(cat "$SSHD_ROOT/sshd.pid")" >/dev/null 2>&1 || true
-          fi
-          rm -rf -- product "$RUNNER_TEMP/p07-private-sshd" "$RUNNER_TEMP/p07-synthetic-source" "$RUNNER_TEMP/p07-isolated-receiver"
-          echo P07_EPHEMERAL_REAL_SSH_AND_PRIVATE_SOURCE_CLEANED
+          docker rm -f p07-ci-source p07-ci-receiver >/dev/null 2>&1
+          docker network rm p07-ci-isolated >/dev/null 2>&1
+          rm -rf -- product "$RUNNER_TEMP/p07-public-ci-key.pub"
+          echo P07_TWO_NODE_PRIVATE_SOURCE_AND_SERVICES_CLEANED
