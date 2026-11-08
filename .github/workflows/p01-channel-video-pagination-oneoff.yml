@@ -1,0 +1,129 @@
+name: p01-channel-video-pagination-oneoff
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p01-channel-video-pagination-oneoff.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  local-only-paging:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'llhzx2018' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      P01_TEST_PASSWORD: SyntheticPagingOnly_2026
+      P01_TEST_ORIGIN: http://127.0.0.1:18991
+      P01_CHANNEL_SITE_ROOT: /tmp/p01-channel-video-pagination-${{ github.run_id }}
+      PLAYWRIGHT_BROWSERS_PATH: /tmp/p01-channel-video-pagination-browsers-${{ github.run_id }}
+
+    steps:
+      - name: Checkout exact private P01 fix source in transient workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: b8cb2bee63d60389f7aff313fcfce90a9c362afd
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+
+      - name: Prepare PHP and isolated Chromium
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-mbstring php-curl php-xml php-zip php-gd unzip >/dev/null
+          php -m | grep -Fxi pdo_sqlite
+          npm install --prefix /tmp/p01-channel-video-pagination-deps --no-save --ignore-scripts --silent playwright@1.56.1
+          /tmp/p01-channel-video-pagination-deps/node_modules/.bin/playwright install chromium
+          ln -s /tmp/p01-channel-video-pagination-deps/node_modules candidate/node_modules
+          echo P01_CHANNEL_PAGING_RUNTIME_READY=PASS
+
+      - name: Verify source identity and focused native page contracts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          test "$(git rev-parse HEAD)" = "b8cb2bee63d60389f7aff313fcfce90a9c362afd"
+          test "$(cat VERSION)" = "2.47.505"
+          test "$(cat src/VERSION.txt)" = "2.47.505"
+          php -l src/app/ChannelLibraryPage.php
+          php -l tests/unit/p01_channels_video_independent_pagination_native.php
+          php -l tests/integration/p01_channels_video_pagination_disposable_fixture.php
+          node --check tests/integration/p01_channels_video_pagination_browser.mjs
+          php tests/unit/p01_channels_video_independent_pagination_native.php
+          php tests/unit/channels_owner_default_video_view_native.php
+          php tests/unit/channel_video_feed_owner_cache_native.php
+          echo P01_CHANNEL_PAGING_NATIVE_SOURCE=PASS
+
+      - name: Create and install disposable Owner site
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          site="$P01_CHANNEL_SITE_ROOT"
+          test ! -e "$site"
+          mkdir -p "$site"
+          cp -a candidate/src/. "$site/"
+          (cd "$site"; php -S 127.0.0.1:18991 -t . >/tmp/p01-video-pagination-php.log 2>&1 & echo $! >/tmp/p01-video-pagination-php.pid)
+          html=/tmp/p01-video-pagination-setup.html
+          for attempt in $(seq 1 50); do
+            if curl --max-time 4 -fsS -c /tmp/p01-video-pagination-cookie -b /tmp/p01-video-pagination-cookie "$P01_TEST_ORIGIN/setup.php" -o "$html"; then break; fi
+            sleep 1
+          done
+          csrf="$(python3 - "$html" <<'PY'
+          import re,sys
+          data=open(sys.argv[1],encoding='utf-8').read()
+          match=re.search(r'name="setup_csrf"\s+value="([^"]+)"',data)
+          if not match: raise SystemExit('Setup CSRF not present')
+          print(match.group(1))
+          PY
+          )"
+          curl -fsS -c /tmp/p01-video-pagination-cookie -b /tmp/p01-video-pagination-cookie -X POST "$P01_TEST_ORIGIN/setup.php" \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode "site_title=Disposable Channels Paging" \
+            --data-urlencode "admin_password=$P01_TEST_PASSWORD" \
+            --data-urlencode "admin_password_confirm=$P01_TEST_PASSWORD" \
+            -o /tmp/p01-video-pagination-setup-complete.html
+          (cd "$site"; php cli/verify.php) | grep -Fx VERIFY_PASS=YES
+          echo P01_CHANNEL_PAGING_DISPOSABLE_INSTALL=PASS
+
+      - name: Seed 116 channels and 560 cached videos only in disposable site
+        shell: bash
+        env:
+          P01_SYNTHETIC_CHANNEL_VIDEO_PAGING: YES
+        run: |
+          set -Eeuo pipefail
+          php candidate/tests/integration/p01_channels_video_pagination_disposable_fixture.php
+          echo P01_CHANNEL_PAGING_DISPOSABLE_CACHE_READY=PASS
+
+      - name: Chromium Owner / Guest actual page 3 to page 4 and last page
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          node candidate/tests/integration/p01_channels_video_pagination_browser.mjs
+          echo P01_CHANNEL_PAGING_116_560_BROWSER_EXACT_HEAD=PASS
+
+      - name: Clean private source and disposable site regardless of outcome
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if [ -f /tmp/p01-video-pagination-php.pid ]; then
+            kill "$(cat /tmp/p01-video-pagination-php.pid)" 2>/dev/null || true
+          fi
+          case "$P01_CHANNEL_SITE_ROOT" in
+            /tmp/p01-channel-video-pagination-*) rm -rf "$P01_CHANNEL_SITE_ROOT";;
+            *) echo "Unsafe cleanup path"; exit 40;;
+          esac
+          case "$PLAYWRIGHT_BROWSERS_PATH" in
+            /tmp/p01-channel-video-pagination-browsers-*) rm -rf "$PLAYWRIGHT_BROWSERS_PATH";;
+            *) echo "Unsafe browser cleanup path"; exit 41;;
+          esac
+          rm -rf /tmp/p01-channel-video-pagination-deps /tmp/p01-video-pagination-php.log \
+            /tmp/p01-video-pagination-php.pid /tmp/p01-video-pagination-cookie \
+            /tmp/p01-video-pagination-setup.html /tmp/p01-video-pagination-setup-complete.html
+          rm -rf candidate
+          echo P01_CHANNEL_PAGING_NO_PUBLIC_SOURCE_OR_PRODUCTION_DATA=PASS
