@@ -80,6 +80,88 @@ jobs:
           grep -F "window.VFLocalNews?.requestDismiss?.()" p01-exact/src/assets/local-subsite-management.js >/dev/null
           echo P01_NEWS_R3_STATIC_SECURITY_WIRING=PASS
 
+      - name: Isolated installed P01 HTTP Owner/Guest/news/Inbox smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p01-exact rev-parse HEAD)" = "$PRODUCT_SHA"
+          SITE="http://127.0.0.1:18078"
+          COOKIES="$(mktemp)"
+          LOG="$(mktemp)"
+          PASS="$(openssl rand -hex 14)"
+          php -S 127.0.0.1:18078 -t p01-exact/src >"$LOG" 2>&1 &
+          SERVER_PID=$!
+          finish() {
+            kill "$SERVER_PID" >/dev/null 2>&1 || true
+            wait "$SERVER_PID" >/dev/null 2>&1 || true
+            rm -f "$COOKIES" "$LOG"
+          }
+          trap finish EXIT
+          for attempt in $(seq 1 30); do
+            if curl -fsS -c "$COOKIES" -b "$COOKIES" "$SITE/setup.php" -o /tmp/p01-news-setup.html; then break; fi
+            sleep 1
+          done
+          SETUP_CSRF="$(sed -n 's/.*name="setup_csrf" value="\([^"]*\)".*/\1/p' /tmp/p01-news-setup.html | head -1)"
+          test -n "$SETUP_CSRF"
+          curl -sS -c "$COOKIES" -b "$COOKIES" -o /tmp/p01-news-installed.html \
+            --data-urlencode "setup_csrf=$SETUP_CSRF" \
+            --data-urlencode 'site_title=News Smoke' \
+            --data-urlencode "admin_password=$PASS" \
+            --data-urlencode "admin_password_confirm=$PASS" \
+            "$SITE/setup.php"
+          test -s p01-exact/src/app/.runtime.php
+          curl -fsS "$SITE/api.php?action=health" | jq -e '.ok==true' >/dev/null
+          echo P01_NEWS_R3_ISOLATED_INSTALL=PASS
+          curl -fsS -c "$COOKIES" -b "$COOKIES" "$SITE/news.php" -o /tmp/p01-news-guest.html
+          grep -F '<h1>新闻</h1>' /tmp/p01-news-guest.html >/dev/null
+          if grep -F 'data-vf-news-save' /tmp/p01-news-guest.html >/dev/null; then
+            echo GUEST_SAVE_LEAK; exit 12
+          fi
+          GUEST_PREF="$(curl -sS -o /tmp/p01-news-guest-prefs.json -w '%{http_code}' "$SITE/news-preferences.php")"
+          test "$GUEST_PREF" = 401
+          echo P01_NEWS_R3_GUEST_PRIVACY_HTTP=PASS
+          LOGIN_JSON="$(python3 -c 'import json,sys;print(json.dumps({"password":sys.argv[1]}))' "$PASS")"
+          CSRF="$(curl -fsS -c "$COOKIES" -b "$COOKIES" -H 'Content-Type: application/json' \
+            -d "$LOGIN_JSON" "$SITE/api.php?action=login" | jq -r '.csrf // empty')"
+          test -n "$CSRF"
+          curl -fsS -c "$COOKIES" -b "$COOKIES" "$SITE/news.php" -o /tmp/p01-news-owner.html
+          grep -F 'data-vf-news-open-manager' /tmp/p01-news-owner.html >/dev/null
+          grep -F 'data-vf-news-csrf=' /tmp/p01-news-owner.html >/dev/null
+          grep -F 'data-vf-local-news-area' /tmp/p01-news-owner.html >/dev/null
+          PREF="$(curl -fsS -b "$COOKIES" "$SITE/news-preferences.php")"
+          VERSION="$(printf '%s' "$PREF" | jq -r '.preferences.version')"
+          test "$VERSION" = defaults
+          BODY="$(python3 -c 'import json,sys;print(json.dumps({"version":sys.argv[1],"order":["bbc-world","bbc-technology","bbc-business","npr-news"],"enabled":["bbc-world","npr-news"],"followed":["npr-news"]}))' "$VERSION")"
+          curl -fsS -b "$COOKIES" -c "$COOKIES" -H 'Content-Type: application/json' \
+            -H "X-CSRF-Token: $CSRF" -d "$BODY" "$SITE/news-preferences.php" \
+            | jq -e '.ok == true and .preferences.followed == ["npr-news"]' >/dev/null
+          curl -fsS -b "$COOKIES" "$SITE/news-preferences.php" | jq -e '.preferences.enabled == ["bbc-world","npr-news"]' >/dev/null
+          curl -fsS -b "$COOKIES" "$SITE/news.php?view=followed" -o /tmp/p01-news-followed.html
+          grep -F '我的关注' /tmp/p01-news-followed.html >/dev/null
+          BLOCKED="$(curl -sS -b "$COOKIES" -o /tmp/p01-news-disabled.json -w '%{http_code}' \
+            -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" \
+            -d '{"source_id":"bbc-business"}' "$SITE/news-feed.php")"
+          test "$BLOCKED" = 403
+          echo P01_NEWS_R3_OWNER_PREFS_HTTP=PASS
+          ( cd p01-exact/src && php -r 'require "app/bootstrap.php";(new VfRepository(vf_db()))->createCategory(["name"=>"Synthetic Inbox","is_private"=>true]);' )
+          SAVED="$(curl -fsS -b "$COOKIES" -c "$COOKIES" -H 'Accept: application/json' \
+            -F "csrf=$CSRF" -F 'url=https://news.example.org/story-one' \
+            -F 'title=News R3 synthetic item' "$SITE/quick-save.php")"
+          printf '%s' "$SAVED" | jq -e '.ok == true' >/dev/null
+          AGAIN="$(curl -fsS -b "$COOKIES" -c "$COOKIES" -H 'Accept: application/json' \
+            -F "csrf=$CSRF" -F 'url=https://news.example.org/story-one' \
+            -F 'title=News R3 synthetic item' "$SITE/quick-save.php")"
+          printf '%s' "$AGAIN" | jq -e '.ok == true' >/dev/null
+          ( cd p01-exact/src && php -r '
+            require "app/bootstrap.php";
+            $db=vf_db();
+            $query=$db->prepare("SELECT is_private,is_pending FROM links WHERE url=?");
+            $query->execute(["https://news.example.org/story-one"]);
+            $rows=$query->fetchAll(PDO::FETCH_ASSOC);
+            if(count($rows)!==1 || (int)$rows[0]["is_private"]!==1 || (int)$rows[0]["is_pending"]!==1)exit(7);
+          ' )
+          echo P01_NEWS_R3_PENDING_CANONICAL_HTTP=PASS
+
       - name: Clean temporary private source from public runner
         if: always()
         shell: bash
