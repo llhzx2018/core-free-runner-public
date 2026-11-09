@@ -6,8 +6,11 @@ set -Eeuo pipefail
 umask 077
 fail() { printf 'P07_OWNER125_BLOCKED=%s\n' "$1" >&2; exit 13; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "MISSING_$1_NO_CHANGES"; }
-url="$(printenv P07_TRIAL_URL 2>/dev/null || true)"
-sha="$(printenv P07_TRIAL_SHA256 2>/dev/null || true)"
+# The public nonformal Owner trial is pinned by immutable GitHub asset ID
+# and digest, so a single no-Git SSH command can install without hand-entered
+# environment variables. Explicit overrides remain available for test runners.
+url="${P07_TRIAL_URL:-https://api.github.com/repos/llhzx2018/core-free-runner-public/releases/assets/727624655}"
+sha="${P07_TRIAL_SHA256:-49201b383fee95c22c99ea963acdc3b5e7510fbbda52af38dd07c5e8ffd36ef0}"
 [[ -n "$url" && -n "$sha" ]] || fail "DISTRIBUTION_NOT_READY_NO_CHANGES"
 [[ "$url" =~ ^https://[^[:space:]]+$ ]] || fail "HTTPS_PACKAGE_URL_REQUIRED_NO_CHANGES"
 [[ ! "$url" =~ ^https://[^/]+@ ]] || fail "EMBEDDED_CREDENTIAL_REFUSED"
