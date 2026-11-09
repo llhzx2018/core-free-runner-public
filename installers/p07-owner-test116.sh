@@ -25,8 +25,12 @@ old="$(cat /opt/vf-server-ops/BUILD_ID)"
 [[ "$old" == "0.1.0-release115" ]] || fail "STABLE_BUILD_UNEXPECTED_NO_CHANGES"
 work="$(mktemp -d -t p07-owner116.XXXXXXXX)" || fail "TEMP_DIR_UNAVAILABLE_NO_CHANGES"
 trap 'rm -rf -- "$work"' EXIT
+curl_headers=()
+case "$url" in
+  https://api.github.com/*) curl_headers=(-H 'Accept: application/octet-stream') ;;
+esac
 curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 15 \
-  --max-time 300 --retry 2 "$url" -o "$work/bundle.tar.gz" ||
+  --max-time 300 --retry 2 "${curl_headers[@]}" "$url" -o "$work/bundle.tar.gz" ||
   fail "PACKAGE_DOWNLOAD_FAILED_NO_CHANGES"
 printf '%s  %s\n' "$sha" "$work/bundle.tar.gz" |
   sha256sum --check --status || fail "SHA256_MISMATCH_NO_CHANGES"
