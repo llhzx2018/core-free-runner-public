@@ -11,8 +11,8 @@ need() { command -v "$1" >/dev/null 2>&1 || fail "MISSING_$1_NO_CHANGES"; }
 # environment variables. Explicit overrides remain available for test runners.
 # This nonformal trial's immutable asset ID and SHA-256 are verified.
 # No Git, manual download or owner-provided hash is needed on CP2.
-url="${P07_TRIAL_URL:-}"
-sha="${P07_TRIAL_SHA256:-}"
+url="${P07_TRIAL_URL:-https://api.github.com/repos/llhzx2018/core-free-runner-public/releases/assets/727973990}"
+sha="${P07_TRIAL_SHA256:-36315ef3c5022ea7352f5a7b647bc71b941746233962dec3d7cfc852126c97c5}"
 [[ -n "$url" && -n "$sha" ]] || fail "DISTRIBUTION_NOT_READY_NO_CHANGES"
 [[ "$url" =~ ^https://[^[:space:]]+$ ]] || fail "HTTPS_PACKAGE_URL_REQUIRED_NO_CHANGES"
 [[ ! "$url" =~ ^https://[^/]+@ ]] || fail "EMBEDDED_CREDENTIAL_REFUSED"
