@@ -17,7 +17,6 @@ BIN='/usr/local/bin/vfops-rc293'
 
 note() { printf 'P07_TEST116_%s\n' "$1"; }
 die() { note "$1" >&2; exit 13; }
-command -v git >/dev/null || die 'GIT_MISSING_NO_CHANGES'
 command -v python3 >/dev/null || die 'PYTHON_MISSING_NO_CHANGES'
 command -v curl >/dev/null || die 'CURL_MISSING_NO_CHANGES'
 command -v tar >/dev/null || die 'TAR_MISSING_NO_CHANGES'
@@ -39,6 +38,38 @@ live_before="$(cat /opt/vf-server-ops/BUILD_ID)"
 work="$(mktemp -d /tmp/p07-owner-test116.XXXXXXXX)" ||
   die 'TEMP_DIR_UNAVAILABLE_NO_CHANGES'
 trap 'rm -rf -- "$work"' EXIT
+
+# CloudPanel Debian/Ubuntu often ships without Git. Install only that
+# missing OS package after confirming the live release115 and the EMPTY
+# isolated slot. Never upgrade unrelated packages or touch CloudPanel data.
+ensure_git() {
+  command -v git >/dev/null 2>&1 && return 0
+  [[ -r /etc/os-release ]] || die 'GIT_MISSING_OS_UNVERIFIED'
+  local os_id
+  os_id="$(. /etc/os-release; printf '%s' "${ID:-unknown}")"
+  case "$os_id" in
+    debian|ubuntu) ;;
+    *) die 'GIT_MISSING_OS_UNSUPPORTED' ;;
+  esac
+  command -v apt-get >/dev/null 2>&1 ||
+    die 'GIT_MISSING_APT_UNAVAILABLE'
+  command -v timeout >/dev/null 2>&1 ||
+    die 'GIT_MISSING_TIMEOUT_UNAVAILABLE'
+  note 'GIT_MISSING_INSTALLING_DEBIAN_PACKAGE'
+  if ! env DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none \
+    timeout 240s apt-get update -qq >"$work/git-apt.log" 2>&1; then
+    die 'GIT_APT_UPDATE_FAILED_SYSTEM_PACKAGE_ONLY'
+  fi
+  if ! env DEBIAN_FRONTEND=noninteractive APT_LISTCHANGES_FRONTEND=none \
+    timeout 240s apt-get -o DPkg::Lock::Timeout=60 install \
+      -y -qq --no-install-recommends git >"$work/git-apt.log" 2>&1; then
+    die 'GIT_APT_INSTALL_FAILED_SYSTEM_PACKAGE_ONLY'
+  fi
+  command -v git >/dev/null 2>&1 ||
+    die 'GIT_INSTALL_DID_NOT_PROVIDE_GIT'
+  note 'GIT_DEPENDENCY_READY'
+}
+ensure_git
 
 # No GitHub login, copy-pasted token, Git credential installation,
 # or password prompts. Reuse only read permission already on this VPS.
