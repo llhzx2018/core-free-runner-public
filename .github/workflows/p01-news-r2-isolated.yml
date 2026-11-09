@@ -1,4 +1,4 @@
-name: P01 Chinese News bounded official RSS live access preflight
+name: P01 Chinese News official replacement RSS candidate live-read triage
 
 on:
   push:
@@ -9,95 +9,81 @@ permissions:
   contents: read
 
 concurrency:
-  group: p01-news-official-feed-read-only
+  group: p01-news-official-candidate-probe
   cancel-in-progress: false
 
 jobs:
-  live-8-official:
+  official-candidates:
     runs-on: ubuntu-24.04
     timeout-minutes: 12
-    env:
-      PRODUCT_SHA: 4c4a238420ed1226ba946f497b10d0d1167db5a3
     steps:
       - name: Checkout registered Public Runner
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Prepare PHP cURL and XML
+      - name: Prepare XML parser and TLS
         run: |
           set -Eeuo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq php-cli php-curl php-xml >/dev/null
-          php -m | grep -Fx curl
-          php -m | grep -Fx SimpleXML
-      - name: Checkout exact current P01 candidate transiently
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: llhzx2018/vf-start
-          ref: ${{ env.PRODUCT_SHA }}
-          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-          path: p01-news
-          persist-credentials: false
-          fetch-depth: 1
-      - name: Bounded one GET per publisher RSS without login redirects or retries
+      - name: Verify three published candidate subscriptions only
         shell: bash
         timeout-minutes: 4
         run: |
           set -Eeuo pipefail
-          test "$(git -C p01-news rev-parse HEAD)" = "$PRODUCT_SHA"
-          cat > /tmp/p01-news-rss-preflight.php <<'PHP'
+          cat > /tmp/p01-chinese-candidates.php <<'PHP'
           <?php
           declare(strict_types=1);
-          require_once getcwd().'/p01-news/src/app/NewsFeedService.php';
-          $registry=(new ReflectionClass('VfNewsFeedService'))->getReflectionConstant('SOURCES')->getValue();
-          if(count($registry)!==8){echo "NEWS_FEED_PREFLIGHT_REGISTRY_DRIFT\n";exit(17);}
-          $allowedHosts=['www.chinanews.com.cn'=>1,'www.ithome.com'=>1,'36kr.com'=>1];
-          $summary=[];
-          foreach($registry as $id=>$source){
-            $url=(string)$source['feed'];
+          $urls=[
+            'solidot-tech'=>'https://www.solidot.org/index.rss',
+            'sspai-tech'=>'https://sspai.com/feed',
+            'cn-headline'=>'https://www.chinanews.com.cn/rss/importnews.xml'
+          ];
+          $hosts=['www.solidot.org'=>true,'sspai.com'=>true,'www.chinanews.com.cn'=>true];
+          foreach($urls as $id=>$url){
             $host=parse_url($url,PHP_URL_HOST);
-            if(!isset($allowedHosts[$host])||!str_starts_with($url,'https://')){
-              echo "NEWS_FEED_PREFLIGHT_UNEXPECTED_HOST\n";exit(19);
-            }
-            $body='';
-            $c=curl_init($url);
-            curl_setopt_array($c,[
+            if(!isset($hosts[$host]))exit(16);
+            $body='';$ch=curl_init($url);
+            curl_setopt_array($ch,[
               CURLOPT_RETURNTRANSFER=>false,CURLOPT_FOLLOWLOCATION=>false,
               CURLOPT_CONNECTTIMEOUT=>3,CURLOPT_TIMEOUT=>7,
               CURLOPT_USERAGENT=>'VF Start News/1 (+source headlines only)',
               CURLOPT_SSL_VERIFYPEER=>true,CURLOPT_SSL_VERIFYHOST=>2,
               CURLOPT_PROXY=>'',CURLOPT_NOPROXY=>'*',
               CURLOPT_HTTPHEADER=>['Accept: application/rss+xml, application/xml, text/xml'],
-              CURLOPT_WRITEFUNCTION=>static function($c,string $chunk)use(&$body):int{
+              CURLOPT_WRITEFUNCTION=>static function($ch,string $chunk) use(&$body):int{
                 if(strlen($body)+strlen($chunk)>393216)return 0;
                 $body.=$chunk;return strlen($chunk);
-              },
+              }
             ]);
-            $ok=curl_exec($c);
-            $code=(int)curl_getinfo($c,CURLINFO_RESPONSE_CODE);
-            $ctype=(string)curl_getinfo($c,CURLINFO_CONTENT_TYPE);
-            $err=(int)curl_errno($c);
-            curl_close($c);
-            $state='NOT_XML';$count=0;
-            if(!$ok)$state='NETWORK_OR_SIZE_ERROR';
-            elseif($code!==200)$state='HTTP_NOT_200';
-            elseif(preg_match('/text\/html/i',$ctype))$state='HTML_CHALLENGE_OR_PAGE';
+            $ok=curl_exec($ch);$status=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE);
+            $ctype=(string)curl_getinfo($ch,CURLINFO_CONTENT_TYPE);
+            $errno=(int)curl_errno($ch);curl_close($ch);
+            $items=0;$reason='INVALID_XML';
+            if(!$ok)$reason='NETWORK_OR_SIZE_ERROR';
+            elseif($status!==200)$reason='HTTP_NOT_200';
+            elseif(stripos($ctype,'text/html')!==false)$reason='HTML_PAGE_OR_CHALLENGE';
+            elseif(preg_match('/<!\s*(?:DOCTYPE|ENTITY)\b/i',$body))$reason='XML_DTD_DENIED';
             else{
-              try{$items=VfNewsFeedService::parseRss($id,$body,time());
-                $count=count($items);$state=$count>0?'VALID_NEWS_XML':'NO_VALID_ITEMS';
-              }catch(Throwable $e){$state='INVALID_FEED_XML';}
+              $prior=libxml_use_internal_errors(true);
+              $root=simplexml_load_string($body,'SimpleXMLElement',LIBXML_NONET|LIBXML_NOCDATA);
+              if($root!==false){
+                $items=isset($root->channel)?count($root->channel->item):0;
+                if($root->getName()==='feed'){
+                  $root->registerXPathNamespace('atom','http://www.w3.org/2005/Atom');
+                  $entries=$root->xpath('/atom:feed/atom:entry');$items=is_array($entries)?count($entries):0;
+                }
+              }
+              libxml_clear_errors();libxml_use_internal_errors($prior);
+              $reason=$items>0?'LIVE_XML_ITEMS':'XML_NO_ITEMS';
             }
-            echo "NEWS_FEED_PREFLIGHT id=$id status=$state http=$code items=$count errno=$err\n";
-            $summary[$state]=($summary[$state]??0)+1;
+            echo "CANDIDATE_SOURCE=$id STATUS=$reason HTTP=$status ITEMS=$items ERRNO=$errno\n";
           }
-          echo 'NEWS_FEED_PREFLIGHT_FINISHED=8 PROBE_ONLY=YES NO_REDIRECTS=YES NO_COOKIES=YES NO_RETRIES=YES'.PHP_EOL;
-          echo 'NEWS_FEED_PREFLIGHT_VALID='.($summary['VALID_NEWS_XML']??0).PHP_EOL;
+          echo "CANDIDATE_OFFICIAL_LIVE_TRIAGE=COMPLETED NO_BYPASS=YES NO_COOKIES=YES\n";
           PHP
-          php /tmp/p01-news-rss-preflight.php
-          echo P01_NEWS_OFFICIAL_RSS_ACCESS_DIAGNOSTIC=EXECUTED
-          echo P01_NEWS_RELEASE_AND_RIGHTS_GATE=NOT_ASSERTED
-      - name: Purge private transient sources and diagnostic
+          php /tmp/p01-chinese-candidates.php
+      - name: Delete temporary response workspace
         if: always()
         run: |
-          rm -rf p01-news /tmp/p01-news-rss-preflight.php
-          echo P01_NEWS_RSS_PRIVATE_CLEANUP=COMPLETE
+          rm -f /tmp/p01-chinese-candidates.php
+          echo P01_NEWS_CANDIDATE_PROBE_CLEANUP=COMPLETE
