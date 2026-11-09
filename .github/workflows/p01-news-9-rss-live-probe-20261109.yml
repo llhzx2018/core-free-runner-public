@@ -1,0 +1,97 @@
+name: P01 News nine publisher RSS live validity - no bypass
+on:
+  push:
+    branches:
+      - task/p01-news-9-rss-live-probe-20261109
+
+permissions:
+  contents: read
+
+jobs:
+  live-rss:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 14
+    env:
+      PRODUCT_SHA: 7964fa76724605f86fc9a3a36c8791891c7147dc
+    steps:
+      - name: Public Runner read-only checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Transient private exact source checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.PRODUCT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p01-news-source
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify publisher sources and normal direct HTTPS XML
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p01-news-source rev-parse HEAD)" = "$PRODUCT_SHA"
+          python3 - <<'PY'
+          import pathlib,re,ssl,urllib.request,urllib.error,xml.etree.ElementTree as ET
+          text=pathlib.Path("p01-news-source/src/app/NewsFeedService.php").read_text()
+          sources={}
+          for line in text.splitlines():
+              m=re.match(r"\s*'([a-z0-9-]+)'\s*=>\s*\[(.*)\],?\s*$",line)
+              if m and "'home'=>" in m.group(2):
+                  info=m.group(2)
+                  feed=re.search(r"'feed'=>'([^']+)'",info)
+                  kind=re.search(r"'kind'=>'([^']+)'",info)
+                  sources[m.group(1)]={"feed":feed.group(1) if feed else None,"kind":kind.group(1) if kind else ""}
+          assert len(sources)==11,len(sources)
+          rss={k:v["feed"] for k,v in sources.items() if v["feed"]}
+          direct=[k for k,v in sources.items() if not v["feed"]]
+          assert len(rss)==9 and len(direct)==2
+          assert set(direct)=={"baijing-global","zaobao-world"}
+          print("P01_NEWS_LIVE_SOURCE_REGISTRY=PASS rss=9 direct=2")
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,*args,**kwargs):return None
+          opener=urllib.request.build_opener(urllib.request.ProxyHandler({}),NoRedirect,urllib.request.HTTPSHandler(context=ssl.create_default_context()))
+          valid=0
+          for sid,url in rss.items():
+              outcome="UNAVAILABLE"
+              try:
+                  assert url.startswith("https://"),"not_https"
+                  req=urllib.request.Request(url,headers={"User-Agent":"VF Start News/1 (+source headlines only)","Accept":"application/rss+xml, application/xml, text/xml"})
+                  with opener.open(req,timeout=9) as resp:
+                      status=resp.status
+                      mime=resp.headers.get("Content-Type","").split(";")[0]
+                      body=resp.read(393217)
+                  if status!=200:outcome="HTTP_"+str(status)
+                  elif len(body)>393216:outcome="TOO_LARGE"
+                  elif b"<!DOCTYPE" in body.upper() or b"<!ENTITY" in body.upper():outcome="DISALLOWED_DTD"
+                  else:
+                      root=ET.fromstring(body)
+                      tag=root.tag.rsplit("}",1)[-1].lower()
+                      if tag=="rss":
+                          count=len(root.findall("./channel/item"))
+                      elif tag=="feed":
+                          count=len(root.findall("{http://www.w3.org/2005/Atom}entry"))
+                      else:
+                          count=0
+                      outcome="XML_VALID_"+str(count) if count>0 else "XML_NO_ITEMS"
+                  if outcome.startswith("XML_VALID_"):valid+=1
+              except urllib.error.HTTPError as e:outcome="HTTP_"+str(e.code)
+              except urllib.error.URLError as e:outcome="URL_ERROR_"+type(e.reason).__name__
+              except TimeoutError:outcome="TIMEOUT"
+              except (ET.ParseError,UnicodeError):outcome="INVALID_XML"
+              except Exception as e:outcome="ERROR_"+type(e).__name__
+              print("P01_NEWS_RSS_LIVE id="+sid+" result="+outcome,flush=True)
+          print("P01_NEWS_LIVE_VALID="+str(valid)+"/9",flush=True)
+          print("P01_NEWS_LIVE_FAILED="+str(9-valid),flush=True)
+          print("P01_NEWS_LIVE_NO_BYPASS=YES",flush=True)
+          PY
+
+      - name: Remove transient private source
+        if: always()
+        shell: bash
+        run: |
+          rm -rf p01-news-source
+          echo P01_PRIVATE_CHECKOUT_CLEANED=YES
