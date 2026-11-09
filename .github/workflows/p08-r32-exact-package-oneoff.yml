@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-lander
-          ref: 7096a37b1d28ff9a3f726236b1714ab4b78bb7a3
+          ref: 916ad97249b4d0a5b3b8a8e667fe38b4aa97ee79
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           fetch-depth: 1
@@ -40,15 +40,30 @@ jobs:
           set +x
           f="$GITHUB_WORKSPACE/p08-private-source/owner-trial-artifacts/p08-first-enable.php"
           test -f "$f" && test ! -L "$f"
-          test "$(git -C p08-private-source rev-parse HEAD)" = "7096a37b1d28ff9a3f726236b1714ab4b78bb7a3"
+          test "$(git -C p08-private-source rev-parse HEAD)" = "916ad97249b4d0a5b3b8a8e667fe38b4aa97ee79"
           test "$(cat p08-private-source/VERSION)" = 0.1.1
           echo P08_OWNER_ARTIFACT_EXACT_CHECKOUT=PASS
-          test "$(stat -c%s "$f")" = 289623
+          test "$(stat -c%s "$f")" = 293243
+          test "$(git -C p08-private-source hash-object owner-trial-artifacts/p08-first-enable.php)" = 749138397aed5a19123bef41356224de0281c316
           echo P08_OWNER_ARTIFACT_SIZE=PASS
-          printf '%s  %s\n' 'b72ff9b3d7fc443d32359347c3fb92e5451281b03816a297014c028520bcf518' "$f" | sha256sum --check --status
+          echo P08_OWNER_CLI_ARTIFACT_GIT_BLOB=PASS
+          zip="$GITHUB_WORKSPACE/p08-private-source/owner-trial-artifacts/vf-lander-0.1.0-first-enable-CLI-fixed.zip"
+          test -f "$zip" && test ! -L "$zip"
+          unzip -tq "$zip" > /dev/null
+          cmp -s "$f" <(unzip -p "$zip" p08-first-enable.php)
+          test "$(unzip -Z1 "$zip" | wc -l)" = 2
+          echo P08_OWNER_CLI_ZIP_AND_PHP_BYTES_IDENTICAL=PASS
+          digest="$(sha256sum "$f" | cut -d' ' -f1)"
+          printf 'P08_OWNER_CLI_PHP_SHA256=%s\n' "$digest"
           echo P08_OWNER_ARTIFACT_SHA256=PASS
           php -l "$f"
           echo P08_OWNER_ARTIFACT_PHP_LINT=PASS
+          if php "$f" --enable-owner-update > "$RUNNER_TEMP/p08-root-guard.txt" 2>&1; then
+            echo P08_OWNER_CLI_OUTSIDE_SITE_ROOT_UNEXPECTEDLY_ALLOWED
+            exit 1
+          fi
+          grep -Fq FIRST_ENABLE_CLI_SITE_ROOT_UNVERIFIED "$RUNNER_TEMP/p08-root-guard.txt"
+          echo P08_OWNER_CLI_FOREIGN_ROOT_REFUSED=PASS
           cat > "$RUNNER_TEMP/p08-verify-bootstrap.php" <<'PHP'
           <?php
           declare(strict_types=1);
@@ -63,7 +78,10 @@ jobs:
               throw new RuntimeException('P08_BOOTSTRAP_ENTRY_UNVERIFIED');
           }
           $body = substr($source, strlen('<?php'));
-          $last = strrpos($body, $entry);
+          // New CLI mode has a bottom dispatch block. Strip it entirely;
+          // evaluating it would execute a forbidden real CLI install.
+          $guard = "\nif (PHP_SAPI === 'cli') {\n    p08FirstCliEnable(\$argv);\n}\np08FirstOwnerEntry();";
+          $last = strrpos($body, $guard);
           if (!is_int($last)) {
               throw new RuntimeException('P08_BOOTSTRAP_ENTRY_NOT_FOUND');
           }
@@ -83,17 +101,50 @@ jobs:
               }
           }
           echo "P08_OWNER_SINGLE_FILE_PHP_LINT_AND_13_GIT_BLOB_CHECK=PASS\n";
+          // Synthetic disposable filesystem install: no production web root.
+          $root = rtrim((string) getenv('RUNNER_TEMP'), '/').'/p08-cli-disposable';
+          if (file_exists($root) || is_link($root)) {
+              throw new RuntimeException('P08_TEMP_COLLISION');
+          }
+          $web = $root.'/htdocs/site';
+          $private = dirname($web).'/.vf-lander-'.substr(hash('sha256',$web),0,16);
+          $original = $private.'/releases/'.P08_FIRST_ORIGIN.'/backend/installer/index.php';
+          if (!mkdir(dirname($original), 0700, true) || !mkdir($private.'/private-backups',0700,true)
+              || !mkdir($web,0700,true)) {
+              throw new RuntimeException('P08_FIXTURE_CREATE_FAILED');
+          }
+          $oldBytes = file_get_contents($argv[2]);
+          $oldBlob = sha1('blob '.strlen($oldBytes)."\0".$oldBytes);
+          if ($oldBlob !== 'f198381ccc3111b9c79d87abe8ea42c23167660d') {
+              throw new RuntimeException('P08_SOURCE_ADAPTER_CHANGED');
+          }
+          file_put_contents($original, $oldBytes);
+          file_put_contents($web.'/index.php', $oldBytes);
+          p08FirstInstall($web, $private);
+          $bridge = $expected['installer/cp3-atomic-bridge-index.php'];
+          if (!p08FirstHash($web.'/index.php', $bridge)
+              || !p08FirstHash($private.'/private-backups/p08-original-0.1.0-index.php',
+                'f198381ccc3111b9c79d87abe8ea42c23167660d')) {
+              throw new RuntimeException('P08_SANDBOX_BACKUP_OR_SWAP_INCORRECT');
+          }
+          foreach ($expected as $name => $blob) {
+              if (!p08FirstHash($private.'/updater/backend/'.$name, $blob)) {
+                  throw new RuntimeException('P08_SANDBOX_COMPONENT_DRIFT');
+              }
+          }
+          echo "P08_OWNER_CLI_DISPOSABLE_BRIDGE_BACKUP_13_FILES=PASS\n";
           echo "P08_BOOTSTRAP_ORIGINAL_OWNER_CSRF_AND_BACKUP_GUARD=SOURCE_UNCHANGED\n";
           echo "P08_PRODUCTION_WRITES=NO\n";
           PHP
-          php "$RUNNER_TEMP/p08-verify-bootstrap.php" "$f"
+          php "$RUNNER_TEMP/p08-verify-bootstrap.php" "$f" "$GITHUB_WORKSPACE/p08-private-source/backend/installer/index.php"
 
       - name: Delete private workspace and validation scratch
         if: always()
         shell: bash
         run: |
           set +e
-          rm -f -- "$RUNNER_TEMP/p08-verify-bootstrap.php"
+          rm -f -- "$RUNNER_TEMP/p08-verify-bootstrap.php" "$RUNNER_TEMP/p08-root-guard.txt"
+          rm -rf -- "$RUNNER_TEMP/p08-cli-disposable"
           rm -rf -- "$GITHUB_WORKSPACE/p08-private-source"
           echo P08_PUBLIC_REPOSITORY_PRIVATE_SOURCE_PERSISTENCE=NO
           echo P08_PUBLIC_ARTIFACT_UPLOAD=NO
