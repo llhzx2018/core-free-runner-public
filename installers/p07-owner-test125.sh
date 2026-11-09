@@ -20,12 +20,32 @@ for command_name in curl sha256sum python3 bash; do need "$command_name"; done
 target=/opt/vf-server-ops-rc125
 previous=/opt/vf-server-ops-rc125.previous
 binary=/usr/local/bin/vfops-rc125
-for slot in "$target" "$previous" /opt/vf-server-ops-rc125.new "$binary"; do
-  [[ ! -e "$slot" && ! -L "$slot" ]] || fail "TEST_SLOT_ALREADY_OCCUPIED_NO_CHANGES"
-done
 [[ -f /opt/vf-server-ops/BUILD_ID ]] || fail "RELEASE115_NOT_INSTALLED_NO_CHANGES"
 old="$(cat /opt/vf-server-ops/BUILD_ID)"
 [[ "$old" == "0.1.0-release115" ]] || fail "STABLE_BUILD_UNEXPECTED_NO_CHANGES"
+# A successful first installation creates a dedicated slot. Re-running the
+# same trusted bootstrap is a NO-CHANGE success, not a failed installation.
+# A partial, altered, interrupted, or mismatched slot still fails closed.
+if [[ -d "$target" && ! -L "$target" && -f "$target/BUILD_ID" &&
+      ! -L "$target/BUILD_ID" && -x "$target/bin/vfops-user" &&
+      -L "$binary" &&
+      "$(readlink -- "$binary" 2>/dev/null || true)" == "$target/bin/vfops-user" &&
+      "$(cat "$target/BUILD_ID")" == "0.1.0-release125" &&
+      "$(NO_COLOR=1 "$binary" --build-id 2>/dev/null || true)" == "0.1.0-release125" &&
+      ! -e "$previous" && ! -L "$previous" &&
+      ! -e /opt/vf-server-ops-rc125.new &&
+      ! -L /opt/vf-server-ops-rc125.new ]]; then
+  printf '%s\n' \
+    'P07_OWNER125_ALREADY_INSTALLED=YES' \
+    "P07_OWNER125_RUN_COMMAND=$binary" \
+    'P07_OWNER125_STABLE_VFOPS_UNCHANGED=YES' \
+    'P07_OWNER125_MIGRATION_AUTORUN=NO' \
+    'P07_OWNER125_DNS_CHANGED=NO'
+  exit 0
+fi
+for slot in "$target" "$previous" /opt/vf-server-ops-rc125.new "$binary"; do
+  [[ ! -e "$slot" && ! -L "$slot" ]] || fail "TEST_SLOT_ALREADY_OCCUPIED_NO_CHANGES"
+done
 work="$(mktemp -d -t p07-owner125.XXXXXXXX)" || fail "TEMP_DIR_UNAVAILABLE_NO_CHANGES"
 trap 'rm -rf -- "$work"' EXIT
 curl_headers=()
