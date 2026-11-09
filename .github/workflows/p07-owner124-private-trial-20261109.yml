@@ -1,0 +1,184 @@
+name: P07 release124 isolated installation regression (NOT FORMAL)
+on:
+  push:
+    branches:
+      - task/p07-owner124-private-trial-20261109
+permissions:
+  contents: read
+concurrency:
+  group: p07-owner124-private-trial-20261109
+  cancel-in-progress: false
+jobs:
+  private-trial-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      WORK: /tmp/p07-owner124-private-trial-20261109
+      PRODUCT_SHA: b1af7077ec58bc6afb3e5192ed399c2a3815bc72
+      PUBLIC_SHA: 7c3f685465b0da9a4414a13b629ea599006019ae
+      PRODUCT_BUILD: 0.1.0-release124
+      TRIAL_TAG: trial/p07-0.1.0-release124-20261109
+      FILE: p07-release124-rc124-owner-test.tar.gz
+    steps:
+      - name: Checkout public builder workflow without stored credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact PRIVATE P07 source into short-lived workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: b1af7077ec58bc6afb3e5192ed399c2a3815bc72
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: product
+      - name: Checkout immutable PUBLIC release115 base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: 7c3f685465b0da9a4414a13b629ea599006019ae
+          persist-credentials: false
+          fetch-depth: 1
+          path: public
+      - name: Build exact complete nonformal Owner preview
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C product rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(git -C public rev-parse HEAD)" = "$PUBLIC_SHA"
+          test "$(tr -d '\r\n ' < product/BUILD_ID)" = "$PRODUCT_BUILD"
+          mkdir -p "$WORK/output"
+          python3 -B product/scripts/p07-owner-prebuilt124-package.py \
+            --product-root "$PWD/product" \
+            --public-root "$PWD/public" \
+            --product-sha "$PRODUCT_SHA" \
+            --output-dir "$WORK/output" > "$WORK/build-receipt.txt"
+          grep -Fqx 'P07_OWNER_PACKAGE_CREATED=YES' "$WORK/build-receipt.txt"
+          grep -Fqx 'P07_OWNER_PACKAGE_UPLOADED=NO' "$WORK/build-receipt.txt"
+          grep -Fqx 'P07_OWNER_PACKAGE_FORMAL_RELEASE=NO' "$WORK/build-receipt.txt"
+          test -s "$WORK/output/$FILE"
+          test -s "$WORK/output/$FILE.sha256"
+          (cd "$WORK/output" && sha256sum -c "$FILE.sha256")
+          python3 -B - "$WORK/output/$FILE" "$PRODUCT_SHA" <<'PY'
+          import hashlib,json,sys,tarfile
+          p,sha=sys.argv[1:3]
+          with tarfile.open(p,"r:gz") as a:
+              members=a.getmembers()
+              assert len(members) > 100
+              assert all(m.name == "candidate" or m.name.startswith("candidate/") for m in members)
+              assert all(m.isdir() or m.isfile() for m in members)
+              data=a.extractfile("candidate/candidate_attestation.json").read()
+              d=json.loads(data)
+              assert d["product_source_sha"] == sha, d
+              assert d["product_build"] == "0.1.0-release124"
+              assert d["status"] == "FORMAL_STAGING_NOT_PUBLISHED"
+              required={"candidate/installers/p07.sh","candidate/installers/p07-final.sh",
+                        "candidate/dist/p07/0.1.0/overlay/RUNTIME.gitblob",
+                        "candidate/dist/p07/0.1.0/overlay/bin/vfops",
+                        "candidate/dist/p07/0.1.0/overlay/bin/vfops-migrate-ui"}
+              assert required <= set(a.getnames()), required-set(a.getnames())
+          PY
+          printf '%s\n' \
+            'P07_OWNER_TRIAL_BUILD_AND_HASH=PASS' \
+            'P07_PUBLIC_ARTIFACT_UPLOAD=NO' \
+            'P07_FORMAL_RELEASE=NO' \
+            'P07_EXISTING_VPS_CHANGES=NONE'
+      - name: Exact source unit tests and isolated package install upgrade rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          (cd product && python3 -B -m unittest -q \
+            tests.test_p07_fresh_menu tests.test_p07_public_owner_install \
+            tests.test_p07_dynamic_preflight tests.test_p07_unproven_sql_owner_receipt \
+            tests.test_migration_versioned_laravel_p07 \
+            tests.test_migration_no_overwrite_resume \
+            tests.test_migration_failed_prepare_audit \
+            tests.test_migration_laravel_live_parity \
+            tests.test_p07_failed_whole_vps_native_readonly \
+            tests.test_server_migration_pull)
+          mkdir -p "$WORK/unpack"
+          tar -xzf "$WORK/output/$FILE" -C "$WORK/unpack"
+          candidate="$WORK/unpack/candidate"
+          test -f "$candidate/candidate_attestation.json"
+          P07_ALLOW_NONROOT=1 P07_INSTALL_DIR="$WORK/installed" \
+            P07_PREVIOUS_DIR="$WORK/installed.previous" \
+            P07_BIN_LINK="$WORK/vfops" P07_PUBLIC_ROOT="file://$candidate" \
+            P07_NO_EXEC=1 bash "$candidate/installers/p07.sh" > "$WORK/clean-install.log"
+          test "$(NO_COLOR=1 "$WORK/vfops" --build-id)" = "$PRODUCT_BUILD"
+          python3 -B - "$WORK/installed/bin/vfops-migrate-ui" <<'PY'
+          from pathlib import Path
+          import sys
+          s=Path(sys.argv[1]).read_text(encoding="utf-8")
+          menu=s.split("migration_menu() {",1)[1].split("\nmigration_menu\n",1)[0]
+          assert "ui_menu_flow 1 '迁入整个旧 VPS（全部 CloudPanel 网站）'" in menu
+          assert "all_sites_in" in menu
+          assert "whole_server_in" not in menu
+          assert "fresh-17site" not in menu
+          assert 'prepare_and_continue "$old_ip"' in s
+          PY
+          mkdir "$WORK/old-release"
+          echo ORIGINAL_OWNER_STATE > "$WORK/old-release/OWNER_MARKER"
+          P07_ALLOW_NONROOT=1 P07_INSTALL_DIR="$WORK/old-release" \
+            P07_PREVIOUS_DIR="$WORK/old-release.previous" \
+            P07_BIN_LINK="$WORK/upgraded-vfops" P07_PUBLIC_ROOT="file://$candidate" \
+            P07_NO_EXEC=1 bash "$candidate/installers/p07.sh" > "$WORK/upgrade.log"
+          test "$(NO_COLOR=1 "$WORK/upgraded-vfops" --build-id)" = "$PRODUCT_BUILD"
+          grep -Fxq ORIGINAL_OWNER_STATE "$WORK/old-release.previous/OWNER_MARKER"
+          mkdir "$WORK/fail-old-release" "$WORK/fail-link-is-directory"
+          echo RESTORE_ON_FAILURE > "$WORK/fail-old-release/OWNER_MARKER"
+          if P07_ALLOW_NONROOT=1 P07_INSTALL_DIR="$WORK/fail-old-release" \
+             P07_PREVIOUS_DIR="$WORK/fail-old-release.previous" \
+             P07_BIN_LINK="$WORK/fail-link-is-directory" P07_PUBLIC_ROOT="file://$candidate" \
+             P07_NO_EXEC=1 bash "$candidate/installers/p07.sh" > "$WORK/failure.log" 2>&1; then
+            echo EXPECTED_FAILURE_NOT_TRIGGERED; exit 23
+          fi
+          grep -Fxq RESTORE_ON_FAILURE "$WORK/fail-old-release/OWNER_MARKER"
+          test ! -e "$WORK/fail-old-release.previous"
+          echo P07_RELEASE116_INSTALL_UPGRADE_ROLLBACK_ISOLATED=PASS
+          echo P07_PUBLIC_ARTIFACT_UPLOAD=NO
+          echo P07_FORMAL_RELEASE=NO
+          echo P07_OWNER_VPS_MODIFIED=NO
+      - name: Synthetic real MariaDB 11.8 schema, Laravel import and owner-marker no-reimport
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C product rev-parse HEAD)" = "$PRODUCT_SHA"
+          command -v docker
+          docker run -d --rm --name p07-synthetic-mariadb124 \
+            -e MARIADB_ROOT_PASSWORD=p07-only-synthetic-mariadb \
+            -p 127.0.0.1:3306:3306 mariadb:11.8 >/dev/null
+          trap 'docker rm -f p07-synthetic-mariadb124 >/dev/null 2>&1 || true' EXIT
+          sudo apt-get -qq update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mariadb-client >/dev/null
+          env MYSQL_PWD=p07-only-synthetic-mariadb bash -c '
+            for attempt in $(seq 1 60); do
+              if mariadb --no-defaults -h127.0.0.1 -P3306 -uroot \
+                --batch --skip-column-names -e "SELECT 1" >/dev/null 2>&1; then
+                exit 0
+              fi
+              sleep 1
+            done
+            exit 13
+          '
+          version="$(MYSQL_PWD=p07-only-synthetic-mariadb mariadb --no-defaults \
+            -h127.0.0.1 -P3306 -uroot --batch --skip-column-names -e 'SELECT VERSION()')"
+          case "$version" in 11.8.*) ;; *) echo P07_REAL_MARIADB_WRONG_VERSION; exit 13 ;; esac
+          (cd product && P07_SYNTHETIC_MARIADB=1 \
+            P07_DB_TEST_HOST=127.0.0.1 P07_DB_TEST_PORT=3306 \
+            P07_DB_TEST_PASSWORD=p07-only-synthetic-mariadb \
+            python3 -B -m unittest -q \
+              tests.test_migration_laravel_mariadb_engine \
+              tests.test_migration_laravel_readonly_engine)
+          echo P07_REAL_MARIADB_11_8_SYNTHETIC_DATABASE_TESTS=PASS
+          echo P07_TEST_DATA_PRIVATE_OR_OWNER=NO
+          echo P07_REAL_TWO_VPS_MIGRATION=NOT_TESTED
+      - name: Cleanup PRIVATE transient source and candidate (always)
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- product public "$WORK"
+          echo 'P07_PUBLIC_WORKSPACE_PRIVATE_MATERIAL_RETAINED=NO'
