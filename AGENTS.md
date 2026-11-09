@@ -134,3 +134,7 @@ Secret / Token 只通过 GitHub Actions Secrets / Runtime Injection 使用，不
 未经明确授权，不执行 Release、Tag、Production、Destructive 操作，不修改无关产品仓。
 
 用户负责目标、重大治理裁决和高风险授权；用户不是 Runner / CI / Git / Shell Operator。能通过当前已注册能力完成的执行、诊断与重试应由 Agent 自动完成。
+
+## 个人小团队交付简化 · 跨仓统一指针（OWNER 2026-11-09）
+
+本仓自有开发遵循 [GOV-DOC 唯一规则源](https://github.com/llhzx2018/gov-doc/blob/main/governance/agent/VF_DEVELOPMENT_SYSTEM_V2.md#个人小团队先开发先交可试用候选正式发布另验)：`DEV_READY`（源码完成）、`OWNER_TRIAL_CANDIDATE`（明确非正式的 Owner 手工试用包）、`FORMAL_RELEASE_READY`（满足适用正式发布门禁）分开。测试环境缺失不阻断可独立完成的源码开发及诚实标注的候选交付，不无限循环 Runner/CI；不得虚报机器 PASS、取消必要备份/回滚或自动写入 Production。项目固有安全、权限、生命周期和高风险边界仍有效。
