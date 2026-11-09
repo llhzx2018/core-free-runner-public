@@ -200,22 +200,22 @@ server_ops_root() {
   esac
 }
 
-# Same public Toolbox URL; release115 remains the default stable path.
+# Same public Toolbox URL; release115 remains stable, release117 is an explicit safe-diagnostic trial.
 # The release116 OWNER trial installs in a separate root-only slot. Never auto-migrate.
-P07_OWNER116_SHA256="a69d84493dd9400f775eda61038ce020706167f4e9520a6004aa207529f5c2cd"
-P07_OWNER116_URL="https://api.github.com/repos/llhzx2018/core-free-runner-public/releases/assets/726701414"
-P07_OWNER116_BOOTSTRAP="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/c6da0260a9a5e7353cb2d6e1bde7563eed71fb47/installers/p07-owner-test116.sh"
-P07_OWNER116_BOOTSTRAP_BLOB="0825b1280f714f10366bd4ac4350521faaa04310"
+P07_OWNER117_SHA256="7db73ceee886b498ba3c292d5980f8e0d326aa2cbb1a0841dc8f504a40fb6a4a"
+P07_OWNER117_URL="https://api.github.com/repos/llhzx2018/core-free-runner-public/releases/assets/726773253"
+P07_OWNER117_BOOTSTRAP="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/4ae9a437bbafafd0b67ea9e537386b325b7966e4/installers/p07-owner-test117.sh"
+P07_OWNER117_BOOTSTRAP_BLOB="3d09afeeba3ccf4bb95208735838199162cde343"
 
-run_server_ops_owner116_trial() {
+run_server_ops_owner117_trial() {
   if [[ "$(id -u)" != 0 ]]; then
     say "✗ 请在新服务器以 root 运行试用版。"
     return 13
   fi
-  if command -v vfops-rc293 >/dev/null 2>&1 && \
-     [[ "$(NO_COLOR=1 vfops-rc293 --build-id 2>/dev/null || true)" == "0.1.0-release116" ]]; then
+  if command -v vfops-rc117 >/dev/null 2>&1 && \
+     [[ "$(NO_COLOR=1 vfops-rc117 --build-id 2>/dev/null || true)" == "0.1.0-release117" ]]; then
     say "已安装 release116 试用版，直接进入。"
-    vfops-rc293
+    vfops-rc117
     return $?
   fi
   if [[ "$(local_server_ops_build || true)" != "0.1.0-release115" ]] || \
@@ -234,12 +234,12 @@ run_server_ops_owner116_trial() {
   tmp="$(mktemp -t p07-owner116-entry.XXXXXXXX)" || return 13
   chmod 700 "$tmp"
   if ! curl -fsSL --proto '=https' --proto-redir '=https' \
-       --connect-timeout 15 --max-time 90 "$P07_OWNER116_BOOTSTRAP" -o "$tmp"; then
+       --connect-timeout 15 --max-time 90 "$P07_OWNER117_BOOTSTRAP" -o "$tmp"; then
     rm -f -- "$tmp"
     say "✗ 试用版入口下载失败，正式版保持不变。"
     return 13
   fi
-  if ! python3 -B - "$tmp" "$P07_OWNER116_BOOTSTRAP_BLOB" <<'PY'
+  if ! python3 -B - "$tmp" "$P07_OWNER117_BOOTSTRAP_BLOB" <<'PY'
 import hashlib,sys
 data=open(sys.argv[1],"rb").read()
 value=hashlib.sha1(b"blob "+str(len(data)).encode()+b"\0"+data).hexdigest()
@@ -252,7 +252,7 @@ PY
     return 13
   fi
   say "安装 release116 独立试用版；保留 release115，不自动迁移或修改 DNS。"
-  P07_TRIAL_URL="$P07_OWNER116_URL" P07_TRIAL_SHA256="$P07_OWNER116_SHA256" \
+  P07_TRIAL_URL="$P07_OWNER117_URL" P07_TRIAL_SHA256="$P07_OWNER117_SHA256" \
     bash "$tmp"
   rc=$?
   rm -f -- "$tmp"
@@ -260,22 +260,22 @@ PY
     say "✗ 试用安装未完成；正式版未被替换。"
     return "$rc"
   fi
-  [[ "$(NO_COLOR=1 vfops-rc293 --build-id 2>/dev/null || true)" == "0.1.0-release116" ]] || return 13
-  vfops-rc293
+  [[ "$(NO_COLOR=1 vfops-rc117 --build-id 2>/dev/null || true)" == "0.1.0-release117" ]] || return 13
+  vfops-rc117
 }
 
 run_server_ops() {
   screen_clear
   say "网站与数据"
   say "  1. 当前正式版 release115"
-  say "  2. 手工试用 release116（独立安装，不覆盖正式版）"
+  say "  2. 手工试用 release117（只读诊断修复，不覆盖正式版）"
   say "  0. 返回"
   printf '请选择 [0-2]：'
   local selected
   read -r selected || return 0
   case "$selected" in
     1) ensure_server_ops_current || return $?; vfops ;;
-    2) run_server_ops_owner116_trial ;;
+    2) run_server_ops_owner117_trial ;;
     0) return 0 ;;
     *) say "请输入 0-2。"; return 0 ;;
   esac
