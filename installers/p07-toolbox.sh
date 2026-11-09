@@ -200,22 +200,22 @@ server_ops_root() {
   esac
 }
 
-# Same public Toolbox URL; release115 remains stable, release123 is an explicit safe-diagnostic trial.
-# The release123 OWNER trial installs in a separate root-only slot. Never auto-migrate.
-P07_OWNER123_SHA256="0a300ab026f5efdc99fd20275690d3953393c6d5bc3ba898381fad10200f99a8"
-P07_OWNER123_URL="https://api.github.com/repos/llhzx2018/core-free-runner-public/releases/assets/727235186"
-P07_OWNER123_BOOTSTRAP="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/f1d3dd0f8dde3ade5dd46a907ce937ff39569c44/installers/p07-owner-test123.sh"
-P07_OWNER123_BOOTSTRAP_BLOB="7ef34afea73d772bef9d18d3ab850d269c04af1a"
+# Same public Toolbox URL; release115 remains stable, release124 is an explicit safe-diagnostic trial.
+# The release124 OWNER trial installs in a separate root-only slot. Never auto-migrate.
+P07_OWNER124_SHA256="fd39e3dabb9a3ad32e39622206edd01f942f30ba4f40cdc86e9ea0d7aab8aa8d"
+P07_OWNER124_URL="https://api.github.com/repos/llhzx2018/core-free-runner-public/releases/assets/727279744"
+P07_OWNER124_BOOTSTRAP="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/1a2ecbd84210bcc81c1722c9a781e368cae916e7/installers/p07-owner-test124.sh"
+P07_OWNER124_BOOTSTRAP_BLOB="258f64f8b6e2700b9bad514749e2b26bdae32239"
 
-run_server_ops_owner123_trial() {
+run_server_ops_owner124_trial() {
   if [[ "$(id -u)" != 0 ]]; then
     say "✗ 请在新服务器以 root 运行试用版。"
     return 13
   fi
-  if command -v vfops-rc123 >/dev/null 2>&1 && \
-     [[ "$(NO_COLOR=1 vfops-rc123 --build-id 2>/dev/null || true)" == "0.1.0-release123" ]]; then
-    say "已安装 release123 试用版，直接进入。"
-    vfops-rc123
+  if command -v vfops-rc124 >/dev/null 2>&1 && \
+     [[ "$(NO_COLOR=1 vfops-rc124 --build-id 2>/dev/null || true)" == "0.1.0-release124" ]]; then
+    say "已安装 release124 试用版，直接进入。"
+    vfops-rc124
     return $?
   fi
   if [[ "$(local_server_ops_build || true)" != "0.1.0-release115" ]] || \
@@ -231,15 +231,15 @@ run_server_ops_owner123_trial() {
       return 13
     }
   done
-  tmp="$(mktemp -t p07-owner123-entry.XXXXXXXX)" || return 13
+  tmp="$(mktemp -t p07-owner124-entry.XXXXXXXX)" || return 13
   chmod 700 "$tmp"
   if ! curl -fsSL --proto '=https' --proto-redir '=https' \
-       --connect-timeout 15 --max-time 90 "$P07_OWNER123_BOOTSTRAP" -o "$tmp"; then
+       --connect-timeout 15 --max-time 90 "$P07_OWNER124_BOOTSTRAP" -o "$tmp"; then
     rm -f -- "$tmp"
     say "✗ 试用版入口下载失败，正式版保持不变。"
     return 13
   fi
-  if ! python3 -B - "$tmp" "$P07_OWNER123_BOOTSTRAP_BLOB" <<'PY'
+  if ! python3 -B - "$tmp" "$P07_OWNER124_BOOTSTRAP_BLOB" <<'PY'
 import hashlib,sys
 data=open(sys.argv[1],"rb").read()
 value=hashlib.sha1(b"blob "+str(len(data)).encode()+b"\0"+data).hexdigest()
@@ -251,8 +251,8 @@ PY
     say "✗ 试用入口完整性校验失败，已停止。"
     return 13
   fi
-  say "安装 release123 独立试用版；保留 release115，不自动迁移或修改 DNS。"
-  P07_TRIAL_URL="$P07_OWNER123_URL" P07_TRIAL_SHA256="$P07_OWNER123_SHA256" \
+  say "安装 release124 独立试用版；保留 release115，不自动迁移或修改 DNS。"
+  P07_TRIAL_URL="$P07_OWNER124_URL" P07_TRIAL_SHA256="$P07_OWNER124_SHA256" \
     bash "$tmp"
   rc=$?
   rm -f -- "$tmp"
@@ -260,22 +260,22 @@ PY
     say "✗ 试用安装未完成；正式版未被替换。"
     return "$rc"
   fi
-  [[ "$(NO_COLOR=1 vfops-rc123 --build-id 2>/dev/null || true)" == "0.1.0-release123" ]] || return 13
-  vfops-rc123
+  [[ "$(NO_COLOR=1 vfops-rc124 --build-id 2>/dev/null || true)" == "0.1.0-release124" ]] || return 13
+  vfops-rc124
 }
 
 run_server_ops() {
   screen_clear
   say "网站与数据"
   say "  1. 当前正式版 release115"
-  say "  2. 手工试用 release123（原生只读错误分类修复）"
+  say "  2. 手工试用 release124（原生只读错误分类修复）"
   say "  0. 返回"
   printf '请选择 [0-2]：'
   local selected
   read -r selected || return 0
   case "$selected" in
     1) ensure_server_ops_current || return $?; vfops ;;
-    2) run_server_ops_owner123_trial ;;
+    2) run_server_ops_owner124_trial ;;
     0) return 0 ;;
     *) say "请输入 0-2。"; return 0 ;;
   esac
