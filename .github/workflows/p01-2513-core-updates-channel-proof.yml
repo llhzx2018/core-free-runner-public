@@ -1,0 +1,106 @@
+name: P01 2.47.513 exact online update channel proof
+on:
+  push:
+    branches:
+      - task/p01-2513-core-updates-channel-proof-20261110
+permissions:
+  contents: read
+jobs:
+  channel-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      CHANNEL_SHA: 4f1f6f97db8ffb2175b2df62b6e4387473eccaad
+      PRODUCT_SHA: c0c5204440a8a249f4198522aedc54cecf4140f1
+      TARGET_VERSION: 2.47.513
+      TARGET_SHA: c0c5204440a8a249f4198522aedc54cecf4140f1
+      TARGET_TREE: e1749fef60e412554b2fc546f2e91d25581b7319
+    steps:
+      - name: Checkout trusted control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Bind exact reusable lane and audit final workflow identities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > /tmp/p01-channel-lane-2513.json <<EOF
+          {
+            "schema": "vf-ephemeral-lane-spec/v1",
+            "lane_id": "p01-2513-core-updates-channel-proof",
+            "project_id": "P01",
+            "repository": "llhzx2018/vf-start",
+            "target_version": "$TARGET_VERSION",
+            "target_sha": "$TARGET_SHA",
+            "target_tree": "$TARGET_TREE",
+            "source_versions": ["2.47.512"],
+            "schema_version": "2026102201",
+            "candidate_run": "$GITHUB_RUN_ID",
+            "previous_lane": {},
+            "extra": {"CHANNEL_SHA": "$CHANNEL_SHA"}
+          }
+          EOF
+          python3 scripts/ephemeral_lane_spec.py validate --spec /tmp/p01-channel-lane-2513.json > /tmp/p01-channel-spec-2513.json
+          python3 scripts/ephemeral_lane_spec.py audit-rendered --spec /tmp/p01-channel-lane-2513.json --input .github/workflows/p01-2513-core-updates-channel-proof.yml > /tmp/p01-channel-render-2513.json
+          echo P01_2513_CHANNEL_LANE_IDENTITY=PASS
+      - name: Read exact P01 manifest from core-updates release PR
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-updates
+          ref: ${{ env.CHANNEL_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: channel-exact
+          persist-credentials: false
+      - name: Run native update-core manifest and PHP regression
+        shell: bash
+        timeout-minutes: 6
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C channel-exact rev-parse HEAD)" = "$CHANNEL_SHA"
+          if ! command -v php >/dev/null 2>&1; then
+            timeout 120s sudo apt-get update -qq
+            timeout 120s sudo apt-get install -y -qq php-cli php-json >/dev/null
+          fi
+          python3 channel-exact/scripts/check_manifest_contract.py
+          find channel-exact/update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l > /tmp/p01-2513-php-lint.txt
+          php channel-exact/update-core/php/tests/run.php
+          echo P01_2513_CHANNEL_NATIVE_MANIFEST_PHP_TESTS=PASS
+      - name: Verify exact atomic-only source and GitHub Release asset identities
+        shell: bash
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          p=channel-exact/projects/P01.json
+          jq -e --arg sha "$PRODUCT_SHA" '
+            .project_id=="P01" and .component_id=="APP" and .enabled==true
+            and .current_version=="2.47.512" and .target_version=="2.47.513"
+            and .update_type=="ATOMIC" and .from_versions==["2.47.512"]
+            and .release_tag=="v2.47.513"
+            and .product_identity==$sha
+            and .schema_from=="2026102201" and .schema_to=="2026102201"
+            and .backup_required==true and .rollback_supported==true
+            and .asset_name=="VF_Start_V2.47.513_UPDATE.zip"
+          ' "$p" >/dev/null
+          tagsha="$(gh api repos/llhzx2018/vf-start/git/ref/tags/v2.47.513 --jq '.object.sha')"
+          test "$tagsha" = "$PRODUCT_SHA"
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.47.513 > /tmp/p01-2513-formal.json
+          jq -e --slurpfile m "$p" --arg sha "$PRODUCT_SHA" '
+            .draft==false and .prerelease==false and .tag_name=="v2.47.513"
+            and .id==$m[0].release_id and .published_at==$m[0].released_at
+            and any(.assets[];
+              .name==$m[0].asset_name and .size==$m[0].asset_bytes
+              and .digest==("sha256:"+$m[0].asset_sha256))
+          ' /tmp/p01-2513-formal.json >/dev/null
+          echo P01_2513_CHANNEL_EXACT_RELEASE_ASSET_SHA256=PASS
+          echo P01_2513_CHANNEL_LIMITED_TO_512_TO_513=PASS
+      - name: Clean transient private workspaces
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- channel-exact /tmp/p01-2513-formal.json /tmp/p01-2513-php-lint.txt /tmp/p01-channel-lane-2513.json /tmp/p01-channel-spec-2513.json /tmp/p01-channel-render-2513.json
+          test ! -e channel-exact
+          echo P01_2513_CHANNEL_PRIVATE_SOURCE_CLEANED=YES
