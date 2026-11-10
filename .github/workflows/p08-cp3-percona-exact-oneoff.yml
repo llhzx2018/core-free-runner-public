@@ -1,0 +1,84 @@
+name: P08 CP3 Percona owner refresh exact-source proof (one-off)
+
+on:
+  push:
+    branches:
+      - task/p08-cp3-percona-exact-20261110
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p08-cp3-percona-exact-20261110
+  cancel-in-progress: false
+
+jobs:
+  cp3-owner-repair-synthetic:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      P08_EXACT_SHA: 44bfbcf5620fcec84707f125f569b8198fa133cf
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Transient checkout of pinned private P08 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-lander
+          ref: 44bfbcf5620fcec84707f125f569b8198fa133cf
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: p08
+      - name: Synthetic Percona selection and isolated temporary restore
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p08 rev-parse HEAD)" = "$P08_EXACT_SHA"
+          test -z "$(git -C p08 status --porcelain --untracked-files=all)"
+          python3 p08/backend/tests/ops/cp3-db-client-compat-synthetic.py >"$RUNNER_TEMP/p08-cp3-client-test.log" 2>&1 || {
+            echo "P08_CP3_CLIENT_SYNTHETIC=FAIL"; exit 1;
+          }
+          echo "P08_CP3_CLIENT_SYNTHETIC=PASS"
+          python3 p08/backend/tests/ops/cp3-owner-temp-restore-contract.py >"$RUNNER_TEMP/p08-cp3-restore-test.log" 2>&1 || {
+            echo "P08_CP3_TEMP_RESTORE_CONTRACT=FAIL"; exit 1;
+          }
+          echo "P08_CP3_TEMP_RESTORE_CONTRACT=PASS"
+      - name: Build and inspect pinned Owner refresh candidate locally
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 p08/backend/bin/build-cp3-owner-refresh-candidate.py \
+            --repo "$GITHUB_WORKSPACE/p08" \
+            --source "$P08_EXACT_SHA" \
+            --out "$RUNNER_TEMP/p08-cp3-owner-refresh.zip" \
+            >"$RUNNER_TEMP/p08-cp3-build.log" 2>&1 || {
+            echo "P08_CP3_REFRESH_PACKAGE_BUILD=FAIL"; exit 1;
+          }
+          python3 - "$RUNNER_TEMP/p08-cp3-owner-refresh.zip" "$P08_EXACT_SHA" <<'PY'
+          import hashlib, json, sys, zipfile
+          archive, source = sys.argv[1:]
+          member = "PRIVATE/updater/backend/bin/cp3-owner-backup.py"
+          with zipfile.ZipFile(archive) as z:
+              assert z.testzip() is None
+              m = json.loads(z.read("CANDIDATE-MANIFEST.json"))
+              assert m["new_candidate_source_sha"] == source
+              assert m["official_release"] is False
+              assert len(m["files"]) == 5
+              assert member in m["files"]
+              assert hashlib.sha256(z.read(member)).hexdigest() == m["files"][member]["new_sha256"]
+              assert m["files"][member]["old_git_blob"] == "8e1435fcaa16c11d11159327185939ede0e10425"
+          print("P08_CP3_REFRESH_PACKAGE_MANIFEST=PASS")
+          PY
+          echo "P08_CP3_REFRESH_PACKAGE_BUILD=PASS"
+      - name: Erase transient private source and candidate
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- "$GITHUB_WORKSPACE/p08"
+          rm -f -- "$RUNNER_TEMP/p08-cp3-client-test.log" \
+                   "$RUNNER_TEMP/p08-cp3-restore-test.log" \
+                   "$RUNNER_TEMP/p08-cp3-build.log" \
+                   "$RUNNER_TEMP/p08-cp3-owner-refresh.zip" \
+                   "$RUNNER_TEMP/p08-cp3-owner-refresh.zip.sha256"
+          echo "P08_CP3_EPHEMERAL_CLEANUP=DONE"
