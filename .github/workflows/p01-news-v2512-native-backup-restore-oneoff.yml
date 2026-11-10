@@ -1,0 +1,143 @@
+name: P01 News 511-to-512 native BackupManager recovery and Atomic rollback
+on:
+  push:
+    branches: [task/p01-news-v2512-backup-restore-oneoff-20261110]
+permissions:
+  contents: read
+jobs:
+  restore:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 27
+    env:
+      P01_SHA: 157fcd721df523e7e77bcb5cbc04dc391ff9d265
+      P01_FROM: 2.47.511
+      P01_TO: 2.47.512
+    steps:
+      - name: Checkout public reusable builder
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Transient exact private P01 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.P01_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: candidate
+          persist-credentials: false
+      - name: Build exact candidate from official 511 assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$P01_SHA"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$P01_TO"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$P01_TO"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-xml php-mbstring php-zip php-gd unzip >/dev/null
+          W="/tmp/p01-news-r5-$GITHUB_RUN_ID"
+          mkdir -p "$W/oldfull" "$W/oldrepair" "$W/artifacts"
+          gh release download "v$P01_FROM" -R llhzx2018/vf-start -D "$W" -p "VF-Start-V$P01_FROM-FULL.zip" -p "VF_Start_V$P01_FROM"_UPDATE.zip
+          unzip -q "$W/VF-Start-V$P01_FROM-FULL.zip" -d "$W/oldfull"
+          unzip -q "$W/VF_Start_V$P01_FROM"_UPDATE.zip -d "$W/oldrepair"
+          test "$(tr -d '\r\n ' < "$W/oldfull/VERSION.txt")" = "$P01_FROM"
+          test -f "$W/oldrepair/repair-v$P01_FROM.php"
+          python3 scripts/p01-maintenance-release.py \
+            --candidate candidate/src --baseline-full "$W/oldfull" \
+            --baseline-repair "$W/oldrepair/repair-v$P01_FROM.php" \
+            --out "$W/artifacts" --version "$P01_TO" --source-version "$P01_FROM" \
+            --target-sha "$P01_SHA" --target-tree "$(git -C candidate rev-parse HEAD^{tree})" >/dev/null
+          unzip -t "$W/artifacts/VF-Start-V$P01_TO-FULL.zip" >/dev/null
+          unzip -t "$W/artifacts/VF_Start_V$P01_TO"_UPDATE.zip >/dev/null
+          unzip -q "$W/artifacts/VF_Start_V$P01_TO"_UPDATE.zip -d "$W/artifacts/repair"
+          test -f "$W/artifacts/repair/repair-v$P01_TO.php"
+          echo P01_512_NATIVE_BACKUP_EXACT_BUILDER=PASS
+      - name: Installed 511 backed-up settings, 512 restore and injected rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export VF_NEWS_R5_SANDBOX=1
+          W="/tmp/p01-news-r5-$GITHUB_RUN_ID"
+          TEST="$W/p01-news-v512-native-backup.php"
+          cp candidate/tests/integration/p01_news_r5_lifecycle_native.php "$TEST"
+          python3 - "$TEST" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]);s=p.read_text()
+          changes={
+            "require_once dirname(__DIR__,2).'/src/app/NewsFeedService.php';":
+              "require_once $resolved.'/app/NewsFeedService.php';",
+            "require_once dirname(__DIR__,2).'/src/app/NewsSourcePreferences.php';":
+              "require_once $resolved.'/app/NewsSourcePreferences.php';",
+            "news_r5_assert(!is_file($resolved.'/news.php'),'new-news-route-removed-after-failed-atomic');":
+              "news_r5_assert(is_file($resolved.'/news.php'),'existing-news-route-preserved-after-failed-atomic');",
+            "$prefs['followed']===['solidot-tech'] && $prefs['enabled']===['cn-live','solidot-tech']":
+              "$prefs['followed']===['solidot-tech'] && count($prefs['enabled'])===2 && in_array('cn-live',$prefs['enabled'],true) && in_array('solidot-tech',$prefs['enabled'],true)"
+          }
+          for a,b in changes.items():
+            assert s.count(a)==1,a
+            s=s.replace(a,b)
+          p.write_text(s)
+          PY
+          php -l "$TEST" >/dev/null
+          PIDS=""
+          cleanup() { for pid in $PIDS; do kill "$pid" >/dev/null 2>&1 || true; done; }
+          trap cleanup EXIT
+          install_511() {
+            local root="$1" port="$2"
+            mkdir -p "$root"
+            unzip -q "$W/VF-Start-V$P01_FROM-FULL.zip" -d "$root"
+            touch "$root/.vf-news-r5-fixture"
+            php -S "127.0.0.1:$port" -t "$root" >"$W/server-$port.log" 2>&1 &
+            local pid=$!
+            PIDS="$PIDS $pid"
+            local cookie="$W/cookie-$port"
+            for n in $(seq 1 50); do
+              if curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$port/setup.php" -o "$W/setup-$port.html" 2>/dev/null; then break; fi
+              sleep .15
+            done
+            local csrf
+            csrf="$(sed -n 's/.*name="setup_csrf" value="\([^"]*\)".*/\1/p' "$W/setup-$port.html" | head -1)"
+            test -n "$csrf"
+            curl -fsS -c "$cookie" -b "$cookie" -X POST "http://127.0.0.1:$port/setup.php" \
+              --data-urlencode "setup_csrf=$csrf" \
+              --data-urlencode "site_title=P01 Isolated Native Backup" \
+              --data-urlencode "admin_password=NativeBackup-$port-Gate" \
+              --data-urlencode "admin_password_confirm=NativeBackup-$port-Gate" \
+              -o "$W/installed-$port.html"
+            test -s "$root/app/.runtime.php"
+            (cd "$root" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+            kill "$pid" >/dev/null 2>&1 || true
+            echo "P01_512_PRIOR_FORMAL_FULL_INSTALL=PASS port=$port"
+          }
+          install_511 "$W/upgrade" 18612
+          php "$TEST" "$W/upgrade" stage | tee "$W/upgrade-stage.log"
+          grep -Fx 'P01_NEWS_R5_STAGE=PASS' "$W/upgrade-stage.log"
+          cp "$W/artifacts/repair/repair-v$P01_TO.php" "$W/upgrade/repair-v$P01_TO.php"
+          php "$W/upgrade/repair-v$P01_TO.php" --verify-source="$W/upgrade" | grep -F '"ok":true'
+          php "$W/upgrade/repair-v$P01_TO.php" --run="$W/upgrade" | grep -F '"ok":true'
+          test "$(tr -d '\r\n ' < "$W/upgrade/VERSION.txt")" = "$P01_TO"
+          php "$TEST" "$W/upgrade" verify-upgrade | tee "$W/upgrade-restore.log"
+          grep -Fx 'P01_NEWS_R5_ATOMIC_AND_BACKUP_RESTORE=PASS' "$W/upgrade-restore.log"
+          (cd "$W/upgrade" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_512_REAL_NATIVE_BACKUP_RESTORE=PASS
+          install_511 "$W/rollback" 18613
+          php "$TEST" "$W/rollback" stage | tee "$W/rollback-stage.log"
+          cp "$W/artifacts/repair/repair-v$P01_TO.php" "$W/rollback/repair-v$P01_TO.php"
+          set +e
+          VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$W/rollback/repair-v$P01_TO.php" --run="$W/rollback" >"$W/fault.log" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          test "$(tr -d '\r\n ' < "$W/rollback/VERSION.txt")" = "$P01_FROM"
+          php "$TEST" "$W/rollback" verify-rollback | tee "$W/rollback-check.log"
+          grep -Fx 'P01_NEWS_R5_ATOMIC_ROLLBACK=PASS' "$W/rollback-check.log"
+          (cd "$W/rollback" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_512_REAL_ROLLBACK_PRIVATE_DATA=PASS
+      - name: Remove private source and local backup fixtures
+        if: always()
+        shell: bash
+        run: |
+          rm -rf candidate "/tmp/p01-news-r5-$GITHUB_RUN_ID"
+          echo P01_512_BACKUP_PROOF_PRIVATE_CLEANUP=YES
