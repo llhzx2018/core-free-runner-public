@@ -1,0 +1,115 @@
+name: P01 News PR1961 publisher RSS body quality bounded live probe
+on:
+  push:
+    branches:
+      - task/p01-news-1961-feed-content-quality-20261110
+
+permissions:
+  contents: read
+
+jobs:
+  source-content:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      P01_EXACT_SHA: ee36b0cb9ecddab91303d1ba08f15ee9f7616973
+    steps:
+      - name: Checkout registered public controls
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Transient exact private P01 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.P01_EXACT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p01-exact
+          persist-credentials: false
+
+      - name: Bounded 9-publisher quality probe using exact P01 normalizer
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p01-exact rev-parse HEAD)" = "$P01_EXACT_SHA"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq php-cli php-curl php-xml php-mbstring >/dev/null
+          cat > "$RUNNER_TEMP/p01-news-1961-quality.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require getcwd().'/p01-exact/src/app/NewsFeedService.php';
+          $r=new ReflectionClass(VfNewsFeedService::class);
+          $sources=$r->getReflectionConstant('SOURCES')->getValue();
+          if(count($sources)!==9)throw new RuntimeException('source registry must equal nine');
+          $attempts=0;$parsed=0;$articleCount=0;$longCount=0;
+          foreach($sources as $id=>$source){
+              $attempts++;
+              $feed=$source['feed']??'';
+              if(!is_string($feed)||!str_starts_with($feed,'https://')){
+                  echo "P01_NEWS_1961_SOURCE id=$id state=UNCONFIGURED\n";
+                  continue;
+              }
+              // Fixed origin, one request; product-compatible cURL settings.
+              // No redirects, proxy, login, cookies or anti-bot attempts.
+              $bytes='';$limit=524288;
+              $ch=curl_init($feed);
+              if($ch===false)throw new RuntimeException('curl missing');
+              curl_setopt_array($ch,[
+                  CURLOPT_RETURNTRANSFER=>false,
+                  CURLOPT_FOLLOWLOCATION=>false,
+                  CURLOPT_CONNECTTIMEOUT=>3,
+                  CURLOPT_TIMEOUT=>7,
+                  CURLOPT_USERAGENT=>'VF Start News/1 (+source headlines only)',
+                  CURLOPT_SSL_VERIFYPEER=>true,
+                  CURLOPT_SSL_VERIFYHOST=>2,
+                  CURLOPT_PROXY=>'',
+                  CURLOPT_NOPROXY=>'*',
+                  CURLOPT_PROTOCOLS=>CURLPROTO_HTTPS,
+                  CURLOPT_HTTPHEADER=>['Accept: application/rss+xml, application/xml, text/xml'],
+                  CURLOPT_WRITEFUNCTION=>static function($ch,string $chunk)use(&$bytes,$limit):int{
+                      if(strlen($bytes)+strlen($chunk)>$limit)return 0;
+                      $bytes.=$chunk;return strlen($chunk);
+                  },
+              ]);
+              $ok=curl_exec($ch);
+              $status=(int)curl_getinfo($ch,CURLINFO_RESPONSE_CODE);
+              $error=(int)curl_errno($ch);
+              curl_close($ch);
+              if($ok===false||$status!==200){
+                  echo "P01_NEWS_1961_SOURCE id=$id state=HTTP_UNAVAILABLE status=$status curl_code=$error\n";
+                  continue;
+              }
+              try{$items=VfNewsFeedService::parseRss($id,$bytes,time());}
+              catch(Throwable $e){
+                  echo "P01_NEWS_1961_SOURCE id=$id state=PARSE_REJECTED\n";
+                  continue;
+              }
+              $n=count($items);$body=0;$excerpts=0;$readable400=0;$long800=0;$empty=0;$lengths=[];
+              foreach($items as $item){
+                  $t=is_string($item['reader_text']??null)?$item['reader_text']:'';
+                  $len=mb_strlen($t,'UTF-8');
+                  $lengths[]=$len;
+                  if(($item['reader_kind']??'')==='feed_body')$body++;else $excerpts++;
+                  if($len>=400)$readable400++;
+                  if($len>=800)$long800++;
+                  if($len===0)$empty++;
+              }
+              sort($lengths);$median=$n>0?$lengths[intdiv($n,2)]:0;
+              $parsed+=($n>0?1:0);$articleCount+=$n;$longCount+=$readable400;
+              echo "P01_NEWS_1961_SOURCE id=$id state=".($n>0?'XML_ITEMS':'EMPTY')." parsed=$n body=$body excerpt=$excerpts readable400=$readable400 long800=$long800 empty=$empty median_chars=$median\n";
+              unset($bytes,$items);
+          }
+          echo "P01_NEWS_1961_SOURCE_QUALITY attempts=$attempts parsed_sources=$parsed total_articles=$articleCount length400_articles=$longCount external_site_fetches=$attempts no_bypass=YES private_data_used=NO\n";
+          if($attempts!==9)exit(13);
+          PHP
+          php "$RUNNER_TEMP/p01-news-1961-quality.php"
+          echo P01_NEWS_1961_SOURCE_PROBE_EXECUTED=YES
+
+      - name: Remove private source and bounded temporary test
+        if: always()
+        shell: bash
+        run: |
+          rm -rf p01-exact
+          rm -f "$RUNNER_TEMP/p01-news-1961-quality.php"
+          echo P01_NEWS_1961_PRIVATE_CHECKOUT_CLEANED=YES
