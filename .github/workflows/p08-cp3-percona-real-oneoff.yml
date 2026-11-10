@@ -1,0 +1,119 @@
+name: P08 CP3 real Percona 8.4 isolated backup restore (one-off)
+
+on:
+  push:
+    branches: [task/p08-cp3-percona-real-20261110]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p08-cp3-percona-real-20261110
+  cancel-in-progress: false
+
+jobs:
+  percona-84-scratch:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      P08_SOURCE: 44bfbcf5620fcec84707f125f569b8198fa133cf
+      P08_SYNTHETIC_DB_PASSWORD: local_p08_ephemeral_only
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Transient exact private P08 checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-lander
+          ref: 44bfbcf5620fcec84707f125f569b8198fa133cf
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: p08
+      - name: Percona 8.4.11 test database and native MySQL clients
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p08 rev-parse HEAD)" = "$P08_SOURCE"
+          sudo apt-get update -qq >/dev/null 2>&1
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -qq -y mysql-client-8.0 >/dev/null 2>&1
+          # Ephemeral hosted runner only: simulate the Owner's Percona-only CLI.
+          sudo rm -f /usr/bin/mariadb /usr/bin/mariadb-dump
+          test -x /usr/bin/mysql
+          test -x /usr/bin/mysqldump
+          test ! -e /usr/bin/mariadb
+          test ! -e /usr/bin/mariadb-dump
+          docker run --rm -d --name p08-percona-proof \
+            -p 127.0.0.1:33306:3306 \
+            -e MYSQL_ROOT_PASSWORD="$P08_SYNTHETIC_DB_PASSWORD" \
+            -e MYSQL_DATABASE=p08_fixture \
+            -e MYSQL_USER=p08_fixture \
+            -e MYSQL_PASSWORD="$P08_SYNTHETIC_DB_PASSWORD" \
+            percona/percona-server:8.4.11 >/dev/null
+          ready=0
+          for i in $(seq 1 60); do
+            if docker exec -e MYSQL_PWD="$P08_SYNTHETIC_DB_PASSWORD" \
+                p08-percona-proof mysql -uroot -N -e "SELECT 1" >/dev/null 2>&1; then
+              ready=1; break
+            fi
+            sleep 2
+          done
+          test "$ready" -eq 1
+          docker exec -e MYSQL_PWD="$P08_SYNTHETIC_DB_PASSWORD" \
+            p08-percona-proof mysql -up08_fixture -Dp08_fixture -e \
+            "CREATE TABLE p08_records (id INT PRIMARY KEY, name VARCHAR(100), payload VARBINARY(64), meta JSON); INSERT INTO p08_records VALUES (1,'alpha',X'00FF10',JSON_OBJECT('k','v')),(2,'beta',NULL,JSON_OBJECT('n',2));" >/dev/null 2>&1
+          echo "P08_CP3_REAL_PERCONA_84_READY=PASS"
+      - name: Actual CP3 backup, SQL session-temp restore, media restore
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - >"$RUNNER_TEMP/p08-proof.log" 2>&1 <<'PY'
+          import hashlib, importlib.util, os, pathlib, tempfile
+          root = pathlib.Path(os.environ["GITHUB_WORKSPACE"])
+          source = root / "p08/backend/bin/cp3-owner-backup.py"
+          spec = importlib.util.spec_from_file_location("p08_cp3_real_percona", source)
+          assert spec and spec.loader
+          backup = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(backup)
+          assert backup.database_client("query") == "/usr/bin/mysql"
+          assert backup.database_client("dump") == "/usr/bin/mysqldump"
+          print("P08_CP3_REAL_PERCONA_CLIENT_SELECTION=PASS", flush=True)
+          home = pathlib.Path(tempfile.mkdtemp(prefix="p08-cp3-db-", dir=os.environ["RUNNER_TEMP"]))
+          (home / "private-backups").mkdir(mode=0o700)
+          (home / "releases" / backup.ORIGIN).mkdir(parents=True)
+          (home / "current").symlink_to("releases/" + backup.ORIGIN)
+          shared = home / "shared"
+          (shared / "storage/private-landing-assets").mkdir(parents=True)
+          (shared / "storage/private-landing-assets/test.bin").write_bytes(b"synthetic\x00asset")
+          page = shared / "public/landing/example"
+          (page / "releases/r1").mkdir(parents=True)
+          (page / "releases/r1/index.html").write_text("<html>synthetic</html>")
+          (page / "current").symlink_to("releases/r1")
+          config = shared / ".env"
+          config.write_text("APP_ENV=testing\nDB_CONNECTION=mysql\nDB_HOST=127.0.0.1\nDB_PORT=33306\nDB_DATABASE=p08_fixture\nDB_USERNAME=p08_fixture\nDB_PASSWORD="+os.environ["P08_SYNTHETIC_DB_PASSWORD"]+"\n")
+          config.chmod(0o600)
+          c,e,d = backup.connection(home)
+          initial = backup.snapshot(c,e,d)
+          assert initial["tables"] == 1 and initial["rows"] == 2
+          result = backup.backup_and_restore(home, backup.ORIGIN, "aabbccddeeff0011")
+          assert result["status"] == "DUMP_DATA_TEMP_RESTORED_MEDIA_VERIFIED"
+          assert result["database_restore_scope"] == "TEMP_TABLE_DATA_ONLY"
+          assert result["database_snapshot"] == initial
+          assert backup.sha(pathlib.Path(result["sql_path"])) == result["database_sha256"]
+          assert backup.sha(pathlib.Path(result["media_path"])) == result["media_sha256"]
+          assert backup.snapshot(c,e,d) == initial
+          assert (page / "current/index.html").read_text() == "<html>synthetic</html>"
+          print("P08_CP3_REAL_PERCONA_DUMP_TEMP_RESTORE=PASS", flush=True)
+          print("P08_CP3_REAL_PERCONA_MEDIA_RESTORE=PASS", flush=True)
+          print("P08_CP3_REAL_PERCONA_SOURCE_DB_UNCHANGED=PASS", flush=True)
+          PY
+          echo "P08_CP3_REAL_PERCONA_BACKUP_RESTORE_STEP=PASS"
+      - name: Clean all private workspaces, SQL and database
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f p08-percona-proof >/dev/null 2>&1 || true
+          rm -rf -- "$GITHUB_WORKSPACE/p08"
+          find "$RUNNER_TEMP" -maxdepth 1 -type d -name 'p08-cp3-db-*' -exec rm -rf -- {} +
+          rm -f -- "$RUNNER_TEMP/p08-proof.log"
+          echo "P08_CP3_REAL_PERCONA_PRIVATE_CLEANUP=DONE"
