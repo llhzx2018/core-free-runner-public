@@ -1,0 +1,197 @@
+name: P07 130 PUBLIC runtime-only OWNER opt-in trial (not Formal)
+on:
+  push:
+    branches: [task/p07-owner130-public-trial-20261110]
+    paths: [.github/workflows/p07-owner130-public-runtime-trial.yml]
+permissions:
+  contents: read
+concurrency:
+  group: p07-130-public-runtime-only-owner-trial
+  cancel-in-progress: false
+jobs:
+  public-owner-trial:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_SHA: 55615a8a27f4e82a34ca9d31eedaf11d473ccf78
+      PUBLIC_BASE_SHA: 7c3f685465b0da9a4414a13b629ea599006019ae
+      RELEASE_REPO: llhzx2018/core-free-runner-public
+      TRIAL_TAG: p07-v0.1.0-release130-owner-trial
+      FILE: p07-release130-owner-runtime-trial.tar.gz
+      GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+    steps:
+      - name: Checkout authorized publication harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Transient exact private source checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 55615a8a27f4e82a34ca9d31eedaf11d473ccf78
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Immutable public stable baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: 7c3f685465b0da9a4414a13b629ea599006019ae
+          persist-credentials: false
+          path: public-base
+      - name: Assemble only installable runtime from exact source and verify identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C product rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(git -C public-base rev-parse HEAD)" = "$PUBLIC_BASE_SHA"
+          test "$(cat product/BUILD_ID)" = 0.1.0-release130
+          tmp="$RUNNER_TEMP/p07-130-public-trial"
+          mkdir -p "$tmp"
+          python3 -B product/scripts/p07_candidate_bundle.py \
+            --product-root "$PWD/product" \
+            --public-root "$PWD/public-base" \
+            --output "$tmp/candidate" \
+            --product-sha "$PRODUCT_SHA" \
+            --build 0.1.0-release130 \
+            --care 0.1.0-rc83 > "$tmp/build-receipt.txt"
+          grep -Fxq P07_CANDIDATE_BUNDLE=PASS "$tmp/build-receipt.txt"
+          python3 -B - "$tmp/candidate" "$tmp/$FILE" "$PRODUCT_SHA" <<'PY'
+          from pathlib import Path, PurePosixPath
+          import gzip,hashlib,json,re,sys,tarfile
+          root=Path(sys.argv[1]); destination=Path(sys.argv[2]); source_sha=sys.argv[3]
+          att=json.loads((root/'candidate_attestation.json').read_text())
+          assert att['status']=='FORMAL_STAGING_NOT_PUBLISHED'
+          assert att['product_source_sha']==source_sha
+          assert att['product_build']=='0.1.0-release130'
+          def blob(data):
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          runtime=Path('dist/p07/0.1.0/overlay')
+          manifest=(root/runtime/'RUNTIME.gitblob').read_bytes()
+          assert blob(manifest)==att['runtime_manifest_blob']
+          files=['candidate_attestation.json','installers/p07.sh','installers/p07-final.sh',
+            'dist/p07/0.1.0-rc2/P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz',
+            'dist/p07/0.1.0/overlay/RUNTIME.gitblob']
+          seen=set(files)
+          for line in manifest.decode('utf-8').splitlines():
+              expected,rel=line.split('  ',1)
+              p=PurePosixPath(rel)
+              assert rel not in ('','.') and not p.is_absolute() and '..' not in p.parts
+              assert p.parts[0] in ('bin','lib') or rel in ('VERSION','BUILD_ID')
+              assert not re.search(r'(^|/)\.(env|ssh|git)|\.key$|\.pem$|\.sql$|\.sqlite',rel,re.I),rel
+              asset=root/runtime/rel
+              assert asset.is_file() and not asset.is_symlink()
+              assert blob(asset.read_bytes())==expected
+              name=str(runtime/p)
+              assert name not in seen
+              seen.add(name);files.append(name)
+          assert len(files)>45
+          wrapper=(root/'installers/p07.sh').read_text()
+          final=(root/'installers/p07-final.sh').read_bytes()
+          pins=re.findall(r'^EXPECTED_BLOB="([a-f0-9]{40})"$',wrapper,re.M)
+          assert pins==[blob(final)]
+          assert b'EXPECTED_BUILD_ID="0.1.0-release130"' in final
+          with destination.open('xb') as raw:
+              with gzip.GzipFile(filename='',mode='wb',fileobj=raw,mtime=0) as gz:
+                  with tarfile.open(fileobj=gz,mode='w|',format=tarfile.PAX_FORMAT) as tar:
+                      for rel in sorted(files):
+                          path=root/rel
+                          assert path.is_file() and not path.is_symlink()
+                          info=tar.gettarinfo(str(path),arcname='candidate/'+rel)
+                          info.uid=info.gid=0;info.uname=info.gname='';info.mtime=0
+                          info.mode=0o755 if path.stat().st_mode&0o111 else 0o644
+                          with path.open('rb') as src:tar.addfile(info,src)
+          print('P07_PUBLIC_TRIAL_RUNTIME_ONLY_FILES='+str(len(files)))
+          print('P07_PUBLIC_TRIAL_FULL_PRIVATE_CHECKOUT_EXCLUDED=YES')
+          PY
+          (cd "$tmp" && sha256sum "$FILE" | tee "$FILE.sha256" && sha256sum -c "$FILE.sha256")
+          mkdir -p "$tmp/preview"
+          tar -xzf "$tmp/$FILE" -C "$tmp/preview"
+          test -f "$tmp/preview/candidate/dist/p07/0.1.0/overlay/RUNTIME.gitblob"
+          echo P07_PUBLIC_RUNTIME_ONLY_PACKAGE_INTEGRITY=PASS
+      - name: Publish clearly nonformal public OWNER runtime trial asset
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test -n "$GH_TOKEN" || { echo P07_RELEASE_WRITE_NOT_AVAILABLE; exit 78; }
+          test "$(gh api "repos/$RELEASE_REPO" --jq '.private')" = false
+          if gh api "repos/$RELEASE_REPO/git/ref/tags/$TRIAL_TAG" >/dev/null 2>&1; then
+            echo P07_PREEXISTING_OWNER_TRIAL_MUST_HAVE_EXACT_ASSETS
+          else
+          gh release create "$TRIAL_TAG" \
+            "$RUNNER_TEMP/p07-130-public-trial/$FILE" \
+            "$RUNNER_TEMP/p07-130-public-trial/$FILE.sha256" \
+            --repo "$RELEASE_REPO" --target "$GITHUB_SHA" --prerelease \
+            --title "P07 0.1.0-release130 PUBLIC runtime-only OWNER TRIAL — NOT FORMAL" \
+            --notes "Opt-in Owner manual trial only. Based on private product PR #303 HEAD 55615a8a27f4e82a34ca9d31eedaf11d473ccf78. Public distribution contains only installable runtime manifest entries, verified hashes, pinned installers and published base tar; it does not publish the private product checkout, source tests, secrets or backups. NOT Formal Release, NOT automatic upgrade, NOT whole-VPS migration PASS. Original 18-site PREPARE_FAILED data, target DB/site and DNS must remain unchanged. Stable release115 remains default."
+          fi
+          test "$(gh api "repos/$RELEASE_REPO/releases/tags/$TRIAL_TAG" --jq '.prerelease')" = true
+          test "$(gh api "repos/$RELEASE_REPO/releases/tags/$TRIAL_TAG" --jq '.assets | length')" = 2
+          remote_digest="$(gh api "repos/$RELEASE_REPO/releases/tags/$TRIAL_TAG" --jq '.assets[] | select(.name == "p07-release130-owner-runtime-trial.tar.gz") | .digest')"
+          expected_digest="sha256:$(sha256sum "$RUNNER_TEMP/p07-130-public-trial/$FILE" | awk '{print $1}')"
+          test "$remote_digest" = "$expected_digest" || { echo P07_TRIAL_REMOTE_DIGEST_MISMATCH; exit 78; }
+          url="https://github.com/$RELEASE_REPO/releases/download/$TRIAL_TAG/$FILE"
+          asset_id="$(gh api "repos/$RELEASE_REPO/releases/tags/$TRIAL_TAG" --jq '.assets[] | select(.name == "p07-release130-owner-runtime-trial.tar.gz") | .id')"
+          [[ "$asset_id" =~ ^[0-9]+$ ]] || { echo P07_ASSET_ID_UNAVAILABLE; exit 78; }
+          api_url="https://api.github.com/repos/$RELEASE_REPO/releases/assets/$asset_id"
+          good_url=''
+          for candidate in "$url" "$api_url"; do
+            if curl -fsSL --retry 2 --retry-delay 1 --connect-timeout 15 --max-time 50 \
+                -H 'Accept: application/octet-stream' "$candidate" \
+                -o "$RUNNER_TEMP/p07-130-public-trial/remote.tar.gz"; then
+              if cmp -s "$RUNNER_TEMP/p07-130-public-trial/remote.tar.gz" "$RUNNER_TEMP/p07-130-public-trial/$FILE"; then
+                good_url="$candidate"; break
+              fi
+            fi
+          done
+          test -n "$good_url" || { echo P07_TRIAL_ANONYMOUS_REMOTE_UNAVAILABLE; exit 78; }
+          printf '%s\n' "$good_url" > "$RUNNER_TEMP/p07-130-public-trial/url.txt"
+          echo P07_PUBLIC_OWNER_TRIAL_ANONYMOUS_DOWNLOAD_READBACK=PASS
+      - name: Run no-Git Owner trial installer on disposable runner as root
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          f="$RUNNER_TEMP/p07-130-public-trial"
+          mkdir -p "$f"
+          curl -fsSL \
+            "https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/8ba713dbe6d7ebfc7e46a3d37c7395cb46e733cd/installers/p07-owner-test130.sh" \
+            -o "$f/owner-bootstrap.sh"
+          bash -n "$f/owner-bootstrap.sh"
+          digest="$(sha256sum "$f/$FILE" | awk '{print $1}')"
+          sudo install -d -m 755 /opt/vf-server-ops
+          printf '%s\n' '0.1.0-release115' | sudo tee /opt/vf-server-ops/BUILD_ID >/dev/null
+          # Reproduce the exact single-command Owner path: the bootstrap
+          # itself contains the immutable trial asset ID and SHA-256.
+          sudo env P07_TRIAL_URL="$(cat "$f/url.txt")" \
+            P07_TRIAL_SHA256="$digest" \
+            bash "$f/owner-bootstrap.sh" > "$f/owner-install.log"
+          grep -Fxq P07_OWNER130_TEST_INSTALL=PASS "$f/owner-install.log"
+          test "$(sudo env NO_COLOR=1 /usr/local/bin/vfops-rc130 --build-id)" = 0.1.0-release130
+          test "$(cat /opt/vf-server-ops/BUILD_ID)" = 0.1.0-release115
+          sudo env P07_TRIAL_URL="$(cat "$f/url.txt")" \
+            P07_TRIAL_SHA256="$digest" \
+            bash "$f/owner-bootstrap.sh" > "$f/owner-reenter.log"
+          grep -Fxq P07_OWNER130_ALREADY_INSTALLED=YES "$f/owner-reenter.log"
+          grep -Fxq P07_OWNER130_STABLE_VFOPS_UNCHANGED=YES "$f/owner-reenter.log"
+          test "$(sudo env NO_COLOR=1 /usr/local/bin/vfops-rc130 --build-id)" = 0.1.0-release130
+          echo P07_OWNER130_REPEATED_BOOTSTRAP_NO_CHANGES=PASS
+          # Occupied but unverified state remains blocked: no clean or overwrite.
+          sudo install -d -m 700 /opt/vf-server-ops-rc130.previous
+          if sudo env P07_TRIAL_URL="$(cat "$f/url.txt")" \
+             P07_TRIAL_SHA256="$digest" \
+             bash "$f/owner-bootstrap.sh" > "$f/owner-partial.log" 2>&1; then
+            echo P07_OWNER130_UNSAFE_OCCUPIED_SLOT_BYPASSED; exit 23
+          fi
+          grep -Fxq P07_OWNER130_BLOCKED=TEST_SLOT_ALREADY_OCCUPIED_NO_CHANGES "$f/owner-partial.log"
+          sudo rmdir /opt/vf-server-ops-rc130.previous
+          echo P07_OWNER130_UNVERIFIED_SLOT_STILL_FAIL_CLOSED=PASS
+          echo P07_OWNER_TRIAL_NO_GIT_ROOT_INSTALL_AND_STABLE_PRESERVATION=PASS
+      - name: Destroy transient private checkout and generated archive on runner
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- product public-base "$RUNNER_TEMP/p07-130-public-trial"
+          echo P07_TRANSIENT_PRIVATE_INPUT_CLEANED=YES
