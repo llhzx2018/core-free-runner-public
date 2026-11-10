@@ -1,0 +1,80 @@
+name: P01 2.47.511 exact online update channel proof
+on:
+  push:
+    branches:
+      - task/p01-2511-core-updates-channel-proof-20261110
+permissions:
+  contents: read
+jobs:
+  channel-proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      CHANNEL_SHA: 885dc202a13937a77ff2fb8fbb5556c9560d216d
+      PRODUCT_SHA: a0580f12a7da986ca9562d2ba9c165c1cab9cc93
+    steps:
+      - name: Checkout trusted control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Read exact P01 manifest from core-updates release PR
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-updates
+          ref: ${{ env.CHANNEL_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: channel-exact
+          persist-credentials: false
+      - name: Run native update-core manifest and PHP regression
+        shell: bash
+        timeout-minutes: 6
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C channel-exact rev-parse HEAD)" = "$CHANNEL_SHA"
+          if ! command -v php >/dev/null 2>&1; then
+            timeout 120s sudo apt-get update -qq
+            timeout 120s sudo apt-get install -y -qq php-cli php-json >/dev/null
+          fi
+          python3 channel-exact/scripts/check_manifest_contract.py
+          find channel-exact/update-core/php -name '*.php' -print0 | xargs -0 -n1 php -l > /tmp/p01-2511-php-lint.txt
+          php channel-exact/update-core/php/tests/run.php
+          echo P01_2511_CHANNEL_NATIVE_MANIFEST_PHP_TESTS=PASS
+      - name: Verify exact atomic-only source and GitHub Release asset identities
+        shell: bash
+        timeout-minutes: 3
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          p=channel-exact/projects/P01.json
+          jq -e --arg sha "$PRODUCT_SHA" '
+            .project_id=="P01" and .component_id=="APP" and .enabled==true
+            and .current_version=="2.47.510" and .target_version=="2.47.511"
+            and .update_type=="ATOMIC" and .from_versions==["2.47.510"]
+            and .release_tag=="v2.47.511"
+            and .product_identity==$sha
+            and .schema_from=="2026102201" and .schema_to=="2026102201"
+            and .backup_required==true and .rollback_supported==true
+            and .asset_name=="VF_Start_V2.47.511_UPDATE.zip"
+          ' "$p" >/dev/null
+          tagsha="$(gh api repos/llhzx2018/vf-start/git/ref/tags/v2.47.511 --jq '.object.sha')"
+          test "$tagsha" = "$PRODUCT_SHA"
+          gh api repos/llhzx2018/vf-start/releases/tags/v2.47.511 > /tmp/p01-2511-formal.json
+          jq -e --slurpfile m "$p" --arg sha "$PRODUCT_SHA" '
+            .draft==false and .prerelease==false and .tag_name=="v2.47.511"
+            and .id==$m[0].release_id and .published_at==$m[0].released_at
+            and any(.assets[];
+              .name==$m[0].asset_name and .size==$m[0].asset_bytes
+              and .digest==("sha256:"+$m[0].asset_sha256))
+          ' /tmp/p01-2511-formal.json >/dev/null
+          echo P01_2511_CHANNEL_EXACT_RELEASE_ASSET_SHA256=PASS
+          echo P01_2511_CHANNEL_LIMITED_TO_510_TO_511=PASS
+      - name: Clean transient private workspaces
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- channel-exact /tmp/p01-2511-formal.json /tmp/p01-2511-php-lint.txt
+          test ! -e channel-exact
+          echo P01_2511_CHANNEL_PRIVATE_SOURCE_CLEANED=YES
