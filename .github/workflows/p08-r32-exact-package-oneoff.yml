@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-lander
-          ref: 916ad97249b4d0a5b3b8a8e667fe38b4aa97ee79
+          ref: 76e91d684d3f4148868f1572886ced0cb2cca29a
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           fetch-depth: 1
@@ -40,14 +40,14 @@ jobs:
           set +x
           f="$GITHUB_WORKSPACE/p08-private-source/owner-trial-artifacts/p08-first-enable.php"
           test -f "$f" && test ! -L "$f"
-          test "$(git -C p08-private-source rev-parse HEAD)" = "916ad97249b4d0a5b3b8a8e667fe38b4aa97ee79"
+          test "$(git -C p08-private-source rev-parse HEAD)" = "76e91d684d3f4148868f1572886ced0cb2cca29a"
           test "$(cat p08-private-source/VERSION)" = 0.1.1
           echo P08_OWNER_ARTIFACT_EXACT_CHECKOUT=PASS
-          test "$(stat -c%s "$f")" = 293243
-          test "$(git -C p08-private-source hash-object owner-trial-artifacts/p08-first-enable.php)" = 749138397aed5a19123bef41356224de0281c316
+          test "$(stat -c%s "$f")" = 297696
+          test "$(git -C p08-private-source hash-object owner-trial-artifacts/p08-first-enable.php)" = 0a5527087002ea6e58b41e1c93ca0e487e4493a9
           echo P08_OWNER_ARTIFACT_SIZE=PASS
           echo P08_OWNER_CLI_ARTIFACT_GIT_BLOB=PASS
-          zip="$GITHUB_WORKSPACE/p08-private-source/owner-trial-artifacts/vf-lander-0.1.0-first-enable-CLI-fixed.zip"
+          zip="$GITHUB_WORKSPACE/p08-private-source/owner-trial-artifacts/vf-lander-0.1.0-first-enable-RESUME-V3.zip"
           test -f "$zip" && test ! -L "$zip"
           unzip -tq "$zip" > /dev/null
           cmp -s "$f" <(unzip -p "$zip" p08-first-enable.php)
@@ -101,6 +101,31 @@ jobs:
               }
           }
           echo "P08_OWNER_SINGLE_FILE_PHP_LINT_AND_13_GIT_BLOB_CHECK=PASS\n";
+          // Deliberately contaminated updater: verify fail-closed before writes.
+          if (in_array(($argv[3] ?? ''), ['unknown','tampered'], true)) {
+              $mode = $argv[3];
+              $root = rtrim((string) getenv('RUNNER_TEMP'), '/').'/p08-cli-negative-'.$mode;
+              $web = $root.'/htdocs/site';
+              $private = dirname($web).'/.vf-lander-'.substr(hash('sha256', $web),0,16);
+              $original = $private.'/releases/'.P08_FIRST_ORIGIN.'/backend/installer/index.php';
+              if (!mkdir(dirname($original),0700,true)
+                  || !mkdir($private.'/private-backups',0700,true)
+                  || !mkdir($web,0700,true)
+                  || !mkdir($private.'/updater/backend/installer',0700,true)) {
+                  throw new RuntimeException('P08_NEGATIVE_FIXTURE_CREATION_FAILED');
+              }
+              $old = file_get_contents($argv[2]);
+              file_put_contents($original, $old);
+              file_put_contents($web.'/index.php', $old);
+              if ($mode === 'unknown') {
+                  file_put_contents($private.'/updater/UNKNOWN-STATE', 'untouched');
+              } else {
+                  file_put_contents($private.'/updater/backend/installer/cp3-owner-entry.php', 'tampered');
+                  chmod($private.'/updater/backend/installer/cp3-owner-entry.php',0600);
+              }
+              p08FirstInstall($web, $private);
+              throw new RuntimeException('P08_FAIL_CLOSED_BYPASSED');
+          }
           // Synthetic disposable filesystem install: no production web root.
           $root = rtrim((string) getenv('RUNNER_TEMP'), '/').'/p08-cli-disposable';
           if (file_exists($root) || is_link($root)) {
@@ -133,10 +158,57 @@ jobs:
               }
           }
           echo "P08_OWNER_CLI_DISPOSABLE_BRIDGE_BACKUP_13_FILES=PASS\n";
+          // Re-running a fully verified bridge is read-only/idempotent.
+          p08FirstInstall($web, $private);
+          if (!p08FirstHash($web.'/index.php', $bridge)) {
+              throw new RuntimeException('P08_SECOND_ENABLE_CHANGED_BRIDGE');
+          }
+          echo "P08_OWNER_CLI_REPEATED_EXACT_ENABLE_IDEMPOTENT=PASS\n";
+          // The exact failure reported by Owner is an already-created updater.
+          // Reconstruct a partial private tree with one exact source helper,
+          // retain it unmodified while filling the other pinned components.
+          $web2 = $root.'/htdocs/resumed';
+          $private2 = dirname($web2).'/.vf-lander-'.substr(hash('sha256', $web2),0,16);
+          $original2 = $private2.'/releases/'.P08_FIRST_ORIGIN.'/backend/installer/index.php';
+          if (!mkdir(dirname($original2), 0700, true)
+              || !mkdir($private2.'/private-backups',0700,true)
+              || !mkdir($web2,0700,true)
+              || !mkdir($private2.'/updater/backend/installer',0700,true)) {
+              throw new RuntimeException('P08_RESUME_FIXTURE_CREATION_FAILED');
+          }
+          file_put_contents($original2, $oldBytes);
+          file_put_contents($web2.'/index.php', $oldBytes);
+          $keepFile = $private2.'/updater/backend/installer/cp3-owner-entry.php';
+          $keepRaw = base64_decode($payload['installer/cp3-owner-entry.php'], true);
+          file_put_contents($keepFile, $keepRaw);
+          chmod($keepFile, 0600);
+          $keepInode = fileinode($keepFile);
+          p08FirstInstall($web2, $private2);
+          if ($keepInode !== fileinode($keepFile)
+              || !p08FirstHash($web2.'/index.php', $bridge)
+              || !p08FirstHash($private2.'/private-backups/p08-original-0.1.0-index.php',
+                  'f198381ccc3111b9c79d87abe8ea42c23167660d')) {
+              throw new RuntimeException('P08_EXISTING_UPDATER_RESUME_FAILED');
+          }
+          foreach ($expected as $name => $blob) {
+              if (!p08FirstHash($private2.'/updater/backend/'.$name, $blob)) {
+                  throw new RuntimeException('P08_RESUMED_HELPER_HASH_FAILED');
+              }
+          }
+          echo "P08_OWNER_CLI_EXACT_EXISTING_UPDATER_SAFE_RESUME=PASS\n";
           echo "P08_BOOTSTRAP_ORIGINAL_OWNER_CSRF_AND_BACKUP_GUARD=SOURCE_UNCHANGED\n";
           echo "P08_PRODUCTION_WRITES=NO\n";
           PHP
           php "$RUNNER_TEMP/p08-verify-bootstrap.php" "$f" "$GITHUB_WORKSPACE/p08-private-source/backend/installer/index.php"
+          for case in unknown tampered; do
+            if php "$RUNNER_TEMP/p08-verify-bootstrap.php" "$f" "$GITHUB_WORKSPACE/p08-private-source/backend/installer/index.php" "$case" > "$RUNNER_TEMP/p08-negative-$case.txt" 2>&1; then
+              echo P08_OWNER_RESUME_NEGATIVE_CASE_BYPASSED
+              exit 1
+            fi
+          done
+          grep -Fxq FIRST_ENABLE_EXISTING_UPDATER_UNKNOWN_CONTENT "$RUNNER_TEMP/p08-negative-unknown.txt"
+          grep -Fxq FIRST_ENABLE_EXISTING_UPDATER_COMPONENT_DRIFT "$RUNNER_TEMP/p08-negative-tampered.txt"
+          echo P08_OWNER_RESUME_UNKNOWN_AND_TAMPERED_FAIL_CLOSED=PASS
 
       - name: Delete private workspace and validation scratch
         if: always()
@@ -144,7 +216,8 @@ jobs:
         run: |
           set +e
           rm -f -- "$RUNNER_TEMP/p08-verify-bootstrap.php" "$RUNNER_TEMP/p08-root-guard.txt"
-          rm -rf -- "$RUNNER_TEMP/p08-cli-disposable"
+          rm -rf -- "$RUNNER_TEMP/p08-cli-disposable" "$RUNNER_TEMP/p08-cli-negative-unknown" "$RUNNER_TEMP/p08-cli-negative-tampered"
+          rm -f -- "$RUNNER_TEMP/p08-negative-unknown.txt" "$RUNNER_TEMP/p08-negative-tampered.txt"
           rm -rf -- "$GITHUB_WORKSPACE/p08-private-source"
           echo P08_PUBLIC_REPOSITORY_PRIVATE_SOURCE_PERSISTENCE=NO
           echo P08_PUBLIC_ARTIFACT_UPLOAD=NO
