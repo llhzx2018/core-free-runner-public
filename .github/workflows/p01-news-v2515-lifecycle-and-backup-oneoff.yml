@@ -1,0 +1,375 @@
+name: P01 News v2.47.515 candidate FULL/Atomic and native BackupManager proof
+on:
+  push:
+    branches: [task/p01-news-v2515-lifecycle-and-backup-20261110]
+permissions:
+  contents: read
+jobs:
+  candidate-515-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      PRODUCT_REPO: llhzx2018/vf-start
+      PRODUCT_BRANCH: fix/news-url-preview-readable-only-20261110
+      TARGET_SHA: 1827c8e0679195abe10645eb470873e6774403d5
+      EXPECTED_TREE: 005dd7fb3a8a079411a449eacd4033b9535f83b2
+      TARGET_VERSION: '2.47.515'
+      TARGET_TREE: 005dd7fb3a8a079411a449eacd4033b9535f83b2
+      VERSION: '2.47.515'
+      SOURCE: '2.47.514'
+      BASE_TAG: v2.47.514
+      ART: /tmp/p01-maintenance-artifacts
+      REL: /tmp/p01-maintenance-source
+    steps:
+      - name: Checkout registered public Runner source and reusable builder
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Prepare runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if command -v php >/dev/null && command -v jq >/dev/null &&
+              php -r 'exit(extension_loaded("pdo_sqlite") && extension_loaded("sqlite3") && extension_loaded("curl") ? 0 : 1);'; then
+            echo P01_515_HOSTED_RUNTIME_READY=YES
+          else
+            timeout 80 sudo apt-get update -qq
+            timeout 125 sudo apt-get install -y -qq php-cli php-sqlite3 php-curl php-mbstring php-zip php-gd unzip jq
+          fi
+          php -m | grep -iFx pdo_sqlite
+          php -m | grep -iFx sqlite3
+          php -m | grep -iFx curl
+          echo P01_RELEASE_RUNTIME=PASS
+
+      - name: Resolve exact product source and prior formal release
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          test -n "$GH_TOKEN"
+
+          remote_main="$(git ls-remote "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" "refs/heads/${PRODUCT_BRANCH}" | awk '{print $1}')"
+          test "$remote_main" = "$TARGET_SHA"
+
+          git clone -q --no-checkout "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" candidate
+          git -C candidate fetch -q --depth 1 origin "$TARGET_SHA"
+          git -C candidate checkout -q --detach FETCH_HEAD
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$VERSION"
+
+          TARGET_TREE="$(git -C candidate rev-parse HEAD^{tree})"
+          test "$TARGET_TREE" = "$EXPECTED_TREE"
+          echo "TARGET_TREE=$TARGET_TREE" >> "$GITHUB_ENV"
+
+          git clone -q --depth 1 --branch "$BASE_TAG" "https://x-access-token:${READ_TOKEN}@github.com/${PRODUCT_REPO}.git" stable
+          test "$(tr -d '\r\n ' < stable/VERSION)" = "$SOURCE"
+          BASE_COMMIT="$(git -C stable rev-parse HEAD)"
+          echo "BASE_COMMIT=$BASE_COMMIT" >> "$GITHUB_ENV"
+
+          rm -rf "$REL"
+          mkdir -p "$REL/full" "$REL/update"
+          gh release download "$BASE_TAG" -R "$PRODUCT_REPO" -D "$REL"             -p "VF-Start-V${SOURCE}-FULL.zip"             -p "VF_Start_V${SOURCE}_UPDATE.zip"
+          unzip -q "$REL/VF-Start-V${SOURCE}-FULL.zip" -d "$REL/full"
+          unzip -q "$REL/VF_Start_V${SOURCE}_UPDATE.zip" -d "$REL/update"
+          test "$(tr -d '\r\n ' < "$REL/full/VERSION.txt")" = "$SOURCE"
+          test -f "$REL/update/repair-v${SOURCE}.php"
+          echo P01_EXACT2.47.514AND_BASELINE=PASS
+
+      - name: Projects exact-source Chromium geometry regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          command -v google-chrome
+          google-chrome --version
+          test -f candidate/tests/unit/project_visual_geometry_browser_contract.cjs
+          node candidate/tests/unit/project_visual_geometry_browser_contract.cjs | tee /tmp/p01-project-geometry.txt
+          grep -Fx 'P01_PROJECT_VISUAL_BROWSER=PASS' /tmp/p01-project-geometry.txt
+          echo P01_PROJECTS_EXACT2.47.514UA_UI=PASS
+
+      - name: Canonical regression in isolated worktree
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat >/tmp/p01-maintenance-lane.json <<EOF
+          {
+            "schema": "vf-ephemeral-lane-spec/v1",
+            "lane_id": "p01-maintenance-release",
+            "project_id": "P01",
+            "repository": "$PRODUCT_REPO",
+            "target_version": "$VERSION",
+            "target_sha": "$TARGET_SHA",
+            "target_tree": "$TARGET_TREE",
+            "source_versions": ["$SOURCE"],
+            "schema_version": "",
+            "candidate_run": "${{ github.run_id }}",
+            "previous_lane": {},
+            "extra": {}
+          }
+          EOF
+          python3 scripts/ephemeral_lane_spec.py validate --spec /tmp/p01-maintenance-lane.json >/tmp/p01-lane-spec.json
+          python3 scripts/ephemeral_lane_spec.py audit-rendered --spec /tmp/p01-maintenance-lane.json --input .github/workflows/p01-news-v2515-lifecycle-and-backup-oneoff.yml | tee /tmp/p01-lane-rendered.json
+          echo P01_NEWS_515_LANE_IDENTITY=PASS
+          python3 scripts/ephemeral_lane_worktree.py run-isolated             --spec /tmp/p01-maintenance-lane.json             --repo candidate             --label p01-canonical-release             -- bash tests/canonical_release_regression.sh . "$GITHUB_WORKSPACE/stable" --require-zero-debt             | tee /tmp/p01-canonical.txt
+          grep -Fx 'P01_CANONICAL_UNIT_REGRESSION=PASS' /tmp/p01-canonical.txt
+          grep -Fx 'P01_CANONICAL_ZERO_DEBT_REQUIRED=PASS' /tmp/p01-canonical.txt
+          test -z "$(git -C candidate status --porcelain)"
+          echo P01_CANONICAL_RELEASE_PROOF=PASS
+
+      - name: Build exact maintenance artifacts
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf "$ART"
+          python3 scripts/p01-maintenance-release.py             --candidate candidate/src             --baseline-full "$REL/full"             --baseline-repair "$REL/update/repair-v${SOURCE}.php"             --out "$ART"             --version "$VERSION"             --source-version "$SOURCE"             --target-sha "$TARGET_SHA"             --target-tree "$TARGET_TREE" | tee /tmp/p01-maintenance-build.json
+
+          test -f "$ART/VF-Start-V${VERSION}-FULL.zip"
+          test -f "$ART/VF_Start_V${VERSION}_UPDATE.zip"
+          test -f "$ART/P01_MAINTENANCE_ARTIFACT_RECEIPT.json"
+          echo P01_MAINTENANCE_BUILD=PASS
+
+      - name: Verify clean FULL and Atomic UPDATE
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          FULL="$ART/VF-Start-V${VERSION}-FULL.zip"
+          UPDATE="$ART/VF_Start_V${VERSION}_UPDATE.zip"
+          WORK="/tmp/p01-maintenance-gate"
+          rm -rf "$WORK"
+          mkdir -p "$WORK/update"
+          unzip -q "$UPDATE" -d "$WORK/update"
+          REPAIR="$WORK/update/repair-v${VERSION}.php"
+
+          test -f "$REPAIR"
+          test "$(unzip -Z1 "$UPDATE")" = "repair-v${VERSION}.php"
+          unzip -t "$FULL" >/dev/null
+          unzip -t "$UPDATE" >/dev/null
+          php -l "$REPAIR" >/dev/null
+          php "$REPAIR" --self-test | tee /tmp/p01-atomic-selftest.json
+          grep -Fq '"ok":true' /tmp/p01-atomic-selftest.json
+
+          assert_no_private_payload() {
+            local zip="$1"
+            if unzip -Z1 "$zip" | grep -Ei '(^|/)(\.runtime\.php|.*\.sqlite3?$|.*\.db$|private/|backups?/|sessions?/|tokens?/|staging/)' >/tmp/p01-private-hits.txt; then
+              cat /tmp/p01-private-hits.txt
+              echo PRIVATE_PAYLOAD_LEAK
+              exit 90
+            fi
+          }
+          assert_no_private_payload "$FULL"
+          assert_no_private_payload "$UPDATE"
+
+          install_full() {
+            local zip="$1" root="$2" port="$3" title="$4"
+            local cookie="/tmp/cookie-$port.txt"
+            rm -rf "$root" "$cookie"
+            mkdir -p "$root"
+            unzip -q "$zip" -d "$root"
+            (
+              cd "$root"
+              php -S 127.0.0.1:"$port" -t . >"/tmp/server-$port.log" 2>&1 &
+              echo $! >"/tmp/server-$port.pid"
+            )
+            local pid
+            pid="$(cat "/tmp/server-$port.pid")"
+            trap 'kill "$pid" >/dev/null 2>&1 || true' RETURN
+            for _ in $(seq 1 50); do
+              if curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$port/setup.php" -o "/tmp/setup-$port.html"; then break; fi
+              sleep 1
+            done
+            local csrf
+            csrf="$(python3 - "/tmp/setup-$port.html" <<'PY'
+          import re,sys
+          text=open(sys.argv[1],encoding="utf-8").read()
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert m
+          print(m.group(1))
+          PY
+          )"
+            local pass="ReleaseGate!${port}"
+            curl -fsS -c "$cookie" -b "$cookie" -X POST "http://127.0.0.1:$port/setup.php"               --data-urlencode "setup_csrf=$csrf"               --data-urlencode "site_title=$title"               --data-urlencode "admin_password=$pass"               --data-urlencode "admin_password_confirm=$pass"               -o "/tmp/setup-post-$port.html"
+            (cd "$root" && php cli/verify.php) | tee "/tmp/verify-$port.txt"
+            grep -Fx 'VERIFY_PASS=YES' "/tmp/verify-$port.txt"
+            local revisit
+            revisit="$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/setup.php")"
+            test "$revisit" = 302
+            local body status
+            body="$(php -r 'echo json_encode(["password"=>$argv[1]], JSON_UNESCAPED_SLASHES);' "$pass")"
+            status="$(curl -sS -c "$cookie" -b "$cookie" -o "/tmp/login-$port.json" -w '%{http_code}' -H 'Content-Type: application/json' --data "$body" "http://127.0.0.1:$port/api.php?action=login")"
+            test "$status" = 200
+            grep -Fq '"ok":true' "/tmp/login-$port.json"
+            kill "$pid" >/dev/null 2>&1 || true
+            trap - RETURN
+          }
+
+          install_full "$FULL" "$WORK/target-full" 18511 "VF Start V$VERSION FULL Gate"
+          test "$(tr -d '\r\n ' < "$WORK/target-full/VERSION.txt")" = "$VERSION"
+          echo P01_CLEAN_FULL_INSTALL=PASS
+
+          install_full "$REL/VF-Start-V${SOURCE}-FULL.zip" "$WORK/upgrade" 18512 "VF Start V$SOURCE Upgrade Source"
+          cat >"$WORK/upgrade/sentinel.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require __DIR__.'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $cat=$repo->createCategory(['name'=>'Release Sentinel','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+          $link=$repo->saveLink(null,['surface'=>'start','category_id'=>$cat,'title'=>'Release Sentinel Link','url'=>'https://example.com/release-sentinel','description'=>'must survive atomic','tags'=>['release-sentinel'],'is_private'=>1,'is_pending'=>0]);
+          file_put_contents('/tmp/p01-sentinel-id.txt',(string)$link['id']);
+          PHP
+          php "$WORK/upgrade/sentinel.php"
+          rm "$WORK/upgrade/sentinel.php"
+          cp "$REPAIR" "$WORK/upgrade/repair-v${VERSION}.php"
+          php "$WORK/upgrade/repair-v${VERSION}.php" --verify-source="$WORK/upgrade" | tee /tmp/p01-source-verify.json
+          grep -Fq '"ok":true' /tmp/p01-source-verify.json
+          php "$WORK/upgrade/repair-v${VERSION}.php" --run="$WORK/upgrade" | tee /tmp/p01-atomic-success.json
+          grep -Fq '"ok":true' /tmp/p01-atomic-success.json
+          test "$(tr -d '\r\n ' < "$WORK/upgrade/VERSION.txt")" = "$VERSION"
+          (cd "$WORK/upgrade" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          php -r 'require $argv[1]."/app/bootstrap.php"; $id=(int)trim(file_get_contents("/tmp/p01-sentinel-id.txt")); $s=vf_db()->prepare("SELECT title,is_private FROM links WHERE id=?"); $s->execute([$id]); $r=$s->fetch(PDO::FETCH_ASSOC); if(!$r||$r["title"]!=="Release Sentinel Link"||(int)$r["is_private"]!==1) exit(1); echo "SENTINEL_PRESERVED\n";' "$WORK/upgrade"
+
+          cp "$REPAIR" "$WORK/upgrade/repair-v${VERSION}.php"
+          php "$WORK/upgrade/repair-v${VERSION}.php" --run="$WORK/upgrade" | tee /tmp/p01-atomic-repeat.json
+          grep -Fq '"already_current":true' /tmp/p01-atomic-repeat.json
+          echo P01_ATOMIC_UPGRADE_AND_IDEMPOTENCY=PASS
+
+          install_full "$REL/VF-Start-V${SOURCE}-FULL.zip" "$WORK/rollback" 18513 "VF Start V$SOURCE Rollback Source"
+          cat >"$WORK/rollback/sentinel.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require __DIR__.'/app/bootstrap.php';
+          $repo=new VfRepository(vf_db());
+          $cat=$repo->createCategory(['name'=>'Rollback Sentinel','description'=>'','icon'=>'','is_private'=>1,'sort_order'=>0]);
+          $link=$repo->saveLink(null,['surface'=>'start','category_id'=>$cat,'title'=>'Rollback Sentinel Link','url'=>'https://example.com/rollback-sentinel','description'=>'must survive rollback','tags'=>['rollback-sentinel'],'is_private'=>1,'is_pending'=>0]);
+          file_put_contents('/tmp/p01-rollback-id.txt',(string)$link['id']);
+          PHP
+          php "$WORK/rollback/sentinel.php"
+          rm "$WORK/rollback/sentinel.php"
+          cp "$REPAIR" "$WORK/rollback/repair-v${VERSION}.php"
+          set +e
+          VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$WORK/rollback/repair-v${VERSION}.php" --run="$WORK/rollback" >/tmp/p01-rollback.out 2>/tmp/p01-rollback.err
+          rollback_rc=$?
+          set -e
+          test "$rollback_rc" -ne 0
+          test "$(tr -d '\r\n ' < "$WORK/rollback/VERSION.txt")" = "$SOURCE"
+          (cd "$WORK/rollback" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          php -r 'require $argv[1]."/app/bootstrap.php"; $id=(int)trim(file_get_contents("/tmp/p01-rollback-id.txt")); $s=vf_db()->prepare("SELECT title FROM links WHERE id=?"); $s->execute([$id]); if($s->fetchColumn()!=="Rollback Sentinel Link") exit(1); echo "ROLLBACK_SENTINEL_PRESERVED\n";' "$WORK/rollback"
+          echo P01_ATOMIC_ROLLBACK=PASS
+
+          unzip -p "$FULL" VERSION.txt | tr -d '\r\n ' | grep -Fx "$VERSION"
+          unzip -p "$FULL" release-manifest.json | php -r '$m=json_decode(stream_get_contents(STDIN),true); if(($m["version"]??"")!==$argv[1]||($m["source_version"]??"")!==$argv[2]||empty($m["maintenance_release"]["schema_unchanged"])) exit(1); echo "P01_RELEASE_MANIFEST=PASS\n";' "$VERSION" "$SOURCE"
+          echo P01_MAINTENANCE_ARTIFACT_GATE=PASS
+
+      - name: Prepare protected synthetic old-full and atomic backup fixtures
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          W="/tmp/p01-news-r5-$GITHUB_RUN_ID"
+          mkdir -p "$W/artifacts/repair"
+          cp "$REL/VF-Start-V${SOURCE}-FULL.zip" "$W/VF-Start-V${SOURCE}-FULL.zip"
+          unzip -q "$ART/VF_Start_V${VERSION}_UPDATE.zip" -d "$W/artifacts/repair"
+          test -f "$W/artifacts/repair/repair-v${VERSION}.php"
+          echo P01_515_NATIVE_BACKUP_FIXTURE_READY=PASS
+      - name: Real installed 512 BackupManager restore and 513 injected rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export VF_NEWS_R5_SANDBOX=1
+          W="/tmp/p01-news-r5-$GITHUB_RUN_ID"
+          TEST="$W/p01-news-v512-native-backup.php"
+          cp candidate/tests/integration/p01_news_r5_lifecycle_native.php "$TEST"
+          python3 - "$TEST" <<'PY'
+          from pathlib import Path
+          import sys
+          p=Path(sys.argv[1]);s=p.read_text()
+          changes={
+            "require_once dirname(__DIR__,2).'/src/app/NewsFeedService.php';":
+              "require_once $resolved.'/app/NewsFeedService.php';",
+            "require_once dirname(__DIR__,2).'/src/app/NewsSourcePreferences.php';":
+              "require_once $resolved.'/app/NewsSourcePreferences.php';",
+            "news_r5_assert(!is_file($resolved.'/news.php'),'new-news-route-removed-after-failed-atomic');":
+              "news_r5_assert(is_file($resolved.'/news.php'),'existing-news-route-preserved-after-failed-atomic');",
+            "$prefs['followed']===['solidot-tech'] && $prefs['enabled']===['cn-live','solidot-tech']":
+              "$prefs['followed']===['solidot-tech'] && count($prefs['enabled'])===2 && in_array('cn-live',$prefs['enabled'],true) && in_array('solidot-tech',$prefs['enabled'],true)"
+          }
+          for a,b in changes.items():
+            assert s.count(a)==1,a
+            s=s.replace(a,b)
+          p.write_text(s)
+          PY
+          php -l "$TEST" >/dev/null
+          PIDS=""
+          cleanup() { for pid in $PIDS; do kill "$pid" >/dev/null 2>&1 || true; done; }
+          trap cleanup EXIT
+          install_official() {
+            local root="$1" port="$2"
+            mkdir -p "$root"
+            unzip -q "$W/VF-Start-V$SOURCE-FULL.zip" -d "$root"
+            touch "$root/.vf-news-r5-fixture"
+            php -S "127.0.0.1:$port" -t "$root" >"$W/server-$port.log" 2>&1 &
+            local pid=$!
+            PIDS="$PIDS $pid"
+            local cookie="$W/cookie-$port"
+            for n in $(seq 1 50); do
+              if curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$port/setup.php" -o "$W/setup-$port.html" 2>/dev/null; then break; fi
+              sleep .15
+            done
+            local csrf
+            csrf="$(sed -n 's/.*name="setup_csrf" value="\([^"]*\)".*/\1/p' "$W/setup-$port.html" | head -1)"
+            test -n "$csrf"
+            curl -fsS -c "$cookie" -b "$cookie" -X POST "http://127.0.0.1:$port/setup.php" \
+              --data-urlencode "setup_csrf=$csrf" \
+              --data-urlencode "site_title=P01 Isolated Native Backup" \
+              --data-urlencode "admin_password=NativeBackup-$port-Gate" \
+              --data-urlencode "admin_password_confirm=NativeBackup-$port-Gate" \
+              -o "$W/installed-$port.html"
+            test -s "$root/app/.runtime.php"
+            (cd "$root" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+            kill "$pid" >/dev/null 2>&1 || true
+            echo "P01_515_PRIOR_FORMAL_FULL_INSTALL=PASS port=$port"
+          }
+          install_official "$W/upgrade" 18612
+          php "$TEST" "$W/upgrade" stage | tee "$W/upgrade-stage.log"
+          grep -Fx 'P01_NEWS_R5_STAGE=PASS' "$W/upgrade-stage.log"
+          cp "$W/artifacts/repair/repair-v$VERSION.php" "$W/upgrade/repair-v$VERSION.php"
+          php "$W/upgrade/repair-v$VERSION.php" --verify-source="$W/upgrade" | grep -F '"ok":true'
+          php "$W/upgrade/repair-v$VERSION.php" --run="$W/upgrade" | grep -F '"ok":true'
+          test "$(tr -d '\r\n ' < "$W/upgrade/VERSION.txt")" = "$VERSION"
+          php "$TEST" "$W/upgrade" verify-upgrade | tee "$W/upgrade-restore.log"
+          grep -Fx 'P01_NEWS_R5_ATOMIC_AND_BACKUP_RESTORE=PASS' "$W/upgrade-restore.log"
+          (cd "$W/upgrade" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_515_REAL_NATIVE_BACKUP_RESTORE=PASS
+          install_official "$W/rollback" 18613
+          php "$TEST" "$W/rollback" stage | tee "$W/rollback-stage.log"
+          cp "$W/artifacts/repair/repair-v$VERSION.php" "$W/rollback/repair-v$VERSION.php"
+          set +e
+          VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php "$W/rollback/repair-v$VERSION.php" --run="$W/rollback" >"$W/fault.log" 2>&1
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          test "$(tr -d '\r\n ' < "$W/rollback/VERSION.txt")" = "$SOURCE"
+          php "$TEST" "$W/rollback" verify-rollback | tee "$W/rollback-check.log"
+          grep -Fx 'P01_NEWS_R5_ATOMIC_ROLLBACK=PASS' "$W/rollback-check.log"
+          (cd "$W/rollback" && php cli/verify.php) | grep -Fx 'VERIFY_PASS=YES'
+          echo P01_515_REAL_ROLLBACK_PRIVATE_DATA=PASS
+      - name: Report exact isolated candidate digest, never publish release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(tr -d '\r\n ' < candidate/VERSION)" = "$VERSION"
+          test "$(tr -d '\r\n ' < candidate/src/VERSION.txt)" = "$VERSION"
+          printf 'P01_NEWS_515_FULL_SHA256=%s\n' "$(sha256sum "$ART/VF-Start-V${VERSION}-FULL.zip" | awk '{print $1}')"
+          printf 'P01_NEWS_515_UPDATE_SHA256=%s\n' "$(sha256sum "$ART/VF_Start_V${VERSION}_UPDATE.zip" | awk '{print $1}')"
+          echo P01_NEWS_515_EXACT_CANDIDATE_LIFECYCLE=PASS
+      - name: Remove transient private repository and fixtures
+        shell: bash
+        if: always()
+        run: |
+          set +e
+          rm -rf candidate stable /tmp/p01-maintenance-source /tmp/p01-maintenance-artifacts /tmp/p01-maintenance-gate
+          rm -rf /tmp/p01-remote-readback /tmp/p01-lane-spec.json /tmp/p01-lane-rendered.json /tmp/p01-maintenance-lane.json "/tmp/p01-news-r5-$GITHUB_RUN_ID"
+          rm -f /tmp/p01-*json /tmp/p01-*txt /tmp/p01-*out /tmp/p01-*err /tmp/server-1851*.pid /tmp/server-1851*.log
+          echo P01_NEWS_515_TRANSIENT_PRIVATE_CLEANUP=YES
