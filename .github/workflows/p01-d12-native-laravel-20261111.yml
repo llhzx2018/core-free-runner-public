@@ -8,7 +8,22 @@ permissions:
 jobs:
   p01-d12-laravel:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 28
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: p01-only-synthetic-test
+          MYSQL_DATABASE: p01_d1_test_mysql_20261111
+        ports:
+          - 3306:3306
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: p01-only-synthetic-test
+          MARIADB_DATABASE: p01_d1_test_maria_20261111
+        ports:
+          - 3307:3306
     steps:
       - name: Exact runner and privacy entry
         run: |
@@ -52,6 +67,11 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq composer >/dev/null
           fi
           php -r 'exit(PHP_VERSION_ID>=80300?0:1);'
+          if ! php -r 'exit(extension_loaded("pdo_sqlite") && extension_loaded("pdo_mysql") ? 0 : 1);'; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-sqlite3 php8.3-mysql >/dev/null
+          fi
+          php -r 'exit(extension_loaded("pdo_sqlite") && extension_loaded("pdo_mysql") ? 0 : 1);'
           echo P01_D12_PHP_RUNTIME=READY
       - name: Prove source and real PHP unit negative gates
         run: |
@@ -173,6 +193,82 @@ jobs:
           test -f "$root/private/data/owner.sqlite"
           php -r '$db=new PDO("sqlite:".$argv[1]);$n=(int)$db->query("SELECT COUNT(*) FROM sqlite_master WHERE type=\"table\" AND name NOT LIKE \"sqlite_%\"")->fetchColumn();if($n!==35)exit(1);' "$root/private/data/owner.sqlite"
           echo P01_D12_NATIVE_SQLITE_HTTP_INSTALL=201_TABLES_35
+          # Genuine MariaDB 11.8 and MySQL 8.4 containers, a disposable
+          # fresh app for each, and the same *actual* Laravel HTTP routes.
+          # HTTPS/FPM Basic variables are synthetic test-only attestations.
+          for entry in 'mariadb 3307 p01_d1_test_maria_20261111 18084' 'mysql 3306 p01_d1_test_mysql_20261111 18085'; do
+            read -r engine dbport dbname webport <<< "$entry"
+            fresh="$(mktemp -d /tmp/p01-d12-native-XXXXXX)"
+            mkdir -m 0700 "$fresh/app"
+            rsync -a --exclude=private/ "$root/" "$fresh/app/"
+            (cd "$fresh/app" && php bin/activate-cloudpanel.php --host=p01-test.example.org --basic-user=vf-install >/dev/null)
+            public="$fresh/app/public"
+            export P01_D12_PUBLIC_ROOT="$public"
+            php -S "127.0.0.1:$webport" -t "$public" "$router" >/tmp/p01-d12-sql-server.log 2>&1 &
+            sql_pid=$!
+            for n in $(seq 1 40); do
+              if php -r '
+                try {
+                  $pdo=new PDO("mysql:host=127.0.0.1;port=".$argv[1].";dbname=".$argv[2],"root","p01-only-synthetic-test");
+                  exit((int)$pdo->query("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=".$pdo->quote($argv[2]))->fetchColumn()===0?0:1);
+                } catch(Throwable $e) { exit(1); }
+              ' "$dbport" "$dbname"; then
+                break
+              fi
+              sleep 1
+            done
+            status=000
+            for n in 1 2 3 4 5 6 7 8 9 10; do
+              status="$(curl -sS --noproxy '*' -D "$headers" -H 'Host: p01-test.example.org' -o "$body" -w '%{http_code}' "http://127.0.0.1:$webport/_next/install/" 2>/dev/null || true)"
+              [ "$status" = 200 ] && break
+              sleep 1
+            done
+            test "$status" = 200
+            token="$(python3 - "$body" <<'PY'
+          import re,sys
+          m=re.search(r'<meta name="csrf-token" content="([^"]+)"',open(sys.argv[1],encoding='utf8').read())
+          if m is None:sys.exit(1)
+          print(m.group(1))
+          PY
+            )"
+            cookie="$(tr -d '\r' < "$headers" | grep -i '^set-cookie: vf_start_next_owner_session=' | head -n1 | cut -d' ' -f2 | cut -d';' -f1)"
+            test -n "$cookie"
+            test -n "$token"
+            P01_D12_ENGINE="$engine" P01_D12_DB_PORT="$dbport" P01_D12_DB_NAME="$dbname" php -r '
+              file_put_contents($argv[1],json_encode([
+                "db_engine"=>getenv("P01_D12_ENGINE"),
+                "db_host"=>"127.0.0.1",
+                "db_port"=>getenv("P01_D12_DB_PORT"),
+                "db_name"=>getenv("P01_D12_DB_NAME"),
+                "db_user"=>"root",
+                "db_password"=>"p01-only-synthetic-test",
+                "owner_password"=>bin2hex(random_bytes(20)),
+              ]));
+            ' "$payload"
+            chmod 0600 "$payload"
+            common_sql=(--noproxy '*' -H 'Host: p01-test.example.org'
+              -H 'Content-Type: application/json'
+              -H 'Origin: https://p01-test.example.org'
+              -H 'Sec-Fetch-Site: same-origin'
+              -H "Cookie: $cookie" -H "X-CSRF-TOKEN: $token")
+            status="$(curl -sS "${common_sql[@]}" -o "$body" -w '%{http_code}' --data-binary "@$payload" "http://127.0.0.1:$webport/_next/install/check")"
+            if [ "$status" != 200 ]; then
+              echo "P01_D12_${engine}_PREFLIGHT_STATUS=$status"
+              cat "$body" | head -c 350
+              exit 1
+            fi
+            status="$(curl -sS "${common_sql[@]}" -o "$body" -w '%{http_code}' --data-binary "@$payload" "http://127.0.0.1:$webport/_next/install/start")"
+            if [ "$status" != 201 ]; then
+              echo "P01_D12_${engine}_INSTALL_STATUS=$status"
+              cat "$body" | head -c 350
+              exit 1
+            fi
+            php -r '$p=new PDO("mysql:host=127.0.0.1;port=".$argv[1].";dbname=".$argv[2],"root","p01-only-synthetic-test");$n=(int)$p->query("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=".$p->quote($argv[2]))->fetchColumn();exit($n===35?0:1);' "$dbport" "$dbname"
+            test -f "$fresh/app/private/state/installation.sealed.json"
+            echo "P01_D12_NATIVE_${engine}_HTTP_INSTALL=201_TABLES_35"
+            kill "$sql_pid" 2>/dev/null || true
+            rm -rf -- "$fresh"
+          done
           echo P01_D12_NGINX_TLS_FPM_PROOF=NOT_PROVEN_SYNTHETIC_SERVER_ONLY
       - name: Cleanup transient private checkout
         if: always()
