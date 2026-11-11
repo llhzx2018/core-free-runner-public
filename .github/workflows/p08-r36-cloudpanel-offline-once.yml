@@ -1,0 +1,67 @@
+name: P08 R36 exact-source CloudPanel offline and installed DB guard (temporary)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p08-r36-cloudpanel-offline-once.yml'
+permissions:
+  contents: read
+jobs:
+  offline-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 18
+    env:
+      P08_SOURCE_SHA: c54b4e3c8bcb81388a235741d38638c040d989c9
+    steps:
+      - name: Checkout one exact P08 private source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: c54b4e3c8bcb81388a235741d38638c040d989c9
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-product
+      - name: Prove source identity before test
+        run: |
+          set -euo pipefail
+          test "$(git -C private-product rev-parse HEAD)" = "$P08_SOURCE_SHA"
+          test "$(cat private-product/VERSION)" = 0.1.1
+          test ! -e private-product/.env
+          echo "P08_R36_EXACT_SOURCE_SHA=$P08_SOURCE_SHA"
+      - name: PHP 8.4 + pinned Composer
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+          tools: composer:v2
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, zip, mbstring, intl, bcmath, dom, fileinfo, sodium, posix
+      - name: Native fixture for stopped service and 3-engine real dotenv parsing
+        working-directory: private-product
+        run: |
+          set -euo pipefail
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
+          composer install --no-dev --no-scripts --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-r36-composer.log" 2>&1
+          php -l src/Upgrade/CloudPanelOfflineGuard.php
+          php -l src/Upgrade/InstalledDatabaseConfig.php
+          php -l src/Upgrade/offline-bridge-cli.php
+          php -l src/Upgrade/OfflineBridgeCoordinator.php
+          php -l tests/test_cloudpanel_offline_contract.php
+          php tests/test_cloudpanel_offline_contract.php
+          echo "P08_R36_NEW_EXACT_PHP_MACHINE_PASS=YES"
+      - name: Verify no web path or root service modification surface
+        working-directory: private-product
+        run: |
+          set -euo pipefail
+          test ! -e public/offline-bridge-cli.php
+          test ! -e public/owner-upgrade-worker.php
+          if grep -E '(systemctl (stop|start|restart|reload)|system\(|shell_exec\()' src/Upgrade/CloudPanelOfflineGuard.php src/Upgrade/offline-bridge-cli.php; then
+            echo 'P08_R36_FORBIDDEN_SERVICE_WRITE=YES'
+            exit 1
+          fi
+          echo 'P08_R36_SERVICE_MODIFICATION=NONE'
+          echo 'P08_R36_REAL_CLOUDPANEL_STOP_DRAIN=NOT_PROVEN'
+      - name: Erase temporary private checkout and logs
+        if: always()
+        run: |
+          rm -rf private-product
+          rm -f "$RUNNER_TEMP/p08-r36-composer.log"
