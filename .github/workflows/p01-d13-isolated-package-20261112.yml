@@ -27,35 +27,82 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-start
-          ref: c3dd150c87fdedf1fba1c7c51dc053d3c93805f7
+          ref: 846a95c4c7000a6c1b5da408149204246e28b1a7
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           path: candidate
           persist-credentials: false
       - name: Verify exact source SHA and run package negative tests
         run: |
           set -Eeuo pipefail
-          test "$(git -C candidate rev-parse HEAD)" = "c3dd150c87fdedf1fba1c7c51dc053d3c93805f7"
+          test "$(git -C candidate rev-parse HEAD)" = "846a95c4c7000a6c1b5da408149204246e28b1a7"
           test "$(cat candidate/VERSION)" = "2.47.515"
-          echo P01_D13_EXACT_SOURCE=c3dd150c87fdedf1fba1c7c51dc053d3c93805f7
+          echo P01_D13_EXACT_SOURCE=846a95c4c7000a6c1b5da408149204246e28b1a7
           cd candidate
           python3 -m py_compile scripts/build_p01_next_clean_full.py
           python3 -m unittest discover -s tests/architecture -p test_p01_next_full_bundle.py -v
           echo P01_D13_PACKAGE_NEGATIVE_TESTS=PASS
-      - name: Resolve pinned public Composer packages for source lock
+      - name: Install pinned PHP build tools and verify immutable source dependency lock
         run: |
           set -Eeuo pipefail
           if ! command -v composer >/dev/null; then
             sudo apt-get update -qq
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq composer >/dev/null
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq composer unzip php-sqlite3 php-mbstring php-xml >/dev/null
           fi
-          test ! -e candidate/src/app/next/composer.lock
-          export COMPOSER_NO_INTERACTION=1
-          composer install --working-dir=candidate/src/app/next --no-dev --no-plugins --no-scripts --prefer-dist --no-progress -q
+          composer validate --working-dir=candidate/src/app/next --no-check-publish -q
           php -r '$o=json_decode(file_get_contents("candidate/src/app/next/composer.lock"),true,512,JSON_THROW_ON_ERROR);$ok=false;foreach($o["packages"] as $v){if($v["name"]==="laravel/framework"&&$v["version"]==="v13.42.0"){$ok=true;break;}}exit($ok?0:1);'
-          echo "P01_D13_PUBLIC_LOCK_SHA256=$(sha256sum candidate/src/app/next/composer.lock | cut -d' ' -f1)"
-          echo P01_D13_PUBLIC_LOCK_BASE64_START
-          base64 -w0 candidate/src/app/next/composer.lock | fold -w120
-          echo P01_D13_PUBLIC_LOCK_BASE64_END
+          echo "P01_D13_PINNED_LOCK_SHA256=$(sha256sum candidate/src/app/next/composer.lock | cut -d' ' -f1)"
+      - name: Build isolated single ZIP from exact source and verify manifest hashes
+        run: |
+          set -Eeuo pipefail
+          python3 candidate/scripts/build_p01_next_clean_full.py build \
+            --source-sha 846a95c4c7000a6c1b5da408149204246e28b1a7 --output /tmp/p01-d13-isolated.zip
+          python3 candidate/scripts/build_p01_next_clean_full.py verify \
+            --zip /tmp/p01-d13-isolated.zip
+          echo "P01_D13_ISOLATED_ZIP_SHA256=$(sha256sum /tmp/p01-d13-isolated.zip | cut -d' ' -f1)"
+          echo P01_D13_BUNDLE_INCLUDES_COMPOSER_AND_VENDOR=PASS
+      - name: Unpack isolated bundle without Composer and exercise native Laravel bootstrap
+        run: |
+          set -Eeuo pipefail
+          mkdir -p /tmp/p01-d13-extracted
+          python3 -m zipfile -e /tmp/p01-d13-isolated.zip /tmp/p01-d13-extracted
+          app=/tmp/p01-d13-extracted/vf-start-next/app
+          test -f "$app/vendor/autoload.php"
+          test -f "$app/composer.lock"
+          test -f /tmp/p01-d13-extracted/vf-start-next/InstallDatabaseConnection.php
+          test -f /tmp/p01-d13-extracted/vf-start-next/SqlServerExactTextKey.php
+          test ! -e "$app/private/state"
+          (cd "$app" && php bin/activate-cloudpanel.php --host=p01-test.example.org --basic-user=vf-install)
+          cat >/tmp/p01-d13-router.php <<'PHP'
+          <?php
+          $_SERVER['DOCUMENT_ROOT']=getenv('P01_D13_PUBLIC_ROOT');
+          $_SERVER['SCRIPT_FILENAME']=getenv('P01_D13_PUBLIC_ROOT').'/index.php';
+          $_SERVER['HTTPS']='on';
+          $_SERVER['SERVER_NAME']='p01-test.example.org';
+          $_SERVER['HTTP_HOST']='p01-test.example.org';
+          $_SERVER['AUTH_TYPE']='Basic';
+          $_SERVER['REMOTE_USER']='vf-install';
+          require getenv('P01_D13_PUBLIC_ROOT').'/index.php';
+          PHP
+          export P01_D13_PUBLIC_ROOT="$app/public"
+          php -S 127.0.0.1:18113 -t "$app/public" /tmp/p01-d13-router.php >/tmp/p01-d13-server.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || :; rm -f /tmp/p01-d13-router.php /tmp/p01-d13-server.log /tmp/p01-d13-body' EXIT
+          status=000
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            status="$(curl -sS --noproxy '*' -H 'Host: p01-test.example.org' -o /tmp/p01-d13-body -w '%{http_code}' 'http://127.0.0.1:18113/_next/install/' 2>/dev/null || true)"
+            [ "$status" = 200 ] && break
+            sleep 1
+          done
+          if [ "$status" != 200 ]; then
+            echo "P01_D13_EXTRACTED_NATIVE_HTTP=$status"
+            sed -E 's#[/](home|tmp)/[^ ]+#<PATH>#g' /tmp/p01-d13-server.log | tail -n 15
+            exit 1
+          fi
+          grep -q SQLite /tmp/p01-d13-body
+          grep -q MariaDB /tmp/p01-d13-body
+          grep -q MySQL /tmp/p01-d13-body
+          echo P01_D13_EXTRACTED_NO_COMPOSER_NATIVE_HTTP=200_THREE_ENGINES
+          echo P01_D13_NGINX_PHP_FPM_REAL_CLOUDPANEL=NOT_PROVEN_SYNTHETIC_HTTP_ONLY
       - name: Cleanup transient private checkout
         if: always()
         run: |
