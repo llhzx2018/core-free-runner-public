@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-server-ops
-          ref: 845c9e6daa4edf06e5a020aa9b7dc991c5c58b67
+          ref: ba0d622a69d5de95a55e5bf37c6ebe1be8f44b39
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           fetch-depth: 1
@@ -39,7 +39,7 @@ jobs:
         run: |
           set -Eeuo pipefail
           set +x
-          test "$(git -C product rev-parse HEAD)" = '845c9e6daa4edf06e5a020aa9b7dc991c5c58b67'
+          test "$(git -C product rev-parse HEAD)" = 'ba0d622a69d5de95a55e5bf37c6ebe1be8f44b39'
           test "$(cat product/BUILD_ID)" = '0.1.0-release143'
           rsync --version >/dev/null
           python3 -B - <<'PY'
@@ -71,7 +71,8 @@ jobs:
                        "lib/migration_original_18_final_window.py",
                        "lib/migration_original_18_frozen_shadow_stage.py",
                        "lib/server_migration_pull.py",
-                       "scripts/p07_candidate_bundle.py"):
+                       "scripts/p07_candidate_bundle.py",
+                       "scripts/p07_owner_trial_singlefile.py"):
               ast.parse((root/name).read_text(encoding="utf-8"), filename=name)
           print("P07_EXACT_SOURCE_SYNTAX_PASS=YES")
           PY
@@ -111,7 +112,7 @@ jobs:
           python3 -B product/scripts/p07_candidate_bundle.py \
             --product-root product --public-root public \
             --output "$build_tmp" \
-            --product-sha '845c9e6daa4edf06e5a020aa9b7dc991c5c58b67' \
+            --product-sha 'ba0d622a69d5de95a55e5bf37c6ebe1be8f44b39' \
             --build 0.1.0-release143 --care 0.1.0-rc83
           test -s "$build_tmp/candidate_attestation.json"
           test -s "$build_tmp/dist/p07/0.1.0/overlay/RUNTIME.gitblob"
@@ -124,6 +125,44 @@ jobs:
           grep -q 'tests/test_p07_original_18_late_mysql_source.py' "$build_tmp/dist/p07/0.1.0/overlay/MANIFEST.gitblob"
           grep -q 'tests/test_p07_original_18_mysql_writer_fence.py' "$build_tmp/dist/p07/0.1.0/overlay/MANIFEST.gitblob"
           echo P07_PR313_OFFLINE_CANDIDATE_COMPOSE_PASS=YES
+          trial_tmp="$(mktemp -d)"
+          trap 'rm -rf -- "$build_tmp" "$trial_tmp"' EXIT
+          python3 -B product/scripts/p07_owner_trial_singlefile.py \
+            --candidate-dir "$build_tmp" --output "$trial_tmp/p07-owner-trial.sh" \
+            --product-sha 'ba0d622a69d5de95a55e5bf37c6ebe1be8f44b39' > "$trial_tmp/summary.json"
+          test -s "$trial_tmp/p07-owner-trial.sh"
+          bash -n "$trial_tmp/p07-owner-trial.sh"
+          bash "$trial_tmp/p07-owner-trial.sh" --inspect > "$trial_tmp/inspect.log"
+          grep -q 'P07_TRIAL_PACKAGE_INTEGRITY=PASS' "$trial_tmp/inspect.log"
+          grep -q 'P07_TRIAL_VPS_WRITES=NONE' "$trial_tmp/inspect.log"
+          python3 - "$trial_tmp/p07-owner-trial.sh" "$trial_tmp/tampered.sh" <<'PY'
+          import sys
+          from pathlib import Path
+          content=bytearray(Path(sys.argv[1]).read_bytes())
+          marker=b"\\n__P07_OWNER_TRIAL_PAYLOAD_V1__\\n"
+          index=content.rindex(marker)+len(marker)
+          content[index] = 65 if content[index] != 65 else 66
+          Path(sys.argv[2]).write_bytes(content)
+          PY
+          if bash "$trial_tmp/tampered.sh" --inspect > "$trial_tmp/negative.log" 2>&1; then
+            echo P07_OWNER_TRIAL_TAMPER_FAIL_OPEN >&2
+            exit 13
+          fi
+          grep -q 'PAYLOAD_SHA256_MISMATCH' "$trial_tmp/negative.log"
+          mkdir -p "$trial_tmp/bin"
+          P07_ALLOW_NONROOT=1 P07_OWNER_TRIAL_TEST=1 \
+          P07_INSTALL_DIR="$trial_tmp/installed" P07_PREVIOUS_DIR="$trial_tmp/previous" \
+          P07_BIN_LINK="$trial_tmp/bin/vfops" \
+            bash "$trial_tmp/p07-owner-trial.sh" --install > "$trial_tmp/install.log" 2>&1 || {
+              tail -60 "$trial_tmp/install.log"
+              exit 13
+            }
+          test "$(NO_COLOR=1 "$trial_tmp/bin/vfops" --build-id)" = '0.1.0-release143'
+          test -s "$trial_tmp/installed/.runtime-manifest.gitblob"
+          sha256sum "$trial_tmp/p07-owner-trial.sh"
+          echo P07_PR313_SINGLEFILE_TRIAL_INSPECT_AND_INSTALL_PASS=YES
+          echo P07_PR313_SINGLEFILE_TAMPER_REJECTION_PASS=YES
+          echo P07_PR313_PRIVATE_ARTIFACT_UPLOAD=NO
           echo P07_PR313_RELEASE_PUBLISHED=NO
       - name: Destroy temporary private checkout
         if: always()
