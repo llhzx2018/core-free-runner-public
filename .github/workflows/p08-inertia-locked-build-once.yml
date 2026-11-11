@@ -1,0 +1,84 @@
+name: P08 typed Inertia locked build (temporary private checkout)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p08-inertia-locked-build-once.yml'
+permissions:
+  contents: read
+jobs:
+  exact-source-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact private candidate source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-adops
+          ref: 05dafd0d641260e67a65c24bba55720b7fd5c8a7
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-product
+      - name: Bind source to exact P08 candidate head
+        run: |
+          set -euo pipefail
+          test "$(git -C private-product rev-parse HEAD)" = "05dafd0d641260e67a65c24bba55720b7fd5c8a7"
+          echo "P08_SOURCE_BOUND=05dafd0d641260e67a65c24bba55720b7fd5c8a7"
+      - name: PHP 8.4 and Composer
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, zip, mbstring, intl, bcmath, dom, fileinfo
+      - name: Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Resolve exact dependency locks and compile actual application
+        working-directory: private-product
+        run: |
+          set -euo pipefail
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
+          composer update inertiajs/inertia-laravel --no-install --no-scripts --with-all-dependencies --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-composer.log" 2>&1
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund > "$RUNNER_TEMP/p08-npm.log" 2>&1
+          composer validate --no-check-publish
+          composer install --no-scripts --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-composer-install.log" 2>&1
+          php artisan package:discover --ansi
+          npm ci --no-audit --no-fund > "$RUNNER_TEMP/p08-npm-ci.log" 2>&1
+          npm run build
+          npm run typecheck
+          npm run test:unit
+          php vendor/bin/phpunit tests/Feature/WorkspaceInertiaTest.php
+          python3 scripts/check_stack_contract.py --phase mature
+          echo P08_INERTIA_TYPED_BUILD=PASS
+      - name: Commit and push ONLY coherent resolved lockfiles to P08 feature branch
+        working-directory: private-product
+        env:
+          VF_RELEASE_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$VF_RELEASE_WRITE_TOKEN"
+          cat > "$RUNNER_TEMP/p08-askpass.sh" <<'ASKPASS'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf 'x-access-token';;
+            *Password*) printf '%s' "$VF_RELEASE_WRITE_TOKEN";;
+            *) exit 1;;
+          esac
+          ASKPASS
+          chmod 700 "$RUNNER_TEMP/p08-askpass.sh"
+          export GIT_ASKPASS="$RUNNER_TEMP/p08-askpass.sh" GIT_TERMINAL_PROMPT=0
+          git config user.name 'VF Source Lock Resolver'
+          git config user.email 'noreply@kewaro.com'
+          test "$(git ls-remote origin refs/heads/feature/p08-inertia-typescript-tailwind-workspace-20261111 | awk '{print $1}')" = "05dafd0d641260e67a65c24bba55720b7fd5c8a7"
+          git add -- composer.lock package-lock.json
+          test "$(git diff --cached --name-only | sort)" = "$(printf '%s\n' composer.lock package-lock.json | sort)"
+          git commit -m 'build(P08): pin tested Laravel Inertia and Vue TypeScript frontend dependency locks'
+          git push origin HEAD:refs/heads/feature/p08-inertia-typescript-tailwind-workspace-20261111
+          echo P08_TESTED_DEPENDENCY_LOCKS_PUSHED=YES
+      - name: Cleanup transient private checkout and logs
+        if: always()
+        run: |
+          rm -rf private-product
+          rm -f "$RUNNER_TEMP/p08-askpass.sh" "$RUNNER_TEMP/p08-composer.log" "$RUNNER_TEMP/p08-composer-install.log" "$RUNNER_TEMP/p08-npm.log" "$RUNNER_TEMP/p08-npm-ci.log"
