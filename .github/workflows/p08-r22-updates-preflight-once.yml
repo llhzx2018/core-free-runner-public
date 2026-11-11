@@ -1,0 +1,103 @@
+name: P08 R22 Owner upgrade preflight and isolated Atomic code-only stage
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p08-r22-updates-preflight-once.yml'
+permissions:
+  contents: read
+jobs:
+  source-and-extracted-full:
+    name: R22 exact source updates, negative guards, extracted FULL and Chromium
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      P08_ISOLATED_INSTALL_TEST: YES
+      P08_CANDIDATE_SOURCE_SHA: 4a6bfb1d76f929dd10ffbc790abe7caacc229153
+      P08_TEST_BASE_URL: http://127.0.0.1:18080
+      APP_ENV: testing
+      APP_URL: http://127.0.0.1:18080
+      SESSION_SECURE_COOKIE: 'false'
+    steps:
+      - name: Transient private product checkout, pinned exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: 4a6bfb1d76f929dd10ffbc790abe7caacc229153
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-product
+      - name: Verify branch source exactness
+        run: |
+          set -euo pipefail
+          test "$(git -C private-product rev-parse HEAD)" = "$P08_CANDIDATE_SOURCE_SHA"
+          test "$(cat private-product/VERSION)" = "0.1.0"
+          test ! -e private-product/.env
+          echo "P08_R22_PRIVATE_SOURCE=$P08_CANDIDATE_SOURCE_SHA"
+      - name: PHP runtime and Composer
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, zip, mbstring, intl, bcmath, dom, fileinfo
+      - name: Node 22 for locked Vue/Inertia build
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Actual PHP and Python negative tests plus typed frontend build
+        working-directory: private-product
+        run: |
+          set -euo pipefail
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
+          composer install --no-dev --no-scripts --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-r22-composer.log" 2>&1
+          npm ci --no-audit --no-fund > "$RUNNER_TEMP/p08-r22-npm.log" 2>&1
+          npm run build
+          npm run typecheck
+          npm run test:unit
+          python3 scripts/check_stack_contract.py --phase full
+          python3 -m unittest discover -s tests -p test_stack_contract.py -q
+          python3 -m unittest discover -s tests -p test_atomic_builder.py -q
+          php -l src/Upgrade/AtomicPackageStage.php
+          php -l src/Upgrade/UpgradeReadiness.php
+          php -l app/Http/Controllers/WorkspaceController.php
+          php -l tests/test_upgrade_readiness.php
+          php tests/test_upgrade_readiness.php
+          echo P08_R22_TYPED_UI_AND_ATOMIC_PURE_GUARDS=PASS
+      - name: Build exact-source FULL and synthetic installed SQLite Owner
+        working-directory: private-product
+        run: |
+          set -euo pipefail
+          python3 scripts/build_full.py --source "$PWD" --output "$RUNNER_TEMP/p08-r22-full.zip" --version 0.1.0 --source-sha "$P08_CANDIDATE_SOURCE_SHA"
+          mkdir "$RUNNER_TEMP/p08-r22-extracted"
+          unzip -qq "$RUNNER_TEMP/p08-r22-full.zip" -d "$RUNNER_TEMP/p08-r22-extracted"
+          test ! -e "$RUNNER_TEMP/p08-r22-extracted/.env"
+          php tests/test_extracted_full_sqlite_e2e.php "$RUNNER_TEMP/p08-r22-extracted"
+          echo P08_R22_EXTRACTED_FULL_OWNER_SQLITE=PASS
+      - name: Execute source-bound Atomic code-only staging and rejection tests
+        working-directory: private-product
+        run: |
+          set -euo pipefail
+          php tests/test_atomic_package_staging_e2e.php "$RUNNER_TEMP/p08-r22-extracted"
+          echo P08_R22_NO_LIVE_ATOMIC_APPLY=PASS
+      - name: Real Chromium authenticated Owner update tab smoke
+        working-directory: private-product
+        run: |
+          set -euo pipefail
+          npx playwright install --with-deps chromium > "$RUNNER_TEMP/p08-r22-browser-install.log" 2>&1
+          (cd "$RUNNER_TEMP/p08-r22-extracted" && php artisan serve --host=127.0.0.1 --port=18080) > "$RUNNER_TEMP/p08-r22-serve.log" 2>&1 &
+          p=$!
+          trap 'kill "$p" 2>/dev/null || true' EXIT
+          ready=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/login -o /dev/null; then ready=1; break; fi
+            sleep 1
+          done
+          if [ "$ready" != 1 ]; then echo P08_R22_BOOT_FAILED; tail -n 20 "$RUNNER_TEMP/p08-r22-serve.log"; exit 1; fi
+          npm run test:e2e -- tests/e2e/owner-workspace.spec.ts
+          echo P08_R22_CHROMIUM_OWNER_UPDATES_READ_ONLY=PASS
+      - name: Erase private checkout and synthetic data, binaries and logs
+        if: always()
+        run: |
+          rm -rf private-product "$RUNNER_TEMP/p08-r22-extracted"
+          rm -f "$RUNNER_TEMP/p08-r22-full.zip" "$RUNNER_TEMP/p08-r22-composer.log" "$RUNNER_TEMP/p08-r22-npm.log" "$RUNNER_TEMP/p08-r22-browser-install.log" "$RUNNER_TEMP/p08-r22-serve.log" "$RUNNER_TEMP"/p08-r16-atomic-*.zip
