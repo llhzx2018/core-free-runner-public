@@ -267,9 +267,9 @@ PY
 # Nonformal release143 owner-trial: deliberately published installable runtime.
 # Exact candidate is bound to one source SHA and SHA-256. This does NOT
 # promote vfops stable or authorize the original 18-site data migration.
-P07_OWNER143_SHA256="82d7c1111396e36d3d095c3183686d37c93d19ceac3b16cf1a08322933060de1"
-P07_OWNER143_SOURCE_SHA="35cf44c5566595afa8ded8467072738c10cdffed"
-P07_OWNER143_URL="https://api.github.com/repos/llhzx2018/core-free-runner-public/releases/assets/735989034"
+P07_OWNER143_SHA256="475b35198bc14879e0d2da4c3028ab31026003082d5a84219794c3db77fe9d49"
+P07_OWNER143_SOURCE_SHA="7f387be5001497ea4eed02ca8402edd62c99a804"
+P07_OWNER143_URL="https://api.github.com/repos/llhzx2018/core-free-runner-public/releases/assets/736048145"
 
 owner143_trial_installed() {
   local entry value
