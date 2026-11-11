@@ -1,0 +1,106 @@
+name: P02 Windows Quick NSIS private DRAFT trial candidate (one-off)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p02-windows-nsis-ownertrial-20261111.yml']
+permissions:
+  contents: read
+jobs:
+  windows-trial:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - name: Verify runtime-only private read (not printed)
+        shell: pwsh
+        env:
+          PRIVATE_READ: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PRIVATE_READ)) { throw "P02_MISSING_PRIVATE_READ_CAPABILITY" }
+          Write-Output "PRIVATE_SOURCE_CHECKOUT_CAPABILITY=AVAILABLE"
+      - name: Checkout exact private P02 commit, transient
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-library
+          ref: ce40ff23627ed75b088a9cf058bb2e799062eeb1
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+          fetch-depth: 1
+      - name: Verify exact source, separate desktop release from Web VERSION
+        shell: pwsh
+        working-directory: product
+        run: |
+          if ((git rev-parse HEAD).Trim() -ne "ce40ff23627ed75b088a9cf058bb2e799062eeb1") { throw "P02_SOURCE_DRIFT" }
+          if ((Get-Content VERSION -Raw).Trim() -ne "2.5.124") { throw "P02_WEB_VERSION_DRIFT" }
+          if (-not (Test-Path desktop/windows-quick/src-tauri/Cargo.lock)) { throw "MISSING_LOCKFILE" }
+          if (-not (Test-Path desktop/windows-quick/src-tauri/icons/icon.ico)) { throw "MISSING_ICO" }
+          Write-Output "P02_EXACT_PRIVATE_SOURCE=ce40ff23627ed75b088a9cf058bb2e799062eeb1"
+      - name: Build actual Windows NSIS executable from locked Tauri 2 application
+        shell: pwsh
+        working-directory: product/desktop/windows-quick
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup update stable
+          npx --yes @tauri-apps/cli@2 build --bundles nsis
+          if ($LASTEXITCODE -ne 0) { throw "TAURI_NSIS_BUILD_FAILED" }
+          $output = Get-ChildItem -Path src-tauri/target/release/bundle/nsis -Filter '*.exe' -File -ErrorAction Stop
+          if (@($output).Count -ne 1) { throw "P02_NSIS_EXPECTED_EXACTLY_ONE_INSTALLER" }
+          $file = @($output)[0]
+          if ($file.Length -lt 150000) { throw "P02_NSIS_INSTALLER_TOO_SMALL" }
+          $stream = [System.IO.File]::OpenRead($file.FullName)
+          try {
+            if ($stream.ReadByte() -ne 77 -or $stream.ReadByte() -ne 90) { throw "P02_NSIS_NOT_WINDOWS_PE" }
+          } finally { $stream.Dispose() }
+          $sha = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+          "P02_INSTALLER_SHA256=$sha" | Set-Content -Path p02-nsis-build-proof.txt
+          "P02_INSTALLER_BYTES=$($file.Length)" | Add-Content p02-nsis-build-proof.txt
+          Get-Content p02-nsis-build-proof.txt
+          Write-Output "P02_NSIS_REAL_WINDOWS_BUILD=PASS"
+      - name: Store candidate ONLY in P02 private GitHub DRAFT, never public artifact
+        shell: pwsh
+        working-directory: product/desktop/windows-quick
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) { throw "PRIVATE_DRAFT_WRITE_CAPABILITY_UNAVAILABLE" }
+          $repo = 'llhzx2018/vf-library'
+          $tag = 'desktop-quick-v0.1.0-owner-trial-ce40ff23'
+          $file = @(Get-ChildItem src-tauri/target/release/bundle/nsis -Filter '*.exe' -File)[0]
+          $expected = (Get-FileHash -Algorithm SHA256 $file.FullName).Hash.ToLowerInvariant()
+          $existing = & gh release view $tag -R $repo --json isDraft --jq '.isDraft' 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            $notes = @(
+              'OWNER TRIAL CANDIDATE ONLY; GITHUB DRAFT; NOT A FORMAL RELEASE OR CORE-UPDATES.',
+              'P02 Web remains 2.5.124, SQLite untouched, Production unchanged.',
+              'Standalone Windows Quick v0.1.0 from exact source ce40ff23627ed75b088a9cf058bb2e799062eeb1.',
+              'Only local tray/shortcut and manual clipboard-to-system-browser lookup. NOT direct P02 API search/save.',
+              'Unsigned NSIS test installer; Windows 10/11 interactive install, DPI, restart and uninstall still NOT_PROVEN.',
+              'To revert: exit tray and uninstall Windows Quick. It does not alter existing P02 Web or server database.',
+              "SHA256 installer: $expected"
+            ) -join "`n"
+            $notes | Set-Content -Path owner-trial-notes.txt -Encoding utf8
+            & gh release create $tag -R $repo --draft --prerelease --title "VF Library Windows Quick 0.1.0 · OWNER TRIAL DRAFT" --target ce40ff23627ed75b088a9cf058bb2e799062eeb1 --notes-file owner-trial-notes.txt
+            if ($LASTEXITCODE -ne 0) { throw "P02_PRIVATE_DRAFT_CREATION_FAILED" }
+          } elseif ($existing -ne 'true') { throw "P02_EXISTING_TAG_IS_NOT_DRAFT" }
+          $asset = 'vf-library-quick-0.1.0-owner-trial-setup.exe'
+          & gh release upload $tag "$($file.FullName)#$asset" -R $repo --clobber
+          if ($LASTEXITCODE -ne 0) { throw "P02_PRIVATE_DRAFT_ASSET_UPLOAD_FAILED" }
+          $releaseJson = & gh api "repos/$repo/releases/tags/$tag"
+          if ($LASTEXITCODE -ne 0) { throw "P02_DRAFT_READBACK_FAILED" }
+          $release = $releaseJson | ConvertFrom-Json
+          if (-not $release.draft -or -not $release.prerelease) { throw "P02_RELEASE_BOUNDARY_VIOLATION" }
+          $record = @($release.assets | Where-Object { $_.name -eq $asset })[0]
+          if ($null -eq $record -or $record.size -ne $file.Length -or $record.state -ne 'uploaded') { throw "P02_DRAFT_ASSET_READBACK_MISMATCH" }
+          Write-Output "P02_OWNER_TRIAL_PRIVATE_DRAFT=PASS"
+          Write-Output "P02_DRAFT_RELEASE_ID=$($release.id)"
+          Write-Output "P02_DRAFT_ASSET_ID=$($record.id)"
+          Write-Output "P02_DRAFT_ASSET_BYTES=$($record.size)"
+          Write-Output "P02_DRAFT_ASSET_SHA256=$expected"
+          Write-Output "P02_DRAFT_URL=$($release.html_url)"
+      - name: Clean private exact checkout; no public source or binary artifact
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path product) { Remove-Item -Path product -Force -Recurse }
+          Write-Output "P02_PUBLIC_RUNNER_PRIVATE_SOURCE_OR_BINARY_PERSISTED=NO"
