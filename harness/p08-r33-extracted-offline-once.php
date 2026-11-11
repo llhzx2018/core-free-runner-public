@@ -58,7 +58,11 @@ $sqlite=new SQLite3($dbfile,SQLITE3_OPEN_READWRITE|SQLITE3_OPEN_CREATE);
 $sqlite->exec('CREATE TABLE p08_atomic_owner (id INTEGER PRIMARY KEY, value TEXT NOT NULL)');
 $sqlite->exec("INSERT INTO p08_atomic_owner(value) VALUES ('OWNER_PRESERVED')");
 $sqlite->close();
-$env="APP_NAME=\"VF AdOps Isolated\"\nAPP_KEY=\"base64:ISOLATED-NOT-A-REAL-SECRET\"\nDB_CONNECTION=\"sqlite\"\nDB_DATABASE=\"".$dbfile."\"\n";
+$env="APP_NAME=\"VF AdOps Isolated\"\n"
+    ."APP_ENV=\"testing\"\nAPP_DEBUG=\"false\"\nAPP_URL=\"http://127.0.0.1:18880\"\n"
+    ."APP_KEY=\"base64:".base64_encode(random_bytes(32))."\"\n"
+    ."DB_CONNECTION=\"sqlite\"\nDB_DATABASE=\"".$dbfile."\"\n"
+    ."SESSION_DRIVER=\"file\"\nCACHE_STORE=\"file\"\nQUEUE_CONNECTION=\"sync\"\n";
 file_put_contents($root.'/.env',$env);
 chmod($root.'/.env',0600);
 $installed=$root.'/storage/app/private/adops/installation/installed.json';
