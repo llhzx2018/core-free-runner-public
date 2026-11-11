@@ -264,20 +264,156 @@ PY
   vfops-rc124
 }
 
+# Nonformal release143 owner-trial: deliberately published installable runtime.
+# Exact candidate is bound to one source SHA and SHA-256. This does NOT
+# promote vfops stable or authorize the original 18-site data migration.
+P07_OWNER143_SHA256="82d7c1111396e36d3d095c3183686d37c93d19ceac3b16cf1a08322933060de1"
+P07_OWNER143_SOURCE_SHA="35cf44c5566595afa8ded8467072738c10cdffed"
+P07_OWNER143_URL="https://api.github.com/repos/llhzx2018/core-free-runner-public/releases/assets/735989034"
+
+owner143_trial_installed() {
+  local entry value
+  [[ -f /opt/vf-server-ops-rc143/BUILD_ID &&
+     ! -L /opt/vf-server-ops-rc143 &&
+     -f /opt/vf-server-ops-rc143/.owner-trial-source &&
+     ! -L /opt/vf-server-ops-rc143/.owner-trial-source ]] || return 1
+  IFS= read -r value < /opt/vf-server-ops-rc143/.owner-trial-source || return 1
+  [[ "$value" == "$P07_OWNER143_SOURCE_SHA" &&
+     "$(cat /opt/vf-server-ops-rc143/BUILD_ID)" == "0.1.0-release143" ]] || return 1
+  entry="$(readlink -f /usr/local/bin/vfops-rc143 2>/dev/null || true)"
+  case "$entry" in
+    /opt/vf-server-ops-rc143/bin/vfops|/opt/vf-server-ops-rc143/bin/vfops-user) ;;
+    *) return 1 ;;
+  esac
+  [[ -x /usr/local/bin/vfops-rc143 ]] || return 1
+  [[ "$(NO_COLOR=1 /usr/local/bin/vfops-rc143 --build-id 2>/dev/null || true)" == "0.1.0-release143" ]]
+}
+
+run_server_ops_owner143_trial() {
+  if [[ "$(id -u)" != 0 ]]; then
+    say "✗ 请在新服务器使用 root 运行 release143 试用版。"
+    return 13
+  fi
+  if owner143_trial_installed; then
+    say "已安装并核对 release143 当前试用版，直接进入。"
+    /usr/local/bin/vfops-rc143
+    return $?
+  fi
+  local cmd tmp inspect stable_before='' stable_after='' stable_link='' rc entry marker tmpmarker
+  for cmd in curl sha256sum python3 bash readlink mktemp; do
+    command -v "$cmd" >/dev/null 2>&1 || {
+      say "✗ 缺少下载或校验所需系统命令：$cmd。未修改服务器。"
+      return 13
+    }
+  done
+  if [[ -f /opt/vf-server-ops/BUILD_ID ]]; then
+    stable_before="$(sha256sum /opt/vf-server-ops/BUILD_ID | awk '{print $1}')"
+  fi
+  if [[ -e /usr/local/bin/vfops || -L /usr/local/bin/vfops ]]; then
+    stable_link="$(readlink -f /usr/local/bin/vfops 2>/dev/null || true)"
+  fi
+  tmp="$(mktemp -t p07-owner143-entry.XXXXXXXX)" || return 13
+  chmod 700 "$tmp"
+  say "正在核验 release143 非正式试用候选；正式版和原迁移任务不会自动改动。"
+  if ! curl -fsSL --proto '=https' --proto-redir '=https' \
+        --connect-timeout 15 --max-time 180 --retry 2 \
+        -H 'Accept: application/octet-stream' \
+        "$P07_OWNER143_URL" -o "$tmp"; then
+    rm -f -- "$tmp"
+    say "✗ 最新试用包无法通过统一入口下载；没有使用旧版代替。"
+    return 13
+  fi
+  if ! printf '%s  %s\n' "$P07_OWNER143_SHA256" "$tmp" |
+      sha256sum -c --status; then
+    rm -f -- "$tmp"
+    say "✗ release143 包 SHA-256 不匹配；没有安装。"
+    return 13
+  fi
+  if ! bash -n "$tmp"; then
+    rm -f -- "$tmp"
+    say "✗ release143 包 Shell 语法验证失败；没有安装。"
+    return 13
+  fi
+  if ! inspect="$(bash "$tmp" --inspect)"; then
+    rm -f -- "$tmp"
+    say "✗ release143 包内部身份校验失败；没有安装。"
+    return 13
+  fi
+  if ! printf '%s\n' "$inspect" | grep -Fxq "P07_TRIAL_SOURCE_SHA=$P07_OWNER143_SOURCE_SHA" ||
+     ! printf '%s\n' "$inspect" | grep -Fxq 'P07_TRIAL_BUILD=0.1.0-release143' ||
+     ! printf '%s\n' "$inspect" | grep -Fxq 'P07_TRIAL_PACKAGE_INTEGRITY=PASS' ||
+     ! printf '%s\n' "$inspect" | grep -Fxq 'P07_TRIAL_VPS_WRITES=NONE'; then
+    rm -f -- "$tmp"
+    say "✗ 试用包版本、来源或只读检查不一致；没有安装。"
+    return 13
+  fi
+  say "试用范围：安装与只读查看；不自动重导原四库、不停旧站、不切 DNS。"
+  # The onefile installer independently asks for typed INSTALL in an
+  # interactive terminal. Clear environment overrides before launching.
+  set +e
+  (
+    unset P07_OWNER_TRIAL_TEST P07_ALLOW_NONROOT P07_INSTALL_DIR
+    unset P07_PREVIOUS_DIR P07_BIN_LINK P07_PUBLIC_ROOT P07_NO_EXEC
+    bash "$tmp" --install
+  )
+  rc=$?
+  set -e
+  rm -f -- "$tmp"
+  if [[ "$rc" != 0 ]]; then
+    say "✗ 非正式试用安装未完成；不会运行旧版本冒充成功。"
+    return "$rc"
+  fi
+  if [[ ! -d /opt/vf-server-ops-rc143 ||
+        -L /opt/vf-server-ops-rc143 ||
+        ! -f /opt/vf-server-ops-rc143/BUILD_ID ||
+        "$(cat /opt/vf-server-ops-rc143/BUILD_ID)" != "0.1.0-release143" ]]; then
+    say "✗ 安装后 release143 目录或版本回读不正确。"
+    return 13
+  fi
+  entry="$(readlink -f /usr/local/bin/vfops-rc143 2>/dev/null || true)"
+  case "$entry" in
+    /opt/vf-server-ops-rc143/bin/vfops|/opt/vf-server-ops-rc143/bin/vfops-user) ;;
+    *) say "✗ 试用执行入口不属于独立安装目录。"; return 13 ;;
+  esac
+  if [[ "$(NO_COLOR=1 /usr/local/bin/vfops-rc143 --build-id 2>/dev/null || true)" != '0.1.0-release143' ]]; then
+    say "✗ 独立执行文件构建回读失败。"
+    return 13
+  fi
+  if [[ -n "$stable_before" ]]; then
+    [[ -f /opt/vf-server-ops/BUILD_ID ]] || { say "✗ 正式版文件缺失，请停止。"; return 13; }
+    stable_after="$(sha256sum /opt/vf-server-ops/BUILD_ID | awk '{print $1}')"
+    [[ "$stable_after" == "$stable_before" ]] || { say "✗ 正式版版本文件发生变化，请停止。"; return 13; }
+  fi
+  if [[ -n "$stable_link" ]]; then
+    [[ "$(readlink -f /usr/local/bin/vfops 2>/dev/null || true)" == "$stable_link" ]] ||
+      { say "✗ 正式执行入口发生变化，请停止。"; return 13; }
+  fi
+  marker=/opt/vf-server-ops-rc143/.owner-trial-source
+  [[ ! -L "$marker" ]] || { say "✗ 试用版来源标记路径不安全。"; return 13; }
+  tmpmarker="$(mktemp -p /opt/vf-server-ops-rc143 .owner-trial-source.XXXXXXXX)" || return 13
+  printf '%s\n' "$P07_OWNER143_SOURCE_SHA" > "$tmpmarker"
+  chmod 600 "$tmpmarker"
+  mv -f -- "$tmpmarker" "$marker"
+  say "release143 已安装并核对；仅用于手工试用，正式版保持不变。"
+  /usr/local/bin/vfops-rc143
+}
+
 run_server_ops() {
   screen_clear
   say "网站与数据"
   say "  1. 当前正式版 release115"
-  say "  2. 手工试用 release124（原生只读错误分类修复）"
+  say "  2. 历史试用 release124（原生只读分类）"
+  say "  3. 最新试用 release143（原18站迁移；安装/只读验收）"
   say "  0. 返回"
-  printf '请选择 [0-2]：'
+  printf '请选择 [0-3]：'
   local selected
   read -r selected || return 0
   case "$selected" in
     1) ensure_server_ops_current || return $?; vfops ;;
     2) run_server_ops_owner124_trial ;;
+    3) run_server_ops_owner143_trial ;;
     0) return 0 ;;
-    *) say "请输入 0-2。"; return 0 ;;
+    *) say "请输入 0-3。"; return 0 ;;
   esac
 }
 
