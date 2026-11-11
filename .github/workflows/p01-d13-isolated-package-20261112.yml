@@ -102,6 +102,80 @@ jobs:
           grep -q MariaDB /tmp/p01-d13-body
           grep -q MySQL /tmp/p01-d13-body
           echo P01_D13_EXTRACTED_NO_COMPOSER_NATIVE_HTTP=200_THREE_ENGINES
+          # This is the *extracted ZIP*, not the checked-out project source.
+          # Exercise actual Laravel web session/CSRF, SQLite migration and
+          # original encrypted Owner credential in an isolated disposable app.
+          headers=/tmp/p01-d13-http-headers
+          install_payload=/tmp/p01-d13-owner-install.json
+          login_payload=/tmp/p01-d13-owner-login.json
+          login_headers=/tmp/p01-d13-login-headers
+          trap 'kill "$pid" 2>/dev/null || :; rm -f /tmp/p01-d13-router.php /tmp/p01-d13-server.log /tmp/p01-d13-body "$headers" "$install_payload" "$login_payload" "$login_headers"' EXIT
+          status="$(curl -sS --noproxy '*' -D "$headers" -H 'Host: p01-test.example.org' \
+            -o /tmp/p01-d13-body -w '%{http_code}' 'http://127.0.0.1:18113/_next/install/')"
+          test "$status" = 200
+          token="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-d13-body',encoding='utf8').read()
+          m=re.search(r'<meta name="csrf-token" content="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )"
+          cookie="$(tr -d '\r' <"$headers" | grep -i '^set-cookie: vf_start_next_owner_session=' | head -n1 | cut -d' ' -f2 | cut -d';' -f1)"
+          test -n "$token" && test -n "$cookie"
+          php -r '$pass=bin2hex(random_bytes(20));file_put_contents($argv[1],json_encode(["db_engine"=>"sqlite","owner_password"=>$pass]));file_put_contents($argv[2],json_encode(["password"=>$pass]));' "$install_payload" "$login_payload"
+          chmod 0600 "$install_payload" "$login_payload"
+          common=(--noproxy '*' -H 'Host: p01-test.example.org'
+            -H 'Content-Type: application/json' -H 'Origin: https://p01-test.example.org'
+            -H 'Sec-Fetch-Site: same-origin' -H "Cookie: $cookie" -H "X-CSRF-TOKEN: $token")
+          status="$(curl -sS "${common[@]}" -o /tmp/p01-d13-body -w '%{http_code}' \
+            --data-binary "@$install_payload" 'http://127.0.0.1:18113/_next/install/check')"
+          test "$status" = 200
+          status="$(curl -sS "${common[@]}" -o /tmp/p01-d13-body -w '%{http_code}' \
+            --data-binary "@$install_payload" 'http://127.0.0.1:18113/_next/install/start')"
+          if [ "$status" != 201 ];then
+            echo "P01_D13_EXTRACTED_SQLITE_INSTALL_STATUS=$status"
+            exit 1
+          fi
+          test -f "$app/private/state/installation.sealed.json"
+          php -r '$d=new PDO("sqlite:".$argv[1]);$n=(int)$d->query("SELECT COUNT(*) FROM sqlite_master WHERE type=\"table\" AND name NOT LIKE \"sqlite_%\"")->fetchColumn();exit($n===35?0:1);' "$app/private/data/owner.sqlite"
+          echo P01_D13_EXTRACTED_SQLITE_INSTALL=201_TABLES_35
+          # The former setup URLs must disappear after the sealed installation.
+          status="$(curl -sS --noproxy '*' -H 'Host: p01-test.example.org' -o /tmp/p01-d13-body -w '%{http_code}' 'http://127.0.0.1:18113/_next/install/')"
+          test "$status" = 404
+          echo P01_D13_EXTRACTED_REINSTALL=404_DENIED
+          status="$(curl -sS --noproxy '*' -D "$login_headers" \
+            -H 'Host: p01-test.example.org' -o /tmp/p01-d13-body -w '%{http_code}' \
+            'http://127.0.0.1:18113/_next/login')"
+          test "$status" = 200
+          login_token="$(python3 - <<'PY'
+          import re
+          s=open('/tmp/p01-d13-body',encoding='utf8').read()
+          m=re.search(r'<meta name="csrf-token" content="([^"]+)"',s)
+          assert m
+          print(m.group(1))
+          PY
+          )"
+          login_cookie="$(tr -d '\r' <"$login_headers" | grep -i '^set-cookie: vf_start_next_owner_session=' | head -n1 | cut -d' ' -f2 | cut -d';' -f1)"
+          test -n "$login_token" && test -n "$login_cookie"
+          auth_common=(--noproxy '*' -H 'Host: p01-test.example.org'
+            -H 'Content-Type: application/json' -H 'Origin: https://p01-test.example.org'
+            -H 'Sec-Fetch-Site: same-origin' -H "Cookie: $login_cookie"
+            -H "X-CSRF-TOKEN: $login_token")
+          status="$(curl -sS "${auth_common[@]}" -D "$login_headers" \
+            -o /tmp/p01-d13-body -w '%{http_code}' \
+            --data-binary "@$login_payload" 'http://127.0.0.1:18113/_next/login')"
+          if [ "$status" != 200 ];then
+            echo "P01_D13_EXTRACTED_OWNER_LOGIN_STATUS=$status"
+            exit 1
+          fi
+          auth_cookie="$(tr -d '\r' <"$login_headers" | grep -i '^set-cookie: vf_start_next_owner_session=' | head -n1 | cut -d' ' -f2 | cut -d';' -f1)"
+          test -n "$auth_cookie"
+          status="$(curl -sS --noproxy '*' -H 'Host: p01-test.example.org' \
+            -H "Cookie: $auth_cookie" -o /tmp/p01-d13-body -w '%{http_code}' \
+            'http://127.0.0.1:18113/_next/session')"
+          test "$status" = 200
+          echo P01_D13_EXTRACTED_OWNER_LOGIN_SESSION=200_PASS
           echo P01_D13_NGINX_PHP_FPM_REAL_CLOUDPANEL=NOT_PROVEN_SYNTHETIC_HTTP_ONLY
       - name: Cleanup transient private checkout
         if: always()
