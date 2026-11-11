@@ -1,0 +1,128 @@
+name: P02 D2-C Windows Quick 0.1.2 private draft Owner Trial (one-off)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p02-windows-quick-012-ownertrial-20261111.yml']
+permissions:
+  contents: read
+jobs:
+  windows-trial:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Verify private read capability
+        shell: pwsh
+        env:
+          PRIVATE_READ: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:PRIVATE_READ)) { throw "PRIVATE_READ_UNAVAILABLE" }
+      - name: Transient exact private P02 checkout
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-library
+          ref: fe775bb8ffe21a5421582d5625b984374fcba093
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+          fetch-depth: 1
+      - name: Exact identity and independent desktop Web version
+        shell: pwsh
+        working-directory: product
+        run: |
+          if ((git rev-parse HEAD).Trim() -ne 'fe775bb8ffe21a5421582d5625b984374fcba093') { throw "P02_SOURCE_DRIFT" }
+          if ((Get-Content VERSION -Raw).Trim() -ne '2.5.124') { throw "WEB_VERSION_DRIFT" }
+          $cfg = Get-Content desktop/windows-quick/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          if ($cfg.version -ne '0.1.2') { throw "DESKTOP_VERSION_DRIFT" }
+          Write-Output "P02_D2C_EXACT_SOURCE=fe775bb8ffe21a5421582d5625b984374fcba093"
+      - name: Actual Windows Node and locked Rust regression
+        shell: pwsh
+        working-directory: product
+        run: |
+          node --test tests/unit/p02_d2_windows_quick_panel.test.mjs tests/unit/p02_d2c_isolated_search.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw "D2C_NODE_TEST_FAIL" }
+          cargo test --locked --manifest-path desktop/windows-quick/src-tauri/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw "D2C_RUST_TEST_FAIL" }
+          Write-Output "P02_D2C_WINDOWS_TESTS=PASS"
+      - name: Actual NSIS binary build, PE and SHA-256
+        shell: pwsh
+        working-directory: product/desktop/windows-quick
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup update stable
+          npx --yes @tauri-apps/cli@2 build --bundles nsis
+          if ($LASTEXITCODE -ne 0) { throw "P02_NSIS_BUILD_FAILED" }
+          $output = @(Get-ChildItem src-tauri/target/release/bundle/nsis -Filter '*.exe' -File -ErrorAction Stop)
+          if ($output.Count -ne 1) { throw "NSIS_EXACTLY_ONE_EXE_REQUIRED" }
+          $exe = $output[0]
+          if ($exe.Length -lt 150000) { throw "NSIS_TOO_SMALL" }
+          $stream = [System.IO.File]::OpenRead($exe.FullName)
+          try {
+            if ($stream.ReadByte() -ne 77 -or $stream.ReadByte() -ne 90) { throw "NOT_WINDOWS_PE" }
+          } finally { $stream.Dispose() }
+          $digest = (Get-FileHash -Algorithm SHA256 $exe.FullName).Hash.ToLowerInvariant()
+          Write-Output "P02_D2C_NSIS_BUILD=PASS"
+          Write-Output "P02_D2C_INSTALLER_NAME=$($exe.Name)"
+          Write-Output "P02_D2C_INSTALLER_BYTES=$($exe.Length)"
+          Write-Output "P02_D2C_INSTALLER_SHA256=$digest"
+      - name: Upload ONLY to P02 private GitHub DRAFT and verify numeric release ID
+        shell: pwsh
+        working-directory: product/desktop/windows-quick
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) { throw "PRIVATE_DRAFT_WRITE_CAPABILITY_UNAVAILABLE" }
+          $repo = 'llhzx2018/vf-library'
+          $tag = 'desktop-quick-v0.1.2-owner-trial-fe775bb8'
+          $exe = @(Get-ChildItem src-tauri/target/release/bundle/nsis -Filter '*.exe' -File)[0]
+          $digest = (Get-FileHash -Algorithm SHA256 $exe.FullName).Hash.ToLowerInvariant()
+          $allJson = & gh api "repos/$repo/releases?per_page=100"
+          if ($LASTEXITCODE -ne 0) { throw "PRIVATE_RELEASE_LIST_UNAVAILABLE" }
+          $existing = @($allJson | ConvertFrom-Json | Where-Object { $_.tag_name -eq $tag })
+          if ($existing.Count -gt 1) { throw "DRAFT_TAG_DUPLICATION" }
+          if ($existing.Count -eq 0) {
+            $notes = @(
+              'OWNER TRIAL DRAFT ONLY; NEVER FORMAL RELEASE OR PRODUCTION.',
+              "Windows Quick 0.1.2 from source fe775bb8ffe21a5421582d5625b984374fcba093; P02 Web 2.5.124 unchanged.",
+              'Quick direct search uses separate native-unprivileged same-origin P02 HTTPS WebView with existing login.',
+              'No separate desktop token, new login, database or remote Tauri permission.',
+              'Website library_search uses GET; queries may appear in private server access logs.',
+              'Unsigned NSIS. Real Win10/11 user login, WebView JS/CSP compatibility, upgrade and rollback NOT_PROVEN.',
+              'Rollback: exit/uninstall VF Library Quick; P02 Web server and SQLite remain untouched.',
+              "Installer SHA256: $digest"
+            ) -join "`n"
+            $notes | Set-Content -Path owner-trial-notes.txt -Encoding utf8
+            & gh release create $tag -R $repo --draft --prerelease --title 'VF Library Quick 0.1.2 | OWNER TRIAL DRAFT' --target 'fe775bb8ffe21a5421582d5625b984374fcba093' --notes-file owner-trial-notes.txt
+            if ($LASTEXITCODE -ne 0) { throw "PRIVATE_DRAFT_CREATE_FAILED" }
+          } elseif (-not $existing[0].draft) { throw "EXISTING_RELEASE_NOT_DRAFT" }
+          # No custom alias: GitHub stores the real Tauri-generated NSIS filename.
+          & gh release upload $tag "$($exe.FullName)" -R $repo --clobber
+          if ($LASTEXITCODE -ne 0) { throw "PRIVATE_DRAFT_UPLOAD_FAILED" }
+          # Draft releases have untagged URLs, so never GET releases/tags/<tag>.
+          $allJson = & gh api "repos/$repo/releases?per_page=100"
+          if ($LASTEXITCODE -ne 0) { throw "PRIVATE_DRAFT_READBACK_FAILED" }
+          $records = @($allJson | ConvertFrom-Json | Where-Object { $_.tag_name -eq $tag -and $_.draft -eq $true })
+          if ($records.Count -ne 1) { throw "PRIVATE_DRAFT_ID_NOT_FOUND" }
+          $oneJson = & gh api "repos/$repo/releases/$($records[0].id)"
+          if ($LASTEXITCODE -ne 0) { throw "PRIVATE_DRAFT_ID_GET_FAILED" }
+          $release = $oneJson | ConvertFrom-Json
+          if (-not $release.draft -or -not $release.prerelease -or $release.published_at) { throw "DRAFT_BOUNDARY_FAILED" }
+          if ($release.target_commitish -ne 'fe775bb8ffe21a5421582d5625b984374fcba093') { throw "DRAFT_EXACT_SOURCE_FAILED" }
+          $assets = @($release.assets | Where-Object { $_.name -eq $exe.Name })
+          if ($assets.Count -ne 1) { throw "DRAFT_REAL_FILENAME_NOT_MATCHED" }
+          $asset = $assets[0]
+          if ($asset.size -ne $exe.Length -or $asset.state -ne 'uploaded') { throw "DRAFT_ASSET_BYTES_STATE_FAILED" }
+          if ($asset.digest -ne "sha256:$digest") { throw "DRAFT_ASSET_DIGEST_FAILED" }
+          Write-Output "P02_D2C_PRIVATE_DRAFT=PASS"
+          Write-Output "P02_D2C_RELEASE_ID=$($release.id)"
+          Write-Output "P02_D2C_ASSET_ID=$($asset.id)"
+          Write-Output "P02_D2C_ASSET_NAME=$($asset.name)"
+          Write-Output "P02_D2C_ASSET_BYTES=$($asset.size)"
+          Write-Output "P02_D2C_ASSET_SHA256=$digest"
+          Write-Output "P02_D2C_DRAFT_URL=$($release.html_url)"
+      - name: Cleanup private source and installer from public workspace
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path product) { Remove-Item product -Recurse -Force }
+          Write-Output "P02_D2C_PRIVATE_CONTENT_PERSISTED_IN_PUBLIC=NO"
