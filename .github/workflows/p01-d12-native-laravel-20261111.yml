@@ -1,0 +1,121 @@
+name: P01 D12 Laravel native bootstrap and HTTPS-gate proof (temporary)
+on:
+  push:
+    branches:
+      - test/p01-d12-laravel-http-20261111
+permissions:
+  contents: read
+jobs:
+  p01-d12-laravel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Exact runner and privacy entry
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_REPOSITORY" = "llhzx2018/core-free-runner-public"
+          test "$GITHUB_REF_NAME" = "test/p01-d12-laravel-http-20261111"
+          echo P01_D12_PRIVATE_TEST_FIXTURES=NONE
+      - name: Check private checkout capability
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo P01_D12_PRIVATE_READ=AVAILABLE
+      - name: Checkout exact private P01 source without persistence
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: c1196daeaa56471a37363bc82b6a67ad74eaebdb
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: candidate
+          persist-credentials: false
+      - name: Verify exact source identity
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "c1196daeaa56471a37363bc82b6a67ad74eaebdb"
+          test "$(cat candidate/VERSION)" = "2.47.515"
+          echo "P01_D12_EXACT_SOURCE=c1196daeaa56471a37363bc82b6a67ad74eaebdb"
+          test -f candidate/src/app/next/composer.json
+          test -f candidate/src/app/next/bootstrap/app.php
+          test -f candidate/tests/unit/p01_d11_runtime_source_parse_contract.php
+      - name: Prepare PHP and Composer in isolated runner
+        run: |
+          set -Eeuo pipefail
+          if ! command -v php >/dev/null || ! php -r 'exit(PHP_VERSION_ID>=80300?0:1);'; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-cli php8.3-sqlite3 php8.3-mbstring php8.3-xml php8.3-curl >/dev/null
+          fi
+          if ! command -v composer >/dev/null; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq composer >/dev/null
+          fi
+          php -r 'exit(PHP_VERSION_ID>=80300?0:1);'
+          echo P01_D12_PHP_RUNTIME=READY
+      - name: Prove source and real PHP unit negative gates
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          php tests/unit/p01_d10_front_controller_preflight_contract.php
+          php tests/unit/p01_d10_deployment_binding_contract.php
+          php tests/unit/p01_d10_cli_activation_contract.php
+          php tests/unit/p01_d11_laravel_boot_contract.php
+          php tests/unit/p01_d11_runtime_source_parse_contract.php
+          echo P01_D12_NATIVE_PHP_SOURCE_TESTS=PASS
+      - name: Install real isolated Laravel 13 framework and exercise its bootstrap
+        run: |
+          set -Eeuo pipefail
+          cd candidate/src/app/next
+          export COMPOSER_NO_INTERACTION=1
+          composer install --no-dev --no-scripts --no-plugins --prefer-dist --no-progress -q
+          php -r 'require "vendor/autoload.php"; exit(class_exists("Illuminate\\Foundation\\Application")?0:1);'
+          php -r '$a=json_decode(file_get_contents("composer.lock"),true); $ok=false; foreach($a["packages"] as $p){if($p["name"]==="laravel/framework"&&$p["version"]==="v13.42.0")$ok=true;} if(!$ok)exit(1);'
+          echo P01_D12_REAL_LARAVEL_FRAMEWORK=13.42.0
+          echo P01_D12_VENDOR_PRIVATE_SOURCE_PERSISTENCE=TEMPORARY_ONLY
+      - name: Actual native Laravel HTTP request on synthetic site variables
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          php src/app/next/bin/activate-cloudpanel.php --host=p01-test.example.org --basic-user=vf-install
+          root="$PWD/src/app/next"
+          router="$(mktemp /tmp/p01-d12-router-XXXXXX.php)"
+          body="$(mktemp /tmp/p01-d12-body-XXXXXX)"
+          cat > "$router" <<'PHP'
+          <?php
+          $_SERVER['DOCUMENT_ROOT']=getenv('P01_D12_PUBLIC_ROOT');
+          $_SERVER['SCRIPT_FILENAME']=getenv('P01_D12_PUBLIC_ROOT').'/index.php';
+          $_SERVER['HTTPS']='on';
+          $_SERVER['SERVER_NAME']='p01-test.example.org';
+          $_SERVER['HTTP_HOST']='p01-test.example.org';
+          $_SERVER['AUTH_TYPE']='Basic';
+          $_SERVER['REMOTE_USER']='vf-install';
+          require getenv('P01_D12_PUBLIC_ROOT').'/index.php';
+          PHP
+          export P01_D12_PUBLIC_ROOT="$root/public"
+          php -S 127.0.0.1:18083 -t "$root/public" "$router" >/tmp/p01-d12-server.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; rm -f "$router" "$body" /tmp/p01-d12-server.log' EXIT
+          code=000
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            code="$(curl -sS --noproxy '*' -H 'Host: p01-test.example.org' -o "$body" -w '%{http_code}' 'http://127.0.0.1:18083/_next/install/' 2>/dev/null || true)"
+            [ "$code" = 200 ] && break
+            sleep 1
+          done
+          if [ "$code" != 200 ]; then
+            echo "P01_D12_NATIVE_HTTP_STATUS=$code"
+            sed -E 's#[/][^ ]+#<PATH>#g' /tmp/p01-d12-server.log | tail -n 30
+            exit 1
+          fi
+          grep -q 'SQLite' "$body"
+          grep -q 'MariaDB' "$body"
+          grep -q 'MySQL' "$body"
+          grep -q 'csrf-token' "$body"
+          echo P01_D12_NATIVE_HTTP_GET=200_THREE_ENGINE_FORM_WITH_CSRF
+          echo P01_D12_NGINX_TLS_FPM_PROOF=NOT_PROVEN_SYNTHETIC_SERVER_ONLY
+      - name: Cleanup transient private checkout
+        if: always()
+        run: |
+          rm -rf -- candidate
+          echo P01_D12_PRIVATE_SOURCE_PERSISTED=NO
