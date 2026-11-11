@@ -77,7 +77,7 @@ if(!$db->exec('CREATE TABLE p08_atomic_owner(id INTEGER PRIMARY KEY,value TEXT N
 $db->close();
 $env="APP_NAME=\"VF AdOps Isolated\"\nAPP_ENV=testing\nAPP_DEBUG=false\n"
     ."APP_URL=http://127.0.0.1:18880\nAPP_KEY=base64:".base64_encode(random_bytes(32))."\n"
-    ."DB_CONNECTION=sqlite\nDB_DATABASE=".$database."\n"
+    ."DB_CONNECTION=\"sqlite\"\nDB_DATABASE=\"".$database."\"\n"
     ."SESSION_DRIVER=file\nCACHE_STORE=file\nQUEUE_CONNECTION=sync\n";
 file_put_contents($site.'/.env',$env);
 chmod($site.'/.env',0600);
