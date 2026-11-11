@@ -42,16 +42,16 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-start
-          ref: db0b19af2685897002a2b17704b1e161b5981bd0
+          ref: 5f031dd34d6d20bb41a528ee870c559b23a485af
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           path: candidate
           persist-credentials: false
       - name: Verify exact source identity
         run: |
           set -Eeuo pipefail
-          test "$(git -C candidate rev-parse HEAD)" = "db0b19af2685897002a2b17704b1e161b5981bd0"
+          test "$(git -C candidate rev-parse HEAD)" = "5f031dd34d6d20bb41a528ee870c559b23a485af"
           test "$(cat candidate/VERSION)" = "2.47.515"
-          echo "P01_D12_EXACT_SOURCE=db0b19af2685897002a2b17704b1e161b5981bd0"
+          echo "P01_D12_EXACT_SOURCE=5f031dd34d6d20bb41a528ee870c559b23a485af"
           test -f candidate/src/app/next/composer.json
           test -f candidate/src/app/next/bootstrap/app.php
           test -f candidate/tests/unit/p01_d11_runtime_source_parse_contract.php
@@ -193,6 +193,72 @@ jobs:
           test -f "$root/private/data/owner.sqlite"
           php -r '$db=new PDO("sqlite:".$argv[1]);$n=(int)$db->query("SELECT COUNT(*) FROM sqlite_master WHERE type=\"table\" AND name NOT LIKE \"sqlite_%\"")->fetchColumn();if($n!==35)exit(1);' "$root/private/data/owner.sqlite"
           echo P01_D12_NATIVE_SQLITE_HTTP_INSTALL=201_TABLES_35
+          run_owner_auth() {
+            local stage="$1" port="$2" install_json="$3"
+            local login_headers login_body login_payload bad_payload csrf cookie code login_cookie new_csrf
+            login_headers="$(mktemp /tmp/p01-d12-login-headers-XXXXXX)"
+            login_body="$(mktemp /tmp/p01-d12-login-body-XXXXXX)"
+            login_payload="$(mktemp /tmp/p01-d12-owner-login-XXXXXX)"
+            bad_payload="$(mktemp /tmp/p01-d12-owner-wrong-XXXXXX)"
+            code="$(curl -sS --noproxy '*' -D "$login_headers" \
+              -H 'Host: p01-test.example.org' -o "$login_body" -w '%{http_code}' \
+              "http://127.0.0.1:$port/_next/login")"
+            if [ "$code" != 200 ]; then echo "P01_D12_${stage}_OWNER_GET=$code"; exit 1; fi
+            grep -q 'csrf-token' "$login_body"
+            csrf="$(python3 - "$login_body" <<'PY'
+          import re,sys
+          m=re.search(r'<meta name="csrf-token" content="([^"]+)"',open(sys.argv[1],encoding='utf8').read())
+          if m is None:sys.exit(1)
+          print(m.group(1))
+          PY
+            )"
+            cookie="$(tr -d '\r' < "$login_headers" | grep -i '^set-cookie: vf_start_next_owner_session=' | head -n1 | cut -d' ' -f2 | cut -d';' -f1)"
+            test -n "$csrf" && test -n "$cookie"
+            php -r '$src=json_decode(file_get_contents($argv[1]),true);file_put_contents($argv[2],json_encode(["password"=>$src["owner_password"]]));' "$install_json" "$login_payload"
+            printf '%s' '{"password":"not-the-owner-passphrase"}' > "$bad_payload"
+            chmod 0600 "$login_payload" "$bad_payload"
+            local common=(--noproxy '*' -H 'Host: p01-test.example.org'
+              -H 'Content-Type: application/json' -H 'Origin: https://p01-test.example.org'
+              -H 'Sec-Fetch-Site: same-origin' -H "Cookie: $cookie"
+              -H "X-CSRF-TOKEN: $csrf")
+            code="$(curl -sS "${common[@]}" -o "$login_body" -w '%{http_code}' \
+              --data-binary "@$bad_payload" "http://127.0.0.1:$port/_next/login")"
+            if [ "$code" != 401 ]; then echo "P01_D12_${stage}_OWNER_WRONG=$code"; exit 1; fi
+            code="$(curl -sS "${common[@]}" -D "$login_headers" -o "$login_body" -w '%{http_code}' \
+              --data-binary "@$login_payload" "http://127.0.0.1:$port/_next/login")"
+            if [ "$code" != 200 ]; then echo "P01_D12_${stage}_OWNER_LOGIN=$code"; exit 1; fi
+            new_csrf="$(python3 - "$login_body" <<'PY'
+          import json,sys
+          o=json.load(open(sys.argv[1]))
+          assert o.get('ok') is True and o.get('authenticated') is True
+          print(o['csrf'])
+          PY
+            )"
+            login_cookie="$(tr -d '\r' < "$login_headers" | grep -i '^set-cookie: vf_start_next_owner_session=' | head -n1 | cut -d' ' -f2 | cut -d';' -f1)"
+            test -n "$new_csrf" && test -n "$login_cookie"
+            code="$(curl -sS --noproxy '*' -H 'Host: p01-test.example.org' \
+              -H "Cookie: $login_cookie" -o "$login_body" -w '%{http_code}' \
+              "http://127.0.0.1:$port/_next/session")"
+            if [ "$code" != 200 ]; then echo "P01_D12_${stage}_OWNER_SESSION=$code"; exit 1; fi
+            python3 - "$login_body" <<'PY'
+          import json,sys
+          o=json.load(open(sys.argv[1]))
+          assert o.get('ok') is True and o.get('authenticated') is True and o.get('role')=='owner'
+          PY
+            code="$(curl -sS --noproxy '*' -H 'Host: p01-test.example.org' \
+              -H 'Content-Type: application/json' -H 'Origin: https://p01-test.example.org' \
+              -H "Cookie: $login_cookie" -H "X-CSRF-TOKEN: $new_csrf" \
+              -o "$login_body" -w '%{http_code}' \
+              -X POST "http://127.0.0.1:$port/_next/logout")"
+            if [ "$code" != 200 ]; then echo "P01_D12_${stage}_OWNER_LOGOUT=$code"; exit 1; fi
+            code="$(curl -sS --noproxy '*' -H 'Host: p01-test.example.org' \
+              -H "Cookie: $login_cookie" -o "$login_body" -w '%{http_code}' \
+              "http://127.0.0.1:$port/_next/session")"
+            if [ "$code" != 401 ]; then echo "P01_D12_${stage}_OWNER_REVOKE=$code"; exit 1; fi
+            echo "P01_D12_NATIVE_${stage}_OWNER_LOGIN_LOGOUT=PASS"
+            rm -f "$login_headers" "$login_body" "$login_payload" "$bad_payload"
+          }
+          run_owner_auth sqlite 18083 "$payload"
           # Genuine MariaDB 11.8 and MySQL 8.4 containers, a disposable
           # fresh app for each, and the same *actual* Laravel HTTP routes.
           # HTTPS/FPM Basic variables are synthetic test-only attestations.
@@ -277,6 +343,7 @@ jobs:
             php -r '$p=new PDO("mysql:host=127.0.0.1;port=".$argv[1].";dbname=".$argv[2],"root","p01-only-synthetic-test");$n=(int)$p->query("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema=".$p->quote($argv[2]))->fetchColumn();exit($n===35?0:1);' "$dbport" "$dbname"
             test -f "$fresh/app/private/state/installation.sealed.json"
             echo "P01_D12_NATIVE_${engine}_HTTP_INSTALL=201_TABLES_35"
+            run_owner_auth "$engine" "$webport" "$payload"
             kill "$sql_pid" 2>/dev/null || true
             rm -rf -- "$fresh"
           done
