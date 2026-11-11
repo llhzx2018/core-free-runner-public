@@ -116,6 +116,63 @@ jobs:
           grep -q 'MySQL' "$body"
           grep -q 'csrf-token' "$body"
           echo P01_D12_NATIVE_HTTP_GET=200_THREE_ENGINE_FORM_WITH_CSRF
+          # One *actual* Laravel web+session+CSRF POST against a synthetic
+          # server-owned HTTPS+Basic fixture. Never real CloudPanel or Owner data.
+          headers="$(mktemp /tmp/p01-d12-headers-XXXXXX)"
+          payload="$(mktemp /tmp/p01-d12-payload-XXXXXX)"
+          trap 'kill "$pid" 2>/dev/null || true; rm -f "$router" "$body" "$headers" "$payload" /tmp/p01-d12-server.log' EXIT
+          curl -fsS --noproxy '*' -D "$headers" -H 'Host: p01-test.example.org' -o "$body" 'http://127.0.0.1:18083/_next/install/'
+          token="$(python3 - "$body" <<'PY'
+          import re,sys,html
+          match=re.search(r'<meta name="csrf-token" content="([^"]+)"',open(sys.argv[1],encoding='utf-8').read())
+          if match is None: sys.exit(1)
+          print(html.unescape(match.group(1)))
+          PY
+          )"
+          cookie="$(tr -d '\r' < "$headers" | grep -i '^set-cookie: vf_start_next_owner_session=' | head -n1 | cut -d' ' -f2 | cut -d';' -f1)"
+          test -n "$cookie"
+          test -n "$token"
+          php -r 'file_put_contents($argv[1],json_encode(["db_engine"=>"sqlite","owner_password"=>bin2hex(random_bytes(20))]));' "$payload"
+          chmod 0600 "$payload"
+          url='http://127.0.0.1:18083/_next/install'
+          # Forged POST cannot mutate, even when a valid Session is present.
+          no_token_status="$(curl -sS --noproxy '*' -o "$body" -w '%{http_code}' \
+            -H 'Host: p01-test.example.org' -H 'Content-Type: application/json' \
+            -H "Cookie: $cookie" -H 'Origin: https://p01-test.example.org' \
+            --data-binary "@$payload" "$url/check")"
+          test "$no_token_status" = 419
+          echo P01_D12_NATIVE_CSRF_MISSING=419_DENIED
+          common=(--noproxy '*' -H 'Host: p01-test.example.org'
+            -H 'Content-Type: application/json' -H 'Origin: https://p01-test.example.org'
+            -H 'Sec-Fetch-Site: same-origin' -H "Cookie: $cookie"
+            -H "X-CSRF-TOKEN: $token")
+          check_status="$(curl -sS "${common[@]}" -o "$body" -w '%{http_code}' --data-binary "@$payload" "$url/check")"
+          if [ "$check_status" != 200 ]; then
+            echo "P01_D12_NATIVE_SQLITE_PREFLIGHT_STATUS=$check_status"
+            cat "$body" | head -c 300
+            exit 1
+          fi
+          python3 - "$body" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]))
+          assert x.get('ok') is True and x.get('fresh') is True and x.get('engine')=='sqlite'
+          PY
+          echo P01_D12_NATIVE_SQLITE_HTTP_PREFLIGHT=200_CLEAN
+          start_status="$(curl -sS "${common[@]}" -o "$body" -w '%{http_code}' --data-binary "@$payload" "$url/start")"
+          if [ "$start_status" != 201 ]; then
+            echo "P01_D12_NATIVE_SQLITE_INSTALL_STATUS=$start_status"
+            cat "$body" | head -c 300
+            exit 1
+          fi
+          python3 - "$body" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]))
+          assert x.get('ok') is True and x.get('installed') is True and x.get('engine')=='sqlite' and x.get('tables')==35
+          PY
+          test -f "$root/private/state/installation.sealed.json"
+          test -f "$root/private/data/owner.sqlite"
+          php -r '$db=new PDO("sqlite:".$argv[1]);$n=(int)$db->query("SELECT COUNT(*) FROM sqlite_master WHERE type=\"table\" AND name NOT LIKE \"sqlite_%\"")->fetchColumn();if($n!==35)exit(1);' "$root/private/data/owner.sqlite"
+          echo P01_D12_NATIVE_SQLITE_HTTP_INSTALL=201_TABLES_35
           echo P01_D12_NGINX_TLS_FPM_PROOF=NOT_PROVEN_SYNTHETIC_SERVER_ONLY
       - name: Cleanup transient private checkout
         if: always()
