@@ -1,0 +1,84 @@
+name: P08 real ZIP and responsive security proof (temporary)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p08-static-upload-responsive-once.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  owner-browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      P08_ISOLATED_INSTALL_TEST: YES
+      P08_TEST_BASE_URL: http://127.0.0.1:18080
+      P08_BROWSER_FIXTURE_DIR: ${{ runner.temp }}/p08-browser-fixtures
+      SESSION_SECURE_COOKIE: 'false'
+      APP_ENV: testing
+      APP_URL: http://127.0.0.1:18080
+    steps:
+      - name: Checkout private P08 exact browser test source
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-adops
+          ref: b5ff288fc14f6e2635a4d45fc3017c4112057b02
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-product
+      - name: Bind exact private source without public artifact
+        run: |
+          test "$(git -C private-product rev-parse HEAD)" = "b5ff288fc14f6e2635a4d45fc3017c4112057b02"
+          echo P08_ISOLATED_BROWSER_SOURCE_SHA=b5ff288fc14f6e2635a4d45fc3017c4112057b02
+      - name: PHP 8.4 and Composer
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, zip, mbstring, intl, bcmath, dom, fileinfo
+      - name: Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build exact locked P08 source and install browser
+        working-directory: private-product
+        run: |
+          set -euo pipefail
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
+          composer install --no-scripts --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-composer-browser.log" 2>&1
+          npm ci --no-audit --no-fund > "$RUNNER_TEMP/p08-npm-browser.log" 2>&1
+          npm run build
+          npm run typecheck
+          npx playwright install --with-deps chromium > "$RUNNER_TEMP/p08-playwright-install.log" 2>&1
+      - name: Prepare truly isolated synthetic SQLite Owner
+        working-directory: private-product
+        run: |
+          set -euo pipefail
+          php tests/test_install_sqlite_e2e.php
+          test -f storage/app/private/adops/installation/installed.json
+          test -f public/build/manifest.json
+          python3 tests/fixtures/make_browser_zip_fixtures.py "$RUNNER_TEMP/p08-browser-fixtures"
+      - name: Run localhost Owner browser proof
+        working-directory: private-product
+        run: |
+          set -euo pipefail
+          php artisan serve --host=127.0.0.1 --port=18080 > "$RUNNER_TEMP/p08-serve-browser.log" 2>&1 &
+          p=$!
+          trap 'kill "$p" 2>/dev/null || true' EXIT
+          ready=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/login -o /dev/null; then ready=1; break; fi
+            sleep 1
+          done
+          if [ "$ready" != 1 ]; then echo P08_BROWSER_SERVER_BOOT=FAIL; tail -n 20 "$RUNNER_TEMP/p08-serve-browser.log"; exit 1; fi
+          npm run test:e2e -- tests/e2e/static-upload-security-responsive.spec.ts
+          echo P08_R11_REAL_ZIP_CSRF_RESPONSIVE=PASS
+      - name: Clean private source + browser logs and test traces
+        if: always()
+        run: |
+          rm -rf private-product "$RUNNER_TEMP/p08-browser-fixtures"
+          rm -f "$RUNNER_TEMP/p08-composer-browser.log" "$RUNNER_TEMP/p08-npm-browser.log" "$RUNNER_TEMP/p08-playwright-install.log" "$RUNNER_TEMP/p08-serve-browser.log"
