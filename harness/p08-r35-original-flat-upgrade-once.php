@@ -39,6 +39,7 @@ foreach ([
     'Upgrade/AtomicReleaseMaterializer.php',
     'Upgrade/AtomicReleasePointer.php',
 ] as $path) require_once getcwd().'/private-bridge/src/'.$path;
+require_once getcwd().'/private-target/src/Upgrade/OfflineBridgeCoordinator.php';
 
 use VF\AdOps\Installation\SetupGuard;
 use VF\AdOps\Upgrade\FlatLayoutBridgePrepare;
@@ -104,29 +105,30 @@ try {
 $expect(!file_exists($site.'/releases'),'WRONG_TRUST_MUTATED_OLD_SITE');
 echo "P08_R35_WRONG_BRIDGE_FULL_TRUST_REFUSED=PASS\n";
 
-$prepared=(new FlatLayoutBridgePrepare())->prepare($site,$bridge,$bridgeSha,$trustedFull);
-$expect(($prepared['status']??'')==='PREPARED_NOT_ACTIVATED'
-    && !is_link($site.'/current') && $shaOf($site.'/public/index.php')===$before['index']
-    && $shaOf($site.'/artisan')===$before['artisan']
-    && $shaOf($database)===$before['db'],'PREPARE_CHANGED_OLD_FLAT');
-echo "P08_R35_ORIGINAL_0_1_0_TO_INACTIVE_R28_BRIDGE=PASS\n";
-
+// Old flat 0.1.0 cannot prove its own PHP-FPM stop. The test intentionally
+// supplies an isolated true callback only after proving false refuses early.
+$coordinator=new \VF\AdOps\Upgrade\OfflineBridgeCoordinator();
+$dbConfig=['driver'=>'sqlite','database'=>$database];
+$trustedOriginal=$shaOf($site.'/FULL_MANIFEST.json');
 try {
-    (new FlatLayoutBridgeActivation())->activate($site,$bridgeSha,$trustedFull,static fn()=>false);
-    $fail('FALSE_OFFLINE_PROOF_ACCEPTED');
-} catch(RuntimeException $e) {
-    if($e->getMessage()==='R35_FALSE_OFFLINE_PROOF_ACCEPTED') throw $e;
+    $coordinator->convert($site,$bridge,$originalSha,$trustedOriginal,
+        $bridgeSha,$trustedFull,$dbConfig,static fn()=>false);
+    $fail('UNPROVEN_OFFLINE_WAS_ACCEPTED');
+} catch (RuntimeException $e) {
+    if ($e->getMessage()==='R35_UNPROVEN_OFFLINE_WAS_ACCEPTED') throw $e;
 }
-$expect(!is_link($site.'/current') && $shaOf($site.'/public/index.php')===$before['index'],
+$expect(!file_exists($site.'/releases')
+    && $shaOf($site.'/public/index.php')===$before['index'],
     'OFFLINE_GUARD_REFUSAL_MUTATED_SITE');
 echo "P08_R35_UNPROVEN_OFFLINE_REFUSED_WITHOUT_CHANGE=PASS\n";
 
-// This callback models a fully STOPPED synthetic web server: there has never
-// been an HTTP/PHP-FPM process for this disposable fixture. Real CloudPanel
-// FPM stop/drain is a SEPARATE still-NOT-PROVEN deployment gate.
-$activated=(new FlatLayoutBridgeActivation())->activate(
-    $site,$bridgeSha,$trustedFull,static fn()=>true);
-$expect(($activated['status']??'')==='COMMITTED'
+// No web/CLI workers ever run during the temporary offline conversion.
+// This is NOT a CloudPanel FPM stop/drain acceptance test.
+$converted=$coordinator->convert($site,$bridge,$originalSha,$trustedOriginal,
+    $bridgeSha,$trustedFull,$dbConfig,static fn()=>true);
+$expect(($converted['status']??null)==='COMMITTED_OFFLINE_BRIDGE'
+    && is_string($converted['backup_id']??null)
+    && is_file($private.'/recovery/'.$converted['backup_id'].'/files-manifest.json')
     && is_link($site.'/current')
     && readlink($site.'/current')==='releases/'.$bridgeSha
     && $shaOf($site.'/public/index.php')===$shaOf($bridge.'/public/index.php')
@@ -134,9 +136,9 @@ $expect(($activated['status']??'')==='COMMITTED'
     && $shaOf($database)===$before['db']
     && $shaOf($site.'/.env')===$before['env']
     && $shaOf($installed)===$before['installed'],
-    'BRIDGE_ACTIVATION_DID_NOT_PRESERVE_OWNER');
+    'BACKUP_FIRST_BRIDGE_ACTIVATION_OR_OWNER_PRESERVATION_FAILED');
 echo "P08_R35_REAL_ORIGINAL_FLAT_TO_VERSIONED_GATEWAY=PASS\n";
-
+echo "P08_R35_COMPOSITE_BACKUP_BEFORE_GATEWAY_ACTIVATION=PASS\n";
 try {
     SetupGuard::package($site);
     $fail('OBSOLETE_FLAT_FULL_ACCEPTED');
@@ -151,11 +153,10 @@ echo "P08_R35_ORIGINAL_FULL_NOT_RELABELED_DURING_BRIDGE=PASS\n";
 $stage=(new AtomicPackageStage())->prepare($site,$zipArg,$archiveHash,$targetSha);
 $expect(($stage['source_version']??null)==='0.1.0'
     && ($stage['target_version']??null)==='0.1.1','STAGE_VERSION_MISMATCH');
-$backup=(new ConsistentSiteSnapshot())->create($site,['driver'=>'sqlite','database'=>$database]);
-$expect(($backup['driver']??null)==='sqlite'
-    && is_file($private.'/recovery/'.$backup['database_id'].'/files-manifest.json'),
-    'REAL_BACKUP_FAILED');
-$armed=(new AtomicUpgradeArm())->arm($site,$stage['id'],$backup['database_id'],$archiveHash,$targetSha);
+// Reuse the genuine pre-conversion backup. No redundant backup during update.
+$backupId=$converted['backup_id'];
+$expect(is_file($private.'/recovery/'.$backupId.'/files-manifest.json'),'REAL_BACKUP_FAILED');
+$armed=(new AtomicUpgradeArm())->arm($site,$stage['id'],$backupId,$archiveHash,$targetSha);
 $expect(($armed['status']??null)==='PREPARED_NOT_APPLIED','ATOMIC_ARM_FAILED');
 $material=(new AtomicReleaseMaterializer())->prepare($site,$stage['id'],$archiveHash,$targetSha);
 $expect(($material['status']??null)==='MATERIALIZED_NOT_ACTIVATED','MATERIALIZER_FAILED');
