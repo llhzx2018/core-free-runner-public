@@ -1,0 +1,164 @@
+name: P02 D3 Windows Quick 0.1.4 private Owner Trial DRAFT (one-off)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p02-d3-readback-014-20261112.yml']
+permissions:
+  contents: read
+jobs:
+  linux-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Private read capability without disclosure
+        env:
+          PRIVATE_READ: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$PRIVATE_READ" || { echo P02_READ_UNAVAILABLE; exit 78; }
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-library
+          ref: 6eb4ca32464bdf9217e69e704dd28cdee060bd39
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: D3 exact source, real synthetic browser and PHP security gate
+        working-directory: product
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "6eb4ca32464bdf9217e69e704dd28cdee060bd39"
+          echo P02_D3_SOURCE_IDENTITY=PASS
+          node --test tests/unit/p02_d2_windows_quick_panel.test.mjs tests/unit/p02_d2c_isolated_search.test.mjs tests/unit/p02_d3_isolated_capture.test.mjs
+          bash scripts/verify-repository.sh
+          echo P02_D3_LINUX_SOURCE_AND_DENIAL=PASS
+      - name: Cleanup transient private workspace
+        if: always()
+        shell: bash
+        run: |
+          rm -rf product
+          echo PRIVATE_SOURCE_PERSISTED_IN_PUBLIC_GIT_OR_ARTIFACT=NO
+  windows-private-trial:
+    needs: linux-source
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - name: Probe private transient read
+        shell: pwsh
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:READ_TOKEN)) { throw 'P02_PRIVATE_READ_UNAVAILABLE' }
+      - name: Exact private P02 source (never public artifact)
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-library
+          ref: 6eb4ca32464bdf9217e69e704dd28cdee060bd39
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: product
+      - name: Verify exact PR head, independent P02 Web version, and 0.1.4 desktop identity
+        working-directory: product
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD).Trim() -ne '6eb4ca32464bdf9217e69e704dd28cdee060bd39') { throw 'SOURCE_DRIFT' }
+          if ((Get-Content VERSION -Raw).Trim() -ne '2.5.124') { throw 'WEB_VERSION_DRIFT' }
+          $cfg = Get-Content desktop/windows-quick/src-tauri/tauri.conf.json -Raw | ConvertFrom-Json
+          if ($cfg.version -ne '0.1.4') { throw 'D3_DESKTOP_VERSION_DRIFT' }
+          Write-Output 'P02_D3_EXACT_SOURCE=PASS'
+      - name: Real full Node suite on Windows before packaging
+        working-directory: product
+        shell: pwsh
+        run: |
+          node --test tests/unit/p02_d2_windows_quick_panel.test.mjs tests/unit/p02_d2c_isolated_search.test.mjs tests/unit/p02_d3_isolated_capture.test.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'P02_D3_NODE_FAIL' }
+          Write-Output 'P02_D3_WINDOWS_NODE_TEST=PASS'
+      - name: Build Windows Tauri 2 NSIS and bind SHA-256
+        working-directory: product/desktop/windows-quick
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          rustup update stable
+          cargo test --locked --manifest-path src-tauri/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw 'P02_D3_WINDOWS_RUST_FAIL' }
+          Write-Output 'P02_D3_WINDOWS_RUST=PASS'
+          npx --yes @tauri-apps/cli@2 build --bundles nsis
+          if ($LASTEXITCODE -ne 0) { throw 'P02_D3_NSIS_BUILD_FAIL' }
+          $set = @(Get-ChildItem 'src-tauri/target/release/bundle/nsis' -File -Filter '*.exe' -ErrorAction Stop)
+          if ($set.Count -ne 1) { throw 'P02_D3_UNEXPECTED_INSTALLER_COUNT' }
+          $exe = $set[0]
+          if ($exe.Length -lt 150000) { throw 'P02_D3_INSTALLER_TOO_SMALL' }
+          $stream = [System.IO.File]::OpenRead($exe.FullName)
+          try {
+            if ($stream.ReadByte() -ne 77 -or $stream.ReadByte() -ne 90) { throw 'P02_D3_NOT_WINDOWS_PE' }
+          } finally { $stream.Dispose() }
+          $digest = (Get-FileHash -Algorithm SHA256 $exe.FullName).Hash.ToLowerInvariant()
+          Write-Output 'P02_D3_WINDOWS_NSIS_BUILD=PASS'
+          Write-Output "P02_D3_INSTALLER_FILENAME=$($exe.Name)"
+          Write-Output "P02_D3_INSTALLER_BYTES=$($exe.Length)"
+          Write-Output "P02_D3_INSTALLER_SHA256=$digest"
+      - name: Upload to P02 private GitHub DRAFT only and validate by digest/size
+        working-directory: product/desktop/windows-quick
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:GH_TOKEN)) { throw 'P02_RELEASE_DRAFT_WRITE_UNAVAILABLE' }
+          $repo = 'llhzx2018/vf-library'
+          $tag = 'desktop-quick-v0.1.4-owner-trial-6eb4ca32'
+          $exe = @(Get-ChildItem 'src-tauri/target/release/bundle/nsis' -File -Filter '*.exe')[0]
+          $digest = (Get-FileHash -Algorithm SHA256 $exe.FullName).Hash.ToLowerInvariant()
+          $listJson = & gh api "repos/$repo/releases?per_page=100"
+          if ($LASTEXITCODE -ne 0) { throw 'P02_PRIVATE_RELEASE_LIST_UNAVAILABLE' }
+          $existing = @($listJson | ConvertFrom-Json | Where-Object { $_.tag_name -eq $tag })
+          if ($existing.Count -ne 0) { throw 'P02_TRIAL_TAG_ALREADY_EXISTS_DO_NOT_OVERWRITE' }
+          if ($existing.Count -eq 0) {
+            $notes = @(
+              'PRIVATE OWNER TRIAL DRAFT ONLY. No formal Release, channel, server or production upgrade.',
+              'Windows Quick 0.1.4 from exact source 6eb4ca32464bdf9217e69e704dd28cdee060bd39; P02 PHP Web remains 2.5.124.',
+              'D3 quick capture uses existing P02 login+CSRF and category list; save ACK+content_get ID readback required.',
+              'Lost network/unknown response blocks automatic retry; possible cross-session duplicate remains.',
+              'D2 quick search and existing full P02 Web workbench are also present.',
+              'Unsigned test installer. Win10/11 interactive login/save, WebView2/CSP and uninstall/rollback NOT_PROVEN.',
+              'Rollback: exit and uninstall VF Library Quick. Website and SQLite are unchanged by installer.',
+              "Installer sha256: $digest"
+            ) -join "`n"
+            $notes | Set-Content -Path owner-trial-notes.txt -Encoding utf8
+            & gh release create $tag -R $repo --draft --prerelease --title 'VF Library Quick 0.1.4 - OWNER TRIAL DRAFT' --target '6eb4ca32464bdf9217e69e704dd28cdee060bd39' --notes-file owner-trial-notes.txt
+            if ($LASTEXITCODE -ne 0) { throw 'P02_PRIVATE_DRAFT_CREATE_FAIL' }
+          }
+          & gh release upload $tag $exe.FullName -R $repo 
+          if ($LASTEXITCODE -ne 0) { throw 'P02_PRIVATE_DRAFT_UPLOAD_FAIL' }
+          $listJson = & gh api "repos/$repo/releases?per_page=100"
+          if ($LASTEXITCODE -ne 0) { throw 'P02_PRIVATE_RELEASE_READBACK_FAIL' }
+          $recordSet = @($listJson | ConvertFrom-Json | Where-Object { $_.tag_name -eq $tag -and $_.draft -eq $true })
+          if ($recordSet.Count -ne 1) { throw 'P02_PRIVATE_DRAFT_NOT_FOUND' }
+          $detailJson = & gh api "repos/$repo/releases/$($recordSet[0].id)"
+          if ($LASTEXITCODE -ne 0) { throw 'P02_PRIVATE_RELEASE_ID_READBACK_FAIL' }
+          $release = $detailJson | ConvertFrom-Json
+          if (-not $release.draft -or -not $release.prerelease -or $release.published_at) { throw 'P02_DRAFT_SAFETY_BOUNDARY_FAIL' }
+          if ($release.target_commitish -ne '6eb4ca32464bdf9217e69e704dd28cdee060bd39') { throw 'P02_DRAFT_SOURCE_ID_FAIL' }
+          # GitHub may normalize filename spaces to dots: use immutable size/digest not the producer filename.
+          $matches = @($release.assets | Where-Object {
+            $_.state -eq 'uploaded' -and $_.size -eq $exe.Length -and
+            $_.digest -eq "sha256:$digest" -and $_.name.EndsWith('.exe')
+          })
+          if ($matches.Count -ne 1) { throw 'P02_PRIVATE_ASSET_DIGEST_OR_SIZE_FAIL' }
+          $asset = $matches[0]
+          Write-Output 'P02_D3_PRIVATE_OWNER_TRIAL_DRAFT=PASS'
+          Write-Output "P02_D3_DRAFT_ID=$($release.id)"
+          Write-Output "P02_D3_ASSET_ID=$($asset.id)"
+          Write-Output "P02_D3_ASSET_FILENAME=$($asset.name)"
+          Write-Output "P02_D3_ASSET_BYTES=$($asset.size)"
+          Write-Output "P02_D3_ASSET_SHA256=$digest"
+          Write-Output "P02_D3_DRAFT_URL=$($release.html_url)"
+      - name: Cleanup private transient checkout and installer
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path product) { Remove-Item -Force -Recurse product }
+          Write-Output 'P02_PRIVATE_SOURCE_AND_BINARY_PERSISTED_IN_PUBLIC=NO'
