@@ -15,13 +15,13 @@ SLOTS = {
     "P07-M01 网络代理节点（V2Ray）": ("run_network_node", "VF_NODE_INSTALLER"),
     "P07-M02 服务器性能检测（VPS 验机）": ("run_vps_audit", "M02_ROOT"),
     "P07-M03 网站与数据": ("run_server_ops", "ensure_server_ops_current"),
-    "P07-M04 服务器维护与安全": ("run_system_care", "ensure_system_care_current"),
+    "P07-M04 服务器维护与安全": ("run_system_care", "M04_RUNTIME"),
     "P07-M05 新服务器初始化": ("run_server_init", "M05_RUNTIME"),
 }
 
 CROSS_MODULE_INSTALLERS = (
     "ensure_server_ops_current", "ensure_system_care_current",
-    "VF_NODE_INSTALLER", "VPS_AUDIT_URL", "M02_ROOT", "M05_RUNTIME",
+    "VF_NODE_INSTALLER", "VPS_AUDIT_URL", "M02_ROOT", "M04_RUNTIME", "M05_RUNTIME",
 )
 
 
