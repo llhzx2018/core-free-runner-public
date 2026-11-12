@@ -154,6 +154,152 @@ jobs:
             python3 governance/governance/public-authority/tools/task_delivery_contract_lint.py               --receipt "${RUNNER_TEMP}/p02-${profile}-delivery.json"               --project-root product --artifact-root product/build/w1-2527-one               --public-router governance/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json
           done
           echo P02_W1_TASK_DELIVERY_STRUCTURAL=PASS
+      - name: Real 2.5.122 and 2.5.124 source FULL to candidate Atomic repair and rollback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "${GH_TOKEN:-}" || { echo P02_PRIVATE_RELEASE_READ_NOT_AVAILABLE; exit 78; }
+          mkdir -p "${RUNNER_TEMP}/p02-official-sources"
+          for old in 2.5.122 2.5.124; do
+            gh release download "v${old}" -R llhzx2018/vf-library -p "VF_Library_V${old}_FULL.zip" -D "${RUNNER_TEMP}/p02-official-sources"
+          done
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib
+          root=Path('product/build/w1-2527-one')
+          assert root.joinpath('VF_Library_V2.5.127_ATOMIC_CANDIDATE.zip').is_file()
+          files={
+            '2.5.122':('493073','79a9e2e2a8e5aa29946bbdbf47cf6d34429fc23a67689cc611ef8daebae82387'),
+            '2.5.124':('496067','c30e9a5a5d8380443f564c0e56606c13edb31da3482c1704deecdcf9c1ff7a56'),
+          }
+          import os
+          for v,(size,sha) in files.items():
+            path=Path(os.environ['RUNNER_TEMP'],'p02-official-sources','VF_Library_V'+v+'_FULL.zip')
+            assert path.is_file() and path.stat().st_size==int(size)
+            assert hashlib.sha256(path.read_bytes()).hexdigest()==sha
+          print('P02_W1_AUTHENTIC_PRIOR_FULL_ASSET_SHA=PASS')
+          PY
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess, tempfile, zipfile, re, json, html, os, time, http.cookiejar
+          import urllib.request, urllib.parse, urllib.error, sqlite3
+          prior=Path(os.environ['RUNNER_TEMP'],'p02-official-sources')
+          artifacts=Path('product/build/w1-2527-one')
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,*args):return None
+          def request(opener,url,data=None,headers=None):
+              r=urllib.request.Request(url,data,headers or {},method='POST' if data is not None else 'GET')
+              try:
+                  resp=opener.open(r,timeout=35)
+                  return resp.status,resp.read().decode('utf-8',errors='replace')
+              except urllib.error.HTTPError as error:
+                  return error.code,error.read().decode('utf-8',errors='replace')
+          def marker(body,name):
+              x=re.search(r'name="'+name+r'" value="([^"]+)"',body)
+              if not x:raise RuntimeError('MISSING_HIDDEN_FIELD_'+name)
+              return html.unescape(x.group(1))
+          def do_post(opener,url,values,base):
+              data=urllib.parse.urlencode(values).encode()
+              return request(opener,url,data,{'Origin':base,'Content-Type':'application/x-www-form-urlencoded'})
+          def post_json(opener,base,csrf,action,data):
+              code,body=request(opener,base+'/api.php?action='+action,json.dumps(data).encode(),
+                {'Origin':base,'Content-Type':'application/json','X-CSRF-Token':csrf})
+              try:result=json.loads(body)
+              except ValueError:raise RuntimeError('BAD_JSON_RESPONSE_'+action+':'+str(code))
+              if code not in (200,201) or not result.get('ok'):raise RuntimeError('CANONICAL_API_POST_FAILED_'+action+':'+str(code))
+              return result
+          with tempfile.TemporaryDirectory(prefix='p02-real-upgrade-') as temp:
+              folder=Path(temp)
+              for n,old in enumerate(['2.5.122','2.5.124']):
+                  site=folder/('source-'+old);site.mkdir()
+                  with zipfile.ZipFile(prior/('VF_Library_V'+old+'_FULL.zip')) as z:z.extractall(site)
+                  assert (site/'VERSION.txt').read_text().strip()==old
+                  port=18971+n
+                  base='http://127.0.0.1:'+str(port)
+                  server=subprocess.Popen(['php','-S','127.0.0.1:'+str(port),'-t',str(site)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+                  opener=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),NoRedirect())
+                  try:
+                      for _ in range(45):
+                          try:
+                              status,body=request(opener,base+'/setup.php')
+                              if status==200:break
+                          except Exception:pass
+                          time.sleep(.1)
+                      else:raise RuntimeError('OLD_INSTALL_HTTP_UNAVAILABLE')
+                      csrf=marker(body,'setup_csrf')
+                      status,body=do_post(opener,base+'/setup.php',{'setup_csrf':csrf,
+                        'password':'P02-SYNTHETIC-OWNER-TRIAL-ONLY','password_confirm':'P02-SYNTHETIC-OWNER-TRIAL-ONLY'},base)
+                      assert status==303,('OLD_INSTALL_FAILED',old,status)
+                      status,body=request(opener,base+'/api.php?action=session')
+                      auth=json.loads(body)
+                      assert status==200 and auth.get('ok') is True and auth.get('site',{}).get('auth') is True
+                      assert auth.get('version')==old
+                      csrf=auth.get('csrf','')
+                      category=post_json(opener,base,csrf,'category_save',{'name':'P02_W1_ONLY_SYNTHETIC','icon':'folder'})
+                      item=post_json(opener,base,csrf,'content_save',{'category_id':category['id'],
+                        'title':'P02_W1_PRESERVED_'+old,
+                        'content':'Synthetic material remains after upgrade and failed injection.',
+                        'content_mode':'article','content_format':'markdown',
+                        'primary_action':'read','status':'active'})
+                      itemid=int(item['id'])
+                      sql=list(folder.rglob('textbox-*.sqlite'))
+                      selected=[x for x in sql if x.parent.parent==folder or x.parent.parent==site.parent]
+                      assert sql,'NO_SQLITE'
+                      repair=artifacts/'repair-v2.5.127-candidate.php'
+                      (site/repair.name).write_bytes(repair.read_bytes())
+                      if old=='2.5.124':
+                          stage=folder/'rollback-stage';stage.mkdir()
+                          update=artifacts/'VF_Library_V2.5.127_UPDATE_CANDIDATE.zip'
+                          with zipfile.ZipFile(update) as z:z.extractall(stage)
+                          php=folder/'inject-rollback.php'
+                          php.write_text("""<?php
+          declare(strict_types=1);
+          require $argv[1].'/app/bootstrap.php';
+          $p=json_decode(file_get_contents($argv[2].'/atomic-manifest.json'),true);
+          $map=[];
+          foreach($p['files'] as $item)$map[$item['path']]=['bytes'=>$item['bytes'],'sha256'=>$item['sha256']];
+          try{
+            VfLibraryAtomicUpgradeService::fromCurrentRuntime()->upgrade('2.5.124','2.5.127',$argv[2].'/payload',$map,['source_schema'=>2401,'target_schema'=>2401,'fail_after_file'=>1]);
+            fwrite(STDERR,'EXPECTED_FAULT_NOT_RAISED');exit(1);
+          }catch(Throwable $e){
+            if(strpos($e->getMessage(),'Atomic test fault: file replacement')===false){
+              fwrite(STDERR,'UNEXPECTED_ATOMIC_FAULT_CLASS');exit(1);
+            }
+          }
+          echo "P02_W1_REAL_PARTIAL_FILE_ROLLBACK=PASS\\n";
+          """)
+                          proc=subprocess.run(['php',str(php),str(site),str(stage)],capture_output=True,text=True,timeout=80)
+                          assert proc.returncode==0,('ROLLBACK_ENGINE_TEST_FAILED',proc.stderr[-200:])
+                          assert (site/'VERSION.txt').read_text().strip()==old
+                          status,body=request(opener,base+'/api.php?action=content_get&id='+str(itemid))
+                          assert status==200 and json.loads(body).get('item',{}).get('title')=='P02_W1_PRESERVED_'+old,('ROLLBACK_DATA_LOSS',old)
+                          print('P02_W1_REAL_PARTIAL_FILE_ROLLBACK=PASS')
+                      status,body=request(opener,base+'/'+repair.name)
+                      assert status==200,('REPAIR_LOGIN_READ',old,status)
+                      form_csrf=marker(body,'csrf')
+                      status,body=do_post(opener,base+'/'+repair.name,{'action':'upgrade','csrf':form_csrf},base)
+                      assert status==200 and '升级完成' in body,('REAL_REPAIR_FAILED',old,status,body[-200:])
+                      assert (site/'VERSION.txt').read_text().strip()=='2.5.127'
+                      status,body=request(opener,base+'/api.php?action=content_get&id='+str(itemid))
+                      after=json.loads(body)
+                      assert status==200 and after.get('item',{}).get('title')=='P02_W1_PRESERVED_'+old,('UPDATE_DATA_LOSS',old)
+                      assert 'Synthetic material remains' in after.get('item',{}).get('content','')
+                      assert not (site/'app/.runtime.php').is_symlink()
+                      db_files=list(folder.rglob('textbox-*.sqlite'))
+                      assert db_files
+                      db_file=[x for x in db_files if x.parent.as_posix().startswith(folder.as_posix())][-1]
+                      with sqlite3.connect(db_file) as db:
+                          assert db.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+                          assert db.execute('PRAGMA foreign_key_check').fetchall()==[]
+                      assert (site/'assets/w1/w1-search.js').is_file()
+                      print('P02_W1_REAL_UPGRADE_FROM_'+old.replace('.','_')+'=PASS')
+                      print('P02_W1_DATA_RETAINED_FROM_'+old.replace('.','_')+'=PASS')
+                  finally:
+                      server.terminate();server.wait(timeout=12)
+          print('P02_W1_REAL_DIRECT_UPGRADE_SET=PASS')
+          PY
       - name: Purge transient private source and synthetic package bytes
         if: always()
         shell: bash
