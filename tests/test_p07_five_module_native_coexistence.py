@@ -270,6 +270,41 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
             self.assertEqual((TARGETS["M03 网站与数据"]/"BUILD_ID").read_text().strip(),
                              "0.1.0-release115")
             verify_modules()
+            # Owner Trial: install M05 only from its explicitly verified local
+            # private ZIP; the other four module roots stay byte-identical.
+            local_zip=work/"m05-candidate1.zip"
+            local_sha=hashlib.sha256(local_zip.read_bytes()).hexdigest()
+            local_cli=["bash",str(ROOT/"installers/p07-toolbox.sh"),
+                       "--install-m05-local",str(local_zip),local_sha,
+                       "P07-M05:INSTALL:"+local_sha]
+            local_baseline={name:tree_hash(target) for name,target in TARGETS.items()
+                            if not name.startswith("M05")}
+            run(*local_cli,timeout=90)
+            incorrect=subprocess.run(
+                ["bash",str(ROOT/"installers/p07-toolbox.sh"),
+                 "--install-m05-local",str(local_zip),"0"*64,
+                 "P07-M05:INSTALL:"+"0"*64],
+                capture_output=True,text=True,timeout=30)
+            self.assertEqual(incorrect.returncode,6,incorrect.stderr)
+            wrong_confirmation=subprocess.run(
+                local_cli[:-1]+["P07-M03:INSTALL:"+local_sha],
+                capture_output=True,text=True,timeout=20)
+            self.assertEqual(wrong_confirmation.returncode,13,wrong_confirmation.stderr)
+            self.assertEqual(os.readlink(MODULES/"m05/current"),
+                             "releases/0.1.0-m05-candidate1")
+            self.assertEqual(local_baseline,
+                             {name:tree_hash(TARGETS[name]) for name in local_baseline})
+            # Existing separately pinned M01/M04 rollback programs remain
+            # independently callable through the common Toolbox CLI.
+            for module,version in (("m01","0.1.0-rc13"),("m04","0.1.0-rc83")):
+                run("bash",str(ROOT/"installers/p07-toolbox.sh"),
+                    "--rollback-"+module,version,
+                    "P07-"+module.upper()+":"+version,timeout=110)
+                self.assertEqual(local_baseline,
+                                 {name:tree_hash(TARGETS[name]) for name in local_baseline})
+            print("P07_M05_LOCAL_PRIVATE_ZIP_GATE=PASS",flush=True)
+            print("P07_M05_LOCAL_NEGATIVE_HASH_AND_CONFIRM=PASS",flush=True)
+            print("P07_TOOLBOX_M01_M04_OWNER_ROLLBACK=PASS",flush=True)
             # P07-M02 服务器性能检测（VPS 验机） verifies its own
             # pinned audit binary before any independent pointer rollback.
             m02_root=MODULES/"m02"
@@ -432,8 +467,9 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                       if not name.startswith("M05")}
             builder.BUILD_ID="0.1.0-m05-candidate2"
             second=builder.build_bundle(work/"m05-next-version.zip")
-            run("python3",str(ROOT/"installers/p07-m05-atomic.py"),
-                "install",second["path"],second["sha256"])
+            run("bash",str(ROOT/"installers/p07-toolbox.sh"),
+                "--install-m05-local",str(second["path"]),second["sha256"],
+                "P07-M05:INSTALL:"+second["sha256"],timeout=100)
             self.assertEqual(os.readlink(MODULES/"m05/current"),
                              "releases/0.1.0-m05-candidate2")
             verify_modules()
@@ -462,7 +498,9 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
             self.assertEqual(os.readlink(MODULES/"m05/current"),
                              "releases/0.1.0-m05-candidate2")
             (previous/"lib/server_migration.py").write_bytes(old_content)
-            run(*rollback_cli,"--confirm","P07-M05:0.1.0-m05-candidate1")
+            run("bash",str(ROOT/"installers/p07-toolbox.sh"),
+                "--rollback-m05","0.1.0-m05-candidate1",
+                "P07-M05:0.1.0-m05-candidate1",timeout=100)
             self.assertEqual(os.readlink(MODULES/"m05/current"),
                              "releases/0.1.0-m05-candidate1")
             verify_modules()
@@ -473,7 +511,9 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                 "install",second["path"],second["sha256"])
             self.assertEqual(os.readlink(MODULES/"m05/current"),
                              "releases/0.1.0-m05-candidate2")
-            run(*rollback_cli,"--confirm","P07-M05:0.1.0-m05-candidate1")
+            run("bash",str(ROOT/"installers/p07-toolbox.sh"),
+                "--rollback-m05","0.1.0-m05-candidate1",
+                "P07-M05:0.1.0-m05-candidate1",timeout=100)
             self.assertEqual(os.readlink(MODULES/"m05/current"),
                              "releases/0.1.0-m05-candidate1")
             print("P07_M05_PUBLIC_INSTALLER_OWN_ROLLBACK=PASS",flush=True)
