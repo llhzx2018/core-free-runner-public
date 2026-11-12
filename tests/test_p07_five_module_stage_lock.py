@@ -71,6 +71,18 @@ def verify(stage,toolbox):
         if ident=="P07-M02":
             if m["package_identity_digest"] not in toolbox:
                 raise ValueError("M02 audit SHA missing from Toolbox")
+        if ident=="P07-M03":
+            if m.get("rollback_scope")!="M03_RUNTIME_ONLY_NO_SITE_OR_DATABASE_RESTORE":
+                raise ValueError("M03 rollback contract must exclude business data")
+            if m.get("previous_snapshot_protection")!="NEVER_OVERWRITE_OR_DELETE":
+                raise ValueError("M03 rollback must preserve previous snapshot")
+            for field in ("rollback_installer_source_ref","rollback_installer_blob"):
+                value=m.get(field)
+                if not isinstance(value,str) or not re.fullmatch(r"[a-f0-9]{40}",value):
+                    raise ValueError("M03 rollback immutable blob/ref required")
+                if value not in toolbox:
+                    raise ValueError("M03 rollback installer absent from Toolbox")
+
         if ident=="P07-M05":
             if m.get("distribution")!="NOT_RELEASED" or m.get("public_package_url") is not None:
                 raise ValueError("M05 package must remain unlisted before release")
