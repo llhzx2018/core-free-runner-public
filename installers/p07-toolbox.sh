@@ -267,6 +267,45 @@ ensure_m02_current() {
   say "${C_GREEN}P07-M02 服务器性能检测：独立版本已就绪。${C_RESET}"
 }
 
+rollback_m02_current() {
+  # P07-M02 服务器性能检测（VPS 验机） owns only m02/current.
+  # No VPS scan, network test or other module installer is invoked.
+  local build="${1:-}" confirm="${2:-}" current old target actual version reported fd link
+  [[ "$(id -u)" == "0" && "$build" == "$VPS_AUDIT_BUILD_EXPECTED" &&
+     "$confirm" == "P07-M02:$build" ]] || return 13
+  [[ -d /opt/vfops-modules && ! -L /opt/vfops-modules &&
+     -d "$M02_ROOT" && ! -L "$M02_ROOT" &&
+     -d "$M02_ROOT/releases" && ! -L "$M02_ROOT/releases" &&
+     ! -L "$M02_ROOT/.install.lock" ]] || return 13
+  exec {fd}>"$M02_ROOT/.install.lock" || return 13
+  flock -x "$fd" || return 13
+  current="$M02_ROOT/current"
+  [[ -L "$current" ]] || return 13
+  old="$(readlink "$current")"
+  [[ "$old" =~ ^releases/[A-Za-z0-9._-]+$ &&
+     -d "$M02_ROOT/$old" && ! -L "$M02_ROOT/$old" ]] || return 13
+  target="$M02_ROOT/releases/$build"
+  [[ -d "$target" && ! -L "$target" &&
+     -f "$target/MANIFEST.sha256" && ! -L "$target/MANIFEST.sha256" &&
+     -f "$target/vps-audit.sh" && ! -L "$target/vps-audit.sh" ]] || return 13
+  [[ "$(cat "$target/MANIFEST.sha256")" ==
+     "$VPS_AUDIT_SHA256  vps-audit.sh" &&
+     "$(wc -l < "$target/MANIFEST.sha256")" == 1 ]] || return 13
+  actual="$(sha256_file "$target/vps-audit.sh")"
+  [[ "$actual" == "$VPS_AUDIT_SHA256" ]] || return 13
+  version="$(NO_COLOR=1 bash "$target/vps-audit.sh" --version 2>/dev/null | awk '{print $NF}' || true)"
+  reported="$(NO_COLOR=1 bash "$target/vps-audit.sh" --build-id 2>/dev/null || true)"
+  [[ "$version" == "$VPS_AUDIT_EXPECTED" && "$reported" == "$build" ]] || return 13
+  if [[ "$old" != "releases/$build" ]]; then
+    link="$M02_ROOT/.current-rollback-$"
+    [[ ! -e "$link" && ! -L "$link" ]] || return 13
+    ln -s "releases/$build" "$link" || return 13
+    mv -Tf -- "$link" "$current" || { rm -f "$link"; return 13; }
+  fi
+  m02_verified_current || return 13
+  say "P07-M02 服务器性能检测（VPS 验机）：已恢复本模块 $build；其他模块未操作。"
+}
+
 run_vps_audit() {
   screen_clear
   say "${C_CYAN}正在启动 P07-M02 服务器性能检测 ${VPS_AUDIT_PUBLIC}…${C_RESET}"
@@ -876,6 +915,7 @@ main_menu() {
 }
 
 case "${1:-}" in
+  --rollback-m02) [[ "$#" == 3 ]] || exit 13; rollback_m02_current "$2" "$3" ;;
   --modules) modules_status_readonly ;;
   --version|-V) printf '服务器工具箱 %s\n' "$VERSION" ;;
   --help|-h)
