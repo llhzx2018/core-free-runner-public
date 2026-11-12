@@ -1,0 +1,157 @@
+name: P02 v2.5.129 isolated runtime install and recovery smoke (no package)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p02-v25129-isolated-install-smoke.yml']
+permissions:
+  contents: read
+jobs:
+  isolated-runtime:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      P02_SHA: 28a480c49818e55e8db1228ac74719668a486ec9
+      P02_TREE: b10d84ce02c1affc3bee5ef746959ef9f2779780
+      P02_VERSION: 2.5.129
+    steps:
+      - name: Checkout exact private product source transiently
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-library
+          ref: 28a480c49818e55e8db1228ac74719668a486ec9
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Verify exact source and isolated PHP SQLite runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$P02_SHA"
+          test "$(git -C product show -s --format=%T HEAD)" = "$P02_TREE"
+          test "$(cat product/VERSION)" = "$P02_VERSION"
+          ( cd product && python3 scripts/verify-source-manifest.py )
+          php -r 'exit(extension_loaded("pdo_sqlite")&&extension_loaded("sqlite3")?0:1);'
+          if ! php -r 'exit(extension_loaded("zip")?0:1);'; then
+            sudo apt-get update -qq
+            sudo apt-get install -y php8.3-zip
+          fi
+          php -r 'exit(extension_loaded("zip")?0:1);'
+          echo P02_129_EXACT_SOURCE_SQLITE_ZIP=PASS
+      - name: Isolated actual install, CRUD, backup restore, rollback-safety regression
+        shell: bash
+        env:
+          FIXTURE_PASSWORD: P02-CI-Synthetic-Only-129!
+        run: |
+          set -Eeuo pipefail
+          root="$(mktemp -d "${RUNNER_TEMP}/p02-129-runtime-XXXXXX")"
+          server_pid=''
+          cleanup() {
+            if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || :; wait "$server_pid" 2>/dev/null || :; fi
+            rm -rf "$root"
+            echo P02_PRIVATE_TEST_RUNTIME_CLEANED=YES
+          }
+          trap cleanup EXIT
+          base=http://127.0.0.1:18779
+          site="$root/site"
+          cookie="$root/cookie"
+          bash product/scripts/build-deploy-tree.sh "$site"
+          test "$(cat "$site/VERSION.txt")" = "$P02_VERSION"
+          php -d display_errors=0 -S 127.0.0.1:18779 -t "$site" > "$root/php.log" 2>&1 &
+          server_pid=$!
+          for i in $(seq 1 60); do
+            if curl -fsS "$base/setup.php" -o "$root/setup.html" 2>/dev/null; then break; fi
+            sleep 0.25
+          done
+          test -s "$root/setup.html"
+          curl -fsS -c "$cookie" "$base/setup.php" > "$root/setup.html"
+          csrf="$(python3 - "$root/setup.html" <<'PY'
+          import html,re,sys
+          s=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf" value="([^"]+)"',s)
+          assert m,'setup token missing'
+          print(html.unescape(m.group(1)))
+          PY
+          )"
+          status="$(curl -sS -o "$root/setup-post" -w '%{http_code}' -b "$cookie" -c "$cookie" -H "Origin: $base" --data-urlencode "setup_csrf=$csrf" --data-urlencode "password=$FIXTURE_PASSWORD" --data-urlencode "password_confirm=$FIXTURE_PASSWORD" "$base/setup.php")"
+          test "$status" = 303
+          curl -fsS -b "$cookie" -c "$cookie" "$base/api.php?action=session" > "$root/session.json"
+          read -r csrf version < <(python3 - "$root/session.json" <<'PY'
+          import json,sys
+          j=json.load(open(sys.argv[1]))
+          assert j['ok'] is True and j['site']['auth'] is True
+          print(j['csrf'],j['version'])
+          PY
+          )
+          test "$version" = "$P02_VERSION"
+          api() {
+            local action="$1" input="$2" output="$3"
+            curl -fsS -b "$cookie" -c "$cookie" -H "Origin: $base" -H "X-CSRF-Token: $csrf" -H 'Content-Type: application/json' --data-binary "@$input" "$base/api.php?action=$action" > "$output"
+            python3 - "$output" <<'PY'
+          import json,sys
+          assert json.load(open(sys.argv[1]))['ok'] is True
+          PY
+          }
+          printf '%s' '{"name":"Synthetic 129 Category","icon":"folder"}' > "$root/category.json"
+          api category_save "$root/category.json" "$root/category.result"
+          cat_id="$(python3 - "$root/category.result" <<'PY'
+          import json,sys
+          print(json.load(open(sys.argv[1]))['id'])
+          PY
+          )"
+          python3 - "$root/create.json" "$cat_id" <<'PY'
+          import json,sys
+          json.dump(dict(category_id=int(sys.argv[2]),title='Synthetic 129 Material',content='P02_129_ORIGINAL_MATERIAL',content_mode='article',content_format='markdown',primary_action='read',status='active'),open(sys.argv[1],'w'))
+          PY
+          api content_save "$root/create.json" "$root/create.result"
+          material_id="$(python3 - "$root/create.result" <<'PY'
+          import json,sys
+          print(json.load(open(sys.argv[1]))['id'])
+          PY
+          )"
+          printf '%s' '{"note":"synthetic machine fixture only"}' > "$root/backup.json"
+          api backup "$root/backup.json" "$root/backup.result"
+          backup_name="$(python3 - "$root/backup.result" <<'PY'
+          import json,sys
+          print(json.load(open(sys.argv[1]))['filename'])
+          PY
+          )"
+          python3 - "$root/change.json" "$cat_id" "$material_id" <<'PY'
+          import json,sys
+          json.dump(dict(id=int(sys.argv[3]),category_id=int(sys.argv[2]),title='Synthetic 129 Material',content='P02_129_MUTATED_MATERIAL',content_mode='article',content_format='markdown',primary_action='read',status='active'),open(sys.argv[1],'w'))
+          PY
+          api content_save "$root/change.json" "$root/change.result"
+          python3 - "$root/reauth.json" "$FIXTURE_PASSWORD" <<'PY'
+          import json,sys
+          json.dump({'password':sys.argv[2]},open(sys.argv[1],'w'))
+          PY
+          api reauth "$root/reauth.json" "$root/reauth.result"
+          csrf="$(python3 - "$root/reauth.result" <<'PY'
+          import json,sys
+          print(json.load(open(sys.argv[1]))['csrf'])
+          PY
+          )"
+          python3 - "$root/restore.json" "$backup_name" <<'PY'
+          import json,sys
+          json.dump({'filename':sys.argv[2],'confirmation':'恢复'},open(sys.argv[1],'w',encoding='utf-8'),ensure_ascii=False)
+          PY
+          api backup_restore "$root/restore.json" "$root/restore.result"
+          curl -fsS -b "$cookie" "$base/api.php?action=content_get&id=$material_id" > "$root/after.json"
+          python3 - "$root/after.json" <<'PY'
+          import json,sys
+          j=json.load(open(sys.argv[1])); assert j['ok'] is True
+          assert 'P02_129_ORIGINAL_MATERIAL' in j['item']['content']
+          assert 'P02_129_MUTATED_MATERIAL' not in j['item']['content']
+          PY
+          ( cd "$site" && php cli/verify.php ) > "$root/verify.json"
+          python3 - "$root/verify.json" <<'PY'
+          import json,sys
+          assert json.load(open(sys.argv[1]))['ok'] is True
+          PY
+          echo P02_129_SOURCE_RUNTIME_INSTALL_CRUD_BACKUP_RESTORE=PASS
+          echo P02_129_PACKAGE_UPGRADE_MATRIX=NOT_EVALUATED
+      - name: Always clean transient private checkout
+        if: always()
+        shell: bash
+        run: |
+          rm -rf product
+          echo P02_PRIVATE_CHECKOUT_PERSISTED_IN_PUBLIC=NO
