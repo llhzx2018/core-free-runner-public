@@ -1,0 +1,136 @@
+name: P04 canonical Provider authority proof (temporary)
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/p04-public-authority-proof.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  p04-shared-rule-source:
+    if: >-
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'maintenance/p04-public-authority-source-proof-20261112'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      P04_SHA: a2bbfbd8fac3a78c749fbbc3676ac8683ed2c5ec
+      GOV_SHA: 33b222f642ff18dd52a1ac7887443d91833edbb2
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Exact P04 private candidate checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-infra
+          ref: ${{ env.P04_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p04
+
+      - name: Exact effective GOV-DOC checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: ${{ env.GOV_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: gov
+
+      - name: Exact source and existing P04 control contract checks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p04 rev-parse HEAD)" = "$P04_SHA"
+          test "$(git -C gov rev-parse HEAD)" = "$GOV_SHA"
+          test -z "$(git -C p04 status --porcelain --untracked-files=all)"
+          echo P04_GOV_EXACT_SOURCE=PASS
+          if python3 -B p04/scripts/check_p04_control_plane_contract.py --root p04 --phase auto \
+              > "$RUNNER_TEMP/p04-source.log" 2>&1; then
+            echo P04_EXISTING_CONTROL_PLANE_SOURCE_GUARD=PASS
+          else
+            echo P04_EXISTING_CONTROL_PLANE_SOURCE_GUARD=FAIL
+            exit 1
+          fi
+          if (cd p04 && python3 -B -m unittest discover -s tests/unit \
+              -p 'test_p04_control_plane_contract.py' -v) \
+              > "$RUNNER_TEMP/p04-tests.log" 2>&1; then
+            echo P04_PUBLIC_AUTHORITY_NEGATIVE_FIXTURES=PASS
+          else
+            echo P04_PUBLIC_AUTHORITY_NEGATIVE_FIXTURES=FAIL
+            exit 1
+          fi
+
+      - name: Canonical real project source-rule resolution and Provider denial
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$P04_SHA" "$RUNNER_TEMP/p04-receipt.json" <<'PY'
+          import json,sys
+          receipt={
+            "schema":"vf.public-authority.task-delivery-check.v1",
+            "project":"P04", "source":sys.argv[1],
+            "project_authority":{
+              "agents":"AGENTS.md", "current":"docs/authority/CURRENT.md",
+              "acceptance":"docs/authority/RPD.md",
+              "applicability":"docs/authority/PUBLIC_AUTHORITY_APPLICABILITY.md"
+            },
+            "acceptance_markers":["多云基础设施管理控制台","单管理员个人"],
+            "required_domains":[
+              "INSTALL","UPGRADE","SECURITY","TESTING","DATA_SCHEMA",
+              "API_PROVIDER","OBSERVABILITY","GIT","UA_UI","NOTIFICATION"
+            ],
+            "task_capabilities":[
+              "formal_development","source_change","provider","auth","database",
+              "diagnostics","ui_change","alert","installer","atomic"
+            ],
+            "delivery":{
+              "profile":"web_full_zip","entrypoint":"public/setup.php",
+              "requires_git":False,"requires_manual_source_copy":False
+            }
+          }
+          with open(sys.argv[2],"w",encoding="utf-8") as file:
+            json.dump(receipt,file,ensure_ascii=False)
+          PY
+          if python3 -B gov/governance/public-authority/tools/task_delivery_contract_lint.py \
+            --phase resolve --receipt "$RUNNER_TEMP/p04-receipt.json" \
+            --project-root p04 --artifact-root "$RUNNER_TEMP" \
+            --public-router gov/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json \
+            > "$RUNNER_TEMP/p04-positive.log" 2>&1; then
+            grep -q '^CONTRACT_CHECK=RULES_RESOLVED$' "$RUNNER_TEMP/p04-positive.log"
+            echo P04_REAL_PROVIDER_PUBLIC_AUTHORITY_RESOLVED=PASS
+          else
+            grep -E '^CONTRACT_(CHECK|REASON)=' "$RUNNER_TEMP/p04-positive.log" || true
+            echo P04_REAL_PROVIDER_PUBLIC_AUTHORITY_RESOLVED=NOT_PROVEN
+            exit 1
+          fi
+          python3 - "$RUNNER_TEMP/p04-receipt.json" "$RUNNER_TEMP/p04-negative.json" <<'PY'
+          import json,sys
+          with open(sys.argv[1],encoding="utf-8") as file:
+            receipt=json.load(file)
+          receipt["required_domains"].remove("API_PROVIDER")
+          with open(sys.argv[2],"w",encoding="utf-8") as file:
+            json.dump(receipt,file,ensure_ascii=False)
+          PY
+          if python3 -B gov/governance/public-authority/tools/task_delivery_contract_lint.py \
+            --phase resolve --receipt "$RUNNER_TEMP/p04-negative.json" \
+            --project-root p04 --artifact-root "$RUNNER_TEMP" \
+            --public-router gov/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json \
+            > "$RUNNER_TEMP/p04-negative.log" 2>&1; then
+            echo P04_MISSING_PROVIDER_WAS_ACCEPTED=UNSAFE
+            exit 1
+          fi
+          grep -q '^CONTRACT_REASON=TASK_TRIGGERED_PUBLIC_DOMAIN_OMITTED$' "$RUNNER_TEMP/p04-negative.log"
+          echo P04_PROVIDER_AUTHORITY_OMISSION_REJECTED=PASS
+          echo P04_EXTERNAL_PROVIDER_WRITES=NONE
+          echo P04_FORMAL_RELEASE_OR_PRODUCTION=NO
+
+      - name: Remove transient private source and receipts
+        if: always()
+        shell: bash
+        run: |
+          rm -rf p04 gov
+          rm -f "$RUNNER_TEMP"/p04-{source,tests,positive,negative}.log
+          rm -f "$RUNNER_TEMP"/p04-{receipt,negative}.json
+          echo P04_TRANSIENT_SOURCE_CLEANUP=ATTEMPTED
