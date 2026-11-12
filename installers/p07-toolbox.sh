@@ -80,7 +80,7 @@ show_menu() {
   say "  ${C_GREEN}2.${C_RESET} 服务器性能检测      ${C_GRAY}VPS验机${C_RESET}"
   say "  ${C_GREEN}3.${C_RESET} 网站与数据          ${C_GRAY}网站/数据库/备份${C_RESET}"
   say "  ${C_GREEN}4.${C_RESET} 服务器维护与安全    ${C_GRAY}更新/清理/安全${C_RESET}"
-  say "  ${C_GREEN}5.${C_RESET} 新服务器初始化      ${C_GRAY}更新/面板/优化${C_RESET}"
+  say "  ${C_GREEN}5.${C_RESET} 新服务器初始化      ${C_GRAY}系统更新/CloudPanel/数据库选择${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
   say "${C_GRAY}版本信息进入对应功能后查看；主菜单只保留常用操作。${C_RESET}"
@@ -790,6 +790,41 @@ run_system_care() {
   bash "$M04_RUNTIME" menu
 }
 
+# Read-only reporting only. No module installers/CLI are executed and no
+# version directories are modified. Plain output also supports Owner SSH.
+modules_status_readonly() {
+  local slot display installed link marker
+  for slot in m01 m02 m03 m04 m05; do
+    case "$slot" in
+      m01) display="P07-M01 网络代理节点（V2Ray）"; installed="$M01_ROOT/current" ;;
+      m02) display="P07-M02 服务器性能检测（VPS 验机）"; installed="$M02_ROOT/current" ;;
+      m03) display="P07-M03 网站与数据"; installed="/opt/vf-server-ops" ;;
+      m04) display="P07-M04 服务器维护与安全"; installed="$M04_ROOT/current" ;;
+      m05) display="P07-M05 新服务器初始化"; installed="$M05_ROOT/current" ;;
+    esac
+    if [[ "$slot" == "m03" ]]; then
+      if [[ -f "$installed/BUILD_ID" && ! -L "$installed/BUILD_ID" ]]; then
+        IFS= read -r marker < "$installed/BUILD_ID" || marker=""
+        [[ "$marker" =~ ^[A-Za-z0-9._-]+$ ]] || marker="身份异常"
+      else
+        marker="未安装"
+      fi
+    elif [[ -L "$installed" ]]; then
+      link="$(readlink "$installed")"
+      if [[ "$link" =~ ^releases/([A-Za-z0-9._-]+)$ ]]; then
+        marker="${BASH_REMATCH[1]}"
+      else
+        marker="身份异常"
+      fi
+    elif [[ -e "$installed" ]]; then
+      marker="身份异常"
+    else
+      marker="未安装"
+    fi
+    printf '%s：%s\n' "$display" "$marker"
+  done
+}
+
 main_menu() {
   local choice rc
   while true; do
@@ -840,6 +875,7 @@ main_menu() {
 }
 
 case "${1:-}" in
+  --modules) modules_status_readonly ;;
   --version|-V) printf '服务器工具箱 %s\n' "$VERSION" ;;
   --help|-h)
     cat <<EOF
@@ -852,9 +888,9 @@ case "${1:-}" in
 2. 服务器性能检测        VPS验机     ${VPS_AUDIT_PUBLIC}
 3. 网站与数据            网站/数据库/备份  ${VF_SERVER_OPS_PUBLIC}
 4. 服务器维护与安全      更新/清理/安全    ${SYSTEM_CARE_PUBLIC}
-5. 新服务器初始化        更新/面板/优化    ${VF_SERVER_OPS_PUBLIC}
+5. 新服务器初始化        系统更新/CloudPanel/数据库选择  V0.1.0（独立模块）
 
-说明：初始化服务器为独立脚本入口；普通界面只显示 Vx.x.x 公共版本。
+说明：5 个模块各自安装与升级；选择未分发模块时会明确提示，不会安装其他模块。
 EOF
     ;;
   "")
