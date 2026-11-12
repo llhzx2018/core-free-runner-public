@@ -80,10 +80,20 @@ show_menu() {
 }
 
 m01_verified_current() {
-  local current="$M01_ROOT/current" release="$M01_ROOT/current" name expected count=0 version=''
-  [[ -L "$current" && "$(readlink "$current")" == "releases/$VF_NODE_EXPECTED" ]] || return 1
-  [[ -f "$release/MANIFEST.sha256" && ! -L "$release/MANIFEST.sha256" ]] || return 1
-  [[ "$(sha256_file "$release/MANIFEST.sha256" 2>/dev/null || true)" == "$M01_MANIFEST_SHA256" ]] || return 1
+  local current="$M01_ROOT/current" root="$M01_ROOT/current" name expected count=0 version='' installed=''
+  [[ -L "$current" ]] || return 1
+  local link
+  link="$(readlink "$current")"
+  [[ "$link" =~ ^releases/([A-Za-z0-9._-]+)$ ]] || return 1
+  installed="${BASH_REMATCH[1]}"
+  [[ -f "$root/MANIFEST.sha256" && ! -L "$root/MANIFEST.sha256" &&
+     -f "$root/VERSION" && ! -L "$root/VERSION" ]] || return 1
+  [[ "$(cat "$root/VERSION")" == "$installed" ]] || return 1
+  # Bootstrap rc13 is checked against the original public SHA pin.
+  # A newer release may carry its OWN verified manifest and version identity.
+  if [[ "$installed" == "$VF_NODE_EXPECTED" ]]; then
+    [[ "$(sha256_file "$root/MANIFEST.sha256" 2>/dev/null || true)" == "$M01_MANIFEST_SHA256" ]] || return 1
+  fi
   declare -A seen=()
   while read -r expected name; do
     [[ -n "$expected" && -n "$name" ]] || continue
@@ -91,17 +101,21 @@ m01_verified_current() {
     [[ "$name" =~ ^(lib/)?[A-Za-z0-9._-]+$ && "$name" != '.' && "$name" != '..' ]] || return 1
     [[ ! -v seen[$name] ]] || return 1
     seen[$name]=1
-    [[ -f "$release/$name" && ! -L "$release/$name" ]] || return 1
-    [[ "$(sha256_file "$release/$name" 2>/dev/null || true)" == "$expected" ]] || return 1
+    [[ -f "$root/$name" && ! -L "$root/$name" ]] || return 1
+    [[ "$(sha256_file "$root/$name" 2>/dev/null || true)" == "$expected" ]] || return 1
     count=$((count + 1))
-  done < "$release/MANIFEST.sha256"
+  done < "$root/MANIFEST.sha256"
   [[ "$count" -eq 10 ]] || return 1
   version="$(NO_COLOR=1 bash "$M01_RUNTIME" --version 2>/dev/null | awk '{print $NF}' || true)"
-  [[ "$version" == "$VF_NODE_EXPECTED" ]]
+  [[ "$version" == "$installed" ]]
 }
 
 ensure_m01_current() {
   m01_verified_current && return 0
+  if [[ -e "$M01_ROOT/current" || -L "$M01_ROOT/current" ]]; then
+    say "${C_RED}P07-M01 网络代理节点（V2Ray）：已安装模块身份异常；拒绝用旧版回退或覆盖，请从本模块更新器修复。${C_RESET}" >&2
+    return 13
+  fi
   if [[ "$(id -u)" != "0" ]]; then
     say "${C_RED}P07-M01 网络代理节点（V2Ray）：独立管理器首次安装/升级需要 root。${C_RESET}" >&2
     return 3
