@@ -320,3 +320,68 @@ jobs:
         run: |
           rm -rf -- product
           echo P07_PRIVATE_CHECKOUT_CLEANED=YES
+
+  owner-cp2-sql-lock-isolated:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      P07_EXACT_SHA: 0bb9dd4f1859ea36071c53701963c533a4546384
+      P07_SYNTHETIC_MARIADB: "1"
+      P07_DB_TEST_HOST: 127.0.0.1
+      P07_DB_TEST_PORT: "63306"
+      P07_DB_TEST_PASSWORD: p07-disposable-synthetic-only
+    steps:
+      - name: Transient private checkout at tested source identity
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 0bb9dd4f1859ea36071c53701963c533a4546384
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: product
+      - name: Verify source and compile changed code
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C product rev-parse HEAD)" = "$P07_EXACT_SHA"
+          test "$(cat product/BUILD_ID)" = "0.1.0-release145"
+          python3 -B -m py_compile product/lib/migration_final_db_shadow.py product/lib/migration_original_db_restore_drill.py product/tests/test_p07_original_db_restore_drill.py product/tests/test_p07_original_db_restore_real_mariadb.py
+          echo P07_LOCK_SCOPE_EXACT_COMPILE=PASS
+      - name: Start disposable MariaDB 11.8 (never Owner CP2)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mariadb-client
+          docker pull mariadb:11.8
+          docker run --rm -d --name p07-lock-synthetic-maria118 -p 127.0.0.1:63306:3306 -e "MARIADB_ROOT_PASSWORD=$P07_DB_TEST_PASSWORD" mariadb:11.8 >/dev/null
+          for i in $(seq 1 100); do
+            if MYSQL_PWD="$P07_DB_TEST_PASSWORD" mariadb --no-defaults -h 127.0.0.1 -P 63306 -uroot -N -e "SELECT 1" >/dev/null 2>&1; then
+              echo P07_LOCK_DISPOSABLE_ENGINE_READY=YES
+              break
+            fi
+            sleep 1
+          done
+          test "$(MYSQL_PWD="$P07_DB_TEST_PASSWORD" mariadb --no-defaults -h 127.0.0.1 -P 63306 -uroot -N -e 'SELECT VERSION()' | cut -d. -f1-2)" = "11.8"
+      - name: Run exact original18 SQL scope exploit regressions and real four-archive restore
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          (cd product && python3 -B -m unittest -v tests.test_p07_original_db_restore_drill tests.test_p07_original_db_restore_real_mariadb tests.test_p07_original_db_protection tests.test_p07_original_18_protected_preparation)
+          echo P07_ARCHIVED_LOCKS_REAL_MARIADB_11_8=PASS
+          echo P07_CROSS_DATABASE_UNSAFE_INJECTION_DENIED=YES
+          echo P07_OWNER_CP2_RESTORE=NOT_RUN
+          echo P07_FORMAL_RELEASE=NO
+      - name: Always wipe disposable DB and checkout
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f p07-lock-synthetic-maria118 >/dev/null 2>&1 || true
+          rm -rf -- product
+          echo P07_ARCHIVE_LOCK_PRIVATE_CLEANUP=YES
