@@ -114,8 +114,8 @@ if (!$landing || !$revision || (int)$landing->current_revision!==1) {
 }
 $landingRoot=storage_path('app/private/adops/landings/'.$landingId);
 (new \VF\AdOps\Landing\LandingVersionStore())->verify($landingRoot,1,(string)$landing->bundle_sha256);
-$landingManifestHash=(string)hash_file('sha256',$landingRoot.'/v1/index.html');
-if (!is_file($landingRoot.'/v1/index.html') || !$landingManifestHash) {
+$landingManifestHash=(string)hash_file('sha256',$landingRoot.'/versions/1/index.html');
+if (!is_file($landingRoot.'/versions/1/index.html') || !$landingManifestHash) {
     // Later file-name mismatch is a test-fixture error, not a release failure.
     $fail('REAL_LANDING_PRIVATE_ASSET_MISSING');
 }
@@ -244,7 +244,7 @@ $expect($restorePdo->query($query)->fetchColumn()==='owner@isolated.example','RE
 $revs='SELECT COUNT(*) FROM landing_revisions WHERE landing_page_id='.(int)$landingId;
 $expect((int)$pdo->query($revs)->fetchColumn()===1,'LANDING_REVISION_LOST_DURING_UPDATE');
 $expect((int)$restorePdo->query($revs)->fetchColumn()===1,'RESTORED_LANDING_REVISION_MISSING');
-$expect(hash_file('sha256',$landingRoot.'/v1/index.html')===$landingManifestHash,
+$expect(hash_file('sha256',$landingRoot.'/versions/1/index.html')===$landingManifestHash,
     'LANDING_MEDIA_CHANGED_DURING_ATOMIC');
 $privateSnapshot=$private.'/recovery/'.$backupId.'/files-manifest.json';
 $snap=json_decode((string)file_get_contents($privateSnapshot),true,64,JSON_THROW_ON_ERROR);
