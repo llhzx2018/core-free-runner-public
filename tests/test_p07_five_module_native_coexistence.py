@@ -262,12 +262,47 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                              "releases/0.1.0-m05-candidate2")
             verify_modules()
             self.assertEqual(baseline,{name:tree_hash(TARGETS[name]) for name in baseline})
-            run("python3",str(PRODUCT/"scripts/install_p07_m05_bundle.py"),
-                "--rollback-build","0.1.0-m05-candidate1",
-                "--confirm-rollback","P07-M05:0.1.0-m05-candidate1")
+            # The PUBLIC M05 standalone installer, not private product
+            # tooling, must own rollback. Negative fault-injection cannot
+            # change current or any of the four sibling module roots.
+            rollback_cli=["python3",str(ROOT/"installers/p07-m05-atomic.py"),
+                          "rollback","0.1.0-m05-candidate1"]
+            for invalid in (
+                rollback_cli+["--confirm","P07-M05:wrong"],
+                ["python3",str(ROOT/"installers/p07-m05-atomic.py"),
+                 "rollback","nonexistent-build","--confirm","P07-M05:nonexistent-build"],
+            ):
+                result=subprocess.run(invalid,capture_output=True,text=True,timeout=30)
+                self.assertEqual(result.returncode,13,result.stderr)
+                self.assertEqual(os.readlink(MODULES/"m05/current"),
+                                 "releases/0.1.0-m05-candidate2")
+            previous=MODULES/"m05/releases/0.1.0-m05-candidate1"
+            old_content=(previous/"lib/server_migration.py").read_bytes()
+            (previous/"lib/server_migration.py").write_bytes(old_content+b"\\n# tampered rollback")
+            rejected=subprocess.run(
+                rollback_cli+["--confirm","P07-M05:0.1.0-m05-candidate1"],
+                capture_output=True,text=True,timeout=30)
+            self.assertEqual(rejected.returncode,13,rejected.stderr)
+            self.assertEqual(os.readlink(MODULES/"m05/current"),
+                             "releases/0.1.0-m05-candidate2")
+            (previous/"lib/server_migration.py").write_bytes(old_content)
+            run(*rollback_cli,"--confirm","P07-M05:0.1.0-m05-candidate1")
             self.assertEqual(os.readlink(MODULES/"m05/current"),
                              "releases/0.1.0-m05-candidate1")
             verify_modules()
+            self.assertEqual(baseline,{name:tree_hash(TARGETS[name]) for name in baseline})
+            # Re-apply exact existing candidate2 archive after rollback; it is
+            # verified byte-for-byte, not overwritten, then re-activated.
+            run("python3",str(ROOT/"installers/p07-m05-atomic.py"),
+                "install",second["path"],second["sha256"])
+            self.assertEqual(os.readlink(MODULES/"m05/current"),
+                             "releases/0.1.0-m05-candidate2")
+            run(*rollback_cli,"--confirm","P07-M05:0.1.0-m05-candidate1")
+            self.assertEqual(os.readlink(MODULES/"m05/current"),
+                             "releases/0.1.0-m05-candidate1")
+            print("P07_M05_PUBLIC_INSTALLER_OWN_ROLLBACK=PASS",flush=True)
+            print("P07_M05_ROLLBACK_INVALID_TARGET_AND_TAMPER_REJECTED=PASS",flush=True)
+            print("P07_M05_INTERRUPTED_SWITCH_RESUME=PASS",flush=True)
             self.assertEqual(baseline,{name:tree_hash(TARGETS[name]) for name in baseline})
             print("P07_FIVE_NATIVE_MODULE_COEXISTENCE=PASS",flush=True)
             print("P07_EACH_MODULE_OTHER_FOUR_UNCHANGED=PASS",flush=True)
