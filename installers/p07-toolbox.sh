@@ -25,6 +25,14 @@ VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-r
 SYSTEM_CARE_PUBLIC="V0.1.0"
 SYSTEM_CARE_EXPECTED="0.1.0-rc82"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
+# P07-M04 服务器维护与安全 independent rc83 candidate, exact immutable source.
+M04_BUILD_EXPECTED="0.1.0-rc83"
+M04_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/587874f15df0c82d5adf22d5900c8fe620eafdc4/installers/p07-system-care-rc83-isolated.sh"
+M04_INSTALLER_BLOB="fb250ca3fa33c1f8b238c58f0d6b22e2140bf0b3"
+M04_UI_BLOB="f140f1158351f9dce2e9f9159611af57047424b1"
+M04_ROOT="/opt/vfops-modules/m04"
+M04_RUNTIME="$M04_ROOT/current/vf-system-care.sh"
+
 
 # P07-M05 新服务器初始化 has its OWN runtime/build and no M03/M04 installer calls.
 # The isolated M05 artifact is not publicly distributed yet: do not invent a
@@ -458,37 +466,6 @@ run_server_ops() {
   esac
 }
 
-ensure_system_care_current() {
-  if [[ "$(local_system_care_version || true)" == "$SYSTEM_CARE_EXPECTED" ]]; then
-    return 0
-  fi
-
-  command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
-  local tmp rc
-  tmp="$(mktemp -t p07-system-care.XXXXXX)"
-  chmod 700 "$tmp"
-  if ! curl -fsSL "$SYSTEM_CARE_INSTALLER" -o "$tmp"; then
-    rm -f "$tmp"
-    say "${C_RED}✗ 初始化所需的系统维护模块下载失败。${C_RESET}" >&2
-    return 4
-  fi
-  if ! bash -n "$tmp"; then
-    rm -f "$tmp"
-    say "${C_RED}✗ 初始化所需的系统维护模块校验失败。${C_RESET}" >&2
-    return 5
-  fi
-
-  set +e
-  P07_FORCE_INTERACTIVE=0 bash "$tmp" status >/dev/null 2>&1
-  rc=$?
-  set -e
-  rm -f "$tmp"
-  [[ $rc -eq 0 ]] || {
-    say "${C_RED}✗ 初始化所需的系统维护模块准备失败。${C_RESET}" >&2
-    return "$rc"
-  }
-  [[ "$(local_system_care_version || true)" == "$SYSTEM_CARE_EXPECTED" ]]
-}
 
 run_server_init() {
   screen_clear
@@ -509,19 +486,61 @@ run_server_init() {
   bash "$M05_RUNTIME" menu
 }
 
-local_system_care_version() {
-  command -v vf-system-care >/dev/null 2>&1 || return 1
-  local version contract
-  version="$(NO_COLOR=1 vf-system-care --version 2>/dev/null | awk '{print $NF}' || true)"
-  contract="$(NO_COLOR=1 vf-system-care --ui-contract 2>/dev/null || true)"
-  [[ "$contract" == 'P07_BEGINNER_ZH_V1' ]] || return 1
-  printf '%s' "$version"
+p07_git_blob_sha1() {
+  local file="$1" bytes
+  bytes="$(wc -c < "$file" | tr -d '[:space:]')"
+  { printf 'blob %s\\0' "$bytes"; cat "$file"; } | sha1sum | awk '{print $1}'
+}
+
+m04_verified_current() {
+  local current="$M04_ROOT/current" actual version contract
+  [[ -L "$current" ]] || return 1
+  [[ "$(readlink "$current")" == "releases/$M04_BUILD_EXPECTED" ]] || return 1
+  [[ -f "$M04_RUNTIME" && ! -L "$M04_RUNTIME" ]] || return 1
+  actual="$(p07_git_blob_sha1 "$M04_RUNTIME" 2>/dev/null || true)"
+  [[ "$actual" == "$M04_UI_BLOB" ]] || return 1
+  version="$(NO_COLOR=1 bash "$M04_RUNTIME" --version 2>/dev/null || true)"
+  contract="$(NO_COLOR=1 bash "$M04_RUNTIME" --ui-contract 2>/dev/null || true)"
+  [[ "$version" == "服务器维护与安全 $M04_BUILD_EXPECTED" && "$contract" == "P07_BEGINNER_ZH_V1" ]]
+}
+
+ensure_m04_current() {
+  m04_verified_current && return 0
+  if [[ "$(id -u)" != "0" ]]; then
+    say "${C_RED}P07-M04 服务器维护与安全：首次独立安装需要 root。${C_RESET}" >&2
+    return 3
+  fi
+  for cmd in curl sha1sum mktemp; do
+    command -v "$cmd" >/dev/null 2>&1 || {
+      say "${C_RED}P07-M04 服务器维护与安全：缺少 $cmd，没有升级任何模块。${C_RESET}" >&2
+      return 3
+    }
+  done
+  local tmp actual rc
+  tmp="$(mktemp -t p07-m04-installer.XXXXXXXX)" || return 13
+  chmod 0600 "$tmp"
+  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-time 60 "$M04_INSTALLER_URL" -o "$tmp"; then
+    rm -f "$tmp"; return 4
+  fi
+  actual="$(p07_git_blob_sha1 "$tmp" 2>/dev/null || true)"
+  if [[ "$actual" != "$M04_INSTALLER_BLOB" ]]; then
+    rm -f "$tmp"
+    say "${C_RED}P07-M04 服务器维护与安全：独立安装器文件校验失败。${C_RESET}" >&2
+    return 6
+  fi
+  set +e
+  bash "$tmp" install
+  rc=$?
+  set -e
+  rm -f "$tmp"
+  [[ "$rc" -eq 0 ]] || return "$rc"
+  m04_verified_current || return 13
 }
 
 run_system_care() {
   screen_clear
-  ensure_system_care_current || return $?
-  vf-system-care menu
+  ensure_m04_current || return $?
+  bash "$M04_RUNTIME" menu
 }
 
 main_menu() {
