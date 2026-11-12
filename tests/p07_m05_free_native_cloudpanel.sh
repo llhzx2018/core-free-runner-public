@@ -87,6 +87,30 @@ install_rc=$?
 set -e
 echo "P07_M05_FREE_NATIVE_BOOTSTRAP_RC=$install_rc"
 if [[ "$install_rc" -ne 0 ]]; then
+  python3 - "$RUNNER_TEMP/p07-m05-cloudpanel-private-install.log" <<'PY'
+import pathlib,sys
+# Allowlisted product failure codes ONLY. Never reveal actual installer logs.
+raw=pathlib.Path(sys.argv[1]).read_text(encoding="utf-8",errors="ignore")
+cases=(
+ ("CLOUDPANEL_SELECTED_DATABASE_DAEMON_MISMATCH_NO_REINSTALL","SELECTED_ENGINE_MISMATCH"),
+ ("CLOUDPANEL_INSTALL_FAILED_MYSQL_8.4","INSTALLER_NONZERO_OR_PANEL_NOT_READY"),
+ ("CloudPanel installation incomplete","PANEL_DATABASE_METADATA_MISSING"),
+ ("Traceback","UNHANDLED_PYTHON_ERROR"),
+)
+print("P07_M05_FREE_NATIVE_SAFE_FAILURE_CLASS="+next((v for k,v in cases if k in raw),"OTHER_ERROR"))
+PY
+  for bin in clpctl mysql mariadb nginx; do
+    if command -v "$bin" >/dev/null 2>&1; then
+      echo "P07_M05_FREE_NATIVE_POSTFAIL_BINARY_$bin=FOUND"
+    else
+      echo "P07_M05_FREE_NATIVE_POSTFAIL_BINARY_$bin=ABSENT"
+    fi
+  done
+  if [[ -f /home/clp/htdocs/app/data/db.sq3 ]]; then
+    echo P07_M05_FREE_NATIVE_POSTFAIL_PANEL_SQLITE=PRESENT
+  else
+    echo P07_M05_FREE_NATIVE_POSTFAIL_PANEL_SQLITE=ABSENT
+  fi
   echo P07_M05_FREE_NATIVE_CLOUDPANEL_INSTALL=FAIL_OR_ENV_BLOCKED
   echo P07_M05_FREE_NATIVE_INSTALLER_LOG=PRIVATE_NOT_PUBLISHED
   exit 13
