@@ -222,10 +222,15 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                 elif name.startswith("M04"):
                     run("bash",str(m04),"install",timeout=130)
                 elif name.startswith("M05"):
-                    data=builder.build_bundle(work/"m05-candidate1.zip")
-                    install_m05_via_local_https(
-                        work,Path(data["path"]),str(data["sha256"]),text
-                    )
+                    # Previous real private candidate1 Owner Trial package:
+                    # fetched only into ephemeral private-source checkout.
+                    oldzip=ROOT/"previous_m05/owner-trial/P07-M05-0.1.0-m05-candidate1.zip"
+                    oldraw=oldzip.read_bytes()
+                    oldhash="226f7cb0f4674072979e9946e639500fc05d77f92fec59a508c6eea7303f458b"
+                    self.assertEqual(hashlib.sha256(oldraw).hexdigest(),oldhash)
+                    local_old=work/"m05-candidate1.zip"
+                    local_old.write_bytes(oldraw)
+                    install_m05_via_local_https(work,local_old,oldhash,text)
             sys.path.insert(0,str((PRODUCT/"scripts").resolve()))
             builder=importlib.import_module("build_p07_m05_bundle")
             # Stage-wide deterministic FULL candidate check: build the exact
@@ -234,7 +239,7 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
             first=builder.build_bundle(work/"m05-stage-frozen-A.zip")
             twin=builder.build_bundle(work/"m05-stage-frozen-B.zip")
             self.assertEqual(first["module_id"],"P07-M05")
-            self.assertEqual(first["build_id"],"0.1.0-m05-candidate1")
+            self.assertEqual(first["build_id"],"0.1.0-m05-candidate2")
             self.assertEqual(first["sha256"],twin["sha256"])
             # The release-stage lock is a pure public metadata contract.
             # Refuse source/ZIP drift instead of silently blessing a new hash.
@@ -243,7 +248,7 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
             m05=next(m for m in stage["modules"] if m["id"]=="P07-M05")
             self.assertEqual(stage["product_source_sha"],
                              os.getenv("P07_PRODUCT_SOURCE_PIN",
-                                       "7371f897605701011ba4b3bc18721b9966babbea"))
+                                       "86469cf1ec09561ad5cd2357c6921b0b8d5e4c97"))
             self.assertEqual(first["sha256"],m05["package_identity_digest"])
             self.assertEqual(first["file_count"],m05["package_file_count"])
             self.assertEqual(m05["distribution"],"NOT_RELEASED")
@@ -462,9 +467,11 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                 # M05 is already current. Reinstalling the identical candidate
                 # must be a verified no-op, just like the others.
                 if selected_name.startswith("M05"):
-                    data=builder.build_bundle(work/"m05-repeat.zip")
+                    # Reapply exact old candidate1, not the pending new build.
+                    oldfile=work/"m05-candidate1.zip"
+                    checksum=hashlib.sha256(oldfile.read_bytes()).hexdigest()
                     run("python3",str(ROOT/"installers/p07-m05-atomic.py"),
-                        "install",data["path"],data["sha256"])
+                        "install",str(oldfile),checksum)
                 else:
                     selected(selected_name)
                 after={name:tree_hash(TARGETS[name]) for name in before}
@@ -472,8 +479,9 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
             # Actual next-build atomic M05 upgrade and old-build rollback.
             baseline={name:tree_hash(loc) for name,loc in TARGETS.items()
                       if not name.startswith("M05")}
-            builder.BUILD_ID="0.1.0-m05-candidate2"
+            # Real immutable product candidate2, NOT a synthetic next build.
             second=builder.build_bundle(work/"m05-next-version.zip")
+            self.assertEqual(second["sha256"],first["sha256"])
             run("bash",str(ROOT/"installers/p07-toolbox.sh"),
                 "--install-m05-local",str(second["path"]),second["sha256"],
                 "P07-M05:INSTALL:"+second["sha256"],timeout=100)
