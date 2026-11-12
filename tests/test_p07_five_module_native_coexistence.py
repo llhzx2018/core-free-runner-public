@@ -135,8 +135,8 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                     run("bash",str(m04),"install",timeout=130)
                 elif name.startswith("M05"):
                     data=builder.build_bundle(work/"m05-candidate1.zip")
-                    run("python3",str(PRODUCT/"scripts/install_p07_m05_bundle.py"),
-                        "--archive",data["path"],"--sha256",data["sha256"],timeout=90)
+                    run("python3",str(ROOT/"installers/p07-m05-atomic.py"),
+                        "install",data["path"],data["sha256"],timeout=90)
             sys.path.insert(0,str((PRODUCT/"scripts").resolve()))
             builder=importlib.import_module("build_p07_m05_bundle")
             # Install once, observe ownership and version of the resulting
@@ -161,8 +161,8 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                 # must be a verified no-op, just like the others.
                 if selected_name.startswith("M05"):
                     data=builder.build_bundle(work/"m05-repeat.zip")
-                    run("python3",str(PRODUCT/"scripts/install_p07_m05_bundle.py"),
-                        "--archive",data["path"],"--sha256",data["sha256"])
+                    run("python3",str(ROOT/"installers/p07-m05-atomic.py"),
+                        "install",data["path"],data["sha256"])
                 else:
                     selected(selected_name)
                 after={name:tree_hash(TARGETS[name]) for name in before}
@@ -172,8 +172,8 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                       if not name.startswith("M05")}
             builder.BUILD_ID="0.1.0-m05-candidate2"
             second=builder.build_bundle(work/"m05-next-version.zip")
-            run("python3",str(PRODUCT/"scripts/install_p07_m05_bundle.py"),
-                "--archive",second["path"],"--sha256",second["sha256"])
+            run("python3",str(ROOT/"installers/p07-m05-atomic.py"),
+                "install",second["path"],second["sha256"])
             self.assertEqual(os.readlink(MODULES/"m05/current"),
                              "releases/0.1.0-m05-candidate2")
             verify_modules()
