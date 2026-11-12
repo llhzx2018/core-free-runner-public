@@ -48,6 +48,12 @@ M04_RUNTIME="$M04_ROOT/current/vf-system-care.sh"
 M05_BUILD_EXPECTED="0.1.0-m05-candidate1"
 M05_ROOT="/opt/vfops-modules/m05"
 M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"
+# M05 official artifact has not been published. Never invent a URL or
+# install M03/M04 in its place; only fill these pins after approved distribution.
+M05_BUNDLE_URL=""
+M05_BUNDLE_SHA256=""
+M05_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/8553be2971396533da71bfbd9069d2ddfdb8b058/installers/p07-m05-atomic.py"
+M05_INSTALLER_BLOB="9e0a94c13eb538452a83e98a6007ee5fe97dc1db"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -640,17 +646,62 @@ PY
   [[ "$actual_version" == "P07-M05 新服务器初始化 $installed" ]]
 }
 
-run_server_init() {
-  screen_clear
-  # Only P07-M05 新服务器初始化; never install M03/M04 as hidden dependencies.
-  if [[ ! -x "$M05_RUNTIME" ]]; then
-    say "${C_YELLOW}P07-M05 新服务器初始化的独立安装包尚未正式分发。没有安装或升级其它模块。${C_RESET}"
-    return 7
-  fi
-  if ! m05_verified_current; then
-    say "${C_RED}P07-M05 新服务器初始化的本模块文件/版本身份不匹配，已停止；其它模块保持原样。${C_RESET}" >&2
+ensure_m05_current() {
+  m05_verified_current && return 0
+  if [[ -e "$M05_ROOT/current" || -L "$M05_ROOT/current" ]]; then
+    say "${C_RED}P07-M05 新服务器初始化：已有模块身份或文件异常，拒绝覆盖/回退。${C_RESET}" >&2
     return 13
   fi
+  if [[ -z "$M05_BUNDLE_URL" || -z "$M05_BUNDLE_SHA256" ]]; then
+    say "${C_YELLOW}P07-M05 新服务器初始化独立安装包尚未正式分发；没有安装其他模块。${C_RESET}"
+    return 7
+  fi
+  [[ "$M05_BUNDLE_URL" == https://* &&
+     "$M05_BUNDLE_SHA256" =~ ^[a-f0-9]{64}$ ]] || return 13
+  if [[ "$(id -u)" != "0" ]]; then
+    say "${C_RED}P07-M05 新服务器初始化：首次独立安装需要 root。${C_RESET}" >&2
+    return 3
+  fi
+  for tool in curl sha256sum sha1sum python3 mktemp; do
+    command -v "$tool" >/dev/null 2>&1 || {
+      say "${C_RED}P07-M05 新服务器初始化：缺少 $tool，其他模块未操作。${C_RESET}" >&2
+      return 3
+    }
+  done
+  local bundle installer actual rc
+  bundle="$(mktemp -t p07-m05-package.XXXXXXXX)" || return 13
+  installer="$(mktemp -t p07-m05-installer.XXXXXXXX)" || { rm -f "$bundle"; return 13; }
+  chmod 0600 "$bundle" "$installer"
+  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-time 90 \
+        "$M05_BUNDLE_URL" -o "$bundle"; then
+    rm -f "$bundle" "$installer"; return 4
+  fi
+  actual="$(sha256_file "$bundle" 2>/dev/null || true)"
+  if [[ "$actual" != "$M05_BUNDLE_SHA256" ]]; then
+    rm -f "$bundle" "$installer"; return 6
+  fi
+  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-time 60 \
+        "$M05_INSTALLER_URL" -o "$installer"; then
+    rm -f "$bundle" "$installer"; return 4
+  fi
+  actual="$(p07_git_blob_sha1 "$installer" 2>/dev/null || true)"
+  if [[ "$actual" != "$M05_INSTALLER_BLOB" ]]; then
+    rm -f "$bundle" "$installer"; return 6
+  fi
+  set +e
+  python3 -B "$installer" install "$bundle" "$M05_BUNDLE_SHA256"
+  rc=$?
+  set -e
+  rm -f "$bundle" "$installer"
+  [[ "$rc" -eq 0 ]] || return "$rc"
+  m05_verified_current || return 13
+}
+
+run_server_init() {
+  screen_clear
+  # Independent artifact only: must not install M03/M04 or provision CloudPanel
+  # until the user actually chooses operations inside the M05 menu.
+  ensure_m05_current || return $?
   bash "$M05_RUNTIME" menu
 }
 
