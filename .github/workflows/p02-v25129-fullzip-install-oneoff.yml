@@ -1,0 +1,189 @@
+name: P02 v2.5.129 exact FULL ZIP fresh-install machine check (one-off)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p02-v25129-fullzip-install-oneoff.yml']
+permissions:
+  contents: read
+jobs:
+  full-zip-first-install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      P02_SOURCE_SHA: 28a480c49818e55e8db1228ac74719668a486ec9
+      P02_SOURCE_TREE: b10d84ce02c1affc3bee5ef746959ef9f2779780
+      P02_FULL_SHA256: 8390218ffab6947021b60b65c989698be15aa6a67335862d531f193a9fe98a01
+      P02_VERSION: 2.5.129
+    steps:
+      - name: Transient checkout of exact private P02 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 Node24
+        with:
+          repository: llhzx2018/vf-library
+          ref: 28a480c49818e55e8db1228ac74719668a486ec9
+          token: \${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+
+      - name: Reproduce exactly the already-delivered candidate FULL ZIP in disposable workspace
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$P02_SOURCE_SHA"
+          test "$(git -C product show -s --format=%T HEAD)" = "$P02_SOURCE_TREE"
+          test "$(cat product/VERSION)" = "$P02_VERSION"
+          (cd product && python3 scripts/verify-source-manifest.py)
+          curl --fail --silent --show-error --location --max-time 25 \
+            https://raw.githubusercontent.com/llhzx2018/core-updates/main/projects/P02.json \
+            -o "$RUNNER_TEMP/p02-channel.json"
+          python3 - "$RUNNER_TEMP/p02-channel.json" "$RUNNER_TEMP/p02-sources.txt" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert x['project_id']=='P02' and x['component_id']=='APP' and x['enabled'] is True
+          assert x['target_version']=='2.5.128'
+          sources=x['from_versions']+[x['target_version']]
+          assert len(sources)==21 and len(set(sources))==21
+          open(sys.argv[2],'w').write('\n'.join(sources)+'\n')
+          print('P02_OFFICIAL_SOURCE_IDENTITY_21=PASS')
+          PY
+          mapfile -t sources < "$RUNNER_TEMP/p02-sources.txt"
+          args=()
+          for version in "\${sources[@]}"; do args+=(--source-version "$version"); done
+          (
+            cd product
+            python3 scripts/build-candidate.py \
+              --out build/p02-oneoff-full-install \
+              --channel-json "$RUNNER_TEMP/p02-channel.json" \
+              --source-commit "$P02_SOURCE_SHA" \
+              --source-tree "$P02_SOURCE_TREE" \
+              --source-ref main "\${args[@]}"
+          )
+          full=product/build/p02-oneoff-full-install/VF_Library_V2.5.129_FULL_CANDIDATE.zip
+          test -s "$full"
+          actual="$(sha256sum "$full" | cut -d' ' -f1)"
+          test "$actual" = "$P02_FULL_SHA256"
+          unzip -t "$full" >/dev/null
+          echo P02_129_OFFLINE_FULL_CANDIDATE_EXACT_BYTES=PASS
+          echo P02_129_NO_RELEASE_OR_ARTIFACT_UPLOAD=YES
+
+      - name: Real install of exact candidate FULL archive, original PHP SQLite and synthetic user data
+        shell: bash
+        env:
+          P02_TEST_PASS: P02-Disposable-Full-Zip-Only-129!
+        run: |
+          set -Eeuo pipefail
+          root="$(mktemp -d "\${RUNNER_TEMP}/p02-fullzip-XXXXXX")"
+          server_pid=''
+          cleanup(){
+            if [[ -n "$server_pid" ]]; then kill "$server_pid" 2>/dev/null || :; wait "$server_pid" 2>/dev/null || :; fi
+            rm -rf "$root"
+            echo P02_TEST_PRIVATE_RUNTIME_CLEANED=YES
+          }
+          trap cleanup EXIT
+          site="$root/site"; mkdir -p "$site"
+          unzip -qq product/build/p02-oneoff-full-install/VF_Library_V2.5.129_FULL_CANDIDATE.zip -d "$site"
+          test -f "$site/setup.php" && test -f "$site/cli/verify.php"
+          test "$(cat "$site/VERSION.txt")" = "$P02_VERSION"
+          test ! -e "$site/app/.runtime.php"
+          test -z "$(find "$site" -type f \( -name '*.sqlite' -o -name '*.db' -o -name '.env' \) -print -quit)"
+          php -r 'exit(extension_loaded("pdo_sqlite")&&extension_loaded("sqlite3")?0:1);'
+          if ! php -r 'exit(extension_loaded("zip")?0:1);'; then
+            sudo apt-get update -qq
+            sudo apt-get install -y php8.3-zip
+          fi
+          php -r 'exit(extension_loaded("zip")?0:1);'
+          base=http://127.0.0.1:18786
+          cookie="$root/cookie"
+          php -d display_errors=0 -S 127.0.0.1:18786 -t "$site" > "$root/php.log" 2>&1 &
+          server_pid=$!
+          for i in $(seq 1 70); do
+            if curl -fsS "$base/setup.php" -o "$root/setup" 2>/dev/null; then break; fi
+            sleep 0.25
+          done
+          curl -fsS -c "$cookie" "$base/setup.php" > "$root/setup"
+          setup_csrf="$(python3 - "$root/setup" <<'PY'
+          import html,re,sys
+          text=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'name="setup_csrf" value="([^"]+)"',text)
+          assert m,'missing setup csrf'
+          print(html.unescape(m.group(1)))
+          PY
+          )"
+          status="$(curl -sS -o "$root/setup-post" -w '%{http_code}' -b "$cookie" -c "$cookie" \
+            -H "Origin: $base" --data-urlencode "setup_csrf=$setup_csrf" \
+            --data-urlencode "password=$P02_TEST_PASS" \
+            --data-urlencode "password_confirm=$P02_TEST_PASS" "$base/setup.php")"
+          test "$status" = 303
+          curl -fsS -b "$cookie" -c "$cookie" "$base/api.php?action=session" > "$root/session"
+          csrf="$(python3 - "$root/session" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          assert d['ok'] and d['site']['auth'] is True and d['version']=='2.5.129'
+          print(d['csrf'])
+          PY
+          )"
+          post_api(){
+            action="$1"; file="$2"; output="$3"
+            curl -fsS -b "$cookie" -c "$cookie" -H "Origin: $base" -H "X-CSRF-Token: $csrf" \
+              -H "Content-Type: application/json" --data-binary "@$file" \
+              "$base/api.php?action=$action" > "$output"
+            python3 - "$output" <<'PY'
+          import json,sys
+          assert json.load(open(sys.argv[1],encoding='utf-8'))['ok'] is True
+          PY
+          }
+          printf '%s' '{"name":"FULL ZIP Synthetic Category","icon":"folder"}' > "$root/category.json"
+          post_api category_save "$root/category.json" "$root/category.result"
+          python3 - "$root/category.result" "$root/content.json" <<'PY'
+          import json,sys
+          id=int(json.load(open(sys.argv[1]))['id'])
+          json.dump({'category_id':id,'title':'FULL ZIP Synthetic Article',
+            'content':'P02_FULL_ZIP_ORIGINAL_129','content_mode':'article','content_format':'markdown',
+            'primary_action':'read','status':'active'},open(sys.argv[2],'w'))
+          PY
+          post_api content_save "$root/content.json" "$root/content.result"
+          item_id="$(python3 - "$root/content.result" <<'PY'
+          import json,sys
+          print(json.load(open(sys.argv[1]))['id'])
+          PY
+          )"
+          curl -fsS -b "$cookie" "$base/api.php?action=content_get&id=$item_id" > "$root/content-read"
+          python3 - "$root/content-read" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); assert d['ok'] is True
+          assert d['item']['content']=='P02_FULL_ZIP_ORIGINAL_129'
+          PY
+          printf '{}' > "$root/empty.json"
+          curl -fsS -b "$cookie" -c "$cookie" -H "Origin: $base" -H "X-CSRF-Token: $csrf" \
+            -H "Content-Type: application/json" --data-binary "@$root/empty.json" \
+            "$base/scratch-action.php?action=create" > "$root/scratch-create"
+          python3 - "$root/scratch-create" "$root/scratch-save.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1])); assert d['ok'] is True
+          json.dump({'id':d['tab']['id'],'content':'P02_FULL_ZIP_SCRATCH_129'},open(sys.argv[2],'w'))
+          PY
+          curl -fsS -b "$cookie" -c "$cookie" -H "Origin: $base" -H "X-CSRF-Token: $csrf" \
+            -H "Content-Type: application/json" --data-binary "@$root/scratch-save.json" \
+            "$base/scratch-action.php?action=save" > "$root/scratch-save"
+          curl -fsS -b "$cookie" "$base/scratch-action.php?action=list" > "$root/scratch-list"
+          python3 - "$root/scratch-save" "$root/scratch-list" <<'PY'
+          import json,sys
+          assert json.load(open(sys.argv[1]))['ok'] is True
+          j=json.load(open(sys.argv[2]))
+          assert j['ok'] is True and any(x['content']=='P02_FULL_ZIP_SCRATCH_129' for x in j['data']['open'])
+          PY
+          printf '%s' '{"note":"synthetic FULL ZIP install acceptance"}' > "$root/backup.json"
+          post_api backup "$root/backup.json" "$root/backup.result"
+          (cd "$site" && php cli/verify.php) > "$root/verify.result"
+          python3 - "$root/verify.result" <<'PY'
+          import json,sys
+          assert json.load(open(sys.argv[1]))['ok'] is True
+          PY
+          echo P02_129_EXACT_FULL_ZIP_FRESH_INSTALL_CRUD_SCRATCH_BACKUP=PASS
+          echo P02_129_ATOMIC_UPGRADE_21_SOURCE_AND_ROLLBACK=NOT_EVALUATED
+
+      - name: Remove all private source and generated candidate files
+        if: always()
+        shell: bash
+        run: |
+          rm -rf product
+          echo P02_PRIVATE_SOURCE_AND_PACKAGE_PERSISTED_IN_PUBLIC=NO
