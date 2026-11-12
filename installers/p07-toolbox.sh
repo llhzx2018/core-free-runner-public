@@ -545,22 +545,74 @@ run_server_ops() {
 }
 
 
+m05_verified_current() {
+  local current="/opt/vfops-modules/m05/current" installed='' link actual_version
+  [[ -L "$current" ]] || return 1
+  link="$(readlink "$current")"
+  [[ "$link" =~ ^releases/([A-Za-z0-9._-]+)$ ]] || return 1
+  installed="${BASH_REMATCH[1]}"
+  [[ -d "/opt/vfops-modules/m05/releases/$installed" &&
+     ! -L "/opt/vfops-modules/m05/releases/$installed" ]] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  # Read-only module-own manifest, NOT the Toolbox's hardcoded bootstrap build:
+  # a properly upgraded local M05 can continue working without changing M01-M04.
+  python3 -B - "$current" "$installed" <<'PY'
+import hashlib,json,pathlib,re,sys
+root,build=pathlib.Path(sys.argv[1]),sys.argv[2]
+try:
+    manifest=root/"MODULE_MANIFEST.json"
+    if manifest.is_symlink() or not manifest.is_file():
+        raise ValueError("manifest")
+    data=json.loads(manifest.read_text(encoding="utf-8"))
+    if (data.get("schema")!="vf.p07.module-bundle.v1" or
+        data.get("module_id")!="P07-M05" or
+        data.get("module_build_id")!=build or
+        data.get("entrypoint")!="bin/vfops-init-entry" or
+        data.get("installation_isolation")!="P07-M05_ONLY"):
+        raise ValueError("identity")
+    if (root/"MODULE_ID").read_text(encoding="utf-8").strip()!="P07-M05":
+        raise ValueError("module")
+    if (root/"MODULE_BUILD_ID").read_text(encoding="utf-8").strip()!=build:
+        raise ValueError("build")
+    files=data.get("files")
+    if not isinstance(files,dict) or not 20<=len(files)<=400:
+        raise ValueError("files")
+    if not {"bin/vfops-init-entry","bin/vfops-init-ui",
+            "bin/vfops-init-core","MODULE_ID","MODULE_BUILD_ID"}.issubset(files):
+        raise ValueError("expected")
+    for name,digest in files.items():
+        if not isinstance(name,str) or not isinstance(digest,str):
+            raise ValueError("types")
+        if not re.fullmatch("[a-f0-9]{64}",digest):
+            raise ValueError("hash")
+        if (name.startswith("/") or "\\" in name or ".." in pathlib.PurePosixPath(name).parts
+            or not (name.startswith(("bin/","lib/")) or name in
+                    ("VERSION","BUILD_ID","MODULE_ID","MODULE_BUILD_ID"))):
+            raise ValueError("path")
+        item=root/name
+        if item.is_symlink() or not item.is_file():
+            raise ValueError("file")
+        if hashlib.sha256(item.read_bytes()).hexdigest()!=digest:
+            raise ValueError("changed")
+except (OSError,UnicodeError,ValueError,TypeError,KeyError,RecursionError):
+    raise SystemExit(13)
+PY
+  [[ "$?" == 0 ]] || return 1
+  actual_version="$(NO_COLOR=1 bash "$M05_RUNTIME" --version 2>/dev/null || true)"
+  [[ "$actual_version" == "P07-M05 新服务器初始化 $installed" ]]
+}
+
 run_server_init() {
   screen_clear
-  # Only P07-M05 新服务器初始化 may be called; nothing here installs,
-  # upgrades, loads or restarts P07-M03 网站与数据 or P07-M04 系统维护与安全.
+  # Only P07-M05 新服务器初始化; never install M03/M04 as hidden dependencies.
   if [[ ! -x "$M05_RUNTIME" ]]; then
     say "${C_YELLOW}P07-M05 新服务器初始化的独立安装包尚未正式分发。没有安装或升级其它模块。${C_RESET}"
     return 7
   fi
-
-  local actual_version
-  actual_version="$(NO_COLOR=1 bash "$M05_RUNTIME" --version 2>/dev/null || true)"
-  if [[ "$actual_version" != "P07-M05 新服务器初始化 $M05_BUILD_EXPECTED" ]]; then
-    say "${C_RED}P07-M05 新服务器初始化的独立构建身份不匹配，已停止；其它模块保持原样。${C_RESET}" >&2
+  if ! m05_verified_current; then
+    say "${C_RED}P07-M05 新服务器初始化的本模块文件/版本身份不匹配，已停止；其它模块保持原样。${C_RESET}" >&2
     return 13
   fi
-
   bash "$M05_RUNTIME" menu
 }
 
