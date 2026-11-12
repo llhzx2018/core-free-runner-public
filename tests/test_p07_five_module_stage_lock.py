@@ -120,7 +120,8 @@ class StageLock(unittest.TestCase):
         with self.assertRaises(ValueError): verify(bad,self.toolbox)
 
     def test_toolbox_help_has_independent_m05_without_stale_m03_label(self):
-        self.assertIn("新服务器初始化      系统更新/CloudPanel/数据库选择",self.toolbox)
+        self.assertIn("5. 新服务器初始化        系统更新/CloudPanel/数据库选择",self.toolbox)
+        self.assertIn("系统更新/CloudPanel/数据库选择",self.toolbox)
         self.assertIn("--modules) modules_status_readonly",self.toolbox)
         self.assertIn("P07-M05 新服务器初始化",self.toolbox)
 
