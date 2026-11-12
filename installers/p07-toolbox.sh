@@ -167,20 +167,37 @@ sha256_file() {
 }
 
 m02_verified_current() {
-  local current="$M02_ROOT/current" target actual version build
+  local current="$M02_ROOT/current" script="$M02_ROOT/current/vps-audit.sh"
+  local installed='' link actual version build
   [[ -L "$current" ]] || return 1
-  [[ "$(readlink "$current")" == "releases/$VPS_AUDIT_BUILD_EXPECTED" ]] || return 1
-  target="$current/vps-audit.sh"
-  [[ -f "$target" && ! -L "$target" ]] || return 1
-  actual="$(sha256_file "$target" 2>/dev/null || true)"
-  [[ "$actual" == "$VPS_AUDIT_SHA256" ]] || return 1
-  version="$(NO_COLOR=1 bash "$target" --version 2>/dev/null | awk '{print $NF}' || true)"
-  build="$(NO_COLOR=1 bash "$target" --build-id 2>/dev/null || true)"
-  [[ "$version" == "$VPS_AUDIT_EXPECTED" && "$build" == "$VPS_AUDIT_BUILD_EXPECTED" ]]
+  link="$(readlink "$current")"
+  [[ "$link" =~ ^releases/([A-Za-z0-9._-]+)$ ]] || return 1
+  installed="${BASH_REMATCH[1]}"
+  [[ -f "$script" && ! -L "$script" ]] || return 1
+  actual="$(sha256_file "$script" 2>/dev/null || true)"
+  [[ "$actual" =~ ^[a-f0-9]{64}$ ]] || return 1
+  if [[ -f "$current/MANIFEST.sha256" && ! -L "$current/MANIFEST.sha256" ]]; then
+    local expected name
+    read -r expected name < "$current/MANIFEST.sha256" || return 1
+    [[ "$name" == "vps-audit.sh" && "$expected" == "$actual" ]] || return 1
+    [[ "$(wc -l < "$current/MANIFEST.sha256")" -eq 1 ]] || return 1
+  else
+    # Legacy first-install candidate had no local manifest.
+    [[ "$installed" == "$VPS_AUDIT_BUILD_EXPECTED" &&
+       "$actual" == "$VPS_AUDIT_SHA256" ]] || return 1
+  fi
+  version="$(NO_COLOR=1 bash "$script" --version 2>/dev/null | awk '{print $NF}' || true)"
+  build="$(NO_COLOR=1 bash "$script" --build-id 2>/dev/null || true)"
+  [[ -n "$version" && "$version" =~ ^V[0-9]+\.[0-9]+\.[0-9]+$ &&
+     "$build" == "$installed" ]]
 }
 
 ensure_m02_current() {
   if m02_verified_current; then return 0; fi
+  if [[ -e "$M02_ROOT/current" || -L "$M02_ROOT/current" ]]; then
+    say "${C_RED}P07-M02 服务器性能检测（VPS 验机）：现有版本或文件校验异常；拒绝自动回退。${C_RESET}" >&2
+    return 13
+  fi
   if [[ "$(id -u)" != "0" ]]; then
     say "${C_RED}P07-M02 服务器性能检测：独立模块首次安装或升级需要 root；未修改其他模块。${C_RESET}" >&2
     return 3
@@ -230,6 +247,8 @@ ensure_m02_current() {
   if ! install -m 0755 -- "$tmp" "$stage/vps-audit.sh"; then
     rm -f "$tmp"; rm -rf -- "$stage"; return 13
   fi
+  printf '%s  vps-audit.sh\n' "$actual" > "$stage/MANIFEST.sha256" || { rm -f "$tmp"; rm -rf -- "$stage"; return 13; }
+  chmod 0644 "$stage/MANIFEST.sha256"
   rm -f "$tmp"
   if ! mv -T -- "$stage" "$dest"; then rm -rf -- "$stage"; return 13; fi
   ln -s "releases/$VPS_AUDIT_BUILD_EXPECTED" "$link" || return 13
