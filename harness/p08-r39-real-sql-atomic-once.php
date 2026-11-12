@@ -94,7 +94,7 @@ file_put_contents($site.'/.env',$env);
 chmod($site.'/.env',0600);
 $installed=$private.'/installation/installed.json';
 file_put_contents($installed,json_encode([
-    'project_id'=>'P08','status'=>'INSTALLED','database_driver'=>'sqlite',
+    'project_id'=>'P08','status'=>'INSTALLED','database_driver'=>$engine,
 ],JSON_THROW_ON_ERROR|JSON_UNESCAPED_SLASHES)."\n");
 chmod($installed,0600);
 $lock=$private.'/maintenance/write-gate.lock';
@@ -118,7 +118,8 @@ echo "P08_R35_WRONG_BRIDGE_FULL_TRUST_REFUSED=PASS\n";
 // Old flat 0.1.0 cannot prove its own PHP-FPM stop. The test intentionally
 // supplies an isolated true callback only after proving false refuses early.
 $coordinator=new \VF\AdOps\Upgrade\OfflineBridgeCoordinator();
-$dbConfig=['driver'=>'sqlite','database'=>$database];
+$dbConfig=['driver'=>$engine,'database'=>$database,'host'=>'127.0.0.1',
+    'port'=>3306,'username'=>'root','password'=>$password];
 $trustedOriginal=$shaOf($site.'/FULL_MANIFEST.json');
 try {
     $coordinator->convert($site,$bridge,$originalSha,$trustedOriginal,
