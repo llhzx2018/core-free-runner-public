@@ -15,7 +15,7 @@ class UnifiedM04Route(unittest.TestCase):
     def test_pinned_installer_and_own_directory(self):
         text = TOOLBOX.read_text()
         self.assertIn("M04_ROOT=\"/opt/vfops-modules/m04\"", text)
-        self.assertIn("M04_INSTALLER_BLOB=\"fb250ca3fa33c1f8b238c58f0d6b22e2140bf0b3\"", text)
+        self.assertIn("M04_INSTALLER_BLOB=\"d39cef5d0915a99753d688f10fb1dbe74c0dac98\"", text)
         self.assertIn("M04_BUILD_EXPECTED=\"0.1.0-rc83\"", text)
         self.assertNotIn("ensure_system_care_current", text)
         fn = text[text.index("run_system_care() {"):text.index("\nmain_menu() {")]
