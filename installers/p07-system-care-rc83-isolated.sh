@@ -122,9 +122,40 @@ install_only_m04() {
   say 'P07-M04 服务器维护与安全：独立模块已安装，其他模块未更新。'
 }
 
+rollback_m04_only() {
+  # Restore only the selected verified M04 release. Never call M03/VF Ops.
+  local build="${1:-}" confirmation="${2:-}" old current target link lock_fd
+  [[ "$(id -u)" == "0" && "$build" == "$MODULE_VERSION" &&
+     "$confirmation" == "P07-M04:$MODULE_VERSION" ]] || deny
+  for tool in flock readlink sha1sum; do
+    command -v "$tool" >/dev/null 2>&1 || deny
+  done
+  lock_path /opt/vfops-modules
+  lock_path "$MODULE_ROOT"
+  lock_path "$MODULE_ROOT/releases"
+  [[ ! -L "$MODULE_ROOT/.install.lock" ]] || deny
+  exec {lock_fd}>"$MODULE_ROOT/.install.lock" || deny
+  flock -x "$lock_fd" || deny
+  current="$MODULE_ROOT/current"
+  [[ -L "$current" ]] || deny
+  old="$(readlink "$current")"
+  [[ "$old" =~ ^releases/[A-Za-z0-9._-]+$ &&
+     -d "$MODULE_ROOT/$old" && ! -L "$MODULE_ROOT/$old" ]] || deny
+  target="$MODULE_ROOT/releases/$MODULE_VERSION"
+  verify_own_release "$target"
+  if [[ "$old" != "releases/$MODULE_VERSION" ]]; then
+    link="$MODULE_ROOT/.current-rollback-$"
+    [[ ! -e "$link" && ! -L "$link" ]] || deny
+    ln -s "releases/$MODULE_VERSION" "$link" || deny
+    mv -Tf -- "$link" "$current" || { rm -f "$link"; deny; }
+  fi
+  say 'P07-M04 服务器维护与安全：仅本模块已恢复指定版本，其他模块未改变。'
+}
+
 case "${1:-}" in
   --version) say "P07-M04 服务器维护与安全 $MODULE_VERSION" ;;
-  --help) say 'P07-M04 独立候选安装器；install 安装当前固定版本，不触碰其他模块。' ;;
+  --help) say 'P07-M04 服务器维护与安全：install 安装；rollback <版本> <P07-M04:版本> 回退本模块。' ;;
   install) install_only_m04 ;;
+  rollback) [[ "$#" == 3 ]] || deny; rollback_m04_only "$2" "$3" ;;
   *) deny ;;
 esac
