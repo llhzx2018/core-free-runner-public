@@ -152,8 +152,8 @@ def verify_saved_release(root: Path, build: str) -> None:
             deny("回滚目标文件清单异常")
         if not BINS.issubset(files) or not META.issubset(files):
             deny("回滚目标运行文件缺失")
-        if (root / "MODULE_ID").read_bytes() != b"P07-M05\\n" or
-                (root / "MODULE_BUILD_ID").read_bytes() != (build + "\\n").encode()):
+        if (root / "MODULE_ID").read_bytes() != b"P07-M05\n" or
+                (root / "MODULE_BUILD_ID").read_bytes() != (build + "\n").encode()):
             deny("回滚目标内部身份不匹配")
         actual = set()
         for item in root.rglob("*"):
