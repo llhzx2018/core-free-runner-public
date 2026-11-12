@@ -1,0 +1,104 @@
+name: P08 R54 independent site-user cron installer idle check (one-off)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p08-r54-cron-idle-once.yml'
+permissions:
+  contents: read
+jobs:
+  isolated-cron:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout disposable public-safe workflow
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Checkout exact private P08 product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: 67f4e51074da0a3d7b3418c683ad4c87e8dbdffd
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-p08
+      - name: Install CLI PHP 8.4 and lock exact source
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: none
+          extensions: sodium, posix, zip
+          coverage: none
+      - name: Source-bound Cron and Owner regressions
+        run: |
+          set -euo pipefail
+          test "$(git -C private-p08 rev-parse HEAD)" = "67f4e51074da0a3d7b3418c683ad4c87e8dbdffd"
+          grep -Fq 'PUBLIC_KEY_HEX = null' private-p08/src/Upgrade/UpdateAuthority.php
+          cd private-p08
+          bash tests/test_cloudpanel_owner_cron_install.sh
+          php tests/test_owner_upgrade_worker_cron.php
+          php tests/test_owner_upgrade_job.php
+          bash scripts/dev_check.sh > "$RUNNER_TEMP/p08-r54-dev-check.log" 2>&1 || { tail -n 38 "$RUNNER_TEMP/p08-r54-dev-check.log"; exit 1; }
+          grep -F 'R1_LOCAL_SOURCE_TESTS=PASS' "$RUNNER_TEMP/p08-r54-dev-check.log"
+          echo P08_R54_EXACT_SOURCE_REGRESSION=PASS
+      - name: Prepare *disposable* isolated CloudPanel-shaped site
+        run: |
+          set -euo pipefail
+          test "$(id -un)" = runner
+          sudo test ! -e /etc/cron.d/vf-adops-owner-upgrade
+          sudo test ! -L /etc/cron.d/vf-adops-owner-upgrade
+          test ! -e /home/runner/htdocs/adops.kewaro.com
+          if ! sudo systemctl status cron >/dev/null 2>&1 && ! systemctl list-unit-files cron.service --no-legend | grep -q cron.service; then
+            sudo apt-get update -qq >/dev/null
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq cron >/dev/null
+          fi
+          sudo systemctl start cron
+          sudo systemctl is-active --quiet cron
+          sha=$(git -C private-p08 rev-parse HEAD)
+          site=/home/runner/htdocs/adops.kewaro.com
+          sudo mkdir -p "$site/releases/$sha/src/Upgrade" "$site/releases/$sha/src/Support" "$site/storage/app/private/adops/upgrade" "$site/storage/app/private/adops/maintenance"
+          sudo cp private-p08/VF_PROJECT.json "$site/VF_PROJECT.json"
+          sudo cp private-p08/VF_PROJECT.json "$site/releases/$sha/VF_PROJECT.json"
+          sudo cp private-p08/src/Upgrade/OwnerUpgradeJob.php private-p08/src/Upgrade/owner-upgrade-worker.php private-p08/src/Upgrade/owner-upgrade-cron-tick.php private-p08/src/Upgrade/UpdateAuthority.php "$site/releases/$sha/src/Upgrade/"
+          sudo cp private-p08/src/Support/Autoload.php "$site/releases/$sha/src/Support/Autoload.php"
+          sudo ln -s "releases/$sha" "$site/current"
+          sudo chown -R runner:runner "$site"
+          sudo test "$(stat -c %U "$site")" = runner
+          echo P08_R54_DISPOSABLE_PRIVATE_SITE=READY
+      - name: Real cron.d install/readback and site-user tick without Owner request
+        run: |
+          set -euo pipefail
+          entry=private-p08/src/Upgrade/cloudpanel-owner-cron-install.sh
+          site=/home/runner/htdocs/adops.kewaro.com
+          sudo bash "$entry" --check runner 8.4 | grep -Fx 'P08_R54_CRON=READY_NOT_INSTALLED'
+          sudo bash "$entry" --apply runner 8.4 | grep -Fx 'P08_R54_CRON=INSTALLED_IDLE_SAFE'
+          sudo bash "$entry" --apply runner 8.4 | grep -Fx 'P08_R54_CRON=ALREADY_INSTALLED'
+          sudo test "$(stat -c %U /etc/cron.d/vf-adops-owner-upgrade)" = root
+          sudo test "$(stat -c %a /etc/cron.d/vf-adops-owner-upgrade)" = 644
+          sudo grep -Fq 'runner /usr/bin/php8.4 /home/runner/htdocs/adops.kewaro.com/current/src/Upgrade/owner-upgrade-cron-tick.php /home/runner/htdocs/adops.kewaro.com' /etc/cron.d/vf-adops-owner-upgrade
+          sudo runuser -u runner -- /usr/bin/php8.4 "$site/current/src/Upgrade/owner-upgrade-cron-tick.php" "$site"
+          test ! -e "$site/storage/app/private/adops/upgrade/owner-job.json"
+          echo P08_R54_CRON_INSTALL_AND_SEPARATE_SITE_USER_IDLE_TICK=PASS
+          printf '{"type":"P08_POINTER_MAINTENANCE_V1"}\n' > "$site/storage/app/private/adops/maintenance/maintenance.json"
+          if sudo runuser -u runner -- /usr/bin/php8.4 "$site/current/src/Upgrade/owner-upgrade-cron-tick.php" "$site"; then
+            echo P08_R54_CRON_MAINTENANCE_UNSAFE >&2
+            exit 1
+          fi
+          test ! -e "$site/storage/app/private/adops/upgrade/owner-job.json"
+          rm "$site/storage/app/private/adops/maintenance/maintenance.json"
+          sudo runuser -u runner -- /usr/bin/php8.4 "$site/current/src/Upgrade/owner-upgrade-cron-tick.php" "$site"
+          echo P08_R54_MAINTENANCE_REFUSED_AND_CLEARED=PASS
+          echo P08_R54_ACTUAL_SCHEDULED_CRON_WAKE_AND_BROWSER_CLICK=NOT_PROVEN
+      - name: Remove isolated cron.d entry, fake site, transient logs and source
+        if: always()
+        run: |
+          if [ -f /etc/cron.d/vf-adops-owner-upgrade ] && [ ! -L /etc/cron.d/vf-adops-owner-upgrade ]; then
+            sudo rm -f /etc/cron.d/vf-adops-owner-upgrade
+          fi
+          if [ -d /home/runner/htdocs/adops.kewaro.com ] && [ ! -L /home/runner/htdocs/adops.kewaro.com ]; then
+            sudo rm -rf /home/runner/htdocs/adops.kewaro.com
+          fi
+          rm -rf private-p08
+          rm -f "$RUNNER_TEMP/p08-r54-dev-check.log"
+          echo P08_R54_TEMP_CRON_AND_PRIVATE_WORKSPACE_CLEANUP=COMPLETE
