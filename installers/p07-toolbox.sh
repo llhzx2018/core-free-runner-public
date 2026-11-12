@@ -52,8 +52,8 @@ M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"
 # install M03/M04 in its place; only fill these pins after approved distribution.
 M05_BUNDLE_URL=""
 M05_BUNDLE_SHA256=""
-M05_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/8553be2971396533da71bfbd9069d2ddfdb8b058/installers/p07-m05-atomic.py"
-M05_INSTALLER_BLOB="9e0a94c13eb538452a83e98a6007ee5fe97dc1db"
+M05_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/b91aee02cc8e44b5da16c1b3200d3c158e5a1fb9/installers/p07-m05-atomic.py"
+M05_INSTALLER_BLOB="2b4f62da2142c098fa739d83bb22cbc890e52c24"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
