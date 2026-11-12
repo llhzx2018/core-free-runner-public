@@ -288,8 +288,7 @@ rollback_m02_current() {
   [[ -d "$target" && ! -L "$target" &&
      -f "$target/MANIFEST.sha256" && ! -L "$target/MANIFEST.sha256" &&
      -f "$target/vps-audit.sh" && ! -L "$target/vps-audit.sh" ]] || return 13
-  [[ "$(cat "$target/MANIFEST.sha256")" ==
-     "$VPS_AUDIT_SHA256  vps-audit.sh" &&
+  [[ "$(cat "$target/MANIFEST.sha256")" == "$VPS_AUDIT_SHA256  vps-audit.sh" &&
      "$(wc -l < "$target/MANIFEST.sha256")" == 1 ]] || return 13
   actual="$(sha256_file "$target/vps-audit.sh")"
   [[ "$actual" == "$VPS_AUDIT_SHA256" ]] || return 13
