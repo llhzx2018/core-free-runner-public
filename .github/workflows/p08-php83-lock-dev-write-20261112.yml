@@ -1,0 +1,123 @@
+name: P08 PHP83 locked Composer dependency correction (temporary)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/p08-php83-lock-dev-write-20261112.yml
+
+permissions:
+  contents: read
+
+jobs:
+  php83-lockfile-repair:
+    if: >-
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'maintenance/p08-php83-lock-dev-write-20261112'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      P08_EXACT_SHA: 1adfe806b509cf9aab8fcd494ac18266b4e78356
+    steps:
+      - name: Check out actual P08 development branch exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: ${{ env.P08_EXACT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p08
+
+      - name: Set actual supported PHP 8.3 runtime
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, pdo_sqlite, mbstring, zip, xml
+          coverage: none
+
+      - name: Generate safe locked Symfony 7 compatible dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p08 rev-parse HEAD)" = "$P08_EXACT_SHA"
+          test -z "$(git -C p08 status --porcelain --untracked-files=all)"
+          cd p08
+          composer config platform.php 8.3.6
+          if composer update 'symfony/*' --with-all-dependencies --no-scripts \
+             --no-interaction --no-progress --prefer-dist \
+             > "$RUNNER_TEMP/p08-composer83.log" 2>&1; then
+            echo P08_PHP83_LOCK_RESOLVE=PASS
+          else
+            echo P08_PHP83_LOCK_RESOLVE=FAIL
+            tail -n 26 "$RUNNER_TEMP/p08-composer83.log"
+            exit 1
+          fi
+          if composer install --no-dev --no-scripts --prefer-dist \
+             --no-interaction --no-progress --optimize-autoloader \
+             > "$RUNNER_TEMP/p08-install83.log" 2>&1; then
+            echo P08_PHP83_ACTUAL_LOCKED_INSTALL=PASS
+          else
+            echo P08_PHP83_ACTUAL_LOCKED_INSTALL=FAIL
+            tail -n 22 "$RUNNER_TEMP/p08-install83.log"
+            exit 1
+          fi
+          composer check-platform-reqs --no-dev > "$RUNNER_TEMP/p08-platform.log" 2>&1
+          echo P08_PHP83_PLATFORM_REQS=PASS
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          proj=json.loads(Path('composer.json').read_text(encoding='utf-8'))
+          lock=json.loads(Path('composer.lock').read_text(encoding='utf-8'))
+          assert proj['config']['platform']['php']=='8.3.6'
+          sym8=[p['name'] for p in lock['packages']
+                if p['name'].startswith('symfony/') and p['version'].lstrip('v').startswith('8.')]
+          assert not sym8, sym8
+          assert lock['platform']['php']=='^8.3'
+          print("P08_PHP83_SYMFONY8_LOCKED_COUNT=0")
+          print("P08_PHP83_LOCK_PACKAGES="+str(len(lock['packages'])))
+          PY
+          test -n "$(git status --porcelain -- composer.json composer.lock)"
+          git add -- composer.json composer.lock
+          git -c user.name="VF Development Agent" -c user.email="vf-agent@users.noreply.github.com" \
+            commit -m "fix(p08-full): lock PHP 8.3-compatible Symfony and reproducible Composer dependencies" \
+            > "$RUNNER_TEMP/p08-lock-commit.log"
+          echo P08_PHP83_LOCK_COMMIT=$(git rev-parse HEAD)
+          echo P08_PHP83_COMPOSER_LOCK_SHA256=$(sha256sum composer.lock | cut -d ' ' -f1)
+          echo P08_NO_USER_DATA_OR_PRODUCTION=YES
+
+      - name: Push only verified Composer manifests to existing P08 task branch
+        shell: bash
+        env:
+          P08_DEV_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$P08_DEV_WRITE_TOKEN" || { echo P08_DEV_WRITE_CAPABILITY=MISSING; exit 1; }
+          cat > "$RUNNER_TEMP/p08-askpass.sh" <<'SH'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf '%s\n' 'x-access-token' ;;
+            *) printf '%s\n' "$P08_DEV_WRITE_TOKEN" ;;
+          esac
+          SH
+          chmod 0700 "$RUNNER_TEMP/p08-askpass.sh"
+          export GIT_ASKPASS="$RUNNER_TEMP/p08-askpass.sh"
+          export GIT_TERMINAL_PROMPT=0
+          remote=https://github.com/llhzx2018/vf-adops.git
+          prior=$(git -C p08 ls-remote "$remote" refs/heads/feat/p08-first-full-isolated-candidate | cut -f1)
+          test "$prior" = "$P08_EXACT_SHA" || { echo P08_BRANCH_MOVED_ABORT=YES; exit 1; }
+          git -C p08 push "$remote" HEAD:refs/heads/feat/p08-first-full-isolated-candidate \
+            > "$RUNNER_TEMP/p08-push.log" 2>&1 || {
+              echo P08_DEV_WRITE=BLOCKED
+              exit 1
+            }
+          echo P08_PHP83_LOCK_BRANCH_UPDATED=PASS
+          echo P08_PHP83_NEW_HEAD=$(git -C p08 rev-parse HEAD)
+          rm -f "$RUNNER_TEMP/p08-askpass.sh"
+
+      - name: Delete transient source and temporary credentials/logs
+        if: always()
+        shell: bash
+        run: |
+          rm -rf p08
+          rm -f "$RUNNER_TEMP/p08-askpass.sh" "$RUNNER_TEMP"/p08-*.log
+          echo P08_PHP83_PRIVATE_SOURCE_CLEANUP=ATTEMPTED
