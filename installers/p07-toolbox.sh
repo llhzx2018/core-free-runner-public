@@ -28,7 +28,9 @@ M02_ROOT="/opt/vfops-modules/m02"  # 独立 VPS 验机版本；不写入 M01/M03
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
 VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release115"
-VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
+VF_SERVER_OPS_INSTALLER_REF="bd34cd295fa83391d7a4c4a899b9a3a98c0bf69a"
+VF_SERVER_OPS_INSTALLER_BLOB="536ac6d8d17b9e8ec9c95097603ecde6c550908f"
+VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07.sh"
 M03_ROLLBACK_INSTALLER_REF="70836f5bba98e8d4ff32ccb6541b4ca1ffc80912"
 M03_ROLLBACK_INSTALLER_BLOB="9571833c4e8a1d737ee47a60e946a030d94c8157"
 M03_ROLLBACK_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${M03_ROLLBACK_INSTALLER_REF}/installers/p07-m03-restore-previous.sh"
@@ -272,43 +274,63 @@ ensure_m02_current() {
 }
 
 rollback_m02_current() {
-  # P07-M02 服务器性能检测（VPS 验机） owns only m02/current.
-  # No VPS scan, network test or other module installer is invoked.
+  # P07-M02 服务器性能检测（VPS 验机）: revert ONLY its current pointer.
+  # A valid newer M02 build can roll back to any retained verified M02 build.
   local build="${1:-}" confirm="${2:-}" current old target actual version reported fd link
-  [[ "$(id -u)" == "0" && "$build" == "$VPS_AUDIT_BUILD_EXPECTED" &&
+  local staged_back=""
+  [[ "$(id -u)" == "0" &&
+     "$build" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ &&
      "$confirm" == "P07-M02:$build" ]] || return 13
+  for cmd in flock sha256sum readlink; do command -v "$cmd" >/dev/null 2>&1 || return 13; done
   [[ -d /opt/vfops-modules && ! -L /opt/vfops-modules &&
      -d "$M02_ROOT" && ! -L "$M02_ROOT" &&
      -d "$M02_ROOT/releases" && ! -L "$M02_ROOT/releases" &&
      ! -L "$M02_ROOT/.install.lock" ]] || return 13
   exec {fd}>"$M02_ROOT/.install.lock" || return 13
   flock -x "$fd" || return 13
+  # Never replace a damaged current pointer, and never repair unknown releases
+  # by silently downloading the older pinned bootstrap.
+  m02_verified_current || return 13
   current="$M02_ROOT/current"
-  [[ -L "$current" ]] || return 13
   old="$(readlink "$current")"
-  [[ "$old" =~ ^releases/[A-Za-z0-9._-]+$ &&
-     -d "$M02_ROOT/$old" && ! -L "$M02_ROOT/$old" ]] || return 13
+  [[ "$old" =~ ^releases/[A-Za-z0-9._-]+$ ]] || return 13
   target="$M02_ROOT/releases/$build"
   [[ -d "$target" && ! -L "$target" &&
      -f "$target/MANIFEST.sha256" && ! -L "$target/MANIFEST.sha256" &&
      -f "$target/vps-audit.sh" && ! -L "$target/vps-audit.sh" ]] || return 13
-  [[ "$(cat "$target/MANIFEST.sha256")" == "$VPS_AUDIT_SHA256  vps-audit.sh" &&
-     "$(wc -l < "$target/MANIFEST.sha256")" == 1 ]] || return 13
-  actual="$(sha256_file "$target/vps-audit.sh")"
-  [[ "$actual" == "$VPS_AUDIT_SHA256" ]] || return 13
+  local manifest_line line_count
+  manifest_line="$(cat "$target/MANIFEST.sha256")" || return 13
+  line_count="$(wc -l < "$target/MANIFEST.sha256")" || return 13
+  [[ "$line_count" == 1 ]] || return 13
+  actual="$(sha256_file "$target/vps-audit.sh" 2>/dev/null || true)"
+  [[ "$actual" =~ ^[a-f0-9]{64}$ &&
+     "$manifest_line" == "$actual  vps-audit.sh" ]] || return 13
   version="$(NO_COLOR=1 bash "$target/vps-audit.sh" --version 2>/dev/null | awk '{print $NF}' || true)"
   reported="$(NO_COLOR=1 bash "$target/vps-audit.sh" --build-id 2>/dev/null || true)"
-  [[ "$version" == "$VPS_AUDIT_EXPECTED" && "$reported" == "$build" ]] || return 13
+  [[ "$version" =~ ^V[0-9]+\.[0-9]+\.[0-9]+$ &&
+     "$reported" == "$build" ]] || return 13
+  if [[ "$build" == "$VPS_AUDIT_BUILD_EXPECTED" ]]; then
+    [[ "$actual" == "$VPS_AUDIT_SHA256" &&
+       "$version" == "$VPS_AUDIT_EXPECTED" ]] || return 13
+  fi
   if [[ "$old" != "releases/$build" ]]; then
-    link="$M02_ROOT/.current-rollback-$"
+    link="$M02_ROOT/.current-rollback-$$"
     [[ ! -e "$link" && ! -L "$link" ]] || return 13
     ln -s "releases/$build" "$link" || return 13
-    mv -Tf -- "$link" "$current" || { rm -f "$link"; return 13; }
+    mv -Tf -- "$link" "$current" || { rm -f -- "$link"; return 13; }
+    if ! m02_verified_current; then
+      # The original verified release remains on disk. Restore only m02/current.
+      staged_back="$M02_ROOT/.current-recovery-$$"
+      if [[ ! -e "$staged_back" && ! -L "$staged_back" ]]; then
+        ln -s "$old" "$staged_back" &&
+          mv -Tf -- "$staged_back" "$current" || true
+      fi
+      rm -f -- "$staged_back" 2>/dev/null || true
+      return 13
+    fi
   fi
-  m02_verified_current || return 13
   say "P07-M02 服务器性能检测（VPS 验机）：已恢复本模块 $build；其他模块未操作。"
 }
-
 run_vps_audit() {
   screen_clear
   say "${C_CYAN}正在启动 P07-M02 服务器性能检测 ${VPS_AUDIT_PUBLIC}…${C_RESET}"
@@ -380,7 +402,12 @@ ensure_server_ops_current() {
     return 13
   fi
 
-  command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
+  for cmd in curl sha1sum mktemp; do
+    command -v "$cmd" >/dev/null 2>&1 || {
+      say "${C_RED}P07-M03 网站与数据：缺少 $cmd；未执行安装。${C_RESET}" >&2
+      return 3
+    }
+  done
   local tmp rc
   tmp="$(mktemp -t p07-server-ops.XXXXXX)"
   chmod 700 "$tmp"
@@ -389,9 +416,16 @@ ensure_server_ops_current() {
     say "${C_RED}✗ 网站与数据模块入口下载失败。${C_RESET}" >&2
     return 4
   fi
+  # Fetch one immutable M03-only source. Never run the mutable main branch
+  # installer, even though its nested runtime blobs are checked separately.
+  if [[ "$(p07_git_blob_sha1 "$tmp" 2>/dev/null || true)" != "$VF_SERVER_OPS_INSTALLER_BLOB" ]]; then
+    rm -f "$tmp"
+    say "${C_RED}P07-M03 网站与数据：安装器身份不匹配，已停止；其他模块未操作。${C_RESET}" >&2
+    return 6
+  fi
   if ! bash -n "$tmp"; then
     rm -f "$tmp"
-    say "${C_RED}✗ 网站与数据模块入口校验失败。${C_RESET}" >&2
+    say "${C_RED}✗ 网站与数据模块入口语法异常。${C_RESET}" >&2
     return 5
   fi
 
