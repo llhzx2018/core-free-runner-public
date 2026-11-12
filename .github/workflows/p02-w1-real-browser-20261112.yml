@@ -1,4 +1,4 @@
-name: P02 W1 exact-source Chromium PHP SQLite browser test (one-off)
+name: P02 W1 browser bundle repair and private build (one-off)
 on:
   pull_request:
     branches: [main]
@@ -6,77 +6,68 @@ on:
 permissions:
   contents: read
 jobs:
-  actual-browser:
+  rebuild-private:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
           repository: llhzx2018/vf-library
-          ref: fcb760de381ef03c6ced322737f139f73dc0a14c
+          ref: fe9d7303ac9e66ae629a892aba46d13b3193e5a2
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           path: product
-      - name: Exact P02 code and isolated PHP preflight
+      - name: Real locked Vue production build for exact P02 source
         shell: bash
         run: |
           set -Eeuo pipefail
-          test "$(git -C product rev-parse HEAD)" = 'fcb760de381ef03c6ced322737f139f73dc0a14c'
+          test "$(git -C product rev-parse HEAD)" = 'fe9d7303ac9e66ae629a892aba46d13b3193e5a2'
           test "$(cat product/VERSION)" = '2.5.127'
-          php -r 'exit(PHP_VERSION_ID>=80300&&extension_loaded("pdo_sqlite")&&extension_loaded("sqlite3")?0:1);'
-          if ! php -r 'exit(extension_loaded("zip")?0:1);'; then
-            timeout 150s sudo apt-get install -y php8.3-zip
+          cd product/frontend/w1-search
+          npm ci --no-audit --no-fund
+          npm run typecheck
+          npm test
+          npm run build
+          test "$(wc -c < ../../public/assets/w1/w1-search.js)" -gt 10000
+          grep -q 'mountW1Search' ../../public/assets/w1/w1-search.js
+          if grep -q 'process.env.NODE_ENV' ../../public/assets/w1/w1-search.js; then
+            echo P02_W1_BROWSER_NODE_ENV_LEAK=FAIL
+            exit 1
           fi
-          php -r 'exit(extension_loaded("zip")?0:1);'
-          echo P02_W1_E2E_SOURCE_AND_PHP=PASS
-      - name: Real Playwright Chrome with disposable original PHP and SQLite
+          echo P02_W1_BROWSER_NODE_ENV_LEAK=NONE
+      - name: Write verified compiled JS/CSS into P02 private development branch
         shell: bash
         env:
-          P02_W1_E2E_SYNTHETIC_PASSWORD: P02-SYNTHETIC-LOCAL-W1-ONLY
-          P02_W1_E2E_BASE: http://127.0.0.1:18765
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
         run: |
           set -Eeuo pipefail
-          root="$(mktemp -d "${RUNNER_TEMP}/p02-w1-XXXXXX")"
-          play="$(mktemp -d "${RUNNER_TEMP}/p02-w1-pw-XXXXXX")"
-          server_pid=''
-          cleanup() {
-            if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || :; wait "$server_pid" 2>/dev/null || :; fi
-            rm -rf "$root" "$play" product
-            echo PRIVATE_SOURCE_AND_SQLITE_PERSISTED_IN_PUBLIC=NO
-          }
-          trap cleanup EXIT
-          site="$root/site"
-          mkdir -p "$site/app"
-          cp -a product/public/. "$site/"
-          cp -a product/src/app/. "$site/app/"
-          # TEMP diagnostic ONLY: patch disposable site copy, not P02 Git bytes.
-          python3 - "$site/assets/w1-search-entry.js" <<'PY'
+          test -n "${GH_TOKEN:-}" || { echo P02_W1_PRIVATE_DEV_WRITE_UNAVAILABLE; exit 78; }
+          branch='p02/w1-real-browser-e2e-20261112'
+          repo='llhzx2018/vf-library'
+          expected='fe9d7303ac9e66ae629a892aba46d13b3193e5a2'
+          live="$(gh api "repos/$repo/git/ref/heads/$branch" --jq '.object.sha')"
+          test "$live" = "$expected" || { echo P02_W1_PRIVATE_HEAD_DRIFT; exit 78; }
+          for file in public/assets/w1/w1-search.js public/assets/w1/w1-search.css; do
+            localfile="product/$file"
+            test -s "$localfile"
+            sha="$(gh api "repos/$repo/contents/$file?ref=$branch" --jq '.sha')"
+            request_json="$(mktemp)"
+            python3 - "$localfile" "$sha" "$branch" "$request_json" <<'PY'
+          import sys,json,base64
           from pathlib import Path
-          import sys
-          p=Path(sys.argv[1])
-          original=p.read_text()
-          anchor='    } catch {\n      cleanup();'
-          assert anchor in original
-          changed=original.replace(anchor,"    } catch (error) {\n      console.warn('P02_W1_DISPOSABLE_FAILURE', String(error && error.stack || error));\n      cleanup();",1)
-          p.write_text(changed)
+          filename,sha,branch,target=sys.argv[1:]
+          Path(target).write_text(json.dumps({
+            'branch':branch,'sha':sha,
+            'message':'build(P02 W1): browser-safe compiled Vue '+Path(filename).name,
+            'content':base64.b64encode(Path(filename).read_bytes()).decode('ascii'),
+          }))
           PY
-          printf '2.5.127\n' > "$site/VERSION.txt"
-          test -s "$site/assets/w1/w1-search.js"
-          php -S 127.0.0.1:18765 -t "$site" > "$root/synthetic-server.log" 2>&1 &
-          server_pid=$!
-          for n in $(seq 1 20); do if curl -fsS 'http://127.0.0.1:18765/setup.php' -o /dev/null; then break; fi; sleep 0.5; done
-          curl -fsS 'http://127.0.0.1:18765/setup.php' -o /dev/null
-          npm install --prefix "$play" --no-save --no-audit --no-fund playwright@1.57.0
-          export P02_W1_PLAYWRIGHT_PACKAGE="$play/node_modules/playwright"
-          if command -v google-chrome >/dev/null 2>&1; then
-            export P02_W1_BROWSER_CHANNEL=chrome
-          else
-            "$play/node_modules/.bin/playwright" install chromium
-            export P02_W1_BROWSER_CHANNEL=chromium
-          fi
-          node product/tests/e2e/p02_w1_vue_search_real_browser.mjs
-          echo P02_W1_REAL_BROWSER_INTEGRATION=PASS
-      - name: Cleanup private checkout on failure
+            gh api --method PUT "repos/$repo/contents/$file" --input "$request_json" >/dev/null
+            rm -f "$request_json"
+            echo "P02_W1_COMPILED_PRIVATE_ASSET=$(basename "$file")"
+          done
+          echo P02_W1_PRIVATE_BROWSER_MODULE_REBUILT=PASS
+      - name: Clean transient private product tree
         if: always()
         shell: bash
         run: |
