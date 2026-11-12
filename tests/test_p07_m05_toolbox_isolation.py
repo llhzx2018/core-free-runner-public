@@ -33,7 +33,7 @@ def assert_independent(body: str) -> None:
         if prohibited in body:
             raise AssertionError("P07-M05 dispatch invokes unrelated module")
     if ('"$M05_RUNTIME" menu' not in body or
-            "m05_verified_current" not in body):
+            "ensure_m05_current" not in body):
         raise AssertionError("missing standalone version ownership")
 
 
@@ -45,6 +45,7 @@ class ToolboxFiveModuleIsolationTests(unittest.TestCase):
         self.source=TOOLBOX.read_text()
         self.body=function_body(self.source,"run_server_init")
         self.helper=function_body(self.source,"m05_verified_current")
+        self.install_helper=function_body(self.source,"ensure_m05_current")
         self.module=self.folder/"m05"
         self.marker=self.folder/"m05-menu-called"
 
@@ -94,10 +95,11 @@ class ToolboxFiveModuleIsolationTests(unittest.TestCase):
             "#!/bin/bash\nset -Eeuo pipefail\n"
             + "M05_ROOT=" + shlex.quote(str(self.module)) + "\n"
             + 'M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"\n'
+            + 'M05_BUNDLE_URL=""\nM05_BUNDLE_SHA256=""\n'
             + "C_YELLOW=''\nC_RED=''\nC_RESET=''\n"
             + "screen_clear() { :; }\n"
             + 'say() { printf \'%s\\n\' "$*"; }\n'
-            + self.helper + "\n" + self.body + "\nrun_server_init\n"
+            + self.helper + "\n" + self.install_helper + "\n" + self.body + "\nrun_server_init\n"
         )
         return path
 
