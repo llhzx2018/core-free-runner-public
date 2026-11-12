@@ -99,9 +99,41 @@ install_m01_manager() {
   msg 'P07-M01 网络代理节点（V2Ray）：独立管理器已安装；未安装代理节点，也未修改其他模块。'
 }
 
+rollback_m01_manager() {
+  # Restore only a verified previously installed management runtime.
+  # The actual V2Ray node/service is never started, stopped or reconfigured.
+  local target_build="${1:-}" confirmation="${2:-}" current old fd switch
+  [[ "$(id -u)" == "0" &&
+     "$target_build" == "$VERSION" &&
+     "$confirmation" == "P07-M01:$VERSION" ]] || deny
+  for cmd in flock sha256sum readlink; do
+    command -v "$cmd" >/dev/null 2>&1 || deny
+  done
+  [[ -d /opt/vfops-modules && ! -L /opt/vfops-modules &&
+     -d "$MODULE_ROOT" && ! -L "$MODULE_ROOT" &&
+     -d "$MODULE_ROOT/releases" && ! -L "$MODULE_ROOT/releases" &&
+     ! -L "$MODULE_ROOT/.install.lock" ]] || deny
+  exec {fd}>"$MODULE_ROOT/.install.lock" || deny
+  flock -x "$fd" || deny
+  current="$MODULE_ROOT/current"
+  [[ -L "$current" ]] || deny
+  old="$(readlink "$current")"
+  [[ "$old" =~ ^releases/[A-Za-z0-9._-]+$ &&
+     -d "$MODULE_ROOT/$old" && ! -L "$MODULE_ROOT/$old" ]] || deny
+  verify_release "$MODULE_ROOT/releases/$VERSION"
+  if [[ "$old" != "releases/$VERSION" ]]; then
+    switch="$MODULE_ROOT/.current-rollback-$"
+    [[ ! -e "$switch" && ! -L "$switch" ]] || deny
+    ln -s "releases/$VERSION" "$switch" || deny
+    mv -Tf -- "$switch" "$current" || { rm -f "$switch"; deny; }
+  fi
+  msg 'P07-M01 网络代理节点（V2Ray）：仅管理器已恢复到指定历史版本，其他四模块和真实节点均未操作。'
+}
+
 case "${1:-}" in
   --version) msg "P07-M01 网络代理节点（V2Ray） $VERSION" ;;
-  --help) msg 'P07-M01 独立管理器安装入口：install（仅安装管理器）' ;;
+  --help) msg 'P07-M01 网络代理节点（V2Ray）：install 安装管理器；rollback <版本> <P07-M01:版本> 独立恢复管理器' ;;
   install) install_m01_manager ;;
+  rollback) [[ "$#" == 3 ]] || deny; rollback_m01_manager "$2" "$3" ;;
   *) deny ;;
 esac
