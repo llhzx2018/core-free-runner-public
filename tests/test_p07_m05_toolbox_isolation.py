@@ -17,13 +17,13 @@ TOOLBOX = HERE / "installers/p07-toolbox.sh"
 
 
 def m05_body(source: str) -> str:
-    start = source.find("run_server_init() {\\n")
+    start = source.find("run_server_init() {\n")
     if start < 0:
         raise AssertionError("P07-M05 tool dispatcher missing")
     # End at the actual Bash function close, not at a historical adjacent
     # M04 helper that correctly disappears when modules become independent.
     import re
-    ending = re.search(r"^}\\s*$", source[start:], re.M)
+    ending = re.search(r"^}\s*$", source[start:], re.M)
     if ending is None:
         raise AssertionError("P07-M05 tool dispatcher incomplete")
     return source[start:start + ending.end()]
