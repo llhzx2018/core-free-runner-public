@@ -1,0 +1,143 @@
+name: P08 actual FULL delivery gate proof (temporary)
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/p08-full-actual-gov-gate-proof.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  p08-full-gate:
+    if: >-
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'maintenance/p08-full-actual-gov-package-check-20261112'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      P08_SHA: dab0a34d92658ea297bf1baddbb81127a7e32454
+      GOV_SHA: 7dd6815d1bb8de481ac74be21f4e68359aa15407
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout exact P08 candidate transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: ${{ env.P08_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p08
+
+      - name: Checkout exact canonical GOV-DOC transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: ${{ env.GOV_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: gov
+
+      - name: Verify exact source and package builder negative/positive tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p08 rev-parse HEAD)" = "$P08_SHA"
+          test "$(git -C gov rev-parse HEAD)" = "$GOV_SHA"
+          test -z "$(git -C p08 status --porcelain --untracked-files=all)"
+          echo P08_FULL_GATE_EXACT_SOURCE=PASS
+          if (cd p08 && python3 -B -m unittest discover -s tests -p test_full_builder.py -v) \
+            > "$RUNNER_TEMP/p08-full-tests.log" 2>&1; then
+            grep -E '^(Ran [0-9]+ tests|OK)$' "$RUNNER_TEMP/p08-full-tests.log" || true
+            echo P08_FULL_CLI_GATE_REGRESSIONS=PASS
+          else
+            grep -E '^(FAIL|ERROR|FAILED|Ran [0-9]+ tests)' "$RUNNER_TEMP/p08-full-tests.log" || true
+            echo P08_FULL_CLI_GATE_REGRESSIONS=FAIL
+            exit 1
+          fi
+          python3 -B p08/scripts/check_stack_contract.py --root p08 --phase foundation \
+            > "$RUNNER_TEMP/p08-stack.log" 2>&1
+          echo P08_EXISTING_STACK_FOUNDATION=PASS
+
+      - name: Resolve real project RPD and canonical shared Public Authorities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/p08-full-receipt.json" <<'RECEIPT'
+          {
+            "schema": "vf.public-authority.task-delivery-check.v1",
+            "project": "P08", "source": "dab0a34d92658ea297bf1baddbb81127a7e32454",
+            "project_authority": {
+              "agents": "AGENTS.md",
+              "current": "docs/authority/CURRENT.md",
+              "acceptance": "docs/authority/RPD.md",
+              "applicability": "docs/authority/PUBLIC_AUTHORITY_APPLICABILITY.md"
+            },
+            "acceptance_markers": ["WordPress-simple", "CloudPanel"],
+            "required_domains": [
+              "INSTALL", "SECURITY", "TESTING", "UPGRADE", "DATA_SCHEMA", "GIT", "UA_UI"
+            ],
+            "task_capabilities": [
+              "formal_development", "source_change", "full_package",
+              "clean_install", "auth", "database", "installer_ui"
+            ],
+            "delivery": {
+              "profile": "web_full_zip",
+              "entrypoint": "public/setup.php",
+              "requires_git": false,
+              "requires_manual_source_copy": false
+            }
+          }
+          RECEIPT
+          python3 -B gov/governance/public-authority/tools/task_delivery_contract_lint.py \
+            --phase resolve --receipt "$RUNNER_TEMP/p08-full-receipt.json" \
+            --project-root p08 --artifact-root "$RUNNER_TEMP" \
+            --public-router gov/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json \
+            > "$RUNNER_TEMP/p08-rule-check.log" 2>&1
+          grep -q '^CONTRACT_CHECK=RULES_RESOLVED$' "$RUNNER_TEMP/p08-rule-check.log"
+          grep -q '^PUBLIC_AUTHORITY_UA_UI=' "$RUNNER_TEMP/p08-rule-check.log"
+          echo P08_REAL_PUBLIC_AUTHORITY_RESOLVE=PASS
+
+          python3 - "$RUNNER_TEMP/p08-full-receipt.json" "$RUNNER_TEMP/p08-negative.json" <<'PY'
+          import json,sys
+          data=json.load(open(sys.argv[1],encoding='utf8'))
+          data['required_domains'].remove('UA_UI')
+          with open(sys.argv[2],'w',encoding='utf8') as f: json.dump(data,f)
+          PY
+          if python3 -B gov/governance/public-authority/tools/task_delivery_contract_lint.py \
+            --phase resolve --receipt "$RUNNER_TEMP/p08-negative.json" \
+            --project-root p08 --artifact-root "$RUNNER_TEMP" \
+            --public-router gov/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json \
+            > "$RUNNER_TEMP/p08-negative.log" 2>&1; then
+            echo P08_MISSING_SETUP_UI_RULE_ALLOWED=UNSAFE
+            exit 1
+          fi
+          grep -q '^CONTRACT_REASON=TASK_TRIGGERED_PUBLIC_DOMAIN_OMITTED$' "$RUNNER_TEMP/p08-negative.log"
+          echo P08_MISSING_PUBLIC_SETUP_UI_RULE_REJECTED=PASS
+
+          # This exact source is still dev. Do not let a green source gate
+          # materialize or pretend to release a Clean FULL.
+          if python3 -B p08/scripts/build_full.py \
+            --source p08 --output "$RUNNER_TEMP/p08-no-full.zip" \
+            --version 0.1.0-dev.1 --source-sha "$P08_SHA" \
+            --governance-root gov \
+            > "$RUNNER_TEMP/p08-cli-dev.log" 2>&1; then
+            echo P08_DEV_VERSION_FALSE_FULL=UNSAFE
+            exit 1
+          fi
+          grep -q 'P08_PUBLIC_AUTHORITY_RESOLVE=PASS' "$RUNNER_TEMP/p08-cli-dev.log"
+          grep -q 'release VERSION must be stable' "$RUNNER_TEMP/p08-cli-dev.log"
+          test ! -e "$RUNNER_TEMP/p08-no-full.zip"
+          echo P08_DEV_VERSION_FULL_BLOCKED=PASS
+          echo P08_REAL_CLEAN_FULL_PACKAGE=NOT_BUILT
+          echo P08_FORMAL_RELEASE=NO
+          echo P08_PRODUCTION=NO
+
+      - name: Delete transient private checkouts and logs
+        if: always()
+        shell: bash
+        run: |
+          rm -rf p08 gov
+          rm -f "$RUNNER_TEMP"/p08-*.log "$RUNNER_TEMP"/p08-*.json \
+            "$RUNNER_TEMP/p08-no-full.zip"
+          echo P08_TRANSIENT_PRIVATE_CLEANUP=ATTEMPTED
