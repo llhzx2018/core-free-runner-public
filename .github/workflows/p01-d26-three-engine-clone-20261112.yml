@@ -1,0 +1,110 @@
+name: P01 D26 three-engine encrypted snapshot isolated clone and failure rollback
+on:
+  push:
+    branches:
+      - test/p01-d26-three-engine-clone-20261112
+permissions:
+  contents: read
+jobs:
+  three-engine-clone:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 24
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: p01-only-synthetic-test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost"
+          --health-interval 10s --health-timeout 5s --health-retries 15
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: p01-only-synthetic-test
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd "healthcheck.sh --connect --innodb_initialized"
+          --health-interval 10s --health-timeout 5s --health-retries 15
+    steps:
+      - name: Verify public-safe synthetic test and exact runner branch
+        run: |
+          set -Eeuo pipefail
+          test "${GITHUB_REPOSITORY}" = "llhzx2018/core-free-runner-public"
+          test "${GITHUB_REF_NAME}" = "test/p01-d26-three-engine-clone-20261112"
+          echo P01_D26_USER_DATA=NONE_SYNTHETIC_ONLY
+      - name: Checkout exact private P01 candidate without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 7df888f24a82d8f841f03db48c786302afa79aac
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+      - name: Install PHP 8.3 PDO SQLite and MySQL; verify candidate
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "7df888f24a82d8f841f03db48c786302afa79aac"
+          test "$(cat candidate/VERSION)" = "2.47.515"
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-cli php8.3-sqlite3 php8.3-mysql php8.3-mbstring >/dev/null
+          php -v | head -n 2
+          php -m | grep -E 'PDO|pdo_sqlite|pdo_mysql|openssl'
+          php -l candidate/src/app/next/runtime/IsolatedCloneMediaStage.php
+          php -l candidate/src/app/next/runtime/IsolatedRecoverySnapshot.php
+          php -l candidate/tests/compatibility/p01_d14_isolated_recovery_smoke.php
+          python3 -m py_compile candidate/scripts/check_p01_fullstack_contract.py
+          echo P01_D26_SOURCE_PIN_AND_PHP_LINT=PASS
+      - name: Independently verify SQLite engine clone with write/media failure injection
+        run: |
+          set -Eeuo pipefail
+          php candidate/tests/compatibility/p01_d14_isolated_recovery_smoke.php sqlite
+          echo P01_D26_SQLITE_ISOLATED_DB_MEDIA_ROLLBACK=PASS
+      - name: Create only four fixed empty SQL test databases in disposable service containers
+        run: |
+          set -Eeuo pipefail
+          php <<'PHP'
+          <?php
+          declare(strict_types=1);
+          foreach ([['mysql',3306,'mysql'],['mariadb',3307,'maria']] as [$type,$port,$label]) {
+              $pdo=new PDO("mysql:host=127.0.0.1;port=$port;charset=utf8mb4",
+                  'root','p01-only-synthetic-test',[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
+              $version=(string)$pdo->query("SELECT VERSION()")->fetchColumn();
+              if((stripos($version,'mariadb')!==false)!==($type==='mariadb')) {
+                  throw new RuntimeException('P01_D26_SQL_ENGINE_IDENTITY_MISMATCH');
+              }
+              foreach (['source','restore'] as $kind) {
+                  $db="p01_d14_{$kind}_{$label}_20261112";
+                  if(!preg_match('/^p01_d14_(?:source|restore)_(?:mysql|maria)_20261112$/D',$db)) {
+                      throw new RuntimeException('P01_D26_TEST_DB_NAME_DENIED');
+                  }
+                  $pdo->exec("CREATE DATABASE `$db` CHARACTER SET utf8mb4 COLLATE utf8mb4_bin");
+              }
+              echo "P01_D26_".strtoupper($type)."_REAL_SERVER_IDENTITY=PASS\n";
+          }
+          PHP
+      - name: Independently verify actual MariaDB 11.8 clone media-first rollback and restore
+        run: |
+          set -Eeuo pipefail
+          php candidate/tests/compatibility/p01_d14_isolated_recovery_smoke.php mariadb
+          echo P01_D26_MARIADB_ISOLATED_DB_MEDIA_ROLLBACK=PASS
+      - name: Independently verify actual MySQL 8.4 clone media-first rollback and restore
+        run: |
+          set -Eeuo pipefail
+          php candidate/tests/compatibility/p01_d14_isolated_recovery_smoke.php mysql
+          echo P01_D26_MYSQL_ISOLATED_DB_MEDIA_ROLLBACK=PASS
+      - name: Verify canonical P01 database adapter/schema source gate (not installation gate)
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          python3 scripts/check_p01_fullstack_contract.py --database-adapter --database-schema
+          echo P01_D26_SOURCE_ADAPTER_SCHEMA_CHECKER=PASS
+          echo P01_TRIPLE_DB_FULL_READY=NO
+          echo P01_D26_FORMAL_RELEASE_OR_PRODUCTION=NOT_AUTHORIZED
+      - name: Remove private checkout from public Runner workspace
+        if: always()
+        run: |
+          rm -rf -- candidate
+          echo P01_D26_PRIVATE_SOURCE_PERSISTED=NO
