@@ -82,6 +82,37 @@ jobs:
             sleep 2
           done
           test "$(MYSQL_PWD="$P07_DB_TEST_PASSWORD" mariadb --no-defaults -h 127.0.0.1 -P 63306 -uroot -N -e 'SELECT VERSION()' | cut -d. -f1-2)" = "11.8"
+      - name: Independent disposable local DB-user authentication and gzip pipe proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          db=p07scopedprobe
+          usr=p07probeonly
+          pw=p07-synthetic-scoped-only
+          MYSQL_PWD="$P07_DB_TEST_PASSWORD" mariadb --no-defaults -h 127.0.0.1 -P 63306 -uroot -e "CREATE DATABASE $db; CREATE USER '$usr'@'localhost' IDENTIFIED BY '$pw'; CREATE USER '$usr'@'127.0.0.1' IDENTIFIED BY '$pw'; GRANT ALL PRIVILEGES ON $db.* TO '$usr'@'localhost'; GRANT ALL PRIVILEGES ON $db.* TO '$usr'@'127.0.0.1';" >/dev/null
+          log=$(mktemp)
+          data=$(mktemp --suffix=.sql.gz)
+          trap 'rm -f "$log" "$data"' EXIT
+          chmod 600 "$log" "$data"
+          if MYSQL_PWD="$pw" mariadb --no-defaults --protocol=tcp --host=127.0.0.1 --port=63306 --binary-mode --default-character-set=utf8mb4 --user="$usr" --database="$db" -N -e 'SELECT 1' >/dev/null 2>"$log"; then
+            echo P07_SCOPED_TEST_ACCOUNT_LOGIN=PASS
+          else
+            code=$(grep -oE 'ERROR [0-9]+' "$log" | head -1 || true)
+            echo "P07_SCOPED_TEST_ACCOUNT_LOGIN=FAIL:$code"
+            exit 1
+          fi
+          printf 'CREATE TABLE scopeproof (id INT);\nINSERT INTO scopeproof VALUES (1);\n' | gzip -c >"$data"
+          if gzip -dc -- "$data" | MYSQL_PWD="$pw" mariadb --no-defaults --protocol=tcp --host=127.0.0.1 --port=63306 --binary-mode --default-character-set=utf8mb4 --user="$usr" --database="$db" >/dev/null 2>"$log"; then
+            echo P07_SCOPED_TEST_ACCOUNT_GZIP_IMPORT=PASS
+          else
+            code=$(grep -oE 'ERROR [0-9]+' "$log" | head -1 || true)
+            echo "P07_SCOPED_TEST_ACCOUNT_GZIP_IMPORT=FAIL:$code"
+            exit 1
+          fi
+          value=$(MYSQL_PWD="$P07_DB_TEST_PASSWORD" mariadb --no-defaults -h 127.0.0.1 -P 63306 -uroot -N -e "SELECT COUNT(*) FROM $db.scopeproof")
+          test "$value" = "1"
+          echo P07_SCOPED_TEST_ACCOUNT_DATABASE_READBACK=PASS
       - name: Native original four DB restore and foreign-write refusal
         shell: bash
         run: |
