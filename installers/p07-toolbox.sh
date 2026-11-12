@@ -489,7 +489,7 @@ run_server_init() {
 p07_git_blob_sha1() {
   local file="$1" bytes
   bytes="$(wc -c < "$file" | tr -d '[:space:]')"
-  { printf 'blob %s\\0' "$bytes"; cat "$file"; } | sha1sum | awk '{print $1}'
+  { printf 'blob %s\0' "$bytes"; cat "$file"; } | sha1sum | awk '{print $1}'
 }
 
 m04_verified_current() {
