@@ -123,6 +123,21 @@ guest_ssh p07test@127.0.0.1 \
   'sudo bash /opt/vfops-modules/m05/current/bin/vfops-init-core server-migrate bootstrap-local --confirm BOOTSTRAP_LOCAL_CLOUDPANEL' \
   > "$work/no-db-choice.log" 2>&1 && blocked UNSELECTED_DB_ACCEPTED
 echo P07_M05_DEBIAN13_UNSELECTED_DB=REJECTED
+# A prior exact-source free hosted TCG guest ran CloudPanel for 2300s and
+# timed out (run #43256040818, exit=124). Never rerun that 38-minute
+# experiment automatically on software virtualization. This CI lane owns the
+# REAL Debian13 preflight proof, not a false claim of CloudPanel INSTALL PASS.
+if [[ "${P07_M05_EXPLICIT_FULL_INSTALL_ON_KVM:-NO}" != "YES" ||
+      ! -c /dev/kvm || ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+  echo P07_M05_DEBIAN13_ACTUAL_EMPTY_VM_PREFLIGHT=PASS
+  echo P07_M05_DEBIAN13_CLOUDPANEL_INSTALL=BLOCKED_TCG_FULL_INSTALL_TIMEOUT
+  echo P07_M05_DEBIAN13_MARIADB118_DAEMON_READBACK=NOT_RUN
+  echo P07_M05_DEBIAN13_FOUR_OTHER_MODULES=UNTOUCHED
+  echo P07_M05_GITHUB_PUBLIC_PRIVATE_ARTIFACT=NONE
+  echo P07_M05_OWNER_SERVER=UNTOUCHED
+  echo P07_M05_DNS=UNTOUCHED
+  exit 0
+fi
 # Opt-in actual empty guest CloudPanel install. The Guest VM itself is
 # destroyed after the job, and no generated CloudPanel password is disclosed.
 set +e
