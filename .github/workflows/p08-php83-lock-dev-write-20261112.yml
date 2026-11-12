@@ -234,12 +234,102 @@ jobs:
           echo P08_EXTRACTED_TAMPER_DENY=PASS
           echo P08_CLOUDPANEL_TLS=NOT_TESTED
 
+      - name: Install real Owner into empty SQLite from extracted ZIP (synthetic)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="$RUNNER_TEMP/p08-first-install"
+          mkdir -m 0700 "$root"
+          python3 - "$RUNNER_TEMP/P08-vf-adops-0.1.0-FULL-ISOLATED.zip" "$root" <<'PY'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              archive.extractall(sys.argv[2])
+          PY
+          db=$(python3 -c 'import secrets; print(secrets.token_hex(20)+".sqlite")')
+          : > "$root/database/$db"
+          chmod 0600 "$root/database/$db"
+          P08_EXTRACTED_PUBLIC_INDEX="$root/public/index.php" php -S 127.0.0.1:18083 \
+            -t "$root/public" "$RUNNER_TEMP/p08-secure-router.php" \
+            > "$RUNNER_TEMP/p08-first-server.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -sS --max-time 2 -H 'Host: adops.kewaro.com' \
+              -o /dev/null http://127.0.0.1:18083/setup 2>/dev/null; then break; fi
+            sleep 0.2
+          done
+          code=$(curl -sS -D "$RUNNER_TEMP/p08-first.headers" \
+            -o "$RUNNER_TEMP/p08-first.html" -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' http://127.0.0.1:18083/setup)
+          test "$code" = 200 || { echo P08_SQLITE_FIRST_GET_STATUS="$code"; exit 1; }
+          csrf=$(python3 - "$RUNNER_TEMP/p08-first.html" <<'PY'
+          import re,sys
+          html=open(sys.argv[1],encoding='utf-8').read()
+          token=re.search(r'name="csrf" value="([^"]+)"',html)
+          assert token
+          print(token.group(1))
+          PY
+          )
+          sid=$(python3 - "$RUNNER_TEMP/p08-first.headers" <<'PY'
+          import re,sys
+          headers=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'(?im)^Set-Cookie:\\s*adops_setup=([^;\\r\\n]+)',headers)
+          assert m
+          print(m.group(1))
+          PY
+          )
+          code=$(curl -sS -D "$RUNNER_TEMP/p08-first-post.headers" \
+            -o "$RUNNER_TEMP/p08-first-post.html" -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' \
+            -H 'Origin: https://adops.kewaro.com' \
+            -H "Cookie: adops_setup=$sid" \
+            --data-urlencode "csrf=$csrf" \
+            --data-urlencode "db_driver=sqlite" \
+            --data-urlencode "db_database=$db" \
+            --data-urlencode "db_username=" \
+            --data-urlencode "db_password=" \
+            --data-urlencode "owner_email=owner@isolated.invalid" \
+            --data-urlencode "owner_password=IsolatedOnly2026Passphrase" \
+            --data-urlencode "owner_confirm=IsolatedOnly2026Passphrase" \
+            http://127.0.0.1:18083/setup)
+          echo P08_SQLITE_FIRST_POST_STATUS="$code"
+          if test "$code" != 303; then
+            tail -n 16 "$RUNNER_TEMP/p08-first-server.log"
+            exit 1
+          fi
+          grep -qi '^Location: /login' "$RUNNER_TEMP/p08-first-post.headers"
+          test -s "$root/.env"
+          test -s "$root/storage/app/private/adops/installation/installed.json"
+          test -s "$root/database/$db"
+          php -r '
+            $root=$argv[1]; $db=$argv[2];
+            $record=json_decode(file_get_contents($root."/storage/app/private/adops/installation/installed.json"),true);
+            if (($record["status"]??"")!=="INSTALLED"||($record["database_driver"]??"")!=="sqlite") exit(1);
+            $pdo=new PDO("sqlite:".$root."/database/".$db);
+            $users=$pdo->query("SELECT email,password FROM users")->fetchAll(PDO::FETCH_ASSOC);
+            if(count($users)!==1 || $users[0]["email"]!=="owner@isolated.invalid"
+              || !password_verify("IsolatedOnly2026Passphrase",$users[0]["password"])) exit(2);
+            echo "P08_REAL_SQLITE_OWNER_DB_AND_PASSWORD=PASS\\n";
+          ' "$root" "$db"
+          echo P08_REAL_EXTRACTED_SQLITE_FIRST_INSTALL=PASS
+
+          code=$(curl -sS -o "$RUNNER_TEMP/p08-login.html" -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' http://127.0.0.1:18083/login)
+          echo P08_POSTINSTALL_LOGIN_STATUS="$code"
+          test "$code" = 200
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' http://127.0.0.1:18083/setup)
+          test "$code" = 403
+          echo P08_REPEAT_SETUP_REFUSED=PASS
+          echo P08_PHP_FPM_CLOUDPANEL_TLS=NOT_TESTED
+          echo P08_INSTALL_SOURCE=SYNTHETIC_EMPTY_SQLITE_ONLY
+
       - name: Clean all private source, package and temporary logs
         if: always()
         shell: bash
         run: |
-          rm -rf p08 gov "$RUNNER_TEMP/p08-extracted"
+          rm -rf p08 gov "$RUNNER_TEMP/p08-extracted" "$RUNNER_TEMP/p08-first-install"
           rm -f "$RUNNER_TEMP/P08-vf-adops-0.1.0-FULL-ISOLATED.zip"
           rm -f "$RUNNER_TEMP"/p08-*.log
-          rm -f "$RUNNER_TEMP"/p08-*.html "$RUNNER_TEMP/p08-secure-router.php"
+          rm -f "$RUNNER_TEMP"/p08-*.html "$RUNNER_TEMP/p08-secure-router.php" "$RUNNER_TEMP"/p08-*.headers
           echo P08_PRIVATE_SOURCE_AND_PACKAGE_CLEANUP=ATTEMPTED
