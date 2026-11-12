@@ -1,0 +1,101 @@
+name: P01 D15 synthetic write gate and three-engine quiesced backup proof
+on:
+  push:
+    branches:
+      - test/p01-d15-write-freeze-20261112
+permissions:
+  contents: read
+jobs:
+  p01-d15:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: p01-only-synthetic-test
+          MYSQL_DATABASE: p01_d14_source_mysql_20261112
+        ports:
+          - 3306:3306
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: p01-only-synthetic-test
+          MARIADB_DATABASE: p01_d14_source_maria_20261112
+        ports:
+          - 3307:3306
+    steps:
+      - name: Preflight fixed temporary public-safe source lane
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_REPOSITORY" = "llhzx2018/core-free-runner-public"
+          test "$GITHUB_REF_NAME" = "test/p01-d15-write-freeze-20261112"
+          echo P01_D15_TEST_DATA=SYNTHETIC_ONLY
+      - name: Verify registered private checkout secret available
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$READ_TOKEN"
+          echo P01_D15_PRIVATE_READ=AVAILABLE
+      - name: Fetch exact private P01 source without credential persistence
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: f2eed8c1e053956ade35e268794d28a9b70e846b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: candidate
+          persist-credentials: false
+      - name: Native PHP and SHA identity
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "f2eed8c1e053956ade35e268794d28a9b70e846b"
+          test "$(cat candidate/VERSION)" = "2.47.515"
+          echo P01_D15_EXACT_SOURCE=f2eed8c1e053956ade35e268794d28a9b70e846b
+          if ! command -v php >/dev/null || ! php -r 'exit(PHP_VERSION_ID>=80300 && extension_loaded("pdo_sqlite") && extension_loaded("pdo_mysql")?0:1);'; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-cli php8.3-sqlite3 php8.3-mysql php8.3-mbstring php8.3-xml >/dev/null
+          fi
+          php -l candidate/src/app/next/runtime/WriteGate.php
+          php -l candidate/src/app/next/runtime/IsolatedRecoverySnapshot.php
+          php -l candidate/tests/unit/p01_d15_write_gate_contract.php
+          php -l candidate/tests/compatibility/p01_d14_isolated_recovery_smoke.php
+          echo P01_D15_NATIVE_PHP_PARSE=PASS
+      - name: Test OS-level cross-process writer/snapshot locking and persistent failure marker
+        run: |
+          set -Eeuo pipefail
+          php candidate/tests/unit/p01_d15_write_gate_contract.php
+      - name: Test full P01 D14 isolated SQLite snapshot under D15 gate
+        run: |
+          set -Eeuo pipefail
+          php candidate/tests/compatibility/p01_d14_isolated_recovery_smoke.php sqlite
+      - name: Prepare fresh SQL restore fixtures in real independent engines
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mysql-client >/dev/null
+          for port in 3306 3307; do
+            ok=no
+            for i in $(seq 1 45); do
+              if mysql --protocol=tcp -h127.0.0.1 -P "$port" -uroot -pp01-only-synthetic-test -e 'SELECT 1' >/dev/null 2>&1; then
+                ok=yes; break
+              fi
+              sleep 1
+            done
+            test "$ok" = yes
+          done
+          mysql --protocol=tcp -h127.0.0.1 -P3306 -uroot -pp01-only-synthetic-test -e 'CREATE DATABASE p01_d14_restore_mysql_20261112;'
+          mysql --protocol=tcp -h127.0.0.1 -P3307 -uroot -pp01-only-synthetic-test -e 'CREATE DATABASE p01_d14_restore_maria_20261112;'
+          echo P01_D15_MYSQL_AND_MARIADB_TEST_CLONES=READY
+      - name: Test MariaDB and MySQL quiesced snapshot and clone restore
+        run: |
+          set -Eeuo pipefail
+          php candidate/tests/compatibility/p01_d14_isolated_recovery_smoke.php mariadb
+          php candidate/tests/compatibility/p01_d14_isolated_recovery_smoke.php mysql
+          echo P01_D15_GATED_THREE_ENGINE_ISOLATED_RESTORE=PASS
+          echo P01_D15_PRODUCTION_ATOMIC=NOT_PROVEN
+      - name: Cleanup private checkout and synthetic fixtures
+        if: always()
+        run: |
+          rm -rf -- candidate
+          echo P01_D15_PRIVATE_SOURCE_PERSISTED=NO
