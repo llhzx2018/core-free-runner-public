@@ -267,26 +267,91 @@ jobs:
           echo P08_R41_FRESH_FPM_MASTER_PROCESS=PASS
           echo P08_R41_REAL_CLOUDPANEL_HOST=NOT_PROVEN
           echo P08_R41_OWNER_CLICK_SIGNED_OFFER=NOT_PROVEN
-      - name: Prime real PHP-FPM OPcache with old immutable application
+      - name: Login synthetic Owner to real versioned HTTPS app and pin FPM master
         run: |
           set -euo pipefail
           site=/home/p08ci/htdocs/adops.kewaro.com
           test "$(sudo readlink "$site/current")" = "releases/$P08_BRIDGE_SHA"
+          sudo openssl req -x509 -nodes -newkey rsa:2048 \
+            -keyout /etc/ssl/private/p08-r48-local-key.pem \
+            -out /etc/ssl/certs/p08-r48-local-cert.pem \
+            -days 1 -subj /CN=adops.kewaro.com > /dev/null 2>&1
+          sudo chmod 0600 /etc/ssl/private/p08-r48-local-key.pem
+          sudo tee /etc/nginx/sites-enabled/p08-r48-local.conf > /dev/null <<'EOF'
+          server {
+            listen 127.0.0.1:18443 ssl;
+            server_name adops.kewaro.com;
+            ssl_certificate /etc/ssl/certs/p08-r48-local-cert.pem;
+            ssl_certificate_key /etc/ssl/private/p08-r48-local-key.pem;
+            root /home/p08ci/htdocs/adops.kewaro.com/public;
+            index index.php;
+            location / { try_files $uri $uri/ /index.php?$query_string; }
+            location ~ \.php$ {
+              include snippets/fastcgi-php.conf;
+              fastcgi_pass unix:/run/php/p08ci-fpm.sock;
+            }
+          }
+          EOF
+          sudo nginx -t -q
+          sudo systemctl reload nginx
           before=$(sudo systemctl show -p MainPID --value php8.4-fpm)
           test "$before" -gt 1
           echo "$before" > "$RUNNER_TEMP/p08-r48-fpm-before"
-          curl --fail --silent --show-error --max-time 20 \
-            -H 'Host: adops.kewaro.com' \
-            http://127.0.0.1:18086/login > "$RUNNER_TEMP/p08-r48-bridge-login.html"
-          sudo -E python3 - <<'PY'
-          import json,os,pathlib
-          root=pathlib.Path('/home/p08ci/htdocs/adops.kewaro.com')
-          sha=os.environ['P08_BRIDGE_SHA']
-          manifest=json.loads((root/'releases'/sha/'public/build/manifest.json').read_text())
-          entry=manifest['resources/js/app.ts']['file']
-          page=pathlib.Path(os.environ['RUNNER_TEMP']+'/p08-r48-bridge-login.html').read_text()
-          assert '/build/'+entry in page,'R48_BRIDGE_VITE_ENTRY_NOT_IN_HTTP'
-          print('P08_R48_OLD_IMMUTABLE_LARAVEL_HTML_VIA_FPM=PASS')
+          host=adops.kewaro.com
+          origin=https://$host:18443
+          login_code=$(curl --noproxy '*' --resolve "$host:18443:127.0.0.1" \
+            -ksS --max-time 20 -b "$RUNNER_TEMP/p08-r48-cookies" \
+            -c "$RUNNER_TEMP/p08-r48-cookies" \
+            -o "$RUNNER_TEMP/p08-r48-login.html" -w '%{http_code}' "$origin/login")
+          test "$login_code" = 200 || { echo P08_R48_OWNER_LOGIN_PAGE_HTTP_CODE="$login_code"; exit 1; }
+          python3 - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          from urllib.parse import urlencode
+          import os
+          class Token(HTMLParser):
+            token=None
+            def handle_starttag(self,tag,attrs):
+              data=dict(attrs)
+              if tag=='input' and data.get('name')=='_token': self.token=data.get('value')
+          root=Path(os.environ['RUNNER_TEMP'])
+          t=Token()
+          t.feed((root/'p08-r48-login.html').read_text())
+          assert isinstance(t.token,str) and len(t.token)>20,'R48_LOGIN_FORM_TOKEN_NOT_FOUND'
+          form=root/'p08-r48-login-form'
+          form.write_text(urlencode({'_token':t.token,'email':'owner@isolated.example',
+                                     'password':'Synthetic-Owner-Test-1234!'}))
+          form.chmod(0o600)
+          PY
+          login_post=$(curl --noproxy '*' --resolve "$host:18443:127.0.0.1" \
+            -ksS --max-time 20 -b "$RUNNER_TEMP/p08-r48-cookies" \
+            -c "$RUNNER_TEMP/p08-r48-cookies" \
+            -H 'Content-Type: application/x-www-form-urlencoded' \
+            --data-binary "@$RUNNER_TEMP/p08-r48-login-form" \
+            -o /dev/null -w '%{http_code}' "$origin/login")
+          test "$login_post" = 302 || { echo P08_R48_OWNER_LOGIN_POST_HTTP_CODE="$login_post"; exit 1; }
+          old_code=$(curl --noproxy '*' --resolve "$host:18443:127.0.0.1" \
+            -ksS --max-time 20 -b "$RUNNER_TEMP/p08-r48-cookies" \
+            -c "$RUNNER_TEMP/p08-r48-cookies" \
+            -o "$RUNNER_TEMP/p08-r48-old-app.html" -w '%{http_code}' "$origin/app")
+          test "$old_code" = 200 || { echo P08_R48_OLD_WORKSPACE_HTTP_CODE="$old_code"; exit 1; }
+          python3 - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          import json,os
+          class Inertia(HTMLParser):
+            value=None
+            def handle_starttag(self,tag,attrs):
+              a=dict(attrs)
+              if a.get('id')=='app' and 'data-page' in a: self.value=a['data-page']
+          root=Path(os.environ['RUNNER_TEMP'])
+          parsed=Inertia()
+          parsed.feed((root/'p08-r48-old-app.html').read_text())
+          assert parsed.value,'R48_OLD_INERTIA_STATE_MISSING'
+          data=json.loads(parsed.value)['props']['initial']['upgrade']
+          assert data['version']=='0.1.0','R48_OLD_VERSION_WRONG'
+          assert data['source_short']==os.environ['P08_BRIDGE_SHA'][:12],'R48_OLD_SOURCE_WRONG'
+          print('P08_R48_AUTHENTICATED_OLD_RELEASE_FPM_RESPONSE=PASS')
           PY
       - name: Prepare real publisher-signed Atomic with native SQLite backup and run deferred Worker
         run: |
@@ -336,42 +401,53 @@ jobs:
             VF\AdOps\Installation\SetupGuard::package($argv[1]);
             echo "P08_R45_TARGET_IMMUTABLE_FULL=PASS\n";
           ' "$site/releases/$P08_TARGET_SHA"
-          # No FPM restart here: immutable absolute code paths must resolve
-          # the newly active target despite OPcache timestamp validation OFF.
+          # Query the actual same-session Owner workbench through the same
+          # live PHP-FPM master, with OPcache timestamp validation disabled.
           after=$(sudo systemctl show -p MainPID --value php8.4-fpm)
           test "$after" -gt 1
           test "$after" = "$(cat "$RUNNER_TEMP/p08-r48-fpm-before")"
-          curl --fail --silent --show-error --max-time 20 \
-            -H 'Host: adops.kewaro.com' \
-            http://127.0.0.1:18086/login > "$RUNNER_TEMP/p08-r48-target-login.html"
-          sudo -E python3 - <<'PY'
-          import json,os,pathlib
-          root=pathlib.Path('/home/p08ci/htdocs/adops.kewaro.com')
-          before=os.environ['P08_BRIDGE_SHA']
-          after=os.environ['P08_TARGET_SHA']
-          old=json.loads((root/'releases'/before/'public/build/manifest.json').read_text())
-          new=json.loads((root/'releases'/after/'public/build/manifest.json').read_text())
-          old_entry=old['resources/js/app.ts']['file']
-          new_entry=new['resources/js/app.ts']['file']
-          assert old_entry != new_entry,'R48_NO_DISTINCT_VITE_ENTRY_IN_FULLS'
-          old_page=pathlib.Path(os.environ['RUNNER_TEMP']+'/p08-r48-bridge-login.html').read_text()
-          new_page=pathlib.Path(os.environ['RUNNER_TEMP']+'/p08-r48-target-login.html').read_text()
-          assert '/build/'+old_entry in old_page,'R48_OLD_ASSET_NOT_SERVED'
-          assert '/build/'+new_entry in new_page,'R48_NEW_ASSET_NOT_SERVED'
-          assert '/build/'+old_entry not in new_page,'R48_OLD_RELEASE_ASSET_STALE'
-          print('P08_R48_REAL_LARAVEL_HTTP_ACTIVE_RELEASE_SWITCH_WITH_FPM_UNRESTARTED=PASS')
+          host=adops.kewaro.com
+          origin=https://$host:18443
+          new_code=$(curl --noproxy '*' --resolve "$host:18443:127.0.0.1" \
+            -ksS --max-time 20 -b "$RUNNER_TEMP/p08-r48-cookies" \
+            -c "$RUNNER_TEMP/p08-r48-cookies" \
+            -o "$RUNNER_TEMP/p08-r48-new-app.html" -w '%{http_code}' "$origin/app")
+          test "$new_code" = 200 || { echo P08_R48_NEW_WORKSPACE_HTTP_CODE="$new_code"; exit 1; }
+          python3 - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          import json,os
+          class Inertia(HTMLParser):
+            value=None
+            def handle_starttag(self,tag,attrs):
+              a=dict(attrs)
+              if a.get('id')=='app' and 'data-page' in a: self.value=a['data-page']
+          root=Path(os.environ['RUNNER_TEMP'])
+          parsed=Inertia()
+          parsed.feed((root/'p08-r48-new-app.html').read_text())
+          assert parsed.value,'R48_NEW_INERTIA_STATE_MISSING'
+          data=json.loads(parsed.value)['props']['initial']['upgrade']
+          assert data['version']=='0.1.1','R48_NEW_VERSION_NOT_SERVED_BY_FPM'
+          assert data['source_short']==os.environ['P08_TARGET_SHA'][:12],'R48_NEW_SOURCE_NOT_SERVED_BY_FPM'
+          assert data['job_status']=='SUCCEEDED','R48_SIGNED_CLI_WORK_NOT_COMPLETED'
+          print('P08_R48_REAL_OWNER_WORKSPACE_NEW_VERSION_WITHOUT_FPM_RESTART=PASS')
           PY
           sudo systemctl is-active --quiet php8.4-fpm
           sudo systemctl is-active --quiet nginx
           echo P08_R48_UNCHANGED_FPM_MASTER_OPCACHE_VALIDATE_TIMESTAMPS_0=PASS
-          echo P08_R48_REAL_OWNER_CLOUDPANEL_AND_AUTH_BROWSER_POST=NOT_PROVEN
+          echo P08_R48_NO_ROOT_WORKER_SERVICE_RESTART_REQUIRED_FOR_THIS_CODE_ONLY_SWITCH=PASS
+          echo P08_R48_REAL_CLOUDPANEL_OWNER_PRODUCTION=NOT_PROVEN
           echo P08_R45_REAL_BROWSER_AUTH_REQUEST=NOT_PROVEN
           echo P08_R45_REAL_RELEASE_SIGNER_CONFIGURED=NO
       - name: Erase private checkout, temporary synthesized Owner data, ZIPs and logs
         if: always()
         run: |
           rm -f "$RUNNER_TEMP/p08-r41-apt.log" "$RUNNER_TEMP/p08-r41-cutover.log"
-          rm -f "$RUNNER_TEMP/p08-r48-fpm-before" "$RUNNER_TEMP/p08-r48-bridge-login.html" "$RUNNER_TEMP/p08-r48-target-login.html"
+          rm -f "$RUNNER_TEMP/p08-r48-fpm-before" "$RUNNER_TEMP/p08-r48-login.html" \
+            "$RUNNER_TEMP/p08-r48-login-form" "$RUNNER_TEMP/p08-r48-cookies" \
+            "$RUNNER_TEMP/p08-r48-old-app.html" "$RUNNER_TEMP/p08-r48-new-app.html"
+          sudo rm -f /etc/nginx/sites-enabled/p08-r48-local.conf \
+            /etc/ssl/private/p08-r48-local-key.pem /etc/ssl/certs/p08-r48-local-cert.pem
           rm -rf "$RUNNER_TEMP/p08-r43-signed" "$RUNNER_TEMP/p08-r43-invalid"
           rm -f "$RUNNER_TEMP/p08-r43-corrupt.zip" "$RUNNER_TEMP/p08-r43-negative.log" "$RUNNER_TEMP/p08-r39-apt.log"
           sudo systemctl stop nginx cron php8.4-fpm 2>/dev/null || true
