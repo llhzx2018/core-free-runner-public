@@ -114,6 +114,7 @@ install_only_m04() {
   bash -n "$stage/vf-system-care.sh" || { rm -rf -- "$tmp" "$stage"; deny; }
   [[ "$(NO_COLOR=1 bash "$stage/vf-system-care.sh" --version)" == "服务器维护与安全 $MODULE_VERSION" ]] || { rm -rf -- "$tmp" "$stage"; deny; }
   [[ "$(NO_COLOR=1 bash "$stage/vf-system-care.sh" --ui-contract)" == 'P07_BEGINNER_ZH_V1' ]] || { rm -rf -- "$tmp" "$stage"; deny; }
+  chmod 0755 "$stage" || { rm -rf -- "$tmp" "$stage"; deny; }
   mv -T -- "$stage" "$dest" || { rm -rf -- "$tmp" "$stage"; deny; }
   ln -s "releases/$MODULE_VERSION" "$link" || deny
   mv -Tf -- "$link" "$active" || deny
