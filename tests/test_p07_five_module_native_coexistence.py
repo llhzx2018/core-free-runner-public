@@ -183,6 +183,49 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
             self.assertEqual((TARGETS["M03 网站与数据"]/"BUILD_ID").read_text().strip(),
                              "0.1.0-release115")
             verify_modules()
+            # Module OWN rollback commands: M01 network manager and M04
+            # system-care return from a controlled synthetic future pointer
+            # only after verifying the original immutable release bytes.
+            # This does not execute real proxy or operating-system tuning.
+            for label, target_root, standalone, build, module_id, critical in (
+                ("P07-M01 网络代理节点（V2Ray）", MODULES/"m01", m01,
+                 "0.1.0-rc13", "P07-M01", "vf-node.sh"),
+                ("P07-M04 服务器维护与安全", MODULES/"m04", m04,
+                 "0.1.0-rc83", "P07-M04", "vf-system-care.sh"),
+            ):
+                saved={name:tree_hash(root) for name,root in TARGETS.items()
+                       if root!=target_root}
+                synthetic=target_root/"releases/0.1.0-synthetic-future"
+                synthetic.mkdir()
+                (synthetic/"MARKER").write_text("owned disposable placeholder")
+                pointer=target_root/"current"
+                next_pointer=target_root/".test-switch"
+                next_pointer.symlink_to("releases/0.1.0-synthetic-future")
+                os.replace(next_pointer,pointer)
+                rollback_cmd=["bash",str(standalone),"rollback",build]
+                invalid=subprocess.run(
+                    rollback_cmd+[module_id+":WRONG"],
+                    capture_output=True,text=True,timeout=20)
+                self.assertEqual(invalid.returncode,13,invalid.stderr)
+                self.assertEqual(os.readlink(pointer),
+                                 "releases/0.1.0-synthetic-future")
+                origin=target_root/"releases"/build/critical
+                original=origin.read_bytes()
+                origin.write_bytes(original+b"\\n# deliberate-tamper")
+                invalid=subprocess.run(
+                    rollback_cmd+[module_id+":"+build],
+                    capture_output=True,text=True,timeout=20)
+                self.assertEqual(invalid.returncode,13,invalid.stderr)
+                self.assertEqual(os.readlink(pointer),
+                                 "releases/0.1.0-synthetic-future")
+                origin.write_bytes(original)
+                run(*(rollback_cmd+[module_id+":"+build]),timeout=20)
+                self.assertEqual(os.readlink(pointer),"releases/"+build)
+                self.assertEqual(saved,{name:tree_hash(TARGETS[name])
+                                        for name in saved},label)
+                print(module_id+"_PUBLIC_OWN_ROLLBACK_AND_BAD_HASH_REFUSAL=PASS",
+                      flush=True)
+            verify_modules()
             # Read-only Toolbox status must report all five independently
             # installed builds without launching any module or touching files.
             before_status={name:tree_hash(root) for name,root in TARGETS.items()}
