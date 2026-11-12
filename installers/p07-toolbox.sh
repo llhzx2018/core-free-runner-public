@@ -25,6 +25,12 @@ SYSTEM_CARE_PUBLIC="V0.1.0"
 SYSTEM_CARE_EXPECTED="0.1.0-rc82"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
 
+# P07-M05 新服务器初始化 has its OWN runtime/build and no M03/M04 installer calls.
+# The isolated M05 artifact is not publicly distributed yet: do not invent a
+# download URL or silently fall back to the legacy M03+M04 installers.
+M05_BUILD_EXPECTED="0.1.0-m05-candidate1"
+M05_RUNTIME="/opt/vfops-modules/m05/current/bin/vfops-init-entry"
+
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
   C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'; C_GRAY=$'\033[90m'
@@ -451,19 +457,21 @@ ensure_system_care_current() {
 
 run_server_init() {
   screen_clear
-  ensure_server_ops_current || return $?
-  ensure_system_care_current || return $?
-  local root init_ui
-  root="$(server_ops_root)" || {
-    say "${C_RED}✗ 无法定位初始化脚本。${C_RESET}" >&2
-    return 6
-  }
-  init_ui="$root/bin/vfops-init-ui"
-  [[ -x "$init_ui" ]] || {
-    say "${C_RED}✗ 初始化脚本未就绪。${C_RESET}" >&2
+  # Only P07-M05 新服务器初始化 may be called; nothing here installs,
+  # upgrades, loads or restarts P07-M03 网站与数据 or P07-M04 系统维护与安全.
+  if [[ ! -x "$M05_RUNTIME" ]]; then
+    say "${C_YELLOW}P07-M05 新服务器初始化的独立安装包尚未正式分发。没有安装或升级其它模块。${C_RESET}"
     return 7
-  }
-  P07_SYSTEM_CARE_ROOT=/opt/vf-system-care P07_SYSTEM_CARE_ENTRY=/usr/local/bin/vf-system-care bash "$init_ui"
+  fi
+
+  local actual_version
+  actual_version="$(NO_COLOR=1 bash "$M05_RUNTIME" --version 2>/dev/null || true)"
+  if [[ "$actual_version" != "P07-M05 新服务器初始化 $M05_BUILD_EXPECTED" ]]; then
+    say "${C_RED}P07-M05 新服务器初始化的独立构建身份不匹配，已停止；其它模块保持原样。${C_RESET}" >&2
+    return 13
+  fi
+
+  bash "$M05_RUNTIME" menu
 }
 
 local_system_care_version() {
