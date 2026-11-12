@@ -110,6 +110,29 @@ def verify(stage,toolbox):
                 raise ValueError("M05 file count")
             if 'M05_BUNDLE_URL=""' not in toolbox or 'M05_BUNDLE_SHA256=""' not in toolbox:
                 raise ValueError("undeclared distribution")
+            offline=m.get("offline_owner_trial")
+            if not isinstance(offline,dict):
+                raise ValueError("private M05 offline artifact missing")
+            if (offline.get("format")!="ONE_BASH_FILE_EMBEDDED_SHA256_ZIP"
+                    or offline.get("distribution")!="PRIVATE_OWNER_TRIAL_ONLY"
+                    or offline.get("public_package_url") is not None
+                    or offline.get("offline_no_git_token") is not True
+                    or offline.get("cloudpanel_bootstrap_manual_confirmation_required") is not True
+                    or offline.get("installed_on_owner_server") is not False
+                    or offline.get("cloudpanel_real_fresh_vm")!="NOT_RUN"
+                    or offline.get("one_file_verified_on_disposable_host") is not True):
+                raise ValueError("private Owner Trial cannot become Release or VPS PASS")
+            if not re.fullmatch(r"[a-f0-9]{64}",offline.get("sha256","")):
+                raise ValueError("private offline executable SHA256 missing")
+            if not re.fullmatch(r"[a-f0-9]{40}",offline.get("private_git_commit","")):
+                raise ValueError("private offline Git commit missing")
+            if not re.fullmatch(r"[a-f0-9]{40}",offline.get("private_git_blob_sha1","")):
+                raise ValueError("private offline Git blob missing")
+            if (offline.get("private_repository")!="llhzx2018/vf-server-ops"
+                    or offline.get("file")!="owner-trial/P07-M05-0.1.0-m05-candidate2-OFFLINE.run"
+                    or not isinstance(offline.get("bytes"),int)
+                    or offline["bytes"] < 500000 or offline["bytes"] >= 1024*1024):
+                raise ValueError("private trial materialization identity drift")
     return True
 
 class StageLock(unittest.TestCase):
@@ -155,6 +178,21 @@ class StageLock(unittest.TestCase):
         m03["installer_source_ref"]=self.stage["modules"][2]["installer_source_ref"]
         m03["final_installer_blob"]="0"*40
         with self.assertRaises(ValueError): verify(altered,self.toolbox)
+
+    def test_private_offline_one_file_cannot_be_mislabeled_public_or_real_cloudpanel(self):
+        for key,value in (
+            ("distribution","PUBLIC_RELEASE"),
+            ("cloudpanel_real_fresh_vm","PASS"),
+            ("installed_on_owner_server",True),
+            ("public_package_url","https://example.invalid/owner-trial.run"),
+            ("sha256","0"*40),
+            ("offline_no_git_token",False),
+        ):
+            with self.subTest(key=key):
+                altered=copy.deepcopy(self.stage)
+                offline=next(x for x in altered["modules"] if x["id"]=="P07-M05")["offline_owner_trial"]
+                offline[key]=value
+                with self.assertRaises(ValueError): verify(altered,self.toolbox)
 
     def test_toolbox_help_has_independent_m05_without_stale_m03_label(self):
         self.assertIn("5. 新服务器初始化        系统更新/CloudPanel/数据库选择",self.toolbox)
