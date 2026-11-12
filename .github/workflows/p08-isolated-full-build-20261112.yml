@@ -155,6 +155,61 @@ jobs:
           echo P08_FORMAL_RELEASE=NO
           echo P08_PRODUCTION_WRITE=NO
 
+      - name: Exercise extracted first-run HTTP form and safe refusal locally
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="$RUNNER_TEMP/p08-extracted"
+          # Isolated PHP dev HTTP only: HTTPS environment value simulates the
+          # CloudPanel proxy flag; this is NOT a real HTTPS/CloudPanel proof.
+          HTTPS=on php -S 127.0.0.1:18081 -t "$root/public" "$root/public/index.php" \
+            > "$RUNNER_TEMP/p08-http-server.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          ready=NO
+          for i in $(seq 1 30); do
+            if curl -sS --max-time 2 -H 'Host: adops.kewaro.com' \
+               -o "$RUNNER_TEMP/p08-setup.html" \
+               http://127.0.0.1:18081/setup 2>/dev/null; then
+              ready=YES
+              break
+            fi
+            sleep 0.2
+          done
+          test "$ready" = YES
+          code=$(curl -sS -o "$RUNNER_TEMP/p08-setup.html" -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' http://127.0.0.1:18081/setup)
+          test "$code" = 200
+          grep -q '第一次安装' "$RUNNER_TEMP/p08-setup.html"
+          grep -q 'name="db_driver"' "$RUNNER_TEMP/p08-setup.html"
+          grep -q 'value="mariadb"' "$RUNNER_TEMP/p08-setup.html"
+          grep -q 'value="mysql"' "$RUNNER_TEMP/p08-setup.html"
+          grep -q 'value="sqlite"' "$RUNNER_TEMP/p08-setup.html"
+          echo P08_EXTRACTED_HTTP_SETUP_GET=PASS
+
+          code=$(curl -sS -o "$RUNNER_TEMP/p08-blank-post.html" -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' -X POST \
+            -d 'owner_email=invalid%40example.invalid' \
+            http://127.0.0.1:18081/setup)
+          test "$code" = 419
+          grep -q '安装表单已过期' "$RUNNER_TEMP/p08-blank-post.html"
+          test ! -f "$root/.env"
+          echo P08_EXTRACTED_HTTP_CSRF_DENY=PASS
+
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' http://127.0.0.1:18081/app)
+          test "$code" = 503
+          echo P08_PREINSTALL_APP_DENY=PASS
+
+          printf '\n<!-- intentional corrupt fixture -->\n' >> "$root/public/build/manifest.json"
+          code=$(curl -sS -o "$RUNNER_TEMP/p08-tampered.html" -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' http://127.0.0.1:18081/setup)
+          test "$code" = 503
+          grep -q 'FULL 完整性检查' "$RUNNER_TEMP/p08-tampered.html"
+          test ! -f "$root/.env"
+          echo P08_EXTRACTED_HTTP_TAMPER_DENY=PASS
+          echo P08_CLOUDPANEL_TLS=NOT_TESTED
+
       - name: Clean all private source, package and temporary logs
         if: always()
         shell: bash
