@@ -72,6 +72,22 @@ def verify(stage,toolbox):
             if m["package_identity_digest"] not in toolbox:
                 raise ValueError("M02 audit SHA missing from Toolbox")
         if ident=="P07-M03":
+            # Lock BOTH hops of the installer; a mutable main download can
+            # otherwise fetch a file whose blob differs from the expected pin.
+            if m.get("package_identity_algorithm")!="GIT_BLOB_SHA1":
+                raise ValueError("M03 must pin its runtime manifest")
+            for field in ("installer_source_ref","installer_blob",
+                          "final_installer_source_ref","final_installer_blob"):
+                identity=m.get(field)
+                if not isinstance(identity,str) or not re.fullmatch(r"[0-9a-f]{40}",identity):
+                    raise ValueError("M03 immutable installer chain: "+field)
+            for field in ("installer_source_ref","installer_blob"):
+                if m[field] not in toolbox:
+                    raise ValueError("M03 immutable Toolbox source mismatch: "+field)
+            final=(ROOT/"installers/p07.sh").read_text(encoding="utf-8")
+            if (m["final_installer_source_ref"] not in final or
+                m["final_installer_blob"] not in final):
+                raise ValueError("M03 nested final installer mismatch")
             if m.get("rollback_scope")!="M03_RUNTIME_ONLY_NO_SITE_OR_DATABASE_RESTORE":
                 raise ValueError("M03 rollback contract must exclude business data")
             if m.get("previous_snapshot_protection")!="NEVER_OVERWRITE_OR_DELETE":
@@ -130,6 +146,15 @@ class StageLock(unittest.TestCase):
         bad=copy.deepcopy(self.stage)
         bad["modules"][4]["package_identity_digest"]="0"*40
         with self.assertRaises(ValueError): verify(bad,self.toolbox)
+
+    def test_m03_installer_chain_cannot_revert_to_unpinned_main(self):
+        altered=copy.deepcopy(self.stage)
+        m03=next(m for m in altered["modules"] if m["id"]=="P07-M03")
+        m03["installer_source_ref"]="main"
+        with self.assertRaises(ValueError): verify(altered,self.toolbox)
+        m03["installer_source_ref"]=self.stage["modules"][2]["installer_source_ref"]
+        m03["final_installer_blob"]="0"*40
+        with self.assertRaises(ValueError): verify(altered,self.toolbox)
 
     def test_toolbox_help_has_independent_m05_without_stale_m03_label(self):
         self.assertIn("5. 新服务器初始化        系统更新/CloudPanel/数据库选择",self.toolbox)
