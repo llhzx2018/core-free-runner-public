@@ -807,6 +807,104 @@ run_server_init() {
   bash "$M05_RUNTIME" menu
 }
 
+# Independent explicit operations. Never implicitly run these during startup,
+# and never accept a private ZIP URL as public distribution.
+p07_owned_helper() {
+  local module="${1:-}" source="${2:-}" identity="${3:-}" kind="${4:-}" verb="${5:-}" build="${6:-}" confirm="${7:-}"
+  local tmp actual rc
+  [[ "$module" =~ ^P07-M0[145]$ &&
+     "$confirm" == "$module:$build" &&
+     "$build" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ &&
+     "$source" == https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/* &&
+     "$identity" =~ ^[a-f0-9]{40}$ &&
+     "$verb" == rollback &&
+     "$(id -u)" == 0 ]] || return 13
+  case "$module:$kind" in
+    P07-M01:bash|P07-M04:bash|P07-M05:python3) ;;
+    *) return 13 ;;
+  esac
+  for cmd in curl sha1sum mktemp; do command -v "$cmd" >/dev/null 2>&1 || return 3; done
+  [[ "$kind" != python3 ]] || command -v python3 >/dev/null 2>&1 || return 3
+  tmp="$(mktemp -t p07-module-own-helper.XXXXXXXX)" || return 13
+  chmod 0600 "$tmp"
+  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-time 60 \
+       "$source" -o "$tmp"; then
+    rm -f -- "$tmp"; return 4
+  fi
+  actual="$(p07_git_blob_sha1 "$tmp" 2>/dev/null || true)"
+  if [[ "$actual" != "$identity" ]]; then
+    rm -f -- "$tmp"
+    say "${C_RED}$module：独立恢复器来源校验失败，未操作任何模块。${C_RESET}" >&2
+    return 6
+  fi
+  set +e
+  if [[ "$kind" == python3 ]]; then
+    python3 -B "$tmp" rollback "$build" --confirm "$confirm"
+  else
+    bash "$tmp" rollback "$build" "$confirm"
+  fi
+  rc=$?
+  set -e
+  rm -f -- "$tmp"
+  [[ "$rc" -eq 0 ]] || return "$rc"
+  case "$module" in
+    P07-M01) m01_verified_current ;;
+    P07-M04) m04_verified_current ;;
+    P07-M05) m05_verified_current ;;
+  esac || return 13
+}
+
+# Manually chosen local M05 Owner Trial ZIP: no auto-publication or CloudPanel.
+# Confirm SHA-256 explicitly; only install/update the M05 runtime files.
+install_m05_local_candidate() {
+  local archive="${1:-}" checksum="${2:-}" confirmation="${3:-}" tmp actual rc
+  [[ "$(id -u)" == 0 &&
+     "$archive" == /* && -f "$archive" && ! -L "$archive" &&
+     "$archive" != *"/../"* && "$archive" != *"/./"* &&
+     "$checksum" =~ ^[a-f0-9]{64}$ &&
+     "$confirmation" == "P07-M05:INSTALL:$checksum" ]] || return 13
+  for cmd in curl sha1sum sha256sum mktemp python3; do
+    command -v "$cmd" >/dev/null 2>&1 || return 3
+  done
+  # Exclude all module runtime trees and the existing website runtime,
+  # including aliases via parent symlinks (canonical path must be identical).
+  local canonical
+  canonical="$(realpath -e -- "$archive" 2>/dev/null || true)"
+  [[ "$canonical" == "$archive" &&
+     "$archive" != /opt/vfops-modules/* &&
+     "$archive" != /opt/vf-server-ops/* &&
+     "$archive" != /opt/vf-server-ops.previous/* ]] || return 13
+  if ! m05_verified_current && [[ -e "$M05_ROOT/current" || -L "$M05_ROOT/current" ]]; then
+    say "${C_RED}P07-M05 新服务器初始化：已有运行时身份异常，拒绝覆盖。${C_RESET}" >&2
+    return 13
+  fi
+  actual="$(sha256_file "$archive" 2>/dev/null || true)"
+  [[ "$actual" == "$checksum" ]] || {
+    say "${C_RED}P07-M05 新服务器初始化：本地 ZIP SHA-256 不匹配；未执行安装。${C_RESET}" >&2
+    return 6
+  }
+  tmp="$(mktemp -t p07-m05-local-installer.XXXXXXXX)" || return 13
+  chmod 0600 "$tmp"
+  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-time 60 \
+       "$M05_INSTALLER_URL" -o "$tmp"; then
+    rm -f -- "$tmp"; return 4
+  fi
+  actual="$(p07_git_blob_sha1 "$tmp" 2>/dev/null || true)"
+  if [[ "$actual" != "$M05_INSTALLER_BLOB" ]]; then
+    rm -f -- "$tmp"
+    say "${C_RED}P07-M05 新服务器初始化：独立原子安装器校验失败。${C_RESET}" >&2
+    return 6
+  fi
+  set +e
+  python3 -B "$tmp" install "$archive" "$checksum"
+  rc=$?
+  set -e
+  rm -f -- "$tmp"
+  [[ "$rc" -eq 0 ]] || return "$rc"
+  m05_verified_current || return 13
+  say "${C_GREEN}P07-M05 新服务器初始化：仅本模块本地候选安装通过；不等于正式发布或 CloudPanel 已初始化。${C_RESET}"
+}
+
 p07_git_blob_sha1() {
   local file="$1" bytes
   bytes="$(wc -c < "$file" | tr -d '[:space:]')"
@@ -978,8 +1076,12 @@ main_menu() {
 }
 
 case "${1:-}" in
-  --rollback-m03) [[ "$#" == 3 ]] || exit 13; rollback_m03_previous "$2" "$3" ;;
+  --rollback-m01) [[ "$#" == 3 ]] || exit 13; p07_owned_helper P07-M01 "$M01_INSTALLER_URL" "$M01_INSTALLER_BLOB" bash rollback "$2" "$3" ;;
   --rollback-m02) [[ "$#" == 3 ]] || exit 13; rollback_m02_current "$2" "$3" ;;
+  --rollback-m03) [[ "$#" == 3 ]] || exit 13; rollback_m03_previous "$2" "$3" ;;
+  --rollback-m04) [[ "$#" == 3 ]] || exit 13; p07_owned_helper P07-M04 "$M04_INSTALLER_URL" "$M04_INSTALLER_BLOB" bash rollback "$2" "$3" ;;
+  --rollback-m05) [[ "$#" == 3 ]] || exit 13; p07_owned_helper P07-M05 "$M05_INSTALLER_URL" "$M05_INSTALLER_BLOB" python3 rollback "$2" "$3" ;;
+  --install-m05-local) [[ "$#" == 4 ]] || exit 13; install_m05_local_candidate "$2" "$3" "$4" ;;
   --modules) modules_status_readonly ;;
   --version|-V) printf '服务器工具箱 %s\n' "$VERSION" ;;
   --help|-h)
@@ -996,6 +1098,15 @@ case "${1:-}" in
 5. 新服务器初始化        系统更新/CloudPanel/数据库选择  V0.1.0（独立模块）
 
 说明：5 个模块各自安装与升级；选择未分发模块时会明确提示，不会安装其他模块。
+恢复既存的独立模块：
+  --rollback-m01 <版本> <P07-M01:版本>
+  --rollback-m02 <版本> <P07-M02:版本>
+  --rollback-m03 <版本> <P07-M03:版本>
+  --rollback-m04 <版本> <P07-M04:版本>
+  --rollback-m05 <版本> <P07-M05:版本>
+M05 私有试用包手动验证安装（不会初始化 CloudPanel）：
+  --install-m05-local <ZIP绝对路径> <SHA-256> <P07-M05:INSTALL:SHA-256>
+正式公共版本尚未发布；请勿在已有业务生产环境试装候选。
 EOF
     ;;
   "")
