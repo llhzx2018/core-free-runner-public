@@ -99,6 +99,29 @@ cases=(
 )
 print("P07_M05_FREE_NATIVE_SAFE_FAILURE_CLASS="+next((v for k,v in cases if k in raw),"OTHER_ERROR"))
 PY
+  # Determine the exact boundary reached in product's real installer
+  # pipeline WITHOUT ever reading installer stdout / credentials into CI logs.
+  official=/root/cloudpanel-install.sh
+  if [[ -f "$official" && ! -L "$official" ]]; then
+    if echo '8146dbe0a488e7088b04071b0c34d59aa0ab1fe9dcec382d395fd155c9e6c476  /root/cloudpanel-install.sh' | sha256sum -c - >/dev/null 2>&1; then
+      echo P07_M05_FREE_NATIVE_OFFICIAL_INSTALLER=DOWNLOADED_AND_SHA256_PASS
+    else
+      echo P07_M05_FREE_NATIVE_OFFICIAL_INSTALLER=DOWNLOADED_BUT_SHA256_MISMATCH
+    fi
+    if bash -n "$official" >/dev/null 2>&1; then
+      echo P07_M05_FREE_NATIVE_OFFICIAL_INSTALLER_SYNTAX=PASS
+    else
+      echo P07_M05_FREE_NATIVE_OFFICIAL_INSTALLER_SYNTAX=FAIL
+    fi
+  else
+    echo P07_M05_FREE_NATIVE_OFFICIAL_INSTALLER=ABSENT_BEFORE_SCRIPT
+  fi
+  if [[ -d /run/systemd/system ]]; then
+    echo P07_M05_FREE_NATIVE_SYSTEMD=AVAILABLE
+  else
+    echo P07_M05_FREE_NATIVE_SYSTEMD=UNAVAILABLE
+  fi
+  # All output is explicitly non-secret, allowlisted metadata only.
   for bin in clpctl mysql mariadb nginx; do
     if command -v "$bin" >/dev/null 2>&1; then
       echo "P07_M05_FREE_NATIVE_POSTFAIL_BINARY_$bin=FOUND"
