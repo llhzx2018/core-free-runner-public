@@ -1,0 +1,431 @@
+name: P08 three-engine extracted FULL package first install proof (temporary)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/p08-three-engines-extracted-full-20261112.yml
+
+permissions:
+  contents: read
+
+jobs:
+  p08-real-full-build:
+    if: >-
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'maintenance/p08-three-engines-extracted-full-20261112'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      P08_EXACT_SHA: 47858f3bbea1abfae232e80cdfc73e98a90c27da
+      GOV_EXACT_SHA: 7dd6815d1bb8de481ac74be21f4e68359aa15407
+      PYTHONDONTWRITEBYTECODE: "1"
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: p08-only-synthetic-root-pass
+          MARIADB_ROOT_HOST: "%"
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="mariadb-admin ping --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: p08-only-synthetic-root-pass
+          MYSQL_ROOT_HOST: "%"
+        ports:
+          - 3308:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=20
+
+    steps:
+      - name: Checkout P08 exact candidate (transient private source)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: ${{ env.P08_EXACT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p08
+
+      - name: Checkout GOV-DOC canonical source (transient private source)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: ${{ env.GOV_EXACT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: gov
+
+      - name: Pin PHP 8.3 with updated compatible locked dependencies
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962
+        with:
+          php-version: '8.3'
+          extensions: pdo_mysql, pdo_sqlite, mbstring, zip, xml
+          coverage: none
+
+      - name: Select deterministic Node 22 runtime
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: p08/package-lock.json
+
+      - name: Verify exact source and build prerequisites
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p08 rev-parse HEAD)" = "$P08_EXACT_SHA"
+          test "$(git -C gov rev-parse HEAD)" = "$GOV_EXACT_SHA"
+          test "$(cat p08/VERSION)" = "0.1.0"
+          test -z "$(git -C p08 status --porcelain --untracked-files=all)"
+          php -v | head -n 1
+          composer --version | head -n 1
+          node --version
+          npm --version
+          echo P08_EXACT_CANDIDATE_SOURCE=PASS
+
+      - name: Install locked Laravel and Vue dependencies and compile actual assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p08
+          if composer install --no-dev --prefer-dist --no-scripts --no-interaction --no-progress --optimize-autoloader \
+              > "$RUNNER_TEMP/p08-composer.log" 2>&1; then
+            test -s vendor/autoload.php
+            echo P08_LOCKED_LARAVEL_VENDOR=PASS
+          else
+            echo P08_LOCKED_LARAVEL_VENDOR=FAIL
+            tail -n 25 "$RUNNER_TEMP/p08-composer.log"
+            exit 1
+          fi
+          if npm ci --no-audit --no-fund > "$RUNNER_TEMP/p08-npm.log" 2>&1; then
+            echo P08_LOCKED_NPM_INSTALL=PASS
+          else
+            echo P08_LOCKED_NPM_INSTALL=FAIL
+            tail -n 25 "$RUNNER_TEMP/p08-npm.log"
+            exit 1
+          fi
+          if npm run typecheck > "$RUNNER_TEMP/p08-typecheck.log" 2>&1; then
+            echo P08_VUE_TYPESCRIPT=PASS
+          else
+            echo P08_VUE_TYPESCRIPT=FAIL
+            tail -n 25 "$RUNNER_TEMP/p08-typecheck.log"
+            exit 1
+          fi
+          if npm run build > "$RUNNER_TEMP/p08-vite.log" 2>&1; then
+            test -s public/build/manifest.json
+            echo P08_REAL_VITE_ASSETS=PASS
+          else
+            echo P08_REAL_VITE_ASSETS=FAIL
+            tail -n 25 "$RUNNER_TEMP/p08-vite.log"
+            exit 1
+          fi
+          if npm run test:unit > "$RUNNER_TEMP/p08-vitest.log" 2>&1; then
+            echo P08_VUE_UNIT_REGRESSIONS=PASS
+          else
+            echo P08_VUE_UNIT_REGRESSIONS=FAIL
+            tail -n 25 "$RUNNER_TEMP/p08-vitest.log"
+            exit 1
+          fi
+          cd ..
+          python3 -B p08/scripts/check_stack_contract.py --root p08 --phase full
+          test -z "$(git -C p08 status --porcelain --untracked-files=all)"
+          echo P08_FULL_EXACT_SOURCE_CLEAN=PASS
+
+      - name: Build actual FULL ZIP and verify extraction with real PHP installer guard
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if python3 -B p08/scripts/build_full.py \
+            --source p08 --output "$RUNNER_TEMP/P08-vf-adops-0.1.0-FULL-ISOLATED.zip" \
+            --version 0.1.0 --source-sha "$P08_EXACT_SHA" \
+            --governance-root gov > "$RUNNER_TEMP/p08-build.log" 2>&1; then
+            grep -E '^P08_PUBLIC_AUTHORITY_(RESOLVE|DELIVERY)=PASS$' "$RUNNER_TEMP/p08-build.log"
+            echo P08_REAL_FULL_ZIP_STRUCTURAL_GATE=PASS
+          else
+            echo P08_REAL_FULL_ZIP_STRUCTURAL_GATE=FAIL
+            tail -n 30 "$RUNNER_TEMP/p08-build.log"
+            exit 1
+          fi
+          python3 - "$RUNNER_TEMP/P08-vf-adops-0.1.0-FULL-ISOLATED.zip" "$RUNNER_TEMP/p08-extracted" <<'PY'
+          import json,sys,zipfile
+          from pathlib import Path
+          archive=Path(sys.argv[1]); dest=Path(sys.argv[2])
+          dest.mkdir(mode=0o700)
+          with zipfile.ZipFile(archive) as z:
+              for member in z.infolist():
+                  part=Path(member.filename)
+                  assert not part.is_absolute() and '..' not in part.parts
+              z.extractall(dest)
+              manifest=json.loads(z.read('FULL_MANIFEST.json'))
+              assert manifest['type']=='CLEAN_FULL_ONLY'
+              assert manifest['source_sha']=='47858f3bbea1abfae232e80cdfc73e98a90c27da'
+              assert 'vendor/autoload.php' in z.namelist()
+              assert 'public/build/manifest.json' in z.namelist()
+              assert not any(n.startswith('storage/') or n.startswith('bootstrap/cache/') for n in z.namelist())
+          print("P08_EXTRACTED_FULL_MEMBER_CHECK=PASS")
+          PY
+          php -r 'require $argv[1]."/src/Support/Autoload.php"; VF\AdOps\Installation\SetupGuard::package($argv[1]); echo "P08_REAL_SETUP_MANIFEST_GUARD=PASS\n";' "$RUNNER_TEMP/p08-extracted"
+          echo P08_REAL_FULL_SHA256=$(sha256sum "$RUNNER_TEMP/P08-vf-adops-0.1.0-FULL-ISOLATED.zip" | cut -d ' ' -f1)
+          echo P08_REAL_FULL_BYTES=$(stat -c '%s' "$RUNNER_TEMP/P08-vf-adops-0.1.0-FULL-ISOLATED.zip")
+          echo P08_ISOLATED_TRIAL_ONLY=YES
+          echo P08_FORMAL_RELEASE=NO
+          echo P08_PRODUCTION_WRITE=NO
+
+      - name: Exercise extracted first-run security and setup HTTP paths
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="$RUNNER_TEMP/p08-extracted"
+          # Plain HTTP must be rejected by the actual installer.
+          php -S 127.0.0.1:18081 -t "$root/public" "$root/public/index.php" \
+            > "$RUNNER_TEMP/p08-plain-server.log" 2>&1 &
+          plain_pid=$!
+          secure_pid=""
+          trap 'kill "$plain_pid" "${secure_pid:-}" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -sS --max-time 2 -H 'Host: adops.kewaro.com' \
+              -o /dev/null http://127.0.0.1:18081/setup 2>/dev/null; then break; fi
+            sleep 0.2
+          done
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' http://127.0.0.1:18081/setup)
+          echo P08_HTTP_PLAINTEXT_GET_STATUS="$code"
+          test "$code" = 403
+          echo P08_PLAINTEXT_INSTALL_REJECTED=PASS
+          kill "$plain_pid" 2>/dev/null || true
+          wait "$plain_pid" 2>/dev/null || true
+
+          # Simulate the HTTPS=on value supplied by a trusted Nginx/PHP-FPM
+          # HTTPS vhost in the temporary test router ONLY, outside the ZIP.
+          # Not an actual TLS transport or CloudPanel functional acceptance.
+          printf '%s\n' '<?php $_SERVER["HTTPS"]="on"; require getenv("P08_EXTRACTED_PUBLIC_INDEX");' \
+            > "$RUNNER_TEMP/p08-secure-router.php"
+          P08_EXTRACTED_PUBLIC_INDEX="$root/public/index.php" php -S 127.0.0.1:18082 \
+            -t "$root/public" "$RUNNER_TEMP/p08-secure-router.php" \
+            > "$RUNNER_TEMP/p08-secure-server.log" 2>&1 &
+          secure_pid=$!
+          for i in $(seq 1 30); do
+            if curl -sS --max-time 2 -H 'Host: adops.kewaro.com' \
+              -o /dev/null http://127.0.0.1:18082/setup 2>/dev/null; then break; fi
+            sleep 0.2
+          done
+          code=$(curl -sS -o "$RUNNER_TEMP/p08-setup.html" -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' http://127.0.0.1:18082/setup)
+          echo P08_SIMULATED_TLS_SETUP_GET_STATUS="$code"
+          if test "$code" != 200; then
+            tail -n 16 "$RUNNER_TEMP/p08-secure-server.log"
+            exit 1
+          fi
+          for marker in '第一次安装' 'name="db_driver"' 'value="mariadb"' 'value="mysql"' 'value="sqlite"'; do
+            if ! grep -q "$marker" "$RUNNER_TEMP/p08-setup.html"; then
+              echo P08_HTTP_FORM_MARKER_MISSING="$marker"
+              exit 1
+            fi
+          done
+          echo P08_EXTRACTED_SETUP_FORM=PASS
+
+          code=$(curl -sS -o "$RUNNER_TEMP/p08-blank-post.html" -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' -X POST \
+            -d 'owner_email=invalid%40example.invalid' \
+            http://127.0.0.1:18082/setup)
+          echo P08_HTTP_CSRF_STATUS="$code"
+          test "$code" = 419
+          grep -q '安装表单已过期' "$RUNNER_TEMP/p08-blank-post.html"
+          test ! -f "$root/.env"
+          echo P08_EXTRACTED_CSRF_DENY=PASS
+
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' http://127.0.0.1:18082/app)
+          echo P08_HTTP_PREINSTALL_APP_STATUS="$code"
+          test "$code" = 503
+          echo P08_PREINSTALL_APP_DENY=PASS
+
+          printf '\n<!-- intentional corrupt fixture -->\n' >> "$root/public/build/manifest.json"
+          code=$(curl -sS -o "$RUNNER_TEMP/p08-tampered.html" -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' http://127.0.0.1:18082/setup)
+          echo P08_HTTP_TAMPER_STATUS="$code"
+          test "$code" = 503
+          grep -q 'FULL 完整性检查' "$RUNNER_TEMP/p08-tampered.html"
+          test ! -f "$root/.env"
+          echo P08_EXTRACTED_TAMPER_DENY=PASS
+          echo P08_CLOUDPANEL_TLS=NOT_TESTED
+
+      - name: Install real Owner into empty SQLite from extracted ZIP (synthetic)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          root="$RUNNER_TEMP/p08-first-install"
+          mkdir -m 0700 "$root"
+          python3 - "$RUNNER_TEMP/P08-vf-adops-0.1.0-FULL-ISOLATED.zip" "$root" <<'PY'
+          import sys, zipfile
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              archive.extractall(sys.argv[2])
+          PY
+          db=$(python3 -c 'import secrets; print(secrets.token_hex(20)+".sqlite")')
+          : > "$root/database/$db"
+          chmod 0600 "$root/database/$db"
+          P08_EXTRACTED_PUBLIC_INDEX="$root/public/index.php" php -S 127.0.0.1:18083 \
+            -t "$root/public" "$RUNNER_TEMP/p08-secure-router.php" \
+            > "$RUNNER_TEMP/p08-first-server.log" 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 30); do
+            if curl -sS --max-time 2 -H 'Host: adops.kewaro.com' \
+              -o /dev/null http://127.0.0.1:18083/setup 2>/dev/null; then break; fi
+            sleep 0.2
+          done
+          code=$(curl -sS -D "$RUNNER_TEMP/p08-first.headers" \
+            -o "$RUNNER_TEMP/p08-first.html" -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' http://127.0.0.1:18083/setup)
+          test "$code" = 200 || { echo P08_SQLITE_FIRST_GET_STATUS="$code"; exit 1; }
+          csrf=$(python3 - "$RUNNER_TEMP/p08-first.html" <<'PY'
+          import re,sys
+          html=open(sys.argv[1],encoding='utf-8').read()
+          token=re.search(r'name="csrf" value="([^"]+)"',html)
+          assert token, 'SETUP_CSRF_FIELD_MISSING'
+          print(token.group(1))
+          PY
+          )
+          sid=$(python3 - "$RUNNER_TEMP/p08-first.headers" <<'PY'
+          import re,sys
+          headers=open(sys.argv[1],encoding='utf-8').read()
+          m=re.search(r'(?im)^Set-Cookie:\s*adops_setup=([^;\r\n]+)',headers)
+          assert m, 'SETUP_SECURE_COOKIE_MISSING'
+          print(m.group(1))
+          PY
+          )
+          code=$(curl -sS -D "$RUNNER_TEMP/p08-first-post.headers" \
+            -o "$RUNNER_TEMP/p08-first-post.html" -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' \
+            -H 'Origin: https://adops.kewaro.com' \
+            -H "Cookie: adops_setup=$sid" \
+            --data-urlencode "csrf=$csrf" \
+            --data-urlencode "db_driver=sqlite" \
+            --data-urlencode "db_database=$db" \
+            --data-urlencode "db_username=" \
+            --data-urlencode "db_password=" \
+            --data-urlencode "owner_email=owner@isolated.invalid" \
+            --data-urlencode "owner_password=IsolatedOnly2026Passphrase" \
+            --data-urlencode "owner_confirm=IsolatedOnly2026Passphrase" \
+            http://127.0.0.1:18083/setup)
+          echo P08_SQLITE_FIRST_POST_STATUS="$code"
+          if test "$code" != 303; then
+            tail -n 16 "$RUNNER_TEMP/p08-first-server.log"
+            exit 1
+          fi
+          grep -qi '^Location: /login' "$RUNNER_TEMP/p08-first-post.headers"
+          test -s "$root/.env"
+          test -s "$root/storage/app/private/adops/installation/installed.json"
+          test -s "$root/database/$db"
+          php -r '
+            $root=$argv[1]; $db=$argv[2];
+            $record=json_decode(file_get_contents($root."/storage/app/private/adops/installation/installed.json"),true);
+            if (($record["status"]??"")!=="INSTALLED"||($record["database_driver"]??"")!=="sqlite") exit(1);
+            $pdo=new PDO("sqlite:".$root."/database/".$db);
+            $users=$pdo->query("SELECT email,password FROM users")->fetchAll(PDO::FETCH_ASSOC);
+            if(count($users)!==1 || $users[0]["email"]!=="owner@isolated.invalid"
+              || !password_verify("IsolatedOnly2026Passphrase",$users[0]["password"])) exit(2);
+            echo "P08_REAL_SQLITE_OWNER_DB_AND_PASSWORD=PASS\\n";
+          ' "$root" "$db"
+          echo P08_REAL_EXTRACTED_SQLITE_FIRST_INSTALL=PASS
+
+          code=$(curl -sS -o "$RUNNER_TEMP/p08-login.html" -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' http://127.0.0.1:18083/login)
+          echo P08_POSTINSTALL_LOGIN_STATUS="$code"
+          test "$code" = 200
+          code=$(curl -sS -o /dev/null -w '%{http_code}' \
+            -H 'Host: adops.kewaro.com' http://127.0.0.1:18083/setup)
+          test "$code" = 403
+          echo P08_REPEAT_SETUP_REFUSED=PASS
+          echo P08_PHP_FPM_CLOUDPANEL_TLS=NOT_TESTED
+          echo P08_INSTALL_SOURCE=SYNTHETIC_EMPTY_SQLITE_ONLY
+
+      - name: Verify MariaDB 11.8 and MySQL 8.4 first Owner from actual extracted FULL
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for engine in mariadb mysql; do
+            case "$engine" in
+              mariadb) port=3307; clean=p08_ci_mariadb_clean; dirty=p08_ci_mariadb_dirty ;;
+              mysql) port=3308; clean=p08_ci_mysql_clean; dirty=p08_ci_mysql_dirty ;;
+            esac
+            root="$RUNNER_TEMP/p08-sql-$engine"
+            mkdir -m 0700 "$root"
+            python3 - "$RUNNER_TEMP/P08-vf-adops-0.1.0-FULL-ISOLATED.zip" "$root" <<'PY'
+          import zipfile,sys
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              archive.extractall(sys.argv[2])
+          PY
+            mkdir -p "$root/tests"
+            cp p08/tests/test_install_mysql_e2e.php "$root/tests/test_install_mysql_e2e.php"
+            python3 - "$root/tests/test_install_mysql_e2e.php" "$port" <<'PY'
+          from pathlib import Path
+          import sys
+          file=Path(sys.argv[1]); code=file.read_text(encoding='utf8')
+          assert code.count('port=3306')==2
+          assert code.count("'db_port' => '3306'")==1
+          code=code.replace('port=3306','port='+sys.argv[2])
+          code=code.replace("'db_port' => '3306'",
+                            "'db_port' => '"+sys.argv[2]+"'")
+          file.write_text(code,encoding='utf8')
+          PY
+            php -r '
+              $pdo=new PDO("mysql:host=127.0.0.1;port=".$argv[1],
+                 "root","p08-only-synthetic-root-pass",
+                 [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
+              foreach([$argv[2],$argv[3]] as $db) {
+                  if(!preg_match("/^p08_ci_[a-z0-9_]+$/D",$db))exit(1);
+                  $pdo->exec("CREATE DATABASE ".$db);
+              }
+              $pdo->exec("CREATE TABLE ".$argv[3].".prior_data (id INT PRIMARY KEY)");
+              $pdo->exec("INSERT INTO ".$argv[3].".prior_data VALUES(1)");
+            ' "$port" "$clean" "$dirty"
+            if P08_ISOLATED_INSTALL_TEST=YES \
+              P08_TEST_DB_DRIVER="$engine" \
+              P08_TEST_DB_HOST=127.0.0.1 \
+              P08_TEST_DB_CLEAN="$clean" \
+              P08_TEST_DB_DIRTY="$dirty" \
+              P08_TEST_DB_USER=root \
+              P08_TEST_DB_PASSWORD=p08-only-synthetic-root-pass \
+              php "$root/tests/test_install_mysql_e2e.php" > "$RUNNER_TEMP/p08-$engine-install.log" 2>&1; then
+              grep '^P08_.*=PASS
+        if: always()
+        shell: bash
+        run: |
+          rm -rf p08 gov "$RUNNER_TEMP/p08-extracted" "$RUNNER_TEMP/p08-first-install" "$RUNNER_TEMP/p08-sql-mariadb" "$RUNNER_TEMP/p08-sql-mysql"
+          rm -f "$RUNNER_TEMP/P08-vf-adops-0.1.0-FULL-ISOLATED.zip"
+          rm -f "$RUNNER_TEMP"/p08-*.log
+          rm -f "$RUNNER_TEMP"/p08-*.html "$RUNNER_TEMP/p08-secure-router.php" "$RUNNER_TEMP"/p08-*.headers
+          echo P08_PRIVATE_SOURCE_AND_PACKAGE_CLEANUP=ATTEMPTED
+ "$RUNNER_TEMP/p08-$engine-install.log"
+              echo "P08_EXTRACTED_FULL_DB_DRIVER=$engine PASS"
+            else
+              echo "P08_EXTRACTED_FULL_DB_DRIVER=$engine FAIL"
+              tail -n 24 "$RUNNER_TEMP/p08-$engine-install.log"
+              exit 1
+            fi
+            grep -q "DB_CONNECTION=\"$engine\"" "$root/.env"
+            php -r '
+              $s=json_decode(file_get_contents($argv[1]."/storage/app/private/adops/installation/installed.json"),true);
+              if(($s["database_driver"]??"")!==$argv[2]||($s["status"]??"")!=="INSTALLED")exit(1);
+            ' "$root" "$engine"
+            echo "P08_EXTRACTED_FULL_DRIVER_MARKER=$engine PASS"
+          done
+          echo P08_REAL_FULL_THREE_ENGINE_OWNER_DB=PASS
+          echo P08_REAL_CLOUDPANEL_TLS=NOT_TESTED
+
+      - name: Clean all private source, package and temporary logs
+        if: always()
+        shell: bash
+        run: |
+          rm -rf p08 gov "$RUNNER_TEMP/p08-extracted" "$RUNNER_TEMP/p08-first-install"
+          rm -f "$RUNNER_TEMP/P08-vf-adops-0.1.0-FULL-ISOLATED.zip"
+          rm -f "$RUNNER_TEMP"/p08-*.log
+          rm -f "$RUNNER_TEMP"/p08-*.html "$RUNNER_TEMP/p08-secure-router.php" "$RUNNER_TEMP"/p08-*.headers
+          echo P08_PRIVATE_SOURCE_AND_PACKAGE_CLEANUP=ATTEMPTED
