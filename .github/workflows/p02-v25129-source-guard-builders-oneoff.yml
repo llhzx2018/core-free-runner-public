@@ -1,0 +1,113 @@
+name: P02 candidate package source guard (one-off, no package)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p02-v25129-source-guard-builders-oneoff.yml'
+permissions:
+  contents: read
+jobs:
+  source-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_REPO: llhzx2018/vf-library
+      TARGET_VERSION: 2.5.129
+      TARGET_SHA: 87148fa92b480bc43f87570cb24df20be80f197e
+      TARGET_TREE: 14421c9d879817b24cbaeb45f625853389822e51
+      SOURCE_VERSIONS_JSON: '["2.5.81","2.5.82","2.5.102","2.5.103","2.5.104","2.5.105","2.5.111","2.5.112","2.5.113","2.5.114","2.5.115","2.5.116","2.5.117","2.5.118","2.5.119","2.5.120","2.5.121","2.5.122","2.5.124","2.5.127","2.5.128"]'
+      SCHEMA_VERSION: '2401'
+    steps:
+      - name: Validate lane identity and rendered workflow
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_spec.py validate --spec .runner-lanes/p02-v25129-source-guard-builders.json
+          python3 scripts/ephemeral_lane_spec.py render --spec .runner-lanes/p02-v25129-source-guard-builders.json --template .runner-lane-templates/p02-package-source-guard.yml.in --output "$RUNNER_TEMP/p02-rendered.yml"
+          cmp "$RUNNER_TEMP/p02-rendered.yml" .github/workflows/p02-v25129-source-guard-builders-oneoff.yml
+          python3 scripts/ephemeral_lane_spec.py audit-rendered --spec .runner-lanes/p02-v25129-source-guard-builders.json --input .github/workflows/p02-v25129-source-guard-builders-oneoff.yml
+      - name: Checkout exact private P02 source
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Checkout current owning update channel
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: update-channel
+      - name: Exact source and all-builder negative checks only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C product show -s --format=%T HEAD)" = "$TARGET_TREE"
+          test "$(cat product/VERSION)" = "$TARGET_VERSION"
+          python3 product/scripts/verify-source-manifest.py
+          bash product/scripts/verify-repository.sh
+          python3 - "$GITHUB_WORKSPACE/update-channel/projects/P02.json" <<'PY'
+          import json, os, subprocess, sys, tempfile
+          from pathlib import Path
+
+          channel = Path(sys.argv[1])
+          document = json.loads(channel.read_text(encoding="utf-8"))
+          sources = document["from_versions"] + [document["target_version"]]
+          expected = json.loads(os.environ["SOURCE_VERSIONS_JSON"])
+          assert len(sources) == len(set(sources)) == 21, "official source count/duplicates changed"
+          assert len(expected) == 21 and set(sources) == set(expected), "lane source set differs from live channel"
+          validator = [
+              sys.executable, "scripts/verify-release-source-set.py",
+              "--channel-json", str(channel),
+              "--target-version", os.environ["TARGET_VERSION"],
+          ]
+          for version in sources:
+              validator.extend(["--source-version", version])
+          subprocess.run(validator, cwd="product", check=True)
+          print("P02_21_SOURCE_SET_OFFICIAL_CHANNEL_MATCH=PASS")
+
+          incomplete = sources[1:]
+          with tempfile.TemporaryDirectory(prefix="p02-package-entry-guard-") as temporary:
+              temp = Path(temporary)
+              deploy = temp / "missing-deploy"
+              cases = [
+                  ("build-candidate.py", ["--out", str(temp / "candidate")], [temp / "candidate"]),
+                  ("build-release.py", ["--out", str(temp / "release")], [temp / "release"]),
+                  ("build-multisource-update.py", [
+                      "--deploy-root", str(deploy), "--output", str(temp / "update.zip"),
+                      "--target-version", os.environ["TARGET_VERSION"],
+                      "--source-schema", os.environ["SCHEMA_VERSION"],
+                      "--target-schema", os.environ["SCHEMA_VERSION"],
+                      "--timestamp", "2026-11-12T00:00:00Z",
+                  ], [temp / "update.zip"]),
+                  ("build-multisource-repair.py", [
+                      "--deploy-root", str(deploy),
+                      "--template", "scripts/repair-template.php",
+                      "--output", str(temp / "repair.php"),
+                      "--target-version", os.environ["TARGET_VERSION"],
+                      "--schema", os.environ["SCHEMA_VERSION"],
+                  ], [temp / "repair.php"]),
+              ]
+              for name, arguments, outputs in cases:
+                  command = [sys.executable, "scripts/" + name, *arguments,
+                             "--channel-json", str(channel)]
+                  for version in incomplete:
+                      command.extend(["--source-version", version])
+                  result = subprocess.run(command, cwd="product", capture_output=True, text=True)
+                  assert result.returncode != 0, name + " unexpectedly accepted an incomplete source set"
+                  assert "P02_SOURCE_CONTINUITY_MISMATCH" in result.stderr, name + ": " + result.stderr[-1200:]
+                  assert all(not output.exists() for output in outputs), name + " wrote an artifact before rejection"
+                  print("P02_DIRECT_BUILDER_MISMATCH_DENIED=PASS " + name)
+          print("P02_ALL_FOUR_PACKAGE_ENTRYPOINTS_FAIL_CLOSED=PASS")
+          PY
+      - name: Cleanup transient private checkouts
+        if: always()
+        shell: bash
+        run: |
+          rm -rf product update-channel
+          echo P02_PRIVATE_SOURCE_AND_CHANNEL_PERSISTED_IN_PUBLIC_GIT_OR_ARTIFACT=NO
