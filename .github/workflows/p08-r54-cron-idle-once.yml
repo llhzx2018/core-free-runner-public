@@ -19,10 +19,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: llhzx2018/vf-adops
-          ref: 67f4e51074da0a3d7b3418c683ad4c87e8dbdffd
+          ref: 61900ba23d59b7b9da19ba2cb88f13871412b62e
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           path: private-p08
+      - name: Checkout compatible P08 0.1.0 bridge source (no new cron tick in bridge)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: 795ba67ac69a461e16084732d0e2ab2b441f576e
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-p08-bridge
       - name: Install CLI PHP 8.4 and lock exact source
         uses: shivammathur/setup-php@v2
         with:
@@ -33,7 +41,10 @@ jobs:
       - name: Source-bound Cron and Owner regressions
         run: |
           set -euo pipefail
-          test "$(git -C private-p08 rev-parse HEAD)" = "67f4e51074da0a3d7b3418c683ad4c87e8dbdffd"
+          test "$(git -C private-p08 rev-parse HEAD)" = "61900ba23d59b7b9da19ba2cb88f13871412b62e"
+          test "$(git -C private-p08-bridge rev-parse HEAD)" = "795ba67ac69a461e16084732d0e2ab2b441f576e"
+          test "$(cat private-p08-bridge/VERSION)" = "0.1.0"
+          test ! -e private-p08-bridge/src/Upgrade/owner-upgrade-cron-tick.php
           grep -Fq 'PUBLIC_KEY_HEX = null' private-p08/src/Upgrade/UpdateAuthority.php
           cd private-p08
           bash tests/test_cloudpanel_owner_cron_install.sh
@@ -55,13 +66,13 @@ jobs:
           fi
           sudo systemctl start cron
           sudo systemctl is-active --quiet cron
-          sha=$(git -C private-p08 rev-parse HEAD)
+          sha=$(git -C private-p08-bridge rev-parse HEAD)
           site=/home/runner/htdocs/adops.kewaro.com
           sudo mkdir -p "$site/releases/$sha/src/Upgrade" "$site/releases/$sha/src/Support" "$site/storage/app/private/adops/upgrade" "$site/storage/app/private/adops/maintenance"
-          sudo cp private-p08/VF_PROJECT.json "$site/VF_PROJECT.json"
-          sudo cp private-p08/VF_PROJECT.json "$site/releases/$sha/VF_PROJECT.json"
-          sudo cp private-p08/src/Upgrade/OwnerUpgradeJob.php private-p08/src/Upgrade/owner-upgrade-worker.php private-p08/src/Upgrade/owner-upgrade-cron-tick.php private-p08/src/Upgrade/UpdateAuthority.php "$site/releases/$sha/src/Upgrade/"
-          sudo cp private-p08/src/Support/Autoload.php "$site/releases/$sha/src/Support/Autoload.php"
+          sudo cp private-p08-bridge/VF_PROJECT.json "$site/VF_PROJECT.json"
+          sudo cp private-p08-bridge/VF_PROJECT.json "$site/releases/$sha/VF_PROJECT.json"
+          sudo cp private-p08-bridge/src/Upgrade/OwnerUpgradeJob.php private-p08-bridge/src/Upgrade/owner-upgrade-worker.php private-p08-bridge/src/Upgrade/UpdateAuthority.php "$site/releases/$sha/src/Upgrade/"
+          sudo cp private-p08-bridge/src/Support/Autoload.php "$site/releases/$sha/src/Support/Autoload.php"
           sudo ln -s "releases/$sha" "$site/current"
           sudo chown -R runner:runner "$site"
           sudo test "$(stat -c %U "$site")" = runner
@@ -76,19 +87,34 @@ jobs:
           sudo bash "$entry" --apply runner 8.4 | grep -Fx 'P08_R54_CRON=ALREADY_INSTALLED'
           sudo test "$(stat -c %U /etc/cron.d/vf-adops-owner-upgrade)" = root
           sudo test "$(stat -c %a /etc/cron.d/vf-adops-owner-upgrade)" = 644
-          sudo grep -Fq 'runner /usr/bin/php8.4 /home/runner/htdocs/adops.kewaro.com/current/src/Upgrade/owner-upgrade-cron-tick.php /home/runner/htdocs/adops.kewaro.com' /etc/cron.d/vf-adops-owner-upgrade
-          sudo runuser -u runner -- /usr/bin/php8.4 "$site/current/src/Upgrade/owner-upgrade-cron-tick.php" "$site"
+          sudo grep -Fq 'runner if [ -e /home/runner/htdocs/adops.kewaro.com/storage/app/private/adops/maintenance/maintenance.json ]' /etc/cron.d/vf-adops-owner-upgrade
+          sudo grep -Fq 'current/src/Upgrade/owner-upgrade-worker.php' /etc/cron.d/vf-adops-owner-upgrade
+          command=$(sudo sed -n '4s/^[^ ]* [^ ]* [^ ]* [^ ]* [^ ]* [^ ]* //p' /etc/cron.d/vf-adops-owner-upgrade)
+          test -n "$command"
+          output=$(sudo runuser -u runner -- /usr/bin/php8.4 "$site/current/src/Upgrade/owner-upgrade-worker.php" "$site")
+          test "$output" = 'P08_OWNER_UPDATE_WORKER=IDLE:NONE'
+          sudo runuser -u runner -- /bin/sh -c "$command"
           test ! -e "$site/storage/app/private/adops/upgrade/owner-job.json"
-          echo P08_R54_CRON_INSTALL_AND_SEPARATE_SITE_USER_IDLE_TICK=PASS
+          echo P08_R54_BRIDGE_COMPATIBLE_CRON_INSTALL_AND_IDLE=PASS
           printf '{"type":"P08_POINTER_MAINTENANCE_V1"}\n' > "$site/storage/app/private/adops/maintenance/maintenance.json"
-          if sudo runuser -u runner -- /usr/bin/php8.4 "$site/current/src/Upgrade/owner-upgrade-cron-tick.php" "$site"; then
-            echo P08_R54_CRON_MAINTENANCE_UNSAFE >&2
+          sudo runuser -u runner -- /bin/sh -c "$command"
+          test ! -e "$site/storage/app/private/adops/upgrade/owner-job.json"
+          if sudo bash "$entry" --check runner 8.4 >"$RUNNER_TEMP/p08-r54-maintenance.log" 2>&1; then
+            echo P08_R54_INSTALLER_IGNORED_MAINTENANCE >&2
             exit 1
           fi
-          test ! -e "$site/storage/app/private/adops/upgrade/owner-job.json"
+          grep -Fq 'P08_R54_CRON=BLOCKED:MAINTENANCE_PENDING' "$RUNNER_TEMP/p08-r54-maintenance.log"
           rm "$site/storage/app/private/adops/maintenance/maintenance.json"
-          sudo runuser -u runner -- /usr/bin/php8.4 "$site/current/src/Upgrade/owner-upgrade-cron-tick.php" "$site"
-          echo P08_R54_MAINTENANCE_REFUSED_AND_CLEARED=PASS
+          sudo runuser -u runner -- /bin/sh -c "$command"
+          sudo bash "$entry" --check runner 8.4 | grep -Fx 'P08_R54_CRON=ALREADY_INSTALLED'
+          echo P08_R54_BRIDGE_MAINTENANCE_SHELL_GUARD_AND_RESTORE=PASS
+          sudo sh -c "echo CONFLICT >> /etc/cron.d/vf-adops-owner-upgrade"
+          if sudo bash "$entry" --check runner 8.4 >"$RUNNER_TEMP/p08-r54-conflict.log" 2>&1; then
+            echo P08_R54_EXISTING_SCHEDULE_OVERWRITTEN >&2
+            exit 1
+          fi
+          grep -Fq 'P08_R54_CRON=BLOCKED:EXISTING_CRON_CONFLICT' "$RUNNER_TEMP/p08-r54-conflict.log"
+          echo P08_R54_CRON_CONFLICT_FAIL_CLOSED=PASS
           echo P08_R54_ACTUAL_SCHEDULED_CRON_WAKE_AND_BROWSER_CLICK=NOT_PROVEN
       - name: Remove isolated cron.d entry, fake site, transient logs and source
         if: always()
@@ -99,6 +125,6 @@ jobs:
           if [ -d /home/runner/htdocs/adops.kewaro.com ] && [ ! -L /home/runner/htdocs/adops.kewaro.com ]; then
             sudo rm -rf /home/runner/htdocs/adops.kewaro.com
           fi
-          rm -rf private-p08
-          rm -f "$RUNNER_TEMP/p08-r54-dev-check.log"
+          rm -rf private-p08 private-p08-bridge
+          rm -f "$RUNNER_TEMP/p08-r54-dev-check.log" "$RUNNER_TEMP/p08-r54-maintenance.log" "$RUNNER_TEMP/p08-r54-conflict.log"
           echo P08_R54_TEMP_CRON_AND_PRIVATE_WORKSPACE_CLEANUP=COMPLETE
