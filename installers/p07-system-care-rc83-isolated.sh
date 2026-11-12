@@ -24,13 +24,27 @@ lock_path() {
   [[ ! -L "$folder" && -d "$folder" ]] || deny
 }
 verify_own_release() {
-  local path="$1"
+  local path="$1" name expected actual count=0
   [[ ! -L "$path" && -d "$path" ]] || deny
-  [[ -f "$path/VERSION" && ! -L "$path/VERSION" ]] || deny
+  [[ -f "$path/MANIFEST.gitblob" && ! -L "$path/MANIFEST.gitblob" ]] || deny
+  [[ "$(blob_sha "$path/MANIFEST.gitblob")" == "$MANIFEST_BLOB" ]] || deny
   [[ "$(cat "$path/VERSION")" == "$MODULE_VERSION" ]] || deny
-  [[ -f "$path/vf-system-care.sh" && ! -L "$path/vf-system-care.sh" ]] || deny
+  declare -A seen=()
+  while read -r expected name; do
+    [[ -n "$expected" && -n "$name" ]] || continue
+    [[ "$expected" =~ ^[a-f0-9]{40}$ ]] || deny
+    [[ "$name" =~ ^(lib/)?[A-Za-z0-9._-]+$ && "$name" != '.' && "$name" != '..' ]] || deny
+    [[ ! -v seen[$name] ]] || deny
+    seen[$name]=1
+    [[ -f "$path/$name" && ! -L "$path/$name" ]] || deny
+    actual="$(blob_sha "$path/$name")"
+    [[ "$actual" == "$expected" ]] || deny
+    count=$((count + 1))
+  done < "$path/MANIFEST.gitblob"
+  [[ "$count" -eq 24 ]] || deny
   [[ "$(blob_sha "$path/vf-system-care.sh")" == "$UI_BLOB" ]] || deny
 }
+
 install_only_m04() {
   [[ "$(id -u)" == 0 ]] || deny
   for bin in curl mktemp sha1sum flock bash; do command -v "$bin" >/dev/null 2>&1 || deny; done
@@ -94,6 +108,8 @@ install_only_m04() {
     esac
   done < "$manifest"
   [[ "$count" -eq 24 ]] || { rm -rf -- "$tmp" "$stage"; deny; }
+  cp -- "$manifest" "$stage/MANIFEST.gitblob"
+  chmod 0644 "$stage/MANIFEST.gitblob"
   verify_own_release "$stage"
   bash -n "$stage/vf-system-care.sh" || { rm -rf -- "$tmp" "$stage"; deny; }
   [[ "$(NO_COLOR=1 bash "$stage/vf-system-care.sh" --version)" == "服务器维护与安全 $MODULE_VERSION" ]] || { rm -rf -- "$tmp" "$stage"; deny; }
