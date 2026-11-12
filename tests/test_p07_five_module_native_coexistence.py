@@ -297,11 +297,18 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
             # Existing separately pinned M01/M04 rollback programs remain
             # independently callable through the common Toolbox CLI.
             for module,version in (("m01","0.1.0-rc13"),("m04","0.1.0-rc83")):
+                # A rollback can create its OWN module lock. The four siblings
+                # must be bitwise identical, including their lock files.
+                selected_label="M"+module[1:]
+                untouched={name:tree_hash(target) for name,target in TARGETS.items()
+                           if not name.startswith(selected_label)}
                 run("bash",str(ROOT/"installers/p07-toolbox.sh"),
                     "--rollback-"+module,version,
                     "P07-"+module.upper()+":"+version,timeout=110)
-                self.assertEqual(local_baseline,
-                                 {name:tree_hash(TARGETS[name]) for name in local_baseline})
+                self.assertEqual(untouched,
+                                 {name:tree_hash(TARGETS[name]) for name in untouched})
+                self.assertEqual(os.readlink(MODULES/module/"current"),
+                                 "releases/"+version)
             print("P07_M05_LOCAL_PRIVATE_ZIP_GATE=PASS",flush=True)
             print("P07_M05_LOCAL_NEGATIVE_HASH_AND_CONFIRM=PASS",flush=True)
             print("P07_TOOLBOX_M01_M04_OWNER_ROLLBACK=PASS",flush=True)
