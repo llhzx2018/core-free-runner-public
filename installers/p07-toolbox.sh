@@ -571,19 +571,47 @@ p07_git_blob_sha1() {
 }
 
 m04_verified_current() {
-  local current="$M04_ROOT/current" actual version contract
+  local current="$M04_ROOT/current" root="$M04_ROOT/current"
+  local link installed='' name expected count=0 actual version contract
   [[ -L "$current" ]] || return 1
-  [[ "$(readlink "$current")" == "releases/$M04_BUILD_EXPECTED" ]] || return 1
-  [[ -f "$M04_RUNTIME" && ! -L "$M04_RUNTIME" ]] || return 1
-  actual="$(p07_git_blob_sha1 "$M04_RUNTIME" 2>/dev/null || true)"
-  [[ "$actual" == "$M04_UI_BLOB" ]] || return 1
+  link="$(readlink "$current")"
+  [[ "$link" =~ ^releases/([A-Za-z0-9._-]+)$ ]] || return 1
+  installed="${BASH_REMATCH[1]}"
+  [[ -f "$root/MANIFEST.gitblob" && ! -L "$root/MANIFEST.gitblob" &&
+     -f "$root/VERSION" && ! -L "$root/VERSION" &&
+     -f "$M04_RUNTIME" && ! -L "$M04_RUNTIME" ]] || return 1
+  [[ "$(cat "$root/VERSION")" == "$installed" ]] || return 1
+  # The bootstrapped rc83 retains the exact public Git blob pin.
+  if [[ "$installed" == "$M04_BUILD_EXPECTED" ]]; then
+    [[ "$(p07_git_blob_sha1 "$M04_RUNTIME" 2>/dev/null || true)" == "$M04_UI_BLOB" ]] || return 1
+  fi
+  declare -A seen=()
+  while read -r expected name; do
+    [[ -n "$expected" && -n "$name" ]] || continue
+    [[ "$expected" =~ ^[0-9a-f]{40}$ ]] || return 1
+    [[ "$name" =~ ^(lib/)?[A-Za-z0-9._-]+$ &&
+       "$name" != '.' && "$name" != '..' ]] || return 1
+    [[ ! -v seen[$name] ]] || return 1
+    seen[$name]=1
+    [[ -f "$root/$name" && ! -L "$root/$name" ]] || return 1
+    actual="$(p07_git_blob_sha1 "$root/$name" 2>/dev/null || true)"
+    [[ "$actual" == "$expected" ]] || return 1
+    count=$((count + 1))
+    [[ "$count" -le 128 ]] || return 1
+  done < "$root/MANIFEST.gitblob"
+  [[ "$count" -ge 20 ]] || return 1
   version="$(NO_COLOR=1 bash "$M04_RUNTIME" --version 2>/dev/null || true)"
   contract="$(NO_COLOR=1 bash "$M04_RUNTIME" --ui-contract 2>/dev/null || true)"
-  [[ "$version" == "服务器维护与安全 $M04_BUILD_EXPECTED" && "$contract" == "P07_BEGINNER_ZH_V1" ]]
+  [[ "$version" == "服务器维护与安全 $installed" &&
+     "$contract" == "P07_BEGINNER_ZH_V1" ]]
 }
 
 ensure_m04_current() {
   m04_verified_current && return 0
+  if [[ -e "$M04_ROOT/current" || -L "$M04_ROOT/current" ]]; then
+    say "${C_RED}P07-M04 服务器维护与安全：现有版本文件验收失败，拒绝退回旧版。${C_RESET}" >&2
+    return 13
+  fi
   if [[ "$(id -u)" != "0" ]]; then
     say "${C_RED}P07-M04 服务器维护与安全：首次独立安装需要 root。${C_RESET}" >&2
     return 3
