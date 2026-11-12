@@ -241,9 +241,13 @@ echo "P08_R39_REAL_SQL_FLAT_BRIDGE_ATOMIC_AND_RESTORED_BACKUP=PASS engine=".$eng
 $query='SELECT email FROM users WHERE id='.$ownerId;
 $expect($pdo->query($query)->fetchColumn()==='owner@isolated.example','INSTALLED_OWNER_ACCOUNT_CHANGED');
 $expect($restorePdo->query($query)->fetchColumn()==='owner@isolated.example','RESTORED_OWNER_ACCOUNT_MISSING');
-$revs='SELECT COUNT(*) FROM landing_revisions WHERE landing_page_id='.(int)$landingId;
-$expect((int)$pdo->query($revs)->fetchColumn()===1,'LANDING_REVISION_LOST_DURING_UPDATE');
-$expect((int)$restorePdo->query($revs)->fetchColumn()===1,'RESTORED_LANDING_REVISION_MISSING');
+$revs='SELECT COUNT(*) FROM landing_revisions WHERE landing_page_id = ?';
+$sourceRevisionQuery=$pdo->prepare($revs);
+$restoreRevisionQuery=$restorePdo->prepare($revs);
+$sourceRevisionQuery->execute([$landingId]);
+$restoreRevisionQuery->execute([$landingId]);
+$expect((int)$sourceRevisionQuery->fetchColumn()===1,'LANDING_REVISION_LOST_DURING_UPDATE');
+$expect((int)$restoreRevisionQuery->fetchColumn()===1,'RESTORED_LANDING_REVISION_MISSING');
 $expect(hash_file('sha256',$landingRoot.'/versions/1/index.html')===$landingManifestHash,
     'LANDING_MEDIA_CHANGED_DURING_ATOMIC');
 $privateSnapshot=$private.'/recovery/'.$backupId.'/files-manifest.json';
