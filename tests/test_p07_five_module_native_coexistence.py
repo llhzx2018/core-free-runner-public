@@ -108,6 +108,21 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                 "\n".join(bash_function(text,name) for name in names)+
                 "\nensure_m02_current\n"
             )
+            # Exact Toolbox readback of M03/M05 does not install anything.
+            # It accepts M05's own verified future build after an independent
+            # candidate upgrade and does not consult a stale Toolbox pin.
+            readback=work/"module-readback.sh"
+            readback.write_text(
+                "#!/bin/bash\nset -Eeuo pipefail\n"
+                + 'M05_ROOT="/opt/vfops-modules/m05"\n'
+                + 'M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"\n'
+                + 'VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"\n'
+                + "\n".join(bash_function(text,fn) for fn in
+                            ("p07_git_blob_sha1","m05_verified_current","m03_verified_current"))
+                + "\nm03_verified_current && m05_verified_current\n"
+            )
+            def verify_modules():
+                run("bash",str(readback),timeout=30)
             def selected(name: str):
                 if name.startswith("M01"):
                     run("bash",str(m01),"install")
@@ -138,6 +153,7 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                 os.readlink(MODULES/"m05/current"),"releases/0.1.0-m05-candidate1")
             self.assertEqual((TARGETS["M03 网站与数据"]/"BUILD_ID").read_text().strip(),
                              "0.1.0-release115")
+            verify_modules()
             for selected_name in TARGETS:
                 before={name:tree_hash(loc) for name,loc in TARGETS.items()
                         if name != selected_name}
@@ -160,12 +176,14 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                 "--archive",second["path"],"--sha256",second["sha256"])
             self.assertEqual(os.readlink(MODULES/"m05/current"),
                              "releases/0.1.0-m05-candidate2")
+            verify_modules()
             self.assertEqual(baseline,{name:tree_hash(TARGETS[name]) for name in baseline})
             run("python3",str(PRODUCT/"scripts/install_p07_m05_bundle.py"),
                 "--rollback-build","0.1.0-m05-candidate1",
                 "--confirm-rollback","P07-M05:0.1.0-m05-candidate1")
             self.assertEqual(os.readlink(MODULES/"m05/current"),
                              "releases/0.1.0-m05-candidate1")
+            verify_modules()
             self.assertEqual(baseline,{name:tree_hash(TARGETS[name]) for name in baseline})
             print("P07_FIVE_NATIVE_MODULE_COEXISTENCE=PASS",flush=True)
             print("P07_EACH_MODULE_OTHER_FOUR_UNCHANGED=PASS",flush=True)
