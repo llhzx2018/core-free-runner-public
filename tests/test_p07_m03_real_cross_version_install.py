@@ -1,16 +1,18 @@
-"""P07-M03 网站与数据: physical upgrade + rollback, not a synthetic pointer swap.
+"""P07-M03 网站与数据: *actual* official release114 -> release115 upgrade/rollback.
 
-Build a complete manifest-verified release114 fixture on a disposable host,
-install the REAL SHA-pinned public release115 runtime with the EXISTING M03
-installer, reject damaged prior source, and restore previous in both directions
-with the EXISTING standalone rollback script. Older fixture bytes are synthetic:
-this does not claim to reproduce the historical official release114 package.
+Reconstruct exact previously published release114 using its immutable historic
+Git checkout, SHA-256 verified original base TAR and SHA-1 Git-blob verified
+runtime overlay. Execute the production installer source for release115 then
+its guarded previous-runtime rollback twice. All installs remain disposable.
 No CloudPanel, websites, MySQL, migrations, DNS or Owner machines are used.
 """
 from __future__ import annotations
 
 import hashlib
 import os
+import re
+import shutil
+import tarfile
 from pathlib import Path
 import subprocess
 import tempfile
@@ -41,29 +43,65 @@ def tree_identity(root: Path) -> str:
     return h.hexdigest()
 
 
-def install_fixture(root: Path):
-    (root / "bin").mkdir(parents=True)
-    (root / "lib").mkdir()
-    (root / "BUILD_ID").write_text(OLD_BUILD + "\n")
-    script = root / "bin/vfops-user"
-    script.write_text(
-        "#!/usr/bin/env bash\n"
-        'home="$(cd "$(dirname "$0")/.." && pwd)"\n'
-        'case "$1" in\n'
-        ' --version) echo "VF Server Ops 0.1.0" ;;\n'
-        ' --build-id) cat "$home/BUILD_ID" ;;\n'
-        ' *) exit 13 ;;\n'
-        'esac\n'
-    )
-    script.chmod(0o755)
-    for i in range(55):
-        (root / "lib" / f"source{i:02d}.py").write_text(
-            f"# disposable validated M03 previous build fixture {i}\n"
-        )
-    files = sorted([*root.glob("lib/*.py"),root / "BUILD_ID",script])
-    rows = [blob(p.read_bytes())+"  "+p.relative_to(root).as_posix()
-            for p in files]
-    (root / ".runtime-manifest.gitblob").write_text("\n".join(rows)+"\n")
+HISTORY_SOURCE = "9561d8a30d6cadda40442461e54cf8d35d551eda"
+OLD_BASE_SHA256 = "de28a5e9dada500357be725e78e9e5cbacd51d26f1ec9bbb55ff92d21d49ada5"
+OLD_MANIFEST_SHA1 = "ac4086db6a20859a8f101d2aeec588e42e0b5b40"
+
+
+def install_verified_release114(root: Path):
+    # The source checkout is pinned by the workflow and checked independently.
+    historic=ROOT / "historical_m03"
+    source=historic/"dist/p07/0.1.0/overlay"
+    base=historic/"dist/p07/0.1.0-rc2/P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"
+    self_head=subprocess.run(["git","-C",str(historic),"rev-parse","HEAD"],
+                             capture_output=True,text=True,timeout=10,check=True)
+    if self_head.stdout.strip()!=HISTORY_SOURCE:
+        raise AssertionError("Historical M03 source drift")
+    tar_bytes=base.read_bytes()
+    if hashlib.sha256(tar_bytes).hexdigest()!=OLD_BASE_SHA256:
+        raise AssertionError("Original M03 base archive SHA256 mismatch")
+    if root.exists() or root.is_symlink():
+        raise AssertionError("Historic M03 target not empty")
+    with tempfile.TemporaryDirectory(prefix="p07-m03-base-extract-") as temp:
+        with tarfile.open(base,"r:gz") as archive:
+            archive.extractall(temp,filter="data")
+        published_base=Path(temp)/"vf-server-ops"
+        if not (published_base/"VERSION").is_file():
+            raise AssertionError("Historic M03 base structure missing")
+        shutil.copytree(published_base,root,symlinks=False)
+    manifest=(source/"RUNTIME.gitblob").read_bytes()
+    if blob(manifest)!=OLD_MANIFEST_SHA1:
+        raise AssertionError("Historical release114 manifest mismatch")
+    rows=manifest.decode("utf-8").splitlines()
+    if not 50<=len(rows)<=240:
+        raise AssertionError("Historical M03 manifest row limit")
+    seen=set()
+    for row in rows:
+        match=re.fullmatch(r"([0-9a-f]{40})  ((?:bin|lib)/[A-Za-z0-9_./-]+|BUILD_ID)",row)
+        if match is None:
+            raise AssertionError("Bad historical M03 manifest")
+        expected,name=match.groups()
+        if ".." in Path(name).parts or name in seen:
+            raise AssertionError("Duplicate / escaped historic path")
+        seen.add(name)
+        original=source/name
+        if original.is_symlink() or not original.is_file():
+            raise AssertionError("Missing historic source "+name)
+        data=original.read_bytes()
+        if blob(data)!=expected:
+            raise AssertionError("Historic public source blob mismatch "+name)
+        installed=root/name
+        installed.parent.mkdir(parents=True,exist_ok=True)
+        installed.write_bytes(data)
+        if name.startswith("bin/"):
+            installed.chmod(0o755)
+    (root/".runtime-manifest.gitblob").write_bytes(manifest)
+    if (root/"BUILD_ID").read_text().strip()!=OLD_BUILD:
+        raise AssertionError("Historical M03 installed build mismatch")
+    v=subprocess.run(["bash",str(root/"bin/vfops-user"),"--version"],
+                     capture_output=True,text=True,timeout=15)
+    if v.returncode or v.stdout.strip()!="VF Server Ops 0.1.0":
+        raise AssertionError("Historical M03 original runtime version failed")
 
 
 @unittest.skipUnless(os.getenv("P07_M03_NATIVE_FULL") == "1" and
@@ -96,7 +134,7 @@ class M03ActualRuntimeUpgrade(unittest.TestCase):
                   "P07_BIN_LINK":str(self.link),
                   "P07_NO_EXEC":"1",
                   "NO_COLOR":"1"}
-        install_fixture(self.current)
+        install_verified_release114(self.current)
         self.link.symlink_to(self.current/"bin/vfops-user")
         self.sibling_before={n:tree_identity(p) for n,p in self.siblings.items()}
         self.data_before={str(p):hashlib.sha256(p.read_bytes()).hexdigest()
@@ -143,8 +181,8 @@ class M03ActualRuntimeUpgrade(unittest.TestCase):
                               capture_output=True,text=True,timeout=30)
 
     def test_01_damaged_existing_manifest_denied_before_download(self):
-        original=(self.current/"lib/source00.py").read_bytes()
-        (self.current/"lib/source00.py").write_bytes(original+b"# modified\n")
+        original=(self.current/"lib/server_migration.py").read_bytes()
+        (self.current/"lib/server_migration.py").write_bytes(original+b"# modified\n")
         fake_env={**self.env,"P07_PUBLIC_ROOT":"https://127.0.0.1:1"}
         result=self.install(fake_env,timeout=40)
         self.assertNotEqual(result.returncode,0)
@@ -153,7 +191,7 @@ class M03ActualRuntimeUpgrade(unittest.TestCase):
         self.verified_build(self.current,OLD_BUILD)
         self.assert_preserved()
 
-    def test_02_real_release115_installer_from_valid_older_fixture_and_back(self):
+    def test_02_real_official_release114_to115_install_and_reverse(self):
         # First show an invalid download does not consume/move the valid older runtime.
         bad_env={**self.env,"P07_PUBLIC_ROOT":"https://127.0.0.1:1"}
         failed=self.install(bad_env,timeout=75)
@@ -170,7 +208,7 @@ class M03ActualRuntimeUpgrade(unittest.TestCase):
         self.verified_build(self.previous,OLD_BUILD)
         self.assertTrue((self.current/".runtime-manifest.gitblob").is_file())
         self.assert_preserved()
-        print("P07_M03_REAL_RELEASE115_PHYSICAL_UPGRADE_FROM_VALID_OLDER_FIXTURE=PASS",
+        print("P07_M03_REAL_RELEASE114_TO_RELEASE115_PHYSICAL_UPGRADE=PASS",
               flush=True)
 
         rollback=self.rollback_script()
@@ -179,7 +217,7 @@ class M03ActualRuntimeUpgrade(unittest.TestCase):
         self.verified_build(self.current,NEW_BUILD)
         self.assert_preserved()
 
-        old_file=self.previous/"lib/source00.py"
+        old_file=self.previous/"lib/server_migration.py"
         original=old_file.read_bytes()
         old_file.write_bytes(original+b"# corrupt previous\n")
         corrupt=self.rollback(rollback,OLD_BUILD,"P07-M03:"+OLD_BUILD)
@@ -198,7 +236,7 @@ class M03ActualRuntimeUpgrade(unittest.TestCase):
         self.verified_build(self.current,NEW_BUILD)
         self.verified_build(self.previous,OLD_BUILD)
         self.assert_preserved()
-        print("P07_M03_REAL_RELEASE115_PHYSICAL_ROLLBACK_AND_REVERSE=PASS",flush=True)
+        print("P07_M03_REAL_RELEASE114_115_PHYSICAL_ROLLBACK_AND_REVERSE=PASS",flush=True)
         print("P07_M03_OTHER_FOUR_MODULES_AND_WEBSITE_FIXTURE_UNCHANGED=PASS",flush=True)
 
 
