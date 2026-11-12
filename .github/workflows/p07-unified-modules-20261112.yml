@@ -95,7 +95,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-server-ops
-          ref: 86469cf1ec09561ad5cd2357c6921b0b8d5e4c97
+          ref: deb9efbbcfe1fd99f976ad867e9bbee8c1424fc7
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           fetch-depth: 1
@@ -113,7 +113,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          test "$(git -C product rev-parse HEAD)" = "86469cf1ec09561ad5cd2357c6921b0b8d5e4c97"
+          test "$(git -C product rev-parse HEAD)" = "deb9efbbcfe1fd99f976ad867e9bbee8c1424fc7"
           test "$(git -C previous_m05 rev-parse HEAD)" = "946e790cb681c77658ebba1f9675a859709adeb3"
           echo "226f7cb0f4674072979e9946e639500fc05d77f92fec59a508c6eea7303f458b  previous_m05/owner-trial/P07-M05-0.1.0-m05-candidate1.zip" | sha256sum -c -
           for path in /opt/vfops-modules/m01 /opt/vfops-modules/m02 /opt/vfops-modules/m03 /opt/vfops-modules/m04 /opt/vfops-modules/m05 /opt/vf-server-ops /opt/vf-server-ops.previous /usr/local/bin/vfops; do
@@ -128,6 +128,7 @@ jobs:
           export PYTHONDONTWRITEBYTECODE=1
           python3 -B -m unittest discover -s product/tests -p 'test_p07_m05_host_write_gate.py' -v
           python3 -B -m unittest discover -s product/tests -p 'test_p07_m05_db_engine_boundary.py' -v
+          python3 -B -m unittest discover -s product/tests -p 'test_p07_m05_owner_trial_run.py' -v
           python3 -B product/scripts/build_p07_m05_bundle.py --output "$RUNNER_TEMP/p07-m05-candidate2-private.zip" > "$RUNNER_TEMP/p07-m05-candidate2-receipt.json"
           python3 -B - <<'PY'
           import hashlib,json,os,pathlib
@@ -149,6 +150,60 @@ jobs:
           set -Eeuo pipefail
           set +x
           sudo env P07_NATIVE_FIVE=1 GITHUB_ACTIONS=true RUNNER_TEMP="$RUNNER_TEMP" python3 -B -m unittest discover -s tests -p 'test_p07_five_module_native_coexistence.py' -v
+          # Build exact private, deterministic M05 one-file trial in ephemeral RAM/disk.
+          python3 -B product/scripts/build_p07_m05_owner_trial_run.py \
+            --bundle "$RUNNER_TEMP/p07-m05-candidate2-private.zip" \
+            --installer installers/p07-m05-atomic.py \
+            --output "$RUNNER_TEMP/P07-M05-0.1.0-m05-candidate2-OFFLINE.run" \
+            > "$RUNNER_TEMP/p07-m05-offline-receipt.json"
+          bash -n "$RUNNER_TEMP/P07-M05-0.1.0-m05-candidate2-OFFLINE.run"
+          bash "$RUNNER_TEMP/P07-M05-0.1.0-m05-candidate2-OFFLINE.run" --verify-only
+          # Save exact sibling module tree fingerprints; M05 may touch only itself.
+          python3 -B - <<'PY' > "$RUNNER_TEMP/p07-four-before.json"
+          import hashlib,json,pathlib
+          bases=[pathlib.Path('/opt/vfops-modules')/v for v in ('m01','m02','m04')]+[pathlib.Path('/opt/vf-server-ops')]
+          result={}
+          for root in bases:
+              h=hashlib.sha256()
+              for p in sorted(root.rglob('*')):
+                  key=p.relative_to(root).as_posix()
+                  if p.is_symlink(): value=b'link:'+p.readlink().as_posix().encode()
+                  elif p.is_file(): value=hashlib.sha256(p.read_bytes()).digest()
+                  elif p.is_dir(): value=b'directory'
+                  else: raise ValueError('unsupported module object')
+                  h.update(key.encode()+b'\0'+value)
+              result[str(root)]=h.hexdigest()
+          print(json.dumps(result,sort_keys=True))
+          PY
+          # On a throwaway runner only: perform real M05 offline candidate2 upgrade
+          # and rollback to the real preserved candidate1 ZIP build.
+          sudo bash "$RUNNER_TEMP/P07-M05-0.1.0-m05-candidate2-OFFLINE.run" --install-only
+          test "$(readlink /opt/vfops-modules/m05/current)" = 'releases/0.1.0-m05-candidate2'
+          sudo bash "$RUNNER_TEMP/P07-M05-0.1.0-m05-candidate2-OFFLINE.run" \
+            --rollback 0.1.0-m05-candidate1 P07-M05:0.1.0-m05-candidate1
+          test "$(readlink /opt/vfops-modules/m05/current)" = 'releases/0.1.0-m05-candidate1'
+          python3 -B - <<'PY'
+          import hashlib,json,os,pathlib
+          bases=[pathlib.Path('/opt/vfops-modules')/v for v in ('m01','m02','m04')]+[pathlib.Path('/opt/vf-server-ops')]
+          result={}
+          for root in bases:
+              h=hashlib.sha256()
+              for p in sorted(root.rglob('*')):
+                  key=p.relative_to(root).as_posix()
+                  if p.is_symlink(): value=b'link:'+p.readlink().as_posix().encode()
+                  elif p.is_file(): value=hashlib.sha256(p.read_bytes()).digest()
+                  elif p.is_dir(): value=b'directory'
+                  else: raise ValueError('unsupported module object')
+                  h.update(key.encode()+b'\0'+value)
+              result[str(root)]=h.hexdigest()
+          expected=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'p07-four-before.json').read_text())
+          assert expected==result,'P07-M05 offline wrapper modified an unrelated module'
+          print('P07_M05_ONE_FILE_REAL_OFFLINE_ATOMIC_UPGRADE_AND_ROLLBACK=PASS')
+          print('P07_M05_ONE_FILE_FOUR_SIBLINGS_UNCHANGED=PASS')
+          print('P07_M05_ONE_FILE_CLOUDPANEL_INSTALL_NOT_RUN=YES')
+          PY
+          test -f "$RUNNER_TEMP/p07-m05-offline-receipt.json"
+          echo P07_M05_ONE_FILE_NO_GIT_NO_TOKEN=PASS
           echo P07_ALL_FIVE_NATIVE_UPGRADE_ISOLATION=PASS
           echo P07_M05_MYSQL_MARIADB_CHOOSER_BUNDLED=PASS_NO_CLOUDPANEL_EXEC
           echo P07_OWNER_PRODUCTION=NOT_TOUCHED
