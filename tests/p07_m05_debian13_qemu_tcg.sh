@@ -72,7 +72,8 @@ qemu-system-x86_64 \
   -monitor none -daemonize -pidfile "$work/qemu.pid" ||
   blocked QEMU_TCG_BOOT_FAILURE
 guest_ssh(){
-  ssh -q -T -i "$work/key" -p 22442 -o BatchMode=yes \
+  limit="$P07_GUEST_SSH_TIMEOUT"
+  timeout "$limit" ssh -q -T -i "$work/key" -p 22442 -o BatchMode=yes \
     -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
     -o ConnectTimeout=5 "$@"
 }
@@ -81,6 +82,7 @@ guest_scp(){
     -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no \
     -o ConnectTimeout=8 "$@"
 }
+P07_GUEST_SSH_TIMEOUT=30
 ready=no
 for i in $(seq 1 80); do
   if guest_ssh p07test@127.0.0.1 true >/dev/null 2>&1; then ready=yes; break; fi
@@ -121,7 +123,7 @@ echo P07_M05_DEBIAN13_UNSELECTED_DB=REJECTED
 # Opt-in actual empty guest CloudPanel install. The Guest VM itself is
 # destroyed after the job, and no generated CloudPanel password is disclosed.
 set +e
-timeout 2300 guest_ssh p07test@127.0.0.1 \
+P07_GUEST_SSH_TIMEOUT=2300 guest_ssh p07test@127.0.0.1 \
   'sudo bash /opt/vfops-modules/m05/current/bin/vfops-init-core server-migrate bootstrap-local --db-engine MARIADB_11.8 --confirm BOOTSTRAP_LOCAL_CLOUDPANEL' \
   > "$work/cloudpanel-private.log" 2>&1
 rc=$?
