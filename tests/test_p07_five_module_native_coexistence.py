@@ -171,6 +171,24 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
             self.assertEqual((TARGETS["M03 网站与数据"]/"BUILD_ID").read_text().strip(),
                              "0.1.0-release115")
             verify_modules()
+            # Read-only Toolbox status must report all five independently
+            # installed builds without launching any module or touching files.
+            before_status={name:tree_hash(root) for name,root in TARGETS.items()}
+            status=run("bash",str(ROOT/"installers/p07-toolbox.sh"),"--modules",
+                       timeout=20).stdout
+            for chinese in (
+                "P07-M01 网络代理节点（V2Ray）",
+                "P07-M02 服务器性能检测（VPS 验机）",
+                "P07-M03 网站与数据",
+                "P07-M04 服务器维护与安全",
+                "P07-M05 新服务器初始化",
+            ):
+                self.assertIn(chinese+"：",status)
+            self.assertIn("0.1.0-m05-candidate1",status)
+            self.assertIn("0.1.0-release115",status)
+            self.assertEqual(before_status,
+                             {name:tree_hash(root) for name,root in TARGETS.items()})
+            print("P07_FIVE_MODULE_READ_ONLY_STATUS_NO_WRITES=PASS",flush=True)
             # Negative: public M05 installer must refuse a bad ZIP hash,
             # an archive that tries to escape into M03, and a corrupted
             # installed M05 file, without touching ANY sibling module.
