@@ -794,6 +794,7 @@ run_system_care() {
 # version directories are modified. Plain output also supports Owner SSH.
 modules_status_readonly() {
   local slot display installed link marker
+  printf '五模块本机版本（只读，未证明业务功能和制品完整性）\n'
   for slot in m01 m02 m03 m04 m05; do
     case "$slot" in
       m01) display="P07-M01 网络代理节点（V2Ray）"; installed="$M01_ROOT/current" ;;
@@ -811,7 +812,7 @@ modules_status_readonly() {
       fi
     elif [[ -L "$installed" ]]; then
       link="$(readlink "$installed")"
-      if [[ "$link" =~ ^releases/([A-Za-z0-9._-]+)$ ]]; then
+      if [[ "$link" =~ ^releases/([A-Za-z0-9._-]+)$ && -d "$installed" && ! -L "$installed/BUILD_ID" ]]; then
         marker="${BASH_REMATCH[1]}"
       else
         marker="身份异常"
