@@ -46,7 +46,7 @@ test('real HTTPS Owner session + CSRF click → Linux cron site-user worker → 
   console.log('P08_R46_OWNER_SESSION_AND_CSRF_NEGATIVE=PASS')
 
   await page.getByRole('button', { name: '执行原子升级' }).click()
-  await expect(page.getByRole('status')).toContainText('等待独立升级程序', { timeout: 20_000 })
+  await expect(page.locator('.upgrade-grid [role="status"]')).toContainText('等待独立升级程序', { timeout: 20_000 })
   const pending = await page.evaluate(async () => {
     const r = await fetch('/app/system/update/status', {
       credentials: 'same-origin', headers: { Accept: 'application/json' }
@@ -73,7 +73,7 @@ test('real HTTPS Owner session + CSRF click → Linux cron site-user worker → 
 
   // On each read the stable public gateway resolves the current immutable
   // SHA. If PHP-FPM remains on the old code or the worker fails, this fails.
-  await expect(page.getByRole('status')).toContainText('已完成', { timeout: 115_000 })
+  await expect(page.locator('.upgrade-grid [role="status"]')).toContainText('已完成', { timeout: 115_000 })
   await expect(page.getByText('0.1.1', { exact: true })).toBeVisible()
   const finished = await page.evaluate(async () => {
     const r = await fetch('/app/system/update/status', {
