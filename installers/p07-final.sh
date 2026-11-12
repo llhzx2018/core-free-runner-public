@@ -55,6 +55,15 @@ if verify_installed_current; then
   exit 0
 fi
 
+# M03 install must never remove an unknown existing rollback snapshot or
+# existing staged directory. Only the M03 owner may decide how to retain it.
+if [[ -e "$PREVIOUS_DIR" || -L "$PREVIOUS_DIR" ]]; then
+  fail "P07-M03 网站与数据：存在上次升级的恢复目录；拒绝覆盖或删除。"
+fi
+if [[ -e "${INSTALL_DIR}.new" || -L "${INSTALL_DIR}.new" ]]; then
+  fail "P07-M03 网站与数据：目标临时目录已有内容；拒绝清理或覆盖。"
+fi
+
 if [[ "${P07_ALLOW_NONROOT:-0}" != "1" ]]; then
   [[ ${EUID:-$(id -u)} -eq 0 ]] || fail "请使用 root 运行。"
 fi
@@ -145,12 +154,12 @@ find "$SRC_DIR/lib" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/nu
 verify_tree_from_manifest "$SRC_DIR" "$TMP_DIR/RUNTIME.gitblob" || fail "运行时完整性自检失败。"
 
 say "安装当前版本..."
-rm -rf "$NEW_DIR"
+[[ ! -e "$NEW_DIR" && ! -L "$NEW_DIR" ]] || fail "M03 临时路径发生并发冲突，拒绝覆盖。"
 mkdir -p "$NEW_DIR"
 cp -a "$SRC_DIR"/. "$NEW_DIR"/
 
 if [[ -e "$INSTALL_DIR" ]]; then
-  rm -rf "$PREVIOUS_DIR"
+  [[ ! -e "$PREVIOUS_DIR" && ! -L "$PREVIOUS_DIR" ]] || fail "M03 原恢复版本已存在，拒绝覆盖。"
   mv "$INSTALL_DIR" "$PREVIOUS_DIR"
   OLD_MOVED=1
 fi
