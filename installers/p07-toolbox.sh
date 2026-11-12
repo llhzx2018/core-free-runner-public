@@ -46,7 +46,8 @@ M04_RUNTIME="$M04_ROOT/current/vf-system-care.sh"
 # The isolated M05 artifact is not publicly distributed yet: do not invent a
 # download URL or silently fall back to the legacy M03+M04 installers.
 M05_BUILD_EXPECTED="0.1.0-m05-candidate1"
-M05_RUNTIME="/opt/vfops-modules/m05/current/bin/vfops-init-entry"
+M05_ROOT="/opt/vfops-modules/m05"
+M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -546,12 +547,12 @@ run_server_ops() {
 
 
 m05_verified_current() {
-  local current="/opt/vfops-modules/m05/current" installed='' link actual_version
+  local current="$M05_ROOT/current" installed='' link actual_version
   [[ -L "$current" ]] || return 1
   link="$(readlink "$current")"
   [[ "$link" =~ ^releases/([A-Za-z0-9._-]+)$ ]] || return 1
   installed="${BASH_REMATCH[1]}"
-  [[ -d "/opt/vfops-modules/m05/releases/$installed" &&
+  [[ -d "$M05_ROOT/releases/$installed" &&
      ! -L "/opt/vfops-modules/m05/releases/$installed" ]] || return 1
   command -v python3 >/dev/null 2>&1 || return 1
   # Read-only module-own manifest, NOT the Toolbox's hardcoded bootstrap build:
