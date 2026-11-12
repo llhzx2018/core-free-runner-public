@@ -288,12 +288,13 @@ rollback_m02_current() {
      ! -L "$M02_ROOT/.install.lock" ]] || return 13
   exec {fd}>"$M02_ROOT/.install.lock" || return 13
   flock -x "$fd" || return 13
-  # Never replace a damaged current pointer, and never repair unknown releases
-  # by silently downloading the older pinned bootstrap.
-  m02_verified_current || return 13
+  # A failed M02 upgrade may leave a damaged active build; allow an explicit
+  # rollback to a VERIFIED retained M02 version, but never follow foreign links.
   current="$M02_ROOT/current"
+  [[ -L "$current" ]] || return 13
   old="$(readlink "$current")"
-  [[ "$old" =~ ^releases/[A-Za-z0-9._-]+$ ]] || return 13
+  [[ "$old" =~ ^releases/[A-Za-z0-9._-]+$ &&
+     -d "$M02_ROOT/$old" && ! -L "$M02_ROOT/$old" ]] || return 13
   target="$M02_ROOT/releases/$build"
   [[ -d "$target" && ! -L "$target" &&
      -f "$target/MANIFEST.sha256" && ! -L "$target/MANIFEST.sha256" &&
