@@ -248,7 +248,7 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
             m05=next(m for m in stage["modules"] if m["id"]=="P07-M05")
             self.assertEqual(stage["product_source_sha"],
                              os.getenv("P07_PRODUCT_SOURCE_PIN",
-                                       "86469cf1ec09561ad5cd2357c6921b0b8d5e4c97"))
+                                       "deb9efbbcfe1fd99f976ad867e9bbee8c1424fc7"))
             self.assertEqual(first["sha256"],m05["package_identity_digest"])
             self.assertEqual(first["file_count"],m05["package_file_count"])
             self.assertEqual(m05["distribution"],"NOT_RELEASED")
