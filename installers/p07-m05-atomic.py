@@ -126,6 +126,111 @@ def verify_existing(root: Path, build: str, expected: dict[str, bytes]) -> None:
         deny("已有模块构建身份不同")
 
 
+def verify_saved_release(root: Path, build: str) -> None:
+    """Verify an inactive installed M05 version without consulting M03/M04.
+
+    Local manifest is the install-time record. No current-version mutation,
+    file repairs, code execution or scanning other module directories.
+    """
+    if (not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", build)
+            or root.is_symlink() or not root.is_dir()):
+        deny("回滚目标目录或版本身份无效")
+    marker = root / MANIFEST
+    if marker.is_symlink() or not marker.is_file():
+        deny("回滚目标缺失完整性清单")
+    try:
+        record = json.loads(marker.read_text(encoding="utf-8"))
+        if (record.get("schema") != "vf.p07.module-bundle.v1"
+                or record.get("module_id") != MODULE
+                or record.get("module_name") != "新服务器初始化"
+                or record.get("installation_isolation") != "P07-M05_ONLY"
+                or record.get("entrypoint") != "bin/vfops-init-entry"
+                or record.get("module_build_id") != build):
+            deny("回滚目标不是已登记的本模块")
+        files = record.get("files")
+        if not isinstance(files, dict) or not 20 <= len(files) <= MAX_FILES:
+            deny("回滚目标文件清单异常")
+        if not BINS.issubset(files) or not META.issubset(files):
+            deny("回滚目标运行文件缺失")
+        if (root / "MODULE_ID").read_bytes() != b"P07-M05\\n" or
+                (root / "MODULE_BUILD_ID").read_bytes() != (build + "\\n").encode()):
+            deny("回滚目标内部身份不匹配")
+        actual = set()
+        for item in root.rglob("*"):
+            name = item.relative_to(root).as_posix()
+            if item.is_symlink():
+                deny("回滚目标包含软链接")
+            if item.is_dir():
+                continue
+            if not item.is_file():
+                deny("回滚目标包含不支持的文件")
+            actual.add(name)
+        if actual != set(files) | {MANIFEST}:
+            deny("回滚目标文件数量不一致")
+        for name, expected in files.items():
+            rel = PurePosixPath(name)
+            if (not isinstance(name, str) or not name.isascii()
+                    or rel.is_absolute() or ".." in rel.parts
+                    or "\\\\" in name or "//" in name or name.startswith(".")
+                    or not (name.startswith(("bin/", "lib/")) or name in META)):
+                deny("回滚目标文件路径异常")
+            if name.startswith("bin/") and name not in BINS:
+                deny("回滚目标包含非授权可执行文件")
+            if not isinstance(expected, str) or not re.fullmatch(r"[a-f0-9]{64}", expected):
+                deny("回滚目标文件摘要异常")
+            item = root / name
+            if not item.is_file() or item.is_symlink() or digest(item.read_bytes()) != expected:
+                deny("回滚目标文件不完整")
+    except (OSError, ValueError, TypeError, KeyError, UnicodeError):
+        deny("回滚目标无法验证")
+
+
+def atomic_switch(home: Path, current: Path, build: str) -> None:
+    next_link = home / (".current-" + uuid.uuid4().hex)
+    try:
+        if next_link.exists() or next_link.is_symlink():
+            deny("模块临时指针冲突")
+        os.symlink("releases/" + build, next_link)
+        os.replace(next_link, current)
+    finally:
+        if next_link.is_symlink():
+            next_link.unlink()
+
+
+def rollback(build: str, confirmation: str) -> str:
+    """Explicit M05-only rollback to a verified immutable existing release."""
+    if os.geteuid() != 0:
+        deny("独立回滚需要 root")
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", build):
+        deny("回滚版本号不合法")
+    if confirmation != MODULE + ":" + build:
+        deny("回滚确认不匹配")
+    home = BASE / "m05"
+    releases = home / "releases"
+    current = home / "current"
+    # Never create an uninstalled module while processing rollback.
+    for folder in (BASE, home, releases):
+        if folder.is_symlink() or not folder.is_dir():
+            deny("没有可安全恢复的 M05 独立安装")
+    lock_path = home / ".install.lock"
+    if lock_path.is_symlink() or (lock_path.exists() and not lock_path.is_file()):
+        deny("模块回滚锁异常")
+    fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not current.is_symlink():
+            deny("回滚前不存在原子版本指针")
+        old = os.readlink(current)
+        if (not re.fullmatch(r"releases/[A-Za-z0-9._-]{1,64}", old)
+                or (home / old).is_symlink() or not (home / old).is_dir()):
+            deny("原版本指针或目录异常")
+        target = releases / build
+        verify_saved_release(target, build)
+        if old != "releases/" + build:
+            atomic_switch(home, current, build)
+    return build
+
+
 def install(archive: Path, checksum: str) -> str:
     if os.geteuid() != 0:
         deny("独立模块安装需要 root")
@@ -151,9 +256,11 @@ def install(archive: Path, checksum: str) -> str:
             deny("已有 current 不是模块软链接")
         target = releases / build
         if target.exists() or target.is_symlink():
-            if not current.is_symlink() or os.readlink(current) != "releases/" + build:
-                deny("版本已存在，不能覆盖；须单独执行回滚")
+            # Only a full SHA256-matched incoming ZIP may resume a previously
+            # staged-but-not-switched release; never overwrite target files.
             verify_existing(target, build, files)
+            if not current.is_symlink() or os.readlink(current) != "releases/" + build:
+                atomic_switch(home, current, build)
             return build
         stage = home / (".stage-" + uuid.uuid4().hex)
         switch = home / (".current-" + uuid.uuid4().hex)
@@ -189,14 +296,22 @@ def install(archive: Path, checksum: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="P07-M05 新服务器初始化 · 独立模块安装")
-    parser.add_argument("command", choices=["install"])
-    parser.add_argument("archive", type=Path)
-    parser.add_argument("sha256")
+    parser = argparse.ArgumentParser(description="P07-M05 新服务器初始化 · 独立安装/回滚")
+    operation = parser.add_subparsers(dest="command", required=True)
+    install_cmd = operation.add_parser("install", help="安装 SHA-256 验证的独立 ZIP")
+    install_cmd.add_argument("archive", type=Path)
+    install_cmd.add_argument("sha256")
+    rollback_cmd = operation.add_parser("rollback", help="只回滚本模块的既存版本")
+    rollback_cmd.add_argument("build")
+    rollback_cmd.add_argument("--confirm", required=True, help="P07-M05:<构建号>")
     args = parser.parse_args(argv)
     try:
-        build = install(args.archive, args.sha256)
-        print(f"P07-M05 新服务器初始化：{build} 已准备好；其他模块未安装或更新。")
+        if args.command == "install":
+            build = install(args.archive, args.sha256)
+            print(f"P07-M05 新服务器初始化：{build} 已准备好；其他模块未安装或更新。")
+        else:
+            build = rollback(args.build, args.confirm)
+            print(f"P07-M05 新服务器初始化：仅本模块已恢复为 {build}；其他模块未改动。")
         return 0
     except (Unsafe, OSError, ValueError, KeyError, zipfile.BadZipFile,
             subprocess.SubprocessError) as error:
