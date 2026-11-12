@@ -3,10 +3,10 @@ set -euo pipefail
 
 PUBLIC_ROOT="${P07_PUBLIC_ROOT:-https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main}"
 # Pin the final installer to the same immutable public source that owns
-# EXPECTED_BLOB; main currently has a different blob and must not be used.
-INSTALLER_SOURCE_REF="bd34cd295fa83391d7a4c4a899b9a3a98c0bf69a"
+# EXPECTED_BLOB; the guarded release115 installer has changed; never use mutable main.
+INSTALLER_SOURCE_REF="1bcd8747428f042b843ca0851439a13e512bf121"
 INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${INSTALLER_SOURCE_REF}/installers/p07-final.sh"
-EXPECTED_BLOB="872cc0c3a61060a7da58ebefcc853b3ff4e82090"
+EXPECTED_BLOB="5f7eb6a618f623482744f4ef0f4dbaacecc0e2b3"
 
 fail() { printf '\n[服务器工具箱] 错误：%s\n' "$*" >&2; exit 1; }
 
