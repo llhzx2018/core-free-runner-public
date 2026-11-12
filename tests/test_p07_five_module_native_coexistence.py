@@ -7,14 +7,18 @@ change website data, run VPS migration or modify Owner production.
 from __future__ import annotations
 
 import hashlib
+import http.server
 import importlib
 import json
 import os
 from pathlib import Path
 import re
+import shutil
+import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 import zipfile
 
@@ -72,6 +76,88 @@ def tree_hash(root: Path) -> str:
         elif path.is_file():
             result.update(hashlib.sha256(path.read_bytes()).digest())
     return result.hexdigest()
+
+
+def install_m05_via_local_https(work: Path, zip_path: Path, checksum: str,
+                                source: str) -> None:
+    """Exercise genuine HTTPS/curl/checksum/Toolbox M05 installation, no public upload.
+
+    Private M05 source stays inside this ephemeral runner. Self-signed HTTPS
+    cert is trusted ONLY by the disposable process via CURL_CA_BUNDLE.
+    """
+    server_dir=work/"m05-https"
+    server_dir.mkdir()
+    offered=server_dir/"owner-trial.zip"
+    shutil.copyfile(zip_path,offered)
+    public_installer=ROOT/"installers/p07-m05-atomic.py"
+    installer_bytes=public_installer.read_bytes()
+    installed_blob=hashlib.sha1(
+        b"blob "+str(len(installer_bytes)).encode()+b"\0"+installer_bytes
+    ).hexdigest()
+    self_blob="17e47121ac27f31162d93a72aa0b1dbea602ea01"
+    if installed_blob!=self_blob:
+        raise AssertionError("public M05 installer pin drift")
+    shutil.copyfile(public_installer,server_dir/"m05-atomic.py")
+    cert=work/"m05-local-cert.pem"
+    key=work/"m05-local-key.pem"
+    run("openssl","req","-x509","-newkey","rsa:2048","-sha256","-nodes",
+        "-days","1","-keyout",str(key),"-out",str(cert),
+        "-subj","/CN=localhost","-addext","subjectAltName=DNS:localhost",
+        timeout=35)
+    class QuietHandler(http.server.SimpleHTTPRequestHandler):
+        def __init__(self,*args,**kwargs):
+            super().__init__(*args,directory=str(server_dir),**kwargs)
+        def log_message(self,*args):
+            pass
+    server=http.server.ThreadingHTTPServer(("127.0.0.1",0),QuietHandler)
+    tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(str(cert),str(key))
+    server.socket=tls.wrap_socket(server.socket,server_side=True)
+    thread=threading.Thread(target=server.serve_forever,daemon=True)
+    thread.start()
+    try:
+        url="https://localhost:"+str(server.server_address[1])
+        harness=work/"m05-verified-https.sh"
+        functions="\n".join(bash_function(source,name) for name in
+                            ("sha256_file","p07_git_blob_sha1",
+                             "m05_verified_current","ensure_m05_current"))
+        harness.write_text(
+            "#!/bin/bash\nset -Eeuo pipefail\n"
+            + 'M05_ROOT="/opt/vfops-modules/m05"\n'
+            + 'M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"\n'
+            + 'M05_BUNDLE_URL="'+url+'/owner-trial.zip"\n'
+            + 'M05_BUNDLE_SHA256="'+checksum+'"\n'
+            + 'M05_INSTALLER_URL="'+url+'/m05-atomic.py"\n'
+            + 'M05_INSTALLER_BLOB="'+self_blob+'"\n'
+            + "C_RED=''; C_YELLOW=''; C_RESET=''\n"
+            + 'say() { printf "%s\\n" "$*"; }\n'
+            + functions + "\nensure_m05_current\n"
+        )
+        env={**os.environ,"CURL_CA_BUNDLE":str(cert),"NO_COLOR":"1"}
+        sibling={n:tree_hash(p) for n,p in TARGETS.items()
+                 if not n.startswith("M05")}
+        offered.write_bytes(b"incorrect-byte-stream")
+        invalid=subprocess.run(["bash",str(harness)],env=env,
+                               capture_output=True,text=True,timeout=35)
+        if invalid.returncode!=6:
+            raise AssertionError("tampered HTTPS package was not rejected: "
+                                 +str(invalid.returncode))
+        if TARGETS["M05 新服务器初始化"].exists():
+            raise AssertionError("M05 root unexpectedly created by bad ZIP")
+        offered.write_bytes(zip_path.read_bytes())
+        run("bash",str(harness),env=env,timeout=100)
+        run("bash",str(harness),env=env,timeout=30)  # verified idempotence
+        if os.readlink(MODULES/"m05/current")!="releases/0.1.0-m05-candidate1":
+            raise AssertionError("M05 HTTPS installation version mismatch")
+        if sibling!={n:tree_hash(TARGETS[n]) for n in sibling}:
+            raise AssertionError("M05 HTTPS install modified unrelated modules")
+        print("P07_M05_HTTPS_VERIFIED_DOWNLOAD_INSTALL=PASS",flush=True)
+        print("P07_M05_HTTPS_CORRUPT_PACKAGE_REJECTED=PASS",flush=True)
+        print("P07_M05_HTTPS_OTHER_FOUR_UNCHANGED=PASS",flush=True)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
 
 
 class AllFiveModuleNativeCoexistence(unittest.TestCase):
@@ -137,8 +223,9 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                     run("bash",str(m04),"install",timeout=130)
                 elif name.startswith("M05"):
                     data=builder.build_bundle(work/"m05-candidate1.zip")
-                    run("python3",str(ROOT/"installers/p07-m05-atomic.py"),
-                        "install",data["path"],data["sha256"],timeout=90)
+                    install_m05_via_local_https(
+                        work,Path(data["path"]),str(data["sha256"]),text
+                    )
             sys.path.insert(0,str((PRODUCT/"scripts").resolve()))
             builder=importlib.import_module("build_p07_m05_bundle")
             # Stage-wide deterministic FULL candidate check: build the exact
