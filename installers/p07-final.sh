@@ -110,13 +110,6 @@ if verify_installed_current; then
   exit 0
 fi
 
-# Guard any previous runtime before downloading/upgrading it. A verified
-# earlier M03 build is upgradeable; a dirty or foreign M03 must be preserved.
-if [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
-  verify_existing_module_before_upgrade ||
-    fail "P07-M03 网站与数据：原运行时归属或完整性无法确认，拒绝升级覆盖。"
-fi
-
 # M03 install must never remove an unknown existing rollback snapshot or
 # existing staged directory. Only the M03 owner may decide how to retain it.
 if [[ -e "$PREVIOUS_DIR" || -L "$PREVIOUS_DIR" ]]; then
@@ -124,6 +117,13 @@ if [[ -e "$PREVIOUS_DIR" || -L "$PREVIOUS_DIR" ]]; then
 fi
 if [[ -e "${INSTALL_DIR}.new" || -L "${INSTALL_DIR}.new" ]]; then
   fail "P07-M03 网站与数据：目标临时目录已有内容；拒绝清理或覆盖。"
+fi
+
+# Guard any previous runtime before downloading/upgrading it. A verified
+# earlier M03 build is upgradeable; a dirty or foreign M03 must be preserved.
+if [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
+  verify_existing_module_before_upgrade ||
+    fail "P07-M03 网站与数据：原运行时归属或完整性无法确认，拒绝升级覆盖。"
 fi
 
 if [[ "${P07_ALLOW_NONROOT:-0}" != "1" ]]; then
