@@ -45,7 +45,15 @@ test('real HTTPS Owner session + CSRF click → Linux cron site-user worker → 
   expect(noCsrf).toBe(419)
   console.log('P08_R46_OWNER_SESSION_AND_CSRF_NEGATIVE=PASS')
 
-  await page.getByRole('button', { name: '执行原子升级' }).click()
+  const [submitResponse] = await Promise.all([
+    page.waitForResponse(r => r.request().method() === 'POST' &&
+      r.url().includes('/app/system/update/request')),
+    page.getByRole('button', { name: '执行原子升级' }).click()
+  ])
+  console.log('P08_R46_OWNER_CLICK_HTTP_STATUS=' + submitResponse.status())
+  console.log('P08_R46_OWNER_CLICK_REDIRECT_PATH=' +
+    (new URL(page.url()).pathname || '/'))
+  expect(submitResponse.status()).toBe(302)
   await expect(page.locator('.upgrade-grid [role="status"]')).toContainText('等待独立升级程序', { timeout: 20_000 })
   const pending = await page.evaluate(async () => {
     const r = await fetch('/app/system/update/status', {
