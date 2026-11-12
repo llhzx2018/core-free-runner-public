@@ -8,7 +8,15 @@ BUILD_ID="0.1.0-preview16"
 
 VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-rc13"
+# Legacy M01 installer URL is retained for text/older regression compatibility,
+# but is NEVER executed by this independently upgradable Toolbox route.
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
+M01_ROOT="/opt/vfops-modules/m01"
+M01_RUNTIME="$M01_ROOT/current/vf-node.sh"
+M01_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/9f5c0d7362cfc766958ab9eb408faf99313546b5/installers/p07-vf-node-independent-rc13.sh"
+M01_INSTALLER_BLOB="590c9adf99c45ceeb38443813005ed68c1b0d694"
+M01_MANIFEST_SHA256="1ca3dc95a5cc6e5aa35c9b7ead415d3b6ea6c6eb9e8307a76310d146ab53c47f"
+
 
 VPS_AUDIT_PUBLIC="V2.1.0"
 VPS_AUDIT_EXPECTED="V2.1.0"
@@ -71,29 +79,66 @@ show_menu() {
   say "${C_GRAY}版本信息进入对应功能后查看；主菜单只保留常用操作。${C_RESET}"
 }
 
-local_node_version() {
-  command -v vf-node >/dev/null 2>&1 || return 1
-  NO_COLOR=1 vf-node --version 2>/dev/null | awk '{print $NF}' || true
+m01_verified_current() {
+  local current="$M01_ROOT/current" release="$M01_ROOT/current" name expected count=0 version=''
+  [[ -L "$current" && "$(readlink "$current")" == "releases/$VF_NODE_EXPECTED" ]] || return 1
+  [[ -f "$release/MANIFEST.sha256" && ! -L "$release/MANIFEST.sha256" ]] || return 1
+  [[ "$(sha256_file "$release/MANIFEST.sha256" 2>/dev/null || true)" == "$M01_MANIFEST_SHA256" ]] || return 1
+  declare -A seen=()
+  while read -r expected name; do
+    [[ -n "$expected" && -n "$name" ]] || continue
+    [[ "$expected" =~ ^[a-f0-9]{64}$ ]] || return 1
+    [[ "$name" =~ ^(lib/)?[A-Za-z0-9._-]+$ && "$name" != '.' && "$name" != '..' ]] || return 1
+    [[ ! -v seen[$name] ]] || return 1
+    seen[$name]=1
+    [[ -f "$release/$name" && ! -L "$release/$name" ]] || return 1
+    [[ "$(sha256_file "$release/$name" 2>/dev/null || true)" == "$expected" ]] || return 1
+    count=$((count + 1))
+  done < "$release/MANIFEST.sha256"
+  [[ "$count" -eq 10 ]] || return 1
+  version="$(NO_COLOR=1 bash "$M01_RUNTIME" --version 2>/dev/null | awk '{print $NF}' || true)"
+  [[ "$version" == "$VF_NODE_EXPECTED" ]]
+}
+
+ensure_m01_current() {
+  m01_verified_current && return 0
+  if [[ "$(id -u)" != "0" ]]; then
+    say "${C_RED}P07-M01 网络代理节点（V2Ray）：独立管理器首次安装/升级需要 root。${C_RESET}" >&2
+    return 3
+  fi
+  for tool in curl sha1sum sha256sum mktemp; do
+    command -v "$tool" >/dev/null 2>&1 || {
+      say "${C_RED}P07-M01 网络代理节点（V2Ray）：缺少 $tool，其他模块保持不变。${C_RESET}" >&2
+      return 3
+    }
+  done
+  local tmp actual rc
+  tmp="$(mktemp -t p07-m01-module-installer.XXXXXXXX)" || return 13
+  chmod 0600 "$tmp"
+  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-time 60 "$M01_INSTALLER_URL" -o "$tmp"; then
+    rm -f "$tmp"
+    return 4
+  fi
+  actual="$(p07_git_blob_sha1 "$tmp" 2>/dev/null || true)"
+  if [[ "$actual" != "$M01_INSTALLER_BLOB" ]]; then
+    rm -f "$tmp"
+    say "${C_RED}P07-M01 网络代理节点（V2Ray）：管理器安装文件身份不匹配。${C_RESET}" >&2
+    return 6
+  fi
+  set +e
+  bash "$tmp" install
+  rc=$?
+  set -e
+  rm -f "$tmp"
+  [[ "$rc" == 0 ]] || return "$rc"
+  m01_verified_current || return 13
 }
 
 run_network_node() {
   screen_clear
-  if [[ "$(local_node_version || true)" == "$VF_NODE_EXPECTED" ]]; then
-    vf-node
-    return $?
-  fi
-
-  command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
-  local tmp rc
-  tmp="$(mktemp -t p07-vf-node.XXXXXX)"
-  chmod 700 "$tmp"
-  curl -fsSL "$VF_NODE_INSTALLER" -o "$tmp" || { rm -f "$tmp"; say "${C_RED}✗ 网络节点入口下载失败。${C_RESET}" >&2; return 4; }
-  set +e
-  bash "$tmp"
-  rc=$?
-  set -e
-  rm -f "$tmp"
-  return "$rc"
+  ensure_m01_current || return $?
+  # Explicitly open ONLY the manager menu: never run implicit non-TTY install.
+  bash "$M01_RUNTIME"
 }
 
 sha256_file() {
