@@ -84,6 +84,24 @@ class M02CrossVersionRollback(unittest.TestCase):
         self.assertEqual(os.readlink(self.root/'current'),pointer)
         self.assertEqual(self.sibling_hashes(),self.before)
 
+    def test_explicit_recovery_from_damaged_active_build_is_scoped(self):
+        # The latest active version may be broken after an interrupted upgrade.
+        # Restore ONLY an intact older M02 release, not any other module.
+        damaged=self.root/'releases'/self.second/'vps-audit.sh'
+        damaged.write_bytes(damaged.read_bytes()+b'\\n# interrupted-upgrade')
+        result=self.invoke(self.first,'P07-M02:'+self.first)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertEqual(os.readlink(self.root/'current'),'releases/'+self.first)
+        self.assertEqual(self.sibling_hashes(),self.before)
+
+    def test_foreign_current_symlink_is_rejected(self):
+        current=self.root/'current'
+        current.unlink()
+        current.symlink_to('../m01')
+        self.assertEqual(self.invoke(self.first,'P07-M02:'+self.first).returncode,13)
+        self.assertEqual(os.readlink(current),'../m01')
+        self.assertEqual(self.sibling_hashes(),self.before)
+
     def test_symlink_manifest_is_rejected(self):
         manifest=self.root/'releases'/self.first/'MANIFEST.sha256'
         manifest.unlink()
