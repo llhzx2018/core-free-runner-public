@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
 import os
 from pathlib import Path
 import re
@@ -148,6 +149,17 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
             self.assertEqual(first["module_id"],"P07-M05")
             self.assertEqual(first["build_id"],"0.1.0-m05-candidate1")
             self.assertEqual(first["sha256"],twin["sha256"])
+            # The release-stage lock is a pure public metadata contract.
+            # Refuse source/ZIP drift instead of silently blessing a new hash.
+            stage=json.loads((ROOT/"dist/p07/candidates/five-modules-stage-20261112.json")
+                             .read_text(encoding="utf-8"))
+            m05=next(m for m in stage["modules"] if m["id"]=="P07-M05")
+            self.assertEqual(stage["product_source_sha"],
+                             os.getenv("P07_PRODUCT_SOURCE_PIN",
+                                       "7371f897605701011ba4b3bc18721b9966babbea"))
+            self.assertEqual(first["sha256"],m05["package_identity_digest"])
+            self.assertEqual(first["file_count"],m05["package_file_count"])
+            self.assertEqual(m05["distribution"],"NOT_RELEASED")
             self.assertEqual((work/"m05-stage-frozen-A.zip").read_bytes(),
                              (work/"m05-stage-frozen-B.zip").read_bytes())
             self.assertGreater(int(first["file_count"]),20)
