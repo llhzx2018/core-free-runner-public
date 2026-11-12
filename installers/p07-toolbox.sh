@@ -29,6 +29,10 @@ VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
 VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release115"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07.sh"
+M03_ROLLBACK_INSTALLER_REF="70836f5bba98e8d4ff32ccb6541b4ca1ffc80912"
+M03_ROLLBACK_INSTALLER_BLOB="9571833c4e8a1d737ee47a60e946a030d94c8157"
+M03_ROLLBACK_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${M03_ROLLBACK_INSTALLER_REF}/installers/p07-m03-restore-previous.sh"
+
 
 SYSTEM_CARE_PUBLIC="V0.1.0"
 SYSTEM_CARE_EXPECTED="0.1.0-rc82"
@@ -393,6 +397,31 @@ ensure_server_ops_current() {
 
   set +e
   P07_TOOLBOX_PARENT=1 P07_NO_EXEC=1 bash "$tmp"
+  rc=$?
+  set -e
+  rm -f "$tmp"
+  return "$rc"
+}
+
+rollback_m03_previous() {
+  # P07-M03 网站与数据: independent runtime restore, NOT site backup restore.
+  # All site migration, data restoration, CloudPanel and DNS functions remain off.
+  local build="${1:-}" confirmation="${2:-}" tmp actual rc
+  [[ "$(id -u)" == 0 &&
+     "$build" =~ ^0[.]1[.]0-release[0-9]+$ &&
+     "$confirmation" == "P07-M03:$build" ]] || return 13
+  for cmd in curl sha1sum mktemp; do command -v "$cmd" >/dev/null 2>&1 || return 13; done
+  tmp="$(mktemp -t p07-m03-module-rollback.XXXXXXXX)" || return 13
+  chmod 0600 "$tmp"
+  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-time 60 "$M03_ROLLBACK_INSTALLER_URL" -o "$tmp"; then
+    rm -f "$tmp"; return 4
+  fi
+  actual="$(p07_git_blob_sha1 "$tmp" 2>/dev/null || true)"
+  if [[ "$actual" != "$M03_ROLLBACK_INSTALLER_BLOB" ]]; then
+    rm -f "$tmp"; return 6
+  fi
+  set +e
+  bash "$tmp" restore-previous "$build" "$confirmation"
   rc=$?
   set -e
   rm -f "$tmp"
@@ -914,6 +943,7 @@ main_menu() {
 }
 
 case "${1:-}" in
+  --rollback-m03) [[ "$#" == 3 ]] || exit 13; rollback_m03_previous "$2" "$3" ;;
   --rollback-m02) [[ "$#" == 3 ]] || exit 13; rollback_m02_current "$2" "$3" ;;
   --modules) modules_status_readonly ;;
   --version|-V) printf '服务器工具箱 %s\n' "$VERSION" ;;
