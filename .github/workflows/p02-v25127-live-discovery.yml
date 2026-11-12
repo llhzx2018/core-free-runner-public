@@ -1,0 +1,102 @@
+name: P02 v2.5.127 live PHP public-mirror discovery and PRIVATE asset transport
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p02-v25127-live-discovery.yml']
+permissions:
+  contents: read
+jobs:
+  verified-discovery:
+    if: github.head_ref == 'test/p02-v25127-release-last-gates-20261112'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout exact PRIVATE P02 production-compatible PHP client
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-library
+          ref: c0cc9412a684aa463c3cbf3a63483ea0dacb25a2
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Ensure PHP cURL on disposable Runner
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! php -r 'exit(extension_loaded("curl") && PHP_VERSION_ID>=80300?0:1);'; then
+             timeout 180s sudo apt-get install -y php8.3-cli php8.3-curl
+          fi
+          php -r 'exit(extension_loaded("curl") && PHP_VERSION_ID>=80300?0:1);'
+          test "$(git -C product rev-parse HEAD)" = 'c0cc9412a684aa463c3cbf3a63483ea0dacb25a2'
+          test "$(cat product/VERSION)" = '2.5.127'
+      - name: Verify canonical, public mirror and immutable formal release independently
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          gh api repos/llhzx2018/core-updates/contents/projects/P02.json?ref=main --jq .content | base64 -d > "${RUNNER_TEMP}/canonical.json"
+          gh api repos/llhzx2018/core-free-runner-public/contents/projects/P02.json?ref=main --jq .content | base64 -d > "${RUNNER_TEMP}/public-mirror.json"
+          gh api repos/llhzx2018/vf-library/releases/442384094 > "${RUNNER_TEMP}/formal-release.json"
+          python3 - <<'PY'
+          import os,json,hashlib
+          from pathlib import Path
+          root=Path(os.environ['RUNNER_TEMP'])
+          a=(root/'canonical.json').read_bytes()
+          b=(root/'public-mirror.json').read_bytes()
+          assert a==b,'CHANNEL_MIRROR_BYTES_DIVERGE'
+          d=json.loads(a)
+          r=json.loads((root/'formal-release.json').read_text())
+          assert r['id']==442384094 and not r['draft'] and not r['prerelease'] and r['published_at']
+          assert r['target_commitish']=='c0cc9412a684aa463c3cbf3a63483ea0dacb25a2' and r['tag_name']=='v2.5.127'
+          assert d['target_version']=='2.5.127' and d['release_id']==r['id']
+          assert d['product_identity']=='c0cc9412a684aa463c3cbf3a63483ea0dacb25a2'
+          assert d['schema_from']==d['schema_to']=='2401' and len(d['from_versions'])==19
+          asset=[x for x in r['assets'] if x['name']==d['asset_name']]
+          assert len(asset)==1 and asset[0]['state']=='uploaded'
+          assert d['asset_bytes']==asset[0]['size'] and 'sha256:'+d['asset_sha256']==asset[0]['digest']
+          print('P02_ONLINE_CANONICAL_MIRROR_BYTE_IDENTITY=PASS')
+          print('P02_ONLINE_RELEASE_ASSET_CHANNEL_IDENTITY=PASS')
+          PY
+      - name: Real exact P02 PHP Update Core fetches PUBLIC mirror and PRIVATE GitHub Release asset
+        shell: bash
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          php -d display_errors=0 <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require_once 'product/src/app/CoreUpdates/GitHubClient.php';
+          require_once 'product/src/app/CoreUpdates/UpdateCore.php';
+          $sourceVersions=['2.5.81','2.5.82','2.5.102','2.5.103','2.5.104','2.5.105','2.5.111','2.5.112','2.5.113','2.5.114','2.5.115','2.5.116','2.5.117','2.5.118','2.5.119','2.5.120','2.5.121','2.5.122','2.5.124'];
+          $client=new \CoreUpdates\GitHubClient('');
+          $manifest=$client->fetchProjectManifest('llhzx2018/core-free-runner-public','P02.json','main');
+          if(($manifest['target_version']??null)!=='2.5.127'||$manifest['from_versions']!==$sourceVersions)throw new RuntimeException('P02_PUBLIC_MIRROR_CONTENT_WRONG');
+          $core=new \CoreUpdates\UpdateCore('P02','APP');
+          foreach($sourceVersions as $from){
+              $check=$core->check($from,'2401',$manifest);
+              if(($check['status']??null)!=='AVAILABLE')throw new RuntimeException('P02_AVAILABLE_FAILED_FOR_'.$from);
+          }
+          if($core->check('2.5.127','2401',$manifest)['status']!=='UP_TO_DATE')throw new RuntimeException('TARGET_UP_TO_DATE_FAILED');
+          if($core->check('2.5.125','2401',$manifest)['status']!=='BLOCKED_SOURCE_VERSION')throw new RuntimeException('BAD_SOURCE_NOT_BLOCKED');
+          if($core->check('2.5.124','2399',$manifest)['status']!=='BLOCKED_SCHEMA')throw new RuntimeException('BAD_SCHEMA_NOT_BLOCKED');
+          echo "P02_LIVE_PUBLIC_MIRROR_PHP_FETCH=PASS\n";
+          echo "P02_LIVE_UPDATE_DISCOVERY_AVAILABLE_19_OF_19=PASS\n";
+          echo "P02_LIVE_UPDATE_DISCOVERY_UP_TO_DATE=PASS\n";
+          echo "P02_LIVE_UPDATE_DISCOVERY_FAIL_CLOSED=PASS\n";
+          $token=trim((string)getenv('VF_PRIVATE_READ_TOKEN'));
+          if($token==='')throw new RuntimeException('READ_ONLY_RUNTIME_CREDENTIAL_MISSING');
+          $path=rtrim((string)getenv('RUNNER_TEMP'),'/').'/p02-v25127-private-asset.zip';
+          try{
+              (new \CoreUpdates\GitHubClient($token))->downloadReleaseAsset((string)$manifest['repository'],(string)$manifest['release_tag'],(string)$manifest['asset_name'],$path);
+              if($core->verifyPackage($path,$manifest)['status']!=='VERIFIED')throw new RuntimeException('LIVE_PRIVATE_RELEASE_PACKAGE_INTEGRITY_FAILED');
+              echo "P02_LIVE_PRIVATE_RELEASE_ASSET_DOWNLOAD_SHA=PASS\n";
+          }finally{if(is_file($path))@unlink($path);}
+          PHP
+      - name: Cleanup private checkout and staging
+        if: always()
+        shell: bash
+        run: |
+          rm -rf product "${RUNNER_TEMP}/p02-v25127-private-asset.zip"
+          echo P02_PUBLIC_MIRROR_PROBE_PRIVATE_DATA_PERSISTED=NO
