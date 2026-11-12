@@ -99,9 +99,12 @@ guest_ssh p07test@127.0.0.1 'test "$(id -u)" -gt 0 &&
 echo P07_M05_DEBIAN13_QEMU_EMPTY_GUEST=PASS
 guest_scp "$trial" p07test@127.0.0.1:/tmp/p07-m05-private-trial.run
 guest_ssh p07test@127.0.0.1 \
-  'sudo bash /tmp/p07-m05-private-trial.run --install-only >/dev/null &&
-   test "$(readlink /opt/vfops-modules/m05/current)" = "releases/0.1.0-m05-candidate2"' ||
+  'sudo bash /tmp/p07-m05-private-trial.run --install-only >/dev/null' ||
  blocked MODULE_INSTALL_IN_GUEST
+guest_ssh p07test@127.0.0.1 \
+  'test "$(sudo readlink /opt/vfops-modules/m05/current)" = "releases/0.1.0-m05-candidate2"' ||
+ blocked MODULE_BUILD_READBACK_IN_GUEST
+echo P07_M05_DEBIAN13_QEMU_REAL_MODULE_INSTALL=PASS
 # Execute the actual product M05 backend on a genuine empty Debian13 VM.
 guest_ssh p07test@127.0.0.1 \
   'sudo bash /opt/vfops-modules/m05/current/bin/vfops-init-core server-migrate target-status --bootstrap-preflight' \
