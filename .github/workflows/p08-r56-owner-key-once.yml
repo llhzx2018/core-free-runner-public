@@ -19,22 +19,30 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: llhzx2018/vf-adops
-          ref: 26b77c4a9a300012b3c9e725b8731d4ff4b7b5e2
+          ref: bf30e1190b05104394fb6b1a26eaf5133c0b6823
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           path: private-p08
+      - name: Checkout original compatible flat 0.1.0 source for isolated HTTP
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: 55ecbc8461a4d90fe7241a00caffa55e557cde1c
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-p08-flat
       - name: Prepare PHP 8.4
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.4'
-          tools: none
+          tools: composer:v2
           coverage: none
-          extensions: sodium, zip, mbstring
+          extensions: sodium, zip, mbstring, pdo_sqlite, sqlite3
       - name: Source-locked Owner trust and web transport tests
         run: |
           set -euo pipefail
           cd private-p08
-          test "$(git rev-parse HEAD)" = "26b77c4a9a300012b3c9e725b8731d4ff4b7b5e2"
+          test "$(git rev-parse HEAD)" = "bf30e1190b05104394fb6b1a26eaf5133c0b6823"
           test "$(cat VERSION)" = 0.1.1
           php -l src/Upgrade/OwnerPublisherTrust.php
           php -l src/Upgrade/UpdateAuthority.php
@@ -47,6 +55,53 @@ jobs:
           python3 scripts/check_stack_contract.py --phase mature
           echo P08_R56_EXACT_PHP_SOURCE_REGRESSION=PASS
           echo P08_R56_USER_CLOUDPANEL_FLAT_SITE=NOT_PROVEN
+      - name: Install real flat Laravel 0.1.0 in disposable SQLite site and exercise one-file HTTP
+        run: |
+          set -euo pipefail
+          flat="$RUNNER_TEMP/p08-r56-flat-site"
+          test "$(git -C private-p08-flat rev-parse HEAD)" = 55ecbc8461a4d90fe7241a00caffa55e557cde1c
+          test "$(cat private-p08-flat/VERSION)" = "0.1.0"
+          cp -a private-p08-flat "$flat"
+          cp private-p08/scripts/owner-publisher-bootstrap-once.php "$flat/public/owner-publisher-once.php"
+          cd "$flat"
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs storage/app/private/adops/installation storage/app/private/adops/maintenance database
+          touch database/r56-test.sqlite
+          secret=$(php -r 'echo base64_encode(str_repeat("T",32));')
+          {
+            echo "APP_NAME=VF_AdOps"
+            echo "APP_ENV=testing"
+            echo "APP_KEY=base64:$secret"
+            echo "APP_URL=https://adops.kewaro.com"
+            echo "APP_DEBUG=false"
+            echo "LOG_CHANNEL=single"
+            echo "DB_CONNECTION=sqlite"
+            echo "DB_DATABASE=$flat/database/r56-test.sqlite"
+            echo "CACHE_STORE=file"
+            echo "SESSION_DRIVER=file"
+            echo "QUEUE_CONNECTION=sync"
+          } > .env
+          chmod 0600 .env
+          composer install --no-dev --no-scripts --no-interaction --prefer-dist --no-progress > "$RUNNER_TEMP/p08-r56-composer.log" 2>&1 || { tail -n 20 "$RUNNER_TEMP/p08-r56-composer.log"; exit 1; }
+          php artisan migrate --force --no-interaction > "$RUNNER_TEMP/p08-r56-migrate.log" 2>&1 || { tail -n 20 "$RUNNER_TEMP/p08-r56-migrate.log"; exit 1; }
+          php -r '
+            require "vendor/autoload.php";
+            $app=require "bootstrap/app.php";
+            $app->make(\Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+            $id=\Illuminate\Support\Facades\DB::table("users")->insertGetId([
+              "name"=>"Owner",
+              "email"=>"owner-r56@example.invalid",
+              "password"=>\Illuminate\Support\Facades\Hash::make("r56-temporary-owner-pass"),
+              "created_at"=>date("Y-m-d H:i:s"),"updated_at"=>date("Y-m-d H:i:s"),
+            ]);
+            file_put_contents("storage/app/private/adops/installation/installed.json",
+              json_encode(["project_id"=>"P08","status"=>"INSTALLED",
+                "owner_id"=>$id,"database_driver"=>"sqlite"],JSON_THROW_ON_ERROR));
+          '
+          cd "$GITHUB_WORKSPACE"
+          python3 private-p08/tests/test_owner_publisher_flat_http.py "$flat"
+          test ! -e "$flat/public/upgrade.php"
+          echo P08_R56_REAL_ORIGINAL_FLAT_LARAVEL_KEY_ONLY_HTTP=PASS
+          echo P08_R56_SIGNED_ATOMIC_AND_PRODUCTION=NOT_TESTED
       - name: Real TypeScript Vue and Vite compilation
         uses: actions/setup-node@v4
         with:
@@ -64,6 +119,6 @@ jobs:
       - name: Always clean private source and ephemeral logs
         if: always()
         run: |
-          rm -rf private-p08
-          rm -f "$RUNNER_TEMP/p08-r56-dev.log" "$RUNNER_TEMP/p08-r56-npm.log"
+          rm -rf private-p08 private-p08-flat "$RUNNER_TEMP/p08-r56-flat-site"
+          rm -f "$RUNNER_TEMP/p08-r56-dev.log" "$RUNNER_TEMP/p08-r56-npm.log" "$RUNNER_TEMP/p08-r56-composer.log" "$RUNNER_TEMP/p08-r56-migrate.log"
           echo P08_R56_PUBLIC_RUNNER_CLEANUP=COMPLETE
