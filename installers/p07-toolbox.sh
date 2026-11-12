@@ -289,10 +289,47 @@ local_server_ops_build() {
   printf '%s' "$value"
 }
 
+m03_verified_current() {
+  local root='/opt/vf-server-ops' entry expected name actual count=0
+  [[ -d "$root" && ! -L "$root" ]] || return 1
+  command -v vfops >/dev/null 2>&1 || return 1
+  entry="$(readlink -f "$(command -v vfops)" 2>/dev/null || true)"
+  case "$entry" in
+    /opt/vf-server-ops/bin/vfops|/opt/vf-server-ops/bin/vfops-user) ;;
+    *) return 1 ;;
+  esac
+  [[ -f "$root/BUILD_ID" && ! -L "$root/BUILD_ID" &&
+     -f "$root/.runtime-manifest.gitblob" &&
+     ! -L "$root/.runtime-manifest.gitblob" ]] || return 1
+  local installed
+  installed="$(cat "$root/BUILD_ID")"
+  [[ "$installed" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
+  [[ "$(NO_COLOR=1 vfops --build-id 2>/dev/null || true)" == "$installed" ]] || return 1
+  [[ "$(NO_COLOR=1 vfops --version 2>/dev/null || true)" == "$VF_SERVER_OPS_EXPECTED" ]] || return 1
+  declare -A seen=()
+  while read -r expected name; do
+    [[ -n "$expected" && -n "$name" ]] || continue
+    [[ "$expected" =~ ^[a-f0-9]{40}$ ]] || return 1
+    [[ "$name" =~ ^(bin|lib)/[A-Za-z0-9_./-]+$ || "$name" == BUILD_ID ]] || return 1
+    [[ "$name" != /* && "$name" != *../* && "$name" != */.. && "$name" != '..' ]] || return 1
+    [[ ! -v seen[$name] ]] || return 1
+    seen[$name]=1
+    [[ -f "$root/$name" && ! -L "$root/$name" ]] || return 1
+    actual="$(p07_git_blob_sha1 "$root/$name" 2>/dev/null || true)"
+    [[ "$actual" == "$expected" ]] || return 1
+    count=$((count + 1))
+    [[ "$count" -le 240 ]] || return 1
+  done < "$root/.runtime-manifest.gitblob"
+  [[ "$count" -ge 50 ]]
+}
+
 ensure_server_ops_current() {
-  if [[ "$(local_server_ops_version || true)" == "$VF_SERVER_OPS_EXPECTED" && \
-        "$(local_server_ops_build || true)" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]]; then
+  if m03_verified_current; then
     return 0
+  fi
+  if [[ -e /opt/vf-server-ops || -L /opt/vf-server-ops ]]; then
+    say "${C_RED}P07-M03 网站与数据：现有模块的独立版本或完整性无法确认，已停止；拒绝降级覆盖。${C_RESET}" >&2
+    return 13
   fi
 
   command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
