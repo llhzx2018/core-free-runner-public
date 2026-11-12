@@ -29,7 +29,7 @@ def body_of(source: str, function: str) -> str:
     begin = re.search(r"^" + re.escape(function) + r"\(\) \{\s*$", source, re.M)
     if not begin:
         raise AssertionError("module entry function missing: " + function)
-    closing = re.search(r"^}\\s*$", source[begin.end():], re.M)
+    closing = re.search(r"^}\s*$", source[begin.end():], re.M)
     if not closing:
         raise AssertionError("module function closing delimiter missing: " + function)
     return source[begin.start():begin.end()+closing.end()]
