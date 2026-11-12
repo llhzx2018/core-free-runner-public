@@ -191,7 +191,20 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                        if loc!=m02_root}
             m02_future=m02_root/"releases/2.1.0-synthetic-future"
             m02_future.mkdir()
-            (m02_future/"MARKER").write_text("synthetic future is isolated")
+            # This is a VALID locally owned future build. Invalid current
+            # identities must remain rejected rather than implicitly repaired.
+            m02_script=m02_future/"vps-audit.sh"
+            m02_script.write_text(
+                '#!/bin/bash\ncase "${1:-}" in\n'
+                '  --version) echo V2.2.0 ;;\n'
+                '  --build-id) echo 2.1.0-synthetic-future ;;\n'
+                '  *) exit 13 ;;\nesac\n'
+            )
+            m02_script.chmod(0o755)
+            (m02_future/"MANIFEST.sha256").write_text(
+                hashlib.sha256(m02_script.read_bytes()).hexdigest()
+                + "  vps-audit.sh\n"
+            )
             m02_switch=m02_root/".test-switch"
             m02_switch.symlink_to("releases/2.1.0-synthetic-future")
             os.replace(m02_switch,m02_root/"current")
