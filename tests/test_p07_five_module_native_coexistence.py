@@ -140,6 +140,22 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                         "install",data["path"],data["sha256"],timeout=90)
             sys.path.insert(0,str((PRODUCT/"scripts").resolve()))
             builder=importlib.import_module("build_p07_m05_bundle")
+            # Stage-wide deterministic FULL candidate check: build the exact
+            # private M05 source twice in disposable storage. Only a SHA256,
+            # not its private ZIP/content, may appear in public evidence.
+            first=builder.build_bundle(work/"m05-stage-frozen-A.zip")
+            twin=builder.build_bundle(work/"m05-stage-frozen-B.zip")
+            self.assertEqual(first["module_id"],"P07-M05")
+            self.assertEqual(first["build_id"],"0.1.0-m05-candidate1")
+            self.assertEqual(first["sha256"],twin["sha256"])
+            self.assertEqual((work/"m05-stage-frozen-A.zip").read_bytes(),
+                             (work/"m05-stage-frozen-B.zip").read_bytes())
+            self.assertGreater(int(first["file_count"]),20)
+            self.assertEqual(first["formal_release"],False)
+            self.assertEqual(first["production_install"],False)
+            print("P07_M05_CANDIDATE_DETERMINISTIC_SHA256="+first["sha256"],flush=True)
+            print("P07_M05_CANDIDATE_FILE_COUNT="+str(first["file_count"]),flush=True)
+            print("P07_M05_CANDIDATE_DISTRIBUTION=NOT_RELEASED",flush=True)
             # Install once, observe ownership and version of the resulting
             # module directory, then run each module's own updater again.
             for name in TARGETS:
