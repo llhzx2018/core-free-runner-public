@@ -1,0 +1,168 @@
+name: S01 Ops and M3U8 public rule proof (temporary)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/s01-ops-m3u8-public-rule-proof.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  s01-shared-rule-proof:
+    if: >-
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'maintenance/s01-ops-m3u8-public-rule-proof-20261112'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      OPS_SHA: 359c3f475f3e79b1fc06de11792096a386e53285
+      M3U8_SHA: 3d53fd39b44c86a454238d0caca1cea0c613590d
+      GOV_SHA: 33b222f642ff18dd52a1ac7887443d91833edbb2
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Exact Ops candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-ops
+          ref: ${{ env.OPS_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: ops
+
+      - name: Exact M3U8 candidate source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-tools-m3u8
+          ref: ${{ env.M3U8_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: m3u8
+
+      - name: Exact effective GOV-DOC main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: ${{ env.GOV_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: gov
+
+      - name: Verify source identities and existing static-first guards
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C ops rev-parse HEAD)" = "$OPS_SHA"
+          test "$(git -C m3u8 rev-parse HEAD)" = "$M3U8_SHA"
+          test "$(git -C gov rev-parse HEAD)" = "$GOV_SHA"
+          test -z "$(git -C ops status --porcelain --untracked-files=all)"
+          test -z "$(git -C m3u8 status --porcelain --untracked-files=all)"
+          echo S01_OPS_M3U8_GOV_EXACT_SOURCE=PASS
+
+          if python3 -B ops/scripts/check_s01_static_modernization.py --root ops --phase auto > "$RUNNER_TEMP/ops-source.log" 2>&1; then
+            echo S01_OPS_STATIC_FIRST_GUARD=PASS
+          else
+            echo S01_OPS_STATIC_FIRST_GUARD=FAIL
+            exit 1
+          fi
+          if python3 -B m3u8/scripts/check_s01_static_modernization.py --root m3u8 --phase auto > "$RUNNER_TEMP/m3u8-source.log" 2>&1; then
+            echo S01_M3U8_STATIC_FIRST_GUARD=PASS
+          else
+            echo S01_M3U8_STATIC_FIRST_GUARD=FAIL
+            exit 1
+          fi
+
+      - name: Test real project negative fixture suites
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if (cd ops && python3 -B -m unittest discover -s tests/unit -p test_s01_static_modernization.py -v) > "$RUNNER_TEMP/ops-tests.log" 2>&1; then
+            echo S01_OPS_AUTHORITY_NEGATIVE_FIXTURES=PASS
+          else
+            echo S01_OPS_AUTHORITY_NEGATIVE_FIXTURES=FAIL
+            exit 1
+          fi
+          if (cd m3u8 && python3 -B -m unittest discover -s tests/unit -p test_s01_static_modernization.py -v) > "$RUNNER_TEMP/m3u8-tests.log" 2>&1; then
+            echo S01_M3U8_AUTHORITY_NEGATIVE_FIXTURES=PASS
+          else
+            echo S01_M3U8_AUTHORITY_NEGATIVE_FIXTURES=FAIL
+            exit 1
+          fi
+
+      - name: Real GOV-DOC Public Authority rule readback and required omission
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$OPS_SHA" "$M3U8_SHA" "$RUNNER_TEMP" <<'PY'
+          import json, sys
+          from pathlib import Path
+          ops_sha, m3u8_sha, out = sys.argv[1:]
+          config = [
+            ("ops", "S01-C02", ops_sha,
+             ["Product / Operations Control Plane", "S01 Unified Admin Shell"],
+             ["INSTALL","UPGRADE","SECURITY","TESTING","DATA_SCHEMA","GIT","UA_UI","SEO","OBSERVABILITY"],
+             ["formal_development","source_change","ui_change","public_indexable_page","diagnostics"]),
+            ("m3u8", "S01-C03", m3u8_sha,
+             ["M3U8 Domain Capability Provider", "Provider technical contract"],
+             ["INSTALL","UPGRADE","SECURITY","TESTING","DATA_SCHEMA","GIT","API_PROVIDER","UA_UI"],
+             ["formal_development","source_change","external_api","ui_change"]),
+          ]
+          for ident, project, sha, markers, domains, capabilities in config:
+            receipt = {
+              "schema": "vf.public-authority.task-delivery-check.v1",
+              "project": project, "source": sha,
+              "project_authority": {
+                 "agents": "AGENTS.md",
+                 "current": "docs/authority/CURRENT.md",
+                 "acceptance": "docs/authority/RPD.md",
+                 "applicability": "docs/authority/PUBLIC_AUTHORITY_APPLICABILITY.md"
+              },
+              "acceptance_markers": markers,
+              "required_domains": domains,
+              "task_capabilities": capabilities,
+              "delivery": {
+                 "profile": "static_bundle_zip", "entrypoint": "index.html",
+                 "requires_git": False, "requires_manual_source_copy": False
+              }
+            }
+            Path(out, ident + "-receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+            if ident == "m3u8":
+              receipt["required_domains"] = [d for d in domains if d != "API_PROVIDER"]
+              Path(out, "m3u8-negative.json").write_text(json.dumps(receipt), encoding="utf-8")
+          PY
+
+          for project in ops m3u8; do
+            python3 -B gov/governance/public-authority/tools/task_delivery_contract_lint.py \
+              --phase resolve --receipt "$RUNNER_TEMP/$project-receipt.json" \
+              --project-root "$project" --artifact-root "$RUNNER_TEMP" \
+              --public-router gov/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json \
+              > "$RUNNER_TEMP/$project-public.log" 2>&1
+            grep -q '^CONTRACT_CHECK=RULES_RESOLVED$' "$RUNNER_TEMP/$project-public.log"
+            if [ "$project" = ops ]; then
+              echo S01_OPS_REAL_PROJECT_PUBLIC_AUTHORITY=PASS
+            else
+              echo S01_M3U8_REAL_PROJECT_PUBLIC_AUTHORITY=PASS
+            fi
+          done
+
+          if python3 -B gov/governance/public-authority/tools/task_delivery_contract_lint.py \
+            --phase resolve --receipt "$RUNNER_TEMP/m3u8-negative.json" \
+            --project-root m3u8 --artifact-root "$RUNNER_TEMP" \
+            --public-router gov/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json \
+            > "$RUNNER_TEMP/m3u8-negative.log" 2>&1; then
+            echo S01_M3U8_MISSING_PROVIDER_REJECTED=NO
+            exit 1
+          fi
+          grep -q '^CONTRACT_REASON=TASK_TRIGGERED_PUBLIC_DOMAIN_OMITTED$' "$RUNNER_TEMP/m3u8-negative.log"
+          echo S01_M3U8_MISSING_PROVIDER_REJECTED=YES
+          echo S01_WORDPRESS_OR_PAGES_FUNCTIONAL_PROOF=NOT_INFERRED
+
+      - name: Delete transient private sources and logs
+        if: always()
+        shell: bash
+        run: |
+          rm -rf ops m3u8 gov
+          rm -f "$RUNNER_TEMP"/{ops,m3u8}-{source,tests,public}.log
+          rm -f "$RUNNER_TEMP"/{ops,m3u8}-receipt.json "$RUNNER_TEMP/m3u8-negative.json" "$RUNNER_TEMP/m3u8-negative.log"
+          echo S01_TEMP_PRIVATE_SOURCE_CLEANUP=ATTEMPTED
