@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -73,6 +74,7 @@ class IndependentM04Tests(unittest.TestCase):
         result = subprocess.run(
             ["bash", str(NEW / "vf-system-care.sh"), "menu"],
             input="7\n0\n", text=True, capture_output=True, timeout=15, check=False,
+            env={**os.environ, "P07_FORCE_INTERACTIVE": "1", "NO_COLOR": "1"},
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("P07-M04 服务器维护与安全", result.stdout)
