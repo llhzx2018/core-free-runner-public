@@ -20,6 +20,28 @@ jobs:
       P08_EXACT_SHA: 47858f3bbea1abfae232e80cdfc73e98a90c27da
       GOV_EXACT_SHA: 7dd6815d1bb8de481ac74be21f4e68359aa15407
       PYTHONDONTWRITEBYTECODE: "1"
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: p08-only-synthetic-root-pass
+          MARIADB_ROOT_HOST: "%"
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="mariadb-admin ping --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: p08-only-synthetic-root-pass
+          MYSQL_ROOT_HOST: "%"
+        ports:
+          - 3308:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=20
+
     steps:
       - name: Checkout P08 exact candidate (transient private source)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -323,6 +345,80 @@ jobs:
           echo P08_REPEAT_SETUP_REFUSED=PASS
           echo P08_PHP_FPM_CLOUDPANEL_TLS=NOT_TESTED
           echo P08_INSTALL_SOURCE=SYNTHETIC_EMPTY_SQLITE_ONLY
+
+      - name: Verify MariaDB 11.8 and MySQL 8.4 first Owner from actual extracted FULL
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for engine in mariadb mysql; do
+            case "$engine" in
+              mariadb) port=3307; clean=p08_ci_mariadb_clean; dirty=p08_ci_mariadb_dirty ;;
+              mysql) port=3308; clean=p08_ci_mysql_clean; dirty=p08_ci_mysql_dirty ;;
+            esac
+            root="$RUNNER_TEMP/p08-sql-$engine"
+            mkdir -m 0700 "$root"
+            python3 - "$RUNNER_TEMP/P08-vf-adops-0.1.0-FULL-ISOLATED.zip" "$root" <<'PY'
+          import zipfile,sys
+          with zipfile.ZipFile(sys.argv[1]) as archive:
+              archive.extractall(sys.argv[2])
+          PY
+            mkdir -p "$root/tests"
+            cp p08/tests/test_install_mysql_e2e.php "$root/tests/test_install_mysql_e2e.php"
+            python3 - "$root/tests/test_install_mysql_e2e.php" "$port" <<'PY'
+          from pathlib import Path
+          import sys
+          file=Path(sys.argv[1]); code=file.read_text(encoding='utf8')
+          assert code.count('port=3306')==2
+          assert code.count("'db_port' => '3306'")==1
+          code=code.replace('port=3306','port='+sys.argv[2])
+          code=code.replace("'db_port' => '3306'",
+                            "'db_port' => '"+sys.argv[2]+"'")
+          file.write_text(code,encoding='utf8')
+          PY
+            php -r '
+              $pdo=new PDO("mysql:host=127.0.0.1;port=".$argv[1],
+                 "root","p08-only-synthetic-root-pass",
+                 [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
+              foreach([$argv[2],$argv[3]] as $db) {
+                  if(!preg_match("/^p08_ci_[a-z0-9_]+$/D",$db))exit(1);
+                  $pdo->exec("CREATE DATABASE ".$db);
+              }
+              $pdo->exec("CREATE TABLE ".$argv[3].".prior_data (id INT PRIMARY KEY)");
+              $pdo->exec("INSERT INTO ".$argv[3].".prior_data VALUES(1)");
+            ' "$port" "$clean" "$dirty"
+            if P08_ISOLATED_INSTALL_TEST=YES \
+              P08_TEST_DB_DRIVER="$engine" \
+              P08_TEST_DB_HOST=127.0.0.1 \
+              P08_TEST_DB_CLEAN="$clean" \
+              P08_TEST_DB_DIRTY="$dirty" \
+              P08_TEST_DB_USER=root \
+              P08_TEST_DB_PASSWORD=p08-only-synthetic-root-pass \
+              php "$root/tests/test_install_mysql_e2e.php" > "$RUNNER_TEMP/p08-$engine-install.log" 2>&1; then
+              grep '^P08_.*=PASS
+        if: always()
+        shell: bash
+        run: |
+          rm -rf p08 gov "$RUNNER_TEMP/p08-extracted" "$RUNNER_TEMP/p08-first-install" "$RUNNER_TEMP/p08-sql-mariadb" "$RUNNER_TEMP/p08-sql-mysql"
+          rm -f "$RUNNER_TEMP/P08-vf-adops-0.1.0-FULL-ISOLATED.zip"
+          rm -f "$RUNNER_TEMP"/p08-*.log
+          rm -f "$RUNNER_TEMP"/p08-*.html "$RUNNER_TEMP/p08-secure-router.php" "$RUNNER_TEMP"/p08-*.headers
+          echo P08_PRIVATE_SOURCE_AND_PACKAGE_CLEANUP=ATTEMPTED
+ "$RUNNER_TEMP/p08-$engine-install.log"
+              echo "P08_EXTRACTED_FULL_DB_DRIVER=$engine PASS"
+            else
+              echo "P08_EXTRACTED_FULL_DB_DRIVER=$engine FAIL"
+              tail -n 24 "$RUNNER_TEMP/p08-$engine-install.log"
+              exit 1
+            fi
+            grep -q "DB_CONNECTION=\"$engine\"" "$root/.env"
+            php -r '
+              $s=json_decode(file_get_contents($argv[1]."/storage/app/private/adops/installation/installed.json"),true);
+              if(($s["database_driver"]??"")!==$argv[2]||($s["status"]??"")!=="INSTALLED")exit(1);
+            ' "$root" "$engine"
+            echo "P08_EXTRACTED_FULL_DRIVER_MARKER=$engine PASS"
+          done
+          echo P08_REAL_FULL_THREE_ENGINE_OWNER_DB=PASS
+          echo P08_REAL_CLOUDPANEL_TLS=NOT_TESTED
 
       - name: Clean all private source, package and temporary logs
         if: always()
