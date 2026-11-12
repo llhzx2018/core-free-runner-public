@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 
 ROOT=Path(__file__).resolve().parents[1]
 PRODUCT=ROOT/"product"
@@ -154,6 +155,43 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
             self.assertEqual((TARGETS["M03 网站与数据"]/"BUILD_ID").read_text().strip(),
                              "0.1.0-release115")
             verify_modules()
+            # Negative: public M05 installer must refuse a bad ZIP hash,
+            # an archive that tries to escape into M03, and a corrupted
+            # installed M05 file, without touching ANY sibling module.
+            m05_origin=work/"m05-candidate1.zip"
+            sibling_baseline={name:tree_hash(loc) for name,loc in TARGETS.items()
+                              if not name.startswith("M05")}
+            current_before=os.readlink(MODULES/"m05/current")
+            public_installer=str(ROOT/"installers/p07-m05-atomic.py")
+            wrong=subprocess.run(
+                ["python3",public_installer,"install",str(m05_origin),"0"*64],
+                capture_output=True,text=True,timeout=30)
+            self.assertEqual(wrong.returncode,13,wrong.stderr)
+            malicious=work/"m05-path-escape.zip"
+            with zipfile.ZipFile(malicious,"w") as archive:
+                archive.writestr("p07-m05/../../../m03/BUILD_ID",b"overwrite-attempt")
+            evil_sha=hashlib.sha256(malicious.read_bytes()).hexdigest()
+            escaped=subprocess.run(
+                ["python3",public_installer,"install",str(malicious),evil_sha],
+                capture_output=True,text=True,timeout=30)
+            self.assertEqual(escaped.returncode,13,escaped.stderr)
+            victim=MODULES/"m05/current/bin/vfops-init-core"
+            original=victim.read_bytes()
+            victim.write_bytes(original+b"\n# synthetic tamper")
+            candidate_sha=hashlib.sha256(m05_origin.read_bytes()).hexdigest()
+            corrupted=subprocess.run(
+                ["python3",public_installer,"install",str(m05_origin),candidate_sha],
+                capture_output=True,text=True,timeout=30)
+            self.assertEqual(corrupted.returncode,13,corrupted.stderr)
+            self.assertEqual(victim.read_bytes(),original+b"\n# synthetic tamper")
+            victim.write_bytes(original)
+            self.assertEqual(os.readlink(MODULES/"m05/current"),current_before)
+            self.assertEqual(
+                sibling_baseline,
+                {name:tree_hash(TARGETS[name]) for name in sibling_baseline})
+            print("P07_M05_PUBLIC_INSTALL_NEGATIVE_CASES=PASS",flush=True)
+            print("P07_M05_FAILURE_OTHERS_UNCHANGED=PASS",flush=True)
+
             for selected_name in TARGETS:
                 before={name:tree_hash(loc) for name,loc in TARGETS.items()
                         if name != selected_name}
