@@ -15,6 +15,7 @@ VPS_AUDIT_EXPECTED="V2.1.0"
 VPS_AUDIT_BUILD_EXPECTED="2.1.0-rc7-field"
 VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/0a851b9fe1819c7970ed5bb8e3633f2fc8e73166/experiments/p07-vps-audit-v21.sh"
 VPS_AUDIT_SHA256="d1846e751bba5c860c623e3db26641908e27ca43b39cf37016758853b65a952d"
+M02_ROOT="/opt/vfops-modules/m02"  # 独立 VPS 验机版本；不写入 M01/M03/M04/M05
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
@@ -98,55 +99,89 @@ sha256_file() {
   fi
 }
 
+m02_verified_current() {
+  local current="$M02_ROOT/current" target actual version build
+  [[ -L "$current" ]] || return 1
+  [[ "$(readlink "$current")" == "releases/$VPS_AUDIT_BUILD_EXPECTED" ]] || return 1
+  target="$current/vps-audit.sh"
+  [[ -f "$target" && ! -L "$target" ]] || return 1
+  actual="$(sha256_file "$target" 2>/dev/null || true)"
+  [[ "$actual" == "$VPS_AUDIT_SHA256" ]] || return 1
+  version="$(NO_COLOR=1 bash "$target" --version 2>/dev/null | awk '{print $NF}' || true)"
+  build="$(NO_COLOR=1 bash "$target" --build-id 2>/dev/null || true)"
+  [[ "$version" == "$VPS_AUDIT_EXPECTED" && "$build" == "$VPS_AUDIT_BUILD_EXPECTED" ]]
+}
+
+ensure_m02_current() {
+  if m02_verified_current; then return 0; fi
+  if [[ "$(id -u)" != "0" ]]; then
+    say "${C_RED}P07-M02 服务器性能检测：独立模块首次安装或升级需要 root；未修改其他模块。${C_RESET}" >&2
+    return 3
+  fi
+  for cmd in curl flock sha256sum mktemp; do
+    command -v "$cmd" >/dev/null 2>&1 || {
+      say "${C_RED}P07-M02 服务器性能检测：缺少命令 $cmd；没有安装其他模块。${C_RESET}" >&2
+      return 3
+    }
+  done
+  [[ ! -L /opt/vfops-modules && ! -L "$M02_ROOT" ]] || return 13
+  mkdir -p "$M02_ROOT/releases" || return 13
+  local fd current dest tmp stage link version build actual
+  exec {fd}>"$M02_ROOT/.install.lock" || return 13
+  flock -x "$fd" || return 13
+  if m02_verified_current; then return 0; fi
+  current="$M02_ROOT/current"
+  dest="$M02_ROOT/releases/$VPS_AUDIT_BUILD_EXPECTED"
+  if [[ -e "$current" || -L "$current" ]]; then
+    [[ -L "$current" ]] || return 13
+    [[ "$(readlink "$current")" =~ ^releases/[A-Za-z0-9._-]+$ ]] || return 13
+  fi
+  # Existing immutable release with wrong bytes must never be overwritten
+  # or 'repaired' by a different module's installer.
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    say "${C_RED}P07-M02 服务器性能检测：已有候选身份未通过校验，已保护原文件。${C_RESET}" >&2
+    return 13
+  fi
+  tmp="$(mktemp -t p07-m02-download.XXXXXXXX)" || return 13
+  chmod 0600 "$tmp"
+  if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 90 "$VPS_AUDIT_URL" -o "$tmp"; then
+    rm -f "$tmp"; return 4
+  fi
+  actual="$(sha256_file "$tmp" 2>/dev/null || true)"
+  if [[ "$actual" != "$VPS_AUDIT_SHA256" ]]; then
+    rm -f "$tmp"; return 6
+  fi
+  version="$(NO_COLOR=1 bash "$tmp" --version 2>/dev/null | awk '{print $NF}' || true)"
+  build="$(NO_COLOR=1 bash "$tmp" --build-id 2>/dev/null || true)"
+  if [[ "$version" != "$VPS_AUDIT_EXPECTED" || "$build" != "$VPS_AUDIT_BUILD_EXPECTED" ]]; then
+    rm -f "$tmp"; return 7
+  fi
+  stage="$M02_ROOT/releases/.stage-$$"
+  link="$M02_ROOT/.current-$$"
+  [[ ! -e "$stage" && ! -L "$stage" && ! -e "$link" && ! -L "$link" ]] || { rm -f "$tmp"; return 13; }
+  mkdir -m 0755 "$stage" || { rm -f "$tmp"; return 13; }
+  if ! install -m 0755 -- "$tmp" "$stage/vps-audit.sh"; then
+    rm -f "$tmp"; rm -rf -- "$stage"; return 13
+  fi
+  rm -f "$tmp"
+  if ! mv -T -- "$stage" "$dest"; then rm -rf -- "$stage"; return 13; fi
+  ln -s "releases/$VPS_AUDIT_BUILD_EXPECTED" "$link" || return 13
+  mv -Tf -- "$link" "$current" || return 13
+  if ! m02_verified_current; then
+    say "${C_RED}P07-M02 服务器性能检测：本模块原子升级后回读失败。${C_RESET}" >&2
+    return 13
+  fi
+  say "${C_GREEN}P07-M02 服务器性能检测：独立版本已就绪。${C_RESET}"
+}
+
 run_vps_audit() {
   screen_clear
-  command -v curl >/dev/null 2>&1 || { say "${C_RED}✗ 当前系统没有 curl。${C_RESET}" >&2; return 3; }
-
-  local tmp actual_sha version build_id rc cmd
-  tmp="$(mktemp -t p07-vps-audit.XXXXXX)"
-  chmod 700 "$tmp"
-
-  say "${C_CYAN}正在启动服务器性能检测 ${VPS_AUDIT_PUBLIC}…${C_RESET}"
-
-  if ! curl -fsSL "$VPS_AUDIT_URL" -o "$tmp"; then
-    rm -f "$tmp"
-    say "${C_RED}✗ 服务器性能检测模块下载失败。${C_RESET}" >&2
-    return 4
-  fi
-
-  actual_sha="$(sha256_file "$tmp" 2>/dev/null || true)"
-  if [[ -z "$actual_sha" ]]; then
-    rm -f "$tmp"
-    say "${C_RED}✗ 当前系统缺少 SHA256 校验工具，已停止执行。${C_RESET}" >&2
-    return 5
-  fi
-  if [[ "$actual_sha" != "$VPS_AUDIT_SHA256" ]]; then
-    rm -f "$tmp"
-    say "${C_RED}✗ 服务器性能检测模块完整性校验失败，已停止执行。${C_RESET}" >&2
-    return 6
-  fi
-
-  version="$(NO_COLOR=1 bash "$tmp" --version 2>/dev/null | awk '{print $NF}' || true)"
-  if [[ "$version" != "$VPS_AUDIT_EXPECTED" ]]; then
-    rm -f "$tmp"
-    say "${C_RED}✗ 服务器性能检测模块版本不匹配，已停止执行。${C_RESET}" >&2
-    return 7
-  fi
-
-  build_id="$(NO_COLOR=1 bash "$tmp" --build-id 2>/dev/null || true)"
-  if [[ "$build_id" != "$VPS_AUDIT_BUILD_EXPECTED" ]]; then
-    rm -f "$tmp"
-    say "${C_RED}✗ 服务器性能检测模块构建身份不匹配，已停止执行。${C_RESET}" >&2
-    return 8
-  fi
-
-  set +e
-  bash "$tmp"
-  rc=$?
-  set -e
-  rm -f "$tmp"
-  return "$rc"
+  say "${C_CYAN}正在启动 P07-M02 服务器性能检测 ${VPS_AUDIT_PUBLIC}…${C_RESET}"
+  ensure_m02_current || return $?
+  # Only the explicit M02 executable runs; no M01/M03/M04/M05 install path.
+  bash "$M02_ROOT/current/vps-audit.sh"
 }
+
 
 local_server_ops_version() {
   command -v vfops >/dev/null 2>&1 || return 1
