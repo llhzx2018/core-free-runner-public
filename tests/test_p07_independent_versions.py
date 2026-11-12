@@ -57,7 +57,7 @@ class InstalledIndependentBuilds(unittest.TestCase):
         care=self.root/"m04/releases/0.1.0-rc99"
         (care/"lib").mkdir(parents=True)
         c={"VERSION":b"0.1.0-rc99\n",
-           "vf-system-care.sh":b"#!/bin/bash\nif [[ \"$1\" == '--version' ]]; then echo '服务器维护与安全 0.1.0-rc99'; else echo P07_BEGINNER_ZH_V1; fi\n"}
+           "vf-system-care.sh":("#!/bin/bash\nif [[ \"$1\" == '--version' ]]; then echo '服务器维护与安全 0.1.0-rc99'; else echo P07_BEGINNER_ZH_V1; fi\n").encode("utf-8")}
         for i in range(18):
             c["lib/file%02d.py"%i]=(str(i)+"\n").encode()
         self._manifest(care,c,"MANIFEST.gitblob","blob")
