@@ -183,6 +183,39 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
             self.assertEqual((TARGETS["M03 网站与数据"]/"BUILD_ID").read_text().strip(),
                              "0.1.0-release115")
             verify_modules()
+            # P07-M02 服务器性能检测（VPS 验机） verifies its own
+            # pinned audit binary before any independent pointer rollback.
+            m02_root=MODULES/"m02"
+            m02_prior="2.1.0-rc7-field"
+            m02_other={name:tree_hash(loc) for name,loc in TARGETS.items()
+                       if loc!=m02_root}
+            m02_future=m02_root/"releases/2.1.0-synthetic-future"
+            m02_future.mkdir()
+            (m02_future/"MARKER").write_text("synthetic future is isolated")
+            m02_switch=m02_root/".test-switch"
+            m02_switch.symlink_to("releases/2.1.0-synthetic-future")
+            os.replace(m02_switch,m02_root/"current")
+            m02_rollback=["bash",str(ROOT/"installers/p07-toolbox.sh"),
+                          "--rollback-m02",m02_prior]
+            for confirmation in ("P07-M02:WRONG",):
+                bad=subprocess.run(m02_rollback+[confirmation],
+                                   capture_output=True,text=True,timeout=20)
+                self.assertEqual(bad.returncode,13,bad.stderr)
+            m02_bin=m02_root/"releases"/m02_prior/"vps-audit.sh"
+            m02_bytes=m02_bin.read_bytes()
+            m02_bin.write_bytes(m02_bytes+b"\\n# synthetic tamper")
+            bad=subprocess.run(m02_rollback+["P07-M02:"+m02_prior],
+                               capture_output=True,text=True,timeout=20)
+            self.assertEqual(bad.returncode,13,bad.stderr)
+            self.assertEqual(os.readlink(m02_root/"current"),
+                             "releases/2.1.0-synthetic-future")
+            m02_bin.write_bytes(m02_bytes)
+            run(*(m02_rollback+["P07-M02:"+m02_prior]),timeout=20)
+            self.assertEqual(os.readlink(m02_root/"current"),
+                             "releases/"+m02_prior)
+            self.assertEqual(m02_other,{name:tree_hash(TARGETS[name])
+                                        for name in m02_other})
+            print("P07_M02_OWN_ROLLBACK_AND_TAMPER_REJECTION=PASS",flush=True)
             # Module OWN rollback commands: M01 network manager and M04
             # system-care return from a controlled synthetic future pointer
             # only after verifying the original immutable release bytes.
