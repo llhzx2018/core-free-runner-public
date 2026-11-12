@@ -1,0 +1,162 @@
+name: P02 W1 2.5.127 isolated Owner Trial build and install proof
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p02-w1-2527-ownertrial-20261112.yml']
+permissions:
+  contents: read
+jobs:
+  w1-trial:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout exact PRIVATE P02 source transiently
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-library
+          ref: c0cc9412a684aa463c3cbf3a63483ea0dacb25a2
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Read canonical GOV-DOC public delivery gate
+        uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/gov-doc
+          ref: 33b222f642ff18dd52a1ac7887443d91833edbb2
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: governance
+      - name: Check exact source and required extensions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = 'c0cc9412a684aa463c3cbf3a63483ea0dacb25a2'
+          test "$(git -C governance rev-parse HEAD)" = '33b222f642ff18dd52a1ac7887443d91833edbb2'
+          test "$(cat product/VERSION)" = '2.5.127'
+          test -s product/public/assets/w1/w1-search.js
+          test -s product/public/assets/w1/w1-search.css
+          if ! php -r 'exit(PHP_VERSION_ID>=80300&&extension_loaded("pdo_sqlite")&&extension_loaded("sqlite3")&&extension_loaded("zip")?0:1);'; then
+            timeout 150s sudo apt-get install -y php8.3-cli php8.3-sqlite3 php8.3-zip
+          fi
+          php -r 'exit(PHP_VERSION_ID>=80300&&extension_loaded("pdo_sqlite")&&extension_loaded("sqlite3")&&extension_loaded("zip")?0:1);'
+          cd product
+          bash scripts/verify-repository.sh
+          echo P02_W1_OWNER_TRIAL_EXACT_SOURCE=PASS
+      - name: Build same candidate twice and verify package identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd product
+          python3 scripts/build-candidate.py --out build/w1-2527-one --source-version 2.5.122 --source-version 2.5.124 --source-commit 'c0cc9412a684aa463c3cbf3a63483ea0dacb25a2' --source-ref main > "${RUNNER_TEMP}/p02-build-once.json"
+          python3 scripts/build-candidate.py --out build/w1-2527-two --source-version 2.5.122 --source-version 2.5.124 --source-commit 'c0cc9412a684aa463c3cbf3a63483ea0dacb25a2' --source-ref main > "${RUNNER_TEMP}/p02-build-twice.json"
+          python3 - <<'PY'
+          import hashlib,json,zipfile
+          from pathlib import Path
+          a=Path('build/w1-2527-one');b=Path('build/w1-2527-two')
+          def meta(x):return (len(x.read_bytes()),hashlib.sha256(x.read_bytes()).hexdigest())
+          assert {x.name:meta(x) for x in a.iterdir()}=={x.name:meta(x) for x in b.iterdir()},'NONDETERMINISTIC_CANDIDATE'
+          p=json.loads((a/'VF_Library_V2.5.127_CANDIDATE_MANIFEST.json').read_text())
+          assert p['source']['candidate_commit']=='c0cc9412a684aa463c3cbf3a63483ea0dacb25a2'
+          assert p['version']=='2.5.127' and p['state']=='CANDIDATE'
+          assert p['compatibility']['supported_from']==['2.5.122','2.5.124']
+          assert p['compatibility']['schema_migration'] is False
+          assert p['publication']['formal_tag'] is None and p['publication']['production_write'] is False
+          assert p['build']['runtime_source_files']==73
+          with zipfile.ZipFile(a/'VF_Library_V2.5.127_FULL_CANDIDATE.zip') as z:
+              files=set(z.namelist());assert 'VERSION.txt' in files and 'setup.php' in files
+              assert 'assets/w1/w1-search.js' in files and 'assets/w1/w1-search.css' in files
+              assert json.loads(z.read('release-manifest.json'))['release_state']=='CANDIDATE'
+              assert z.testzip() is None
+              for f in files:
+                  lower=f.lower();parts=set(lower.split('/'))
+                  assert not ({'.git','private_data','vendor','node_modules','session','cache'} & parts),(f,'private')
+                  assert not lower.endswith(('.db','.sqlite','.sqlite3','.log')),(f,'private')
+          with zipfile.ZipFile(a/'VF_Library_V2.5.127_UPDATE_CANDIDATE.zip') as z:
+              m=json.loads(z.read('atomic-manifest.json'))
+              assert m['format_version']==2 and m['source_versions']==['2.5.122','2.5.124']
+              assert m['target_version']=='2.5.127' and len(m['files'])==73
+              assert z.testzip() is None
+          with zipfile.ZipFile(a/'VF_Library_V2.5.127_ATOMIC_CANDIDATE.zip') as z:
+              assert z.namelist()==['repair-v2.5.127-candidate.php']
+              assert z.testzip() is None
+          lines=(a/'SHA256SUMS.txt').read_text().strip().splitlines()
+          for line in lines:
+              digest,name=line.split('  ',1)
+              assert meta(a/name)[1]==digest
+          print('P02_W1_CANDIDATE_DETERMINISM=PASS')
+          print('P02_W1_CANDIDATE_FULL_UPDATE_ATOMIC_PRIVACY=PASS')
+          print('P02_W1_CANDIDATE_SOURCE_SET=2.5.122,2.5.124')
+          for name in ['VF_Library_V2.5.127_FULL_CANDIDATE.zip','VF_Library_V2.5.127_ATOMIC_CANDIDATE.zip','VF_Library_V2.5.127_UPDATE_CANDIDATE.zip']:
+              size,digest=meta(a/name);print('P02_W1_ARTIFACT='+name+';BYTES='+str(size)+';SHA256='+digest)
+          PY
+      - name: Real fresh FULL install of built package with synthetic-only localhost
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import http.cookiejar,html,json,pathlib,re,subprocess,tempfile,time,urllib.parse,urllib.request,urllib.error,zipfile
+          from pathlib import Path
+          root=Path.cwd()
+          archive=root/'product/build/w1-2527-one/VF_Library_V2.5.127_FULL_CANDIDATE.zip'
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,*args): return None
+          with tempfile.TemporaryDirectory(prefix='p02-w1-candidate-') as tmp:
+              site=Path(tmp)/'site';site.mkdir()
+              with zipfile.ZipFile(archive) as z:z.extractall(site)
+              assert not (site/'app/.runtime.php').exists()
+              server=subprocess.Popen(['php','-S','127.0.0.1:18996','-t',str(site)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+              base='http://127.0.0.1:18996'
+              jar=http.cookiejar.CookieJar()
+              session=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar),NoRedirect())
+              try:
+                  for i in range(40):
+                      try: page=session.open(base+'/setup.php',timeout=2).read().decode();break
+                      except Exception:time.sleep(0.15)
+                  else:raise AssertionError('FULL_CANDIDATE_SETUP_NO_HTTP')
+                  match=re.search(r'name="setup_csrf" value="([^"]+)"',page)
+                  assert match,'NO_SETUP_CSRF'
+                  form=urllib.parse.urlencode({'setup_csrf':html.unescape(match.group(1)),'password':'P02-SYNTHETIC-TRIAL-ONLY','password_confirm':'P02-SYNTHETIC-TRIAL-ONLY'}).encode()
+                  request=urllib.request.Request(base+'/setup.php',form,headers={'Origin':base,'Content-Type':'application/x-www-form-urlencoded'},method='POST')
+                  try:resp=session.open(request,timeout=20);code=resp.status
+                  except urllib.error.HTTPError as e:code=e.code
+                  assert code==303,('INSTALL_HTTP',code)
+                  res=json.load(session.open(base+'/api.php?action=session',timeout=10))
+                  assert res.get('ok') is True and res['site']['auth'] is True and res.get('version')=='2.5.127',res
+                  assert (site/'assets/w1/w1-search.js').is_file()
+                  assert 'process.env.NODE_ENV' not in (site/'assets/w1/w1-search.js').read_text()
+                  print('P02_W1_CANDIDATE_REAL_CLEAN_FULL=PASS')
+                  print('P02_W1_CANDIDATE_PHP_SQLITE_AUTH=PASS')
+              finally:server.terminate();server.wait(timeout=10)
+          PY
+      - name: Required Public Authority task delivery structural check
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          root=Path('product/build/w1-2527-one')
+          domains=['INSTALL','SECURITY','TESTING','UPGRADE','DATA_SCHEMA','API_PROVIDER','CRON_JOB','NOTIFICATION','OBSERVABILITY','GIT','UA_UI']
+          base={'schema':'vf.public-authority.task-delivery-check.v1','project':'P02','source':'c0cc9412a684aa463c3cbf3a63483ea0dacb25a2',
+            'project_authority':{'agents':'AGENTS.md','current':'docs/authority/CURRENT.md','acceptance':'docs/authority/ACCEPTANCE_MATRIX.md','applicability':'docs/authority/PUBLIC_AUTHORITY_APPLICABILITY.md'},
+            'acceptance_markers':['Source Manifest','W1_BROWSER_COMPAT'],
+            'required_domains':domains,
+            'task_capabilities':['full_package','clean_install','candidate','update','atomic','rollback','database','backup','external_api','scheduler','notification_center','operational_health','source_change','ui_change']}
+          for label,profile,asset,entry in [
+            ('full','web_full_zip','VF_Library_V2.5.127_FULL_CANDIDATE.zip','setup.php'),
+            ('atomic','web_atomic_zip','VF_Library_V2.5.127_ATOMIC_CANDIDATE.zip','repair-v2.5.127-candidate.php')]:
+            receipt=dict(base)
+            receipt['delivery']={'profile':profile,'entrypoint':entry,'artifact':asset,
+              'sha256':hashlib.sha256((root/asset).read_bytes()).hexdigest(),'requires_git':False,'requires_manual_source_copy':False}
+            Path(os.environ['RUNNER_TEMP'],f'p02-{label}-delivery.json').write_text(json.dumps(receipt))
+          PY
+          for profile in full atomic; do
+            python3 governance/governance/public-authority/tools/task_delivery_contract_lint.py               --receipt "${RUNNER_TEMP}/p02-${profile}-delivery.json"               --project-root product --artifact-root product/build/w1-2527-one               --public-router governance/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json
+          done
+          echo P02_W1_TASK_DELIVERY_STRUCTURAL=PASS
+      - name: Purge transient private source and synthetic package bytes
+        if: always()
+        shell: bash
+        run: |
+          rm -rf product governance
+          echo PRIVATE_SOURCE_AND_CANDIDATE_PERSISTED_IN_PUBLIC_GIT_OR_ARTIFACT=NO
