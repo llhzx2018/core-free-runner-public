@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # P07 V0.1.0 final public distribution readback marker.
 # 公共版本保持简短稳定；内部构建身份仅用于精确校验和工程追溯。
 VERSION="V0.1.0"
-BUILD_ID="0.1.0-five-modules-release1"
+BUILD_ID="0.1.0-five-modules-release3-m05"
 
 VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-rc13"
@@ -52,14 +52,16 @@ M04_RUNTIME="$M04_ROOT/current/vf-system-care.sh"
 
 # P07-M05 新服务器初始化 has its OWN runtime/build and no M03/M04 installer calls.
 # Exact published M05 artifact: no fallback to M03/M04 installers.
-# Matches the private, exact-source M05 candidate; not a public distribution pin.
-M05_BUILD_EXPECTED="0.1.0-m05-candidate2"
+# M05-only official build; no other module or Production writes.
+M05_BUILD_EXPECTED="0.1.0-m05-clean-host-guard1"
+M05_UPGRADE_FROM="0.1.0-m05-candidate2"
+M05_UPGRADE_FROM2="0.1.0-m05-existing-safe1"
 M05_ROOT="/opt/vfops-modules/m05"
 M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"
 # M05 is published as an immutable reviewed public Release ZIP.
 # Never install M03/M04 in its place and verify SHA-256 before extraction.
-M05_BUNDLE_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-v0.1.0-five-modules-20261113/P07-M05-0.1.0-m05-candidate2.zip"
-M05_BUNDLE_SHA256="835356e2af2f89877e79d904f47b1ad38602983aa760978657ac4bb3c7593adb"
+M05_BUNDLE_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-clean-host-guard1-20261113/P07-M05-0.1.0-m05-clean-host-guard1.zip"
+M05_BUNDLE_SHA256="b2b72275980f7c2220f0c95fce18f644967bd69a17fa0a8320f96149a4096a1a"
 # Immutable private Owner Trial .run identity, never a public download source.
 M05_OFFLINE_TRIAL_SHA256="e42b6b3c59719f6ec189e4c62b7cfc54385aaa6e566c8f92ca5306246f022bbb"
 M05_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/35e3fbcb1e8c40042558f9f163e4215570074793/installers/p07-m05-atomic.py"
@@ -781,8 +783,32 @@ PY
 }
 
 ensure_m05_current() {
-  m05_verified_current && return 0
-  if [[ -e "$M05_ROOT/current" || -L "$M05_ROOT/current" ]]; then
+  local installed='' upgrade_response='' upgrade_from=''
+  if m05_verified_current; then
+    installed="$(readlink "$M05_ROOT/current")"
+    case "$installed" in
+      "releases/$M05_BUILD_EXPECTED") return 0 ;;
+      "releases/$M05_UPGRADE_FROM"|"releases/$M05_UPGRADE_FROM2")
+        upgrade_from="${installed#releases/}"
+        say "${C_CYAN}P07-M05 新服务器初始化：发现已验证的旧版 $upgrade_from。${C_RESET}"
+        say "新版 $M05_BUILD_EXPECTED 支持已有 CloudPanel 安全检查及旧面板/软件残留的空机拦截。"
+        say "仅更新 M05 自己的程序文件；保留旧版本，可回滚。不执行系统更新、Swap 补齐或 CloudPanel 安装。"
+        if [[ ! -t 0 || ! -t 1 ]]; then
+          say "${C_YELLOW}升级需要本人在交互式终端确认；本次不变更。${C_RESET}"
+          return 7
+        fi
+        printf '确认仅升级 P07-M05 新服务器初始化？[y/N]：'
+        read -r upgrade_response || upgrade_response=''
+        if [[ ! "$upgrade_response" =~ ^[Yy]$ ]]; then
+          say '未确认 M05 升级；旧版程序和其它模块保持不变。'
+          return 7
+        fi
+        ;;
+      *)
+        say "${C_RED}P07-M05 新服务器初始化：当前已安装版本不在此次经验证的升级来源内，拒绝自动覆盖。${C_RESET}" >&2
+        return 13 ;;
+    esac
+  elif [[ -e "$M05_ROOT/current" || -L "$M05_ROOT/current" ]]; then
     say "${C_RED}P07-M05 新服务器初始化：已有模块身份或文件异常，拒绝覆盖/回退。${C_RESET}" >&2
     return 13
   fi
@@ -821,6 +847,13 @@ ensure_m05_current() {
   actual="$(p07_git_blob_sha1 "$installer" 2>/dev/null || true)"
   if [[ "$actual" != "$M05_INSTALLER_BLOB" ]]; then
     rm -f "$bundle" "$installer"; return 6
+  fi
+  if [[ -n "$upgrade_from" ]]; then
+    if ! m05_verified_current || [[ "$(readlink "$M05_ROOT/current")" != "releases/$upgrade_from" ]]; then
+      rm -f "$bundle" "$installer"
+      say "${C_RED}P07-M05：下载期间已安装版本发生变化，为安全已停止。${C_RESET}" >&2
+      return 13
+    fi
   fi
   set +e
   python3 -B "$installer" install "$bundle" "$M05_BUNDLE_SHA256"
@@ -1179,6 +1212,7 @@ case "${1:-}" in
 5. 新服务器初始化        系统更新/CloudPanel/数据库选择  V0.1.0（独立模块）
 
 说明：五模块独立安装和升级；仅选择本模块才按需下载核验发行资产。
+P07-M05 检查旧面板/容器/软件残留；非干净空机不会自动安装或清空业务。
 恢复既存的独立模块：
   --rollback-m01 <版本> <P07-M01:版本>
   --rollback-m02 <版本> <P07-M02:版本>
