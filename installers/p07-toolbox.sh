@@ -1187,9 +1187,9 @@ case "${1:-}" in
   --rollback-m05 <版本> <P07-M05:版本>
 M05 私有单文件试用安装（无 Git/Token/网络/额外安装器，不会初始化 CloudPanel）：
   --install-m05-offline <RUN绝对路径> <P07-M05:INSTALL>
-M05 私有 ZIP 候选手动验证安装（可能需要在线取得安装器）：
+M05 本地 ZIP 手动验证安装（可能需要在线取得安装器）：
   --install-m05-local <ZIP绝对路径> <SHA-256> <P07-M05:INSTALL:SHA-256>
-正式公共版本尚未发布；请勿在已有业务生产环境试装候选。
+五模块正式公共版已发布；在已有业务服务器操作前先备份，迁移和 DNS 仍由 Owner 独立决定。
 EOF
     ;;
   "")
