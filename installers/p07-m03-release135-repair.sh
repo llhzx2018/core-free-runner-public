@@ -10,8 +10,10 @@ ZIP_SHA256='2e5509bf7f2d36c5bc9f4ec9e2e05016e9e30f94cff546880e93e441af8af866'
 RUNTIME_BLOB='f57e114e0ef23f73a1ec12ba864d8f2e67a5bd30'
 INSTALLER_BLOB='dc6e0be1419ee77a71fabb332cb8f7c97237122f'
 URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/$RELEASE/$ZIP_NAME"
-# Alternate URL is the same official GitHub Release asset ID. Never accept different bytes.
-API_ASSET_URL='https://api.github.com/repos/llhzx2018/core-free-runner-public/releases/assets/744246070'
+# SHA256-identical copy of the previously published official ZIP, kept under
+# one immutable Git commit. RAW download is preferred for VPS networking; only
+# the published checksum and embedded manifest grant installation permission.
+RAW_MIRROR_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/38d201e3e84bbe7f30fccdea142bf5fe74f26173/dist/p07/0.1.0-release135/P07-M03-0.1.0-release135.zip"
 msg() { printf '%s\n' "$*"; }
 deny() {
   local step="${1:-P07_M03_VERIFY_FAILED}"
@@ -39,11 +41,11 @@ fi
 tmp="$(mktemp -d -t p07-m03-release135.XXXXXXXX)" || deny
 chmod 0700 "$tmp"
 trap 'rm -rf -- "$tmp"' EXIT
-if ! curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --connect-timeout 15 --max-time 180 "$URL" -o "$tmp/$ZIP_NAME" 2>"$tmp/primary-error"; then
-  # Official GitHub asset API is an alternative transport, never an alternative trust root.
-  if ! curl --proto '=https' --tlsv1.2 -fsSL --retry 1 --connect-timeout 15 --max-time 180 \
-      -H 'Accept: application/octet-stream' -H 'X-GitHub-Api-Version: 2022-11-28' \
-      "$API_ASSET_URL" -o "$tmp/$ZIP_NAME" 2>"$tmp/fallback-error"; then
+if ! curl --proto '=https' --tlsv1.2 -fsSL --retry 1 --connect-timeout 10 --max-time 90 "$RAW_MIRROR_URL" -o "$tmp/$ZIP_NAME" 2>"$tmp/primary-error"; then
+  # Only the official GitHub Release is an alternative transport; both need
+  # to match the same pinned SHA256 and the same signed file manifest.
+  if ! curl --proto '=https' --tlsv1.2 -fsSL --retry 1 --connect-timeout 10 --max-time 120 \
+      "$URL" -o "$tmp/$ZIP_NAME" 2>"$tmp/fallback-error"; then
     deny DOWNLOAD_UNAVAILABLE
   fi
 fi
