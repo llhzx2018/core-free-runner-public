@@ -108,6 +108,19 @@ class PublicTerminalUXV3Tests(unittest.TestCase):
             with self.assertRaisesRegex(ux.PublicUXError, "测试函数缺失"):
                 ux.validate_pr(changed, text, root)
 
+    def test_new_p07_terminal_entry_must_still_trigger_pr_ci(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.fixtures(temp)
+            workflow = root / ux.WORKFLOW
+            content = workflow.read_text(encoding="utf-8")
+            self.assertIn("installers/p07-*.sh", content)
+            self.assertIn("experiments/p07-*.sh", content)
+            workflow.write_text(content.replace(
+                "installers/p07-*.sh", "installers/p07-toolbox.sh"),
+                encoding="utf-8")
+            with self.assertRaisesRegex(ux.PublicUXError, "CI 接线缺失"):
+                ux.load_and_check(root)
+
     def test_missing_ci_or_agents_pointer_fail(self):
         with tempfile.TemporaryDirectory() as temp:
             root = self.fixtures(temp)
