@@ -29,8 +29,36 @@ def verify(stage,toolbox):
         raise ValueError("stage schema")
     if stage.get("status")!="DEV_READY_NOT_DISTRIBUTED":
         raise ValueError("stage prematurely released")
-    if stage.get("formal_release_authorized") is not False:
-        raise ValueError("formal release misrepresented")
+    if stage.get("formal_release_authorized") is not True:
+        raise ValueError("Owner formal release authorization not recorded")
+    # OWNER authorization is NOT a GitHub Release, downloadable asset or
+    # public delivery permission for private Python/shell product source.
+    evidence=stage.get("release_evidence")
+    if not isinstance(evidence,dict) or evidence.get("phase")!="FORMAL_RELEASE_AUTHORIZED_ASSETS_NOT_PUBLISHED":
+        raise ValueError("release evidence stage cannot be elevated")
+    depot=evidence.get("m05_debian13_mariadb118_cloudpanel_full")
+    native=evidence.get("five_module_native_install_upgrade_rollback")
+    if not isinstance(depot,dict) or not isinstance(native,dict):
+        raise ValueError("missing exact-source machine evidence")
+    if (depot.get("proof_state")!="MACHINE_PASS_DEPOT_EXACT_WORKFLOW"
+            or depot.get("run")!="https://github.com/llhzx2018/vf-server-ops/runs/131671979315"
+            or depot.get("tested_workflow_sha")!="b1bac61b5aeae5862d8fbe32c9040a512a58e38c"
+            or depot.get("exact_private_trial_sha256")!="e42b6b3c59719f6ec189e4c62b7cfc54385aaa6e566c8f92ca5306246f022bbb"
+            or depot.get("production_executed") is not False):
+        raise ValueError("unverified M05 full CloudPanel install claim")
+    if (native.get("proof_state")!="MACHINE_PASS_GH_NATIVE_DISPOSABLE"
+            or native.get("run")!="https://github.com/llhzx2018/core-free-runner-public/actions/runs/43359410382"
+            or native.get("tested_public_source_sha")!="037815e52a28efa5723001523ad19ffba00a0295"
+            or native.get("production_executed") is not False):
+        raise ValueError("unverified all-five module independence claim")
+    blockers=evidence.get("distribution_blockers")
+    required={
+        "M05_PRIVATE_SOURCE_CANNOT_BE_PUBLISHED_TO_PUBLIC_GIT_OR_ARTIFACT",
+        "M05_NO_APPROVED_PUBLIC_RETRIEVABLE_SOURCE_SAFE_BINARY_OR_AUTHORIZED_PRIVATE_DELIVERY",
+        "FIVE_MODULE_FORMAL_RELEASE_ASSETS_AND_MAIN_REMOTE_READBACK_NOT_PROVEN",
+    }
+    if not isinstance(blockers,list) or set(blockers)!=required or len(blockers)!=3:
+        raise ValueError("prematurely cleared required release blockers")
     if stage.get("production_install_authorized") is not False:
         raise ValueError("production misrepresented")
     if stage.get("implicit_cross_module_installs_allowed") is not False:
@@ -153,9 +181,9 @@ def verify(stage,toolbox):
                     or offline.get("offline_no_git_token") is not True
                     or offline.get("cloudpanel_bootstrap_manual_confirmation_required") is not True
                     or offline.get("installed_on_owner_server") is not False
-                    or offline.get("cloudpanel_real_fresh_vm")!="NOT_RUN"
+                    or offline.get("cloudpanel_real_fresh_vm")!="MACHINE_PASS_DEPOT_EXACT_WORKFLOW"
                     or offline.get("one_file_verified_on_disposable_host") is not True):
-                raise ValueError("private Owner Trial cannot become Release or VPS PASS")
+                raise ValueError("private Owner Trial cannot become public Release or VPS PASS")
             if not re.fullmatch(r"[a-f0-9]{64}",offline.get("sha256","")):
                 raise ValueError("private offline executable SHA256 missing")
             if 'M05_OFFLINE_TRIAL_SHA256="'+offline["sha256"]+'"' not in toolbox:
@@ -177,6 +205,29 @@ class StageLock(unittest.TestCase):
     def setUp(self):
         self.stage=json.loads(STAGE.read_text(encoding="utf-8"))
         self.toolbox=TOOLBOX.read_text(encoding="utf-8")
+
+    def test_release_authorization_evidence_cannot_publish_private_source(self):
+        self.assertTrue(verify(self.stage,self.toolbox))
+        for path,value in (
+            (("formal_release_authorized",),False),
+            (("release_evidence","phase"),"DISTRIBUTED"),
+            (("release_evidence","m05_debian13_mariadb118_cloudpanel_full","tested_workflow_sha"),"0"*40),
+            (("release_evidence","m05_debian13_mariadb118_cloudpanel_full","exact_private_trial_sha256"),"0"*64),
+            (("release_evidence","five_module_native_install_upgrade_rollback","run"),"https://example.invalid"),
+            (("release_evidence","distribution_blockers"),[]),
+        ):
+            with self.subTest(path=path):
+                bad=copy.deepcopy(self.stage)
+                dest=bad
+                for p in path[:-1]:
+                    dest=dest[p]
+                dest[path[-1]]=value
+                with self.assertRaises(ValueError):
+                    verify(bad,self.toolbox)
+        # Release still must not invent a public M05 link or promote an
+        # ephemeral owner trial into a public code distribution.
+        self.assertIsNone(self.stage["modules"][4]["public_package_url"])
+        self.assertEqual(self.stage["modules"][4]["distribution"],"NOT_RELEASED")
 
     def test_stage_and_all_five_chinese_paths_are_immutable_and_unreleased(self):
         self.assertTrue(verify(self.stage,self.toolbox))
