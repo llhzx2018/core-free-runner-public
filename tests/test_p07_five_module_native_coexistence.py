@@ -197,14 +197,20 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                 "\nensure_m02_current\n"
             )
             # Exact Toolbox readback of M03/M05 does not install anything.
-            # It accepts M05's own verified future build after an independent
-            # candidate upgrade and does not consult a stale Toolbox pin.
+            # M03 must receive the actual stable build and pinned manifest
+            # from the current Toolbox; do NOT weaken the pre-execution gate
+            # or duplicate old literals in a disposable test wrapper.
+            m03_names=("VF_SERVER_OPS_EXPECTED","VF_SERVER_OPS_BUILD_EXPECTED",
+                       "VF_SERVER_OPS_MANIFEST_BLOB")
+            m03_lines=[line for line in text.splitlines()
+                       if any(line.startswith(name+"=") for name in m03_names)]
+            self.assertEqual({line.split("=",1)[0] for line in m03_lines},set(m03_names))
             readback=work/"module-readback.sh"
             readback.write_text(
                 "#!/bin/bash\nset -Eeuo pipefail\n"
                 + 'M05_ROOT="/opt/vfops-modules/m05"\n'
                 + 'M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"\n'
-                + 'VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"\n'
+                + "\n".join(m03_lines) + "\n"
                 + "\n".join(bash_function(text,fn) for fn in
                             ("p07_git_blob_sha1","m05_verified_current","m03_verified_current"))
                 + "\nm03_verified_current && m05_verified_current\n"
