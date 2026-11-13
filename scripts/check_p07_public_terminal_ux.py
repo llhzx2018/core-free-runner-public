@@ -62,7 +62,8 @@ def load_and_check(root: Path = ROOT) -> None:
     content = wf.read_text(encoding="utf-8")
     for token in ("pull_request:", "check_p07_public_terminal_ux.py",
                   "--base-ref", "BASE_SHA",
-                  "test_p07_public_terminal_ux.py"):
+                  "test_p07_public_terminal_ux.py",
+                  "installers/p07-*.sh", "experiments/p07-*.sh"):
         require(token in content, f"P07 Public UX CI 接线缺失：{token}")
     for route in PUBLIC_ROUTES:
         require((root / route).is_file(), f"公共 P07 用户入口不存在：{route}")
