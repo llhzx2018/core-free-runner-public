@@ -29,12 +29,22 @@ class FiveModuleSelectedOwnerOperations(unittest.TestCase):
             identifier=f"{module:02d}"
             self.assertEqual(source.count(f"--rollback-m{identifier})"),1)
         self.assertEqual(source.count("--install-m05-local)"),1)
+        self.assertEqual(source.count("--install-m05-offline)"),1)
+        # Historical M03 Owner trials remain inert without a selected
+        # development operation; the common Owner menu never runs them.
+        start=source.index("run_server_ops() {")
+        end=source.index("\\n}\\n",start) if False else source.index("\n}\n",start)
+        m03_entry=source[start:end]
+        self.assertNotIn("run_server_ops_owner124_trial",m03_entry)
+        self.assertNotIn("run_server_ops_owner143_trial",m03_entry)
+        self.assertNotIn("release143",m03_entry)
         self.assertIn('M05_BUNDLE_URL=""',source)
         self.assertIn('M05_BUNDLE_SHA256=""',source)
         help_text=invoke("--help")
         self.assertEqual(help_text.returncode,0,help_text.stderr)
         for x in ("--rollback-m01","--rollback-m02","--rollback-m03",
-                  "--rollback-m04","--rollback-m05","--install-m05-local"):
+                  "--rollback-m04","--rollback-m05","--install-m05-local",
+                  "--install-m05-offline"):
             self.assertIn(x,help_text.stdout)
         self.assertIn("P07-M05 新服务器初始化",source)
         self.assertIn("P07-M04 服务器维护与安全",source)
@@ -78,6 +88,16 @@ class FiveModuleSelectedOwnerOperations(unittest.TestCase):
                      ("--rollback-m05",)):
             result=invoke(*args)
             self.assertEqual(result.returncode,13,result.stderr)
+
+    def test_offline_trial_does_not_depend_on_git_token_or_network(self):
+        source=TOOLBOX.read_text(encoding="utf-8")
+        fragment=source.split("install_m05_offline_trial() {",1)[1].split("\n}\n",1)[0]
+        self.assertIn('bash "$tmp" --verify-only',fragment)
+        self.assertIn('bash "$tmp" --install-only',fragment)
+        for dependency in ("curl ", "ssh ", "git ", "gh auth",
+                           "VF_PRIVATE_READ_TOKEN", "VF_RELEASE_WRITE_TOKEN"):
+            self.assertNotIn(dependency,fragment)
+        self.assertIn('"$confirmation" == "P07-M05:INSTALL"',fragment)
 
     def test_m05_is_not_distributed_by_a_private_candidate_url(self):
         source=TOOLBOX.read_text(encoding="utf-8")
