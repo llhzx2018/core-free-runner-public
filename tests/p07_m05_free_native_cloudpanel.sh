@@ -95,17 +95,25 @@ install_rc=$?
 set -e
 echo "P07_M05_FREE_NATIVE_BOOTSTRAP_RC=$install_rc"
 if [[ "$install_rc" -ne 0 ]]; then
-  python3 - "$RUNNER_TEMP/p07-m05-cloudpanel-private-install.log" <<'PY'
-import pathlib,sys
-# Allowlisted product failure codes ONLY. Never reveal actual installer logs.
+  # The source's real exception includes only a safe failure code and a
+  # numeric subprocess exit status; parse those but NEVER print raw output.
+  P07_M05_SELECTED_DB_ENGINE="$ENGINE" python3 - "$RUNNER_TEMP/p07-m05-cloudpanel-private-install.log" <<'PY'
+import os,pathlib,re,sys
 raw=pathlib.Path(sys.argv[1]).read_text(encoding="utf-8",errors="ignore")
+engine=os.environ["P07_M05_SELECTED_DB_ENGINE"]
 cases=(
  ("CLOUDPANEL_SELECTED_DATABASE_DAEMON_MISMATCH_NO_REINSTALL","SELECTED_ENGINE_MISMATCH"),
- ("CLOUDPANEL_INSTALL_FAILED_MYSQL_8.4","INSTALLER_NONZERO_OR_PANEL_NOT_READY"),
+ ("CLOUDPANEL_INSTALL_FAILED_"+engine,"INSTALLER_NONZERO_OR_PANEL_NOT_READY"),
  ("CloudPanel installation incomplete","PANEL_DATABASE_METADATA_MISSING"),
+ ("CLOUDPANEL_DATABASE_OWNER_SELECTION_REQUIRED","OWNER_DATABASE_SELECTION_MISSING"),
  ("Traceback","UNHANDLED_PYTHON_ERROR"),
 )
-print("P07_M05_FREE_NATIVE_SAFE_FAILURE_CLASS="+next((v for k,v in cases if k in raw),"OTHER_ERROR"))
+code=next((value for key,value in cases if key in raw),"UNKNOWN_SAFE_CLASS")
+match=re.search(r"安装进程退出码[ ]+(-?[0-9]{1,4})",raw)
+reason="UNKNOWN" if not match else str(int(match.group(1)))
+print("P07_M05_FREE_NATIVE_SAFE_FAILURE_CLASS="+code)
+print("P07_M05_FREE_NATIVE_CLOUDPANEL_CHILD_EXIT="+reason)
+print("P07_M05_FREE_NATIVE_FAILURE_LOG_REDACTED=YES")
 PY
   # Determine the exact boundary reached in product's real installer
   # pipeline WITHOUT ever reading installer stdout / credentials into CI logs.
