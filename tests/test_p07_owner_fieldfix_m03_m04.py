@@ -48,7 +48,7 @@ class P07OwnerFieldFixTests(unittest.TestCase):
             script.chmod(0o755)
             return subprocess.run(
                 ["bash",str(M03),"install"],capture_output=True,text=True,timeout=12,
-                env={**os.environ,"PATH":str(Path(td))+":"+os.environ["PATH"],
+                env={**os.environ,"P07_ALLOW_NONROOT":"1","PATH":str(Path(td))+":"+os.environ["PATH"],
                      "NO_COLOR":"1"}
             )
 
