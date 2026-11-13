@@ -149,7 +149,7 @@ class ToolboxFiveModuleIsolationTests(unittest.TestCase):
 
     def test_unlisted_payload_is_rejected_before_root_cli(self):
         release=self.module_fixture()
-        (release/"lib/extra.py").write_text("print('not declared')\\n")
+        (release/"lib/extra.py").write_text("print('not declared')\n")
         result=self.invoke()
         self.assertEqual(result.returncode,13,result.stderr)
         self.assertFalse(self.marker.exists())
