@@ -5,34 +5,26 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 source "$SCRIPT_DIR/lib/common.sh"
 
 show_header() {
-  clear 2>/dev/null || true
-  say "${C_CYAN}┌──────────────────────────────────────────────────────────────┐${C_RESET}"
-  say "${C_CYAN}│${C_RESET}  ${C_BOLD}网络代理节点${C_RESET}   ${C_GRAY}V0.1.0${C_RESET}                              ${C_CYAN}│${C_RESET}"
-  say "${C_CYAN}│${C_RESET}  VMess · mKCP · dtls   ${C_GREEN}长期稳定基线${C_RESET}                  ${C_CYAN}│${C_RESET}"
-  say "${C_CYAN}└──────────────────────────────────────────────────────────────┘${C_RESET}"
+  [[ -t 1 ]] && clear 2>/dev/null || true
+  say "${C_BOLD}网络代理节点${C_RESET}  ${C_GRAY}${VF_NODE_VERSION}${C_RESET}"
+  say "${C_GRAY}────────────────────────────────────────${C_RESET}"
 }
 
 show_live_summary() {
   load_state
-  say
   if [[ -r "$VF_NODE_STATE_FILE" ]]; then
     if node_healthy; then
-      say "状态   ${C_GREEN}● 已安装 · 运行正常${C_RESET}"
+      say "当前状态：${C_GREEN}运行正常${C_RESET}"
     else
-      say "状态   ${C_RED}● 安装异常 · 可自动修复${C_RESET}"
+      say "当前状态：${C_YELLOW}需要检查${C_RESET}"
     fi
-    say "方案   ${C_GREEN}VMess + mKCP + dtls${C_RESET}"
     if [[ -n "${PORT:-}" ]]; then
-      if port_in_use_udp "$PORT"; then
-        say "UDP    ${C_GREEN}${PORT}/UDP · 监听中${C_RESET}"
-      else
-        say "UDP    ${C_RED}${PORT}/UDP · 未监听${C_RESET}"
-      fi
+      say "节点端口：${PORT}/UDP"
     fi
   elif v2ray_cli >/dev/null 2>&1; then
-    say "状态   ${C_YELLOW}● 检测到外部 V2Ray · P07 不接管${C_RESET}"
+    say "当前状态：${C_YELLOW}检测到外部 V2Ray（不接管）${C_RESET}"
   else
-    say "状态   ${C_GRAY}● 未安装${C_RESET}"
+    say "当前状态：未安装"
   fi
 }
 
@@ -40,18 +32,32 @@ show_menu() {
   show_header
   show_live_summary
   say
-  say "${C_GRAY}──────────────────────────────────────────────────────────────${C_RESET}"
-  say
-  say "  ${C_GREEN}1.${C_RESET} 安装 / 修复节点"
-  say "  ${C_CYAN}2.${C_RESET} 查看节点状态"
-  say "  ${C_MAGENTA}3.${C_RESET} 显示分享链接"
-  say "  ${C_RED}4.${C_RESET} 卸载节点"
-  say "  ${C_GRAY}0.${C_RESET} 返回"
+  if [[ -r "$VF_NODE_STATE_FILE" ]]; then
+    if node_healthy; then
+      say "  1. 检查节点（当前正常）"
+    else
+      say "  1. 修复节点（可能重启服务）"
+    fi
+  elif v2ray_cli >/dev/null 2>&1; then
+    say "  1. 查看外部节点（不接管）"
+  else
+    say "  1. 安装节点"
+  fi
+  say "  2. 查看节点状态"
+  say "  3. 查看分享链接"
+  if [[ -r "$VF_NODE_STATE_FILE" ]]; then
+    say "  4. 卸载节点"
+  else
+    say "  4. 卸载节点（未安装）"
+  fi
+  say "  0. 返回工具箱"
   say
 }
 
 run_and_pause() {
-  "$@" || true
+  if ! "$@"; then
+    warn '操作未完成，节点状态未被假报为成功。'
+  fi
   pause_if_tty
 }
 
@@ -78,20 +84,37 @@ repair_managed_install() {
 }
 
 install_from_menu() {
+  local answer=''
   if [[ -r "$VF_NODE_STATE_FILE" ]]; then
     if node_healthy; then
-      warn "节点已经安装并运行正常，无需重装。"
+      ok '节点正在运行；无需重复安装。'
     else
-      repair_managed_install || true
+      warn '节点异常；修复可能重启 V2Ray 服务，但不会覆盖节点配置。'
+      printf '确认修复？[y/N]：'
+      read -r answer || answer=''
+      if [[ "$answer" =~ ^[Yy]$ ]]; then
+        repair_managed_install || true
+      else
+        info '已取消；服务没有改变。'
+      fi
     fi
     pause_if_tty
     return 0
   fi
-
-  bash "$SCRIPT_DIR/install.sh" || true
-  pause_if_tty
+  if v2ray_cli >/dev/null 2>&1; then
+    warn '这是其他工具安装的 V2Ray，P07 不会覆盖或接管。'
+    pause_if_tty
+    return 0
+  fi
+  printf '将安装新的 V2Ray 节点，确认继续？[y/N]：'
+  read -r answer || answer=''
+  if [[ "$answer" =~ ^[Yy]$ ]]; then
+    run_and_pause bash "$SCRIPT_DIR/install.sh"
+  else
+    info '已取消；没有安装节点。'
+    pause_if_tty
+  fi
 }
-
 menu_loop() {
   while true; do
     show_menu
@@ -103,7 +126,7 @@ menu_loop() {
       3) run_and_pause bash "$SCRIPT_DIR/share.sh" ;;
       4) run_and_pause bash "$SCRIPT_DIR/uninstall.sh" ;;
       0) return 0 ;;
-      *) warn "无效选择：$choice"; sleep 1 ;;
+      *) warn '无效选择，请输入 0-4。' ;;
     esac
   done
 }
