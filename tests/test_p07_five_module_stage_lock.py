@@ -192,6 +192,21 @@ class StageLock(unittest.TestCase):
         bad["implicit_cross_module_installs_allowed"]=True
         with self.assertRaises(ValueError): verify(bad,self.toolbox)
 
+    def test_m05_integrity_checks_full_tree_before_executing_launcher(self):
+        source=self.toolbox
+        guard=source.split("m05_verified_current() {",1)[1].split("\\n}\\n",1)[0]
+        for required in (
+            '! -L "$M05_ROOT"',
+            '! -L "$M05_ROOT/releases"',
+            '! -L "$M05_ROOT/releases/$installed"',
+            'if item.is_symlink():',
+            'if file_names!=set(files)|{"MODULE_MANIFEST.json"} or directory_names!=expected_dirs:',
+            'actual_version="$(NO_COLOR=1 bash "$M05_RUNTIME" --version',
+        ):
+            self.assertIn(required,guard)
+        self.assertLess(guard.index('file_names!=set(files)'),
+                        guard.index('actual_version="$(NO_COLOR=1 bash'))
+
     def test_m05_offline_single_file_identity_and_route_cannot_drift(self):
         self.assertTrue(verify(self.stage,self.toolbox))
         offline=next(m for m in self.stage["modules"] if m["id"]=="P07-M05")["offline_owner_trial"]
