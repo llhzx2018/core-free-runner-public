@@ -1,0 +1,127 @@
+name: P07-M05 新服务器初始化脏主机安全检查独立机验
+on:
+  push:
+    branches: [test/p07-m05-dirty-host-guard-20261113]
+    paths: [.github/workflows/p07-m05-dirty-host-guard-20261113.yml]
+permissions:
+  contents: read
+jobs:
+  guarded-host-and-atomic-upgrade:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    steps:
+      - name: Public tooling only, no credential persistence
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Transient exact private P07 source only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 9aef5be584a0fddf3462a182f192d118a485af6a
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Real-source strict Bash, module and positive/negative M05 tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = 9aef5be584a0fddf3462a182f192d118a485af6a
+          bash -n product/bin/vfops-init-core
+          bash -n product/bin/vfops-init-ui
+          bash -n product/bin/vfops-init-entry
+          export PYTHONDONTWRITEBYTECODE=1
+          (cd product && python3 -B scripts/check_p07_modules.py)
+          (cd product && python3 -B -m unittest discover -s tests -p 'test_p07_m05_*.py' -v)
+          (cd product && python3 -B -m unittest discover -s tests -p 'test_p07_module_contract.py' -v)
+          echo P07_M05_DIRTY_HOST_SOURCE_REGRESSION=PASS
+      - name: Build new independent bundle, source identity and security review
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/p07-proof"
+          python3 -B product/scripts/build_p07_m05_bundle.py \
+            --output "$RUNNER_TEMP/p07-proof/P07-M05-0.1.0-m05-clean-host-guard1.zip" \
+             > "$RUNNER_TEMP/p07-proof/bundle.json"
+          python3 - <<'PY'
+          import json,hashlib,os,pathlib,stat,zipfile,re
+          base=pathlib.Path(os.environ['RUNNER_TEMP'])/'p07-proof'
+          z=base/'P07-M05-0.1.0-m05-clean-host-guard1.zip'
+          obj=json.loads((base/'bundle.json').read_text())
+          digest=hashlib.sha256(z.read_bytes()).hexdigest()
+          assert obj['module_id']=='P07-M05'
+          assert obj['build_id']=='0.1.0-m05-clean-host-guard1'
+          assert obj['sha256']==digest
+          with zipfile.ZipFile(z) as q:
+            members=q.infolist()
+            assert len(members)==89 and len(set(m.filename for m in members))==len(members)
+            assert q.testzip() is None
+            assert all(m.filename.startswith('p07-m05/') for m in members)
+            assert all(not stat.S_ISLNK(m.external_attr>>16) for m in members)
+            assert all('..' not in pathlib.PurePosixPath(m.filename).parts for m in members)
+            assert q.read('p07-m05/MODULE_BUILD_ID')==b'0.1.0-m05-clean-host-guard1\n'
+            guard=q.read('p07-m05/lib/m05_environment_guard.py')
+            core=q.read('p07-m05/bin/vfops-init-core')
+            assert b'def inspect(' in guard
+            assert b'm05_require_clean_host()' in core
+            for m in members:
+              data=q.read(m)
+              for sig in (rb'-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----',
+                          rb'(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})',
+                          rb'(?:45\.76\.171\.57|45\.63\.52\.90)'):
+                assert not re.search(sig,data),(m.filename,'secret')
+          print('P07_M05_NEW_BUNDLE_SHA256='+digest)
+          print('P07_M05_BUNDLE_SECRET_PATH_MODULE_CHECK=PASS')
+          PY
+      - name: Real public old ZIPs to new Atomic, negative hash, idempotent and rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          base="$RUNNER_TEMP/p07-proof"
+          new="$base/P07-M05-0.1.0-m05-clean-host-guard1.zip"
+          newsha="$(sha256sum "$new" | cut -d' ' -f1)"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --max-time 90 \
+            https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-v0.1.0-five-modules-20261113/P07-M05-0.1.0-m05-candidate2.zip \
+            -o "$base/old-candidate2.zip"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --max-time 90 \
+            https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-existing-safe1-20261113/P07-M05-0.1.0-m05-existing-safe1.zip \
+            -o "$base/old-existing-safe1.zip"
+          echo "835356e2af2f89877e79d904f47b1ad38602983aa760978657ac4bb3c7593adb  $base/old-candidate2.zip" | sha256sum -c --status
+          echo "ff67f7563baf197892b698fe978eab6deafd6c8d432c5c7c20eaf18d4fcb48ad  $base/old-existing-safe1.zip" | sha256sum -c --status
+          test ! -e /opt/vfops-modules/m05
+          sudo python3 -B installers/p07-m05-atomic.py install "$base/old-candidate2.zip" \
+            835356e2af2f89877e79d904f47b1ad38602983aa760978657ac4bb3c7593adb
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-candidate2
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$newsha"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-clean-host-guard1
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$newsha"
+          if sudo python3 -B installers/p07-m05-atomic.py install "$new" "$(printf '0%.0s' {1..64})" >/dev/null 2>&1; then
+            echo P07_M05_BAD_SHA_WRONGLY_ACCEPTED; exit 13
+          fi
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-clean-host-guard1
+          sudo python3 -B installers/p07-m05-atomic.py rollback 0.1.0-m05-candidate2 \
+            --confirm P07-M05:0.1.0-m05-candidate2
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-candidate2
+          sudo python3 -B installers/p07-m05-atomic.py install "$base/old-existing-safe1.zip" \
+            ff67f7563baf197892b698fe978eab6deafd6c8d432c5c7c20eaf18d4fcb48ad
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-existing-safe1
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$newsha"
+          sudo python3 -B installers/p07-m05-atomic.py rollback 0.1.0-m05-existing-safe1 \
+            --confirm P07-M05:0.1.0-m05-existing-safe1
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-existing-safe1
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$newsha"
+          for module in m01 m02 m03 m04; do
+            test ! -e "/opt/vfops-modules/$module"
+          done
+          test ! -e /home/clp
+          echo P07_M05_TWO_PREVIOUS_FORMAL_BUILDS_TO_NEW_ATOMIC_ROLLBACK=PASS
+          echo P07_M05_BAD_SHA_AND_IDEMPOTENT=PASS
+          echo P07_M05_FOUR_OTHER_MODULES_AND_CLOUDPANEL_UNTOUCHED=YES
+          echo P07_M05_OWNER_PRODUCTION=NOT_TOUCHED
+      - name: Cleanup private checked-out product and runtime packages
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- product "$RUNNER_TEMP/p07-proof"
+          echo P07_M05_PRIVATE_SOURCE_PERSISTED_PUBLIC=NO
