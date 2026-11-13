@@ -9,6 +9,10 @@ VF/Kewaro 工程任务先 live-read [CURRENT.md](https://github.com/llhzx2018/go
 
 `core-free-runner-public` 是 VF 固定的 **Public-safe GitHub Hosted Runner + Evidence 基础设施**，不是产品仓、Release 仓或私人数据仓。
 
+## P07 公共工具箱终端 UX V3 · 专属硬要求（OWNER 2026-11-13）
+
+修改本仓 P07 单一公共工具箱及 P07-M01 网络代理节点（V2Ray）、P07-M02 服务器性能检测（VPS 验机）、P07-M03 网站与数据、P07-M04 服务器维护与安全、P07-M05 新服务器初始化相关的用户可见 SSH 菜单/输出时，必须先读 [《P07 Public Terminal UX Adoption》](docs/authority/P07_TERMINAL_UX_ADOPTION.md)，并追溯 P07 产品仓唯一 [企业级 UX V3 Authority](https://github.com/llhzx2018/vf-server-ops/blob/main/docs/authority/P07_TERMINAL_UX_STANDARD_V3.md)。改动有用户提示/菜单/确认/进度时必须附七场景 UX 审查+具名正反测试；`scripts/check_p07_public_terminal_ux.py` 和现有公共 Actions 的 PR Gate 必须 PASS。非 UI 的哈希/版本变化不额外触发 UX 证据；UX Gate 不授权自动更新其它模块、正式发行或 Production。这是仅用于 **P07 自有公共入口** 的指针，不改变其它 Runner/产品的 Authority。
+
 ## 1. Authority First
 
 进入本仓任务时默认只读：
