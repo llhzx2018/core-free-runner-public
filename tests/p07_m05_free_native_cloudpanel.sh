@@ -191,6 +191,19 @@ fi
 "$CLIENT" --version | grep -F "$EXPECTED_VERSION" >/dev/null ||
   fail_env SELECTED_ENGINE_CHANGED_AFTER_REINSTALL_DENIAL
 echo P07_M05_FREE_NATIVE_EXISTING_CLOUDPANEL_REINSTALL=REJECTED
+# Prove the installed P07-M05 新服务器初始化 own first-admin UI,
+# not a hand-built clpctl shortcut, on this throwaway official CloudPanel.
+if [[ "${P07_M05_TEST_REAL_FIRST_ADMIN:-NO}" == YES ]]; then
+  python3 -B tests/p07_m05_native_first_admin.py
+  "$CLIENT" --version | grep -F "$EXPECTED_VERSION" >/dev/null ||
+    fail_env DATABASE_VERSION_CHANGED_AFTER_FIRST_ADMIN
+  # After first admin, a second CloudPanel install must remain impossible.
+  if bash "$CORE" server-migrate bootstrap-local --db-engine "$ENGINE" \
+     --confirm BOOTSTRAP_LOCAL_CLOUDPANEL >/dev/null 2>&1; then
+    fail_env FIRST_ADMIN_REENABLED_CLOUDPANEL_REINSTALL
+  fi
+  echo P07_M05_FREE_NATIVE_FIRST_ADMIN_AND_REINSTALL_GUARD=PASS
+fi
 echo "P07_M05_FREE_NATIVE_CLOUDPANEL_$ENGINE=PASS"
 echo P07_M05_FREE_NATIVE_OTHER_FOUR_MODULES=UNCHANGED
 echo P07_M05_DEBIAN13_MARIADB118=NOT_RUN
