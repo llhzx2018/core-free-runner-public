@@ -13,8 +13,8 @@ import json
 import os
 from pathlib import Path
 import re
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+import subprocess
+import tempfile
 
 OWNER = "llhzx2018"
 GOV_REPO = "llhzx2018/gov-doc"
@@ -49,29 +49,49 @@ INDEX = {t.id: t for t in TARGETS}
 assert len(INDEX) == len(TARGETS) == 8
 
 
-def github_json(path: str, token: str) -> dict:
+def git_refs(repo: str, refs: tuple[str, ...], token: str) -> dict:
+    """Discover only preapproved PR+branch refs using existing Contents:read."""
     if not token:
         raise MonitorError("PRIVATE_READ_CAPABILITY_NOT_INJECTED")
-    if not (path.startswith("/repos/llhzx2018/") and "?" not in path
-            and ".." not in path and "//" not in path):
-        raise MonitorError("UNTRUSTED_GITHUB_API_PATH")
-    req = Request(
-        "https://api.github.com" + path,
-        headers={"Authorization": "Bearer " + token,
-                 "Accept": "application/vnd.github+json",
-                 "X-GitHub-Api-Version": "2022-11-28",
-                 "User-Agent": "vf-cross-project-authority-check"},
-    )
-    try:
-        with urlopen(req, timeout=15) as response:
-            value = json.load(response)
-    except HTTPError as exc:
-        raise MonitorError("GITHUB_READ_DENIED_OR_UNAVAILABLE:HTTP_" + str(exc.code)) from None
-    except (URLError, TimeoutError, OSError) as exc:
-        raise MonitorError("GITHUB_READ_UNAVAILABLE:" + type(exc).__name__) from None
-    if not isinstance(value, dict):
-        raise MonitorError("GITHUB_RESPONSE_NOT_OBJECT")
-    return value
+    if repo not in {GOV_REPO, *(t.repo for t in TARGETS)}:
+        raise MonitorError("UNTRUSTED_GIT_REPOSITORY")
+    allowed = {"refs/heads/main"} if repo == GOV_REPO else {
+        f"refs/pull/{t.pr}/head" for t in TARGETS if t.repo == repo
+    } | {"refs/heads/" + BRANCH}
+    if not refs or any(ref not in allowed for ref in refs):
+        raise MonitorError("UNTRUSTED_GIT_REFERENCE")
+    with tempfile.TemporaryDirectory(prefix="vf-askpass-") as temp:
+        askpass = Path(temp) / "git-askpass"
+        # Credential value is injected through the runner environment only,
+        # never embedded in the script, command line, URL, logs, or artifact.
+        askpass.write_text(
+            '#!/bin/sh\ncase "$1" in\n'
+            '*Username*) printf "%s\\n" "x-access-token";;\n'
+            '*Password*) printf "%s\\n" "$VF_PRIVATE_READ_TOKEN";;\n'
+            '*) exit 1;;\nesac\n', encoding="utf-8")
+        askpass.chmod(0o700)
+        env = os.environ.copy()
+        env["VF_PRIVATE_READ_TOKEN"] = token
+        env["GIT_ASKPASS"] = str(askpass)
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        try:
+            run = subprocess.run(
+                ["git", "-c", "credential.helper=", "ls-remote", "--exit-code",
+                 f"https://github.com/{repo}.git", *refs],
+                env=env, capture_output=True, text=True, timeout=25, check=False)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise MonitorError("READ_ONLY_GIT_REF_UNAVAILABLE:" + type(exc).__name__) from None
+    if run.returncode != 0:
+        raise MonitorError("READ_ONLY_GIT_REF_DENIED_OR_MISSING")
+    output = {}
+    for line in run.stdout.splitlines():
+        sha, _, ref = line.partition("\t")
+        if ref not in refs or ref in output:
+            raise MonitorError("UNEXPECTED_GIT_REF_OUTPUT")
+        output[ref] = valid_sha(sha, "GIT_REF")
+    if set(output) != set(refs):
+        raise MonitorError("GIT_REF_INCOMPLETE")
+    return output
 
 
 def valid_sha(value: object, where: str) -> str:
@@ -81,27 +101,19 @@ def valid_sha(value: object, where: str) -> str:
 
 
 def branch_sha(repo: str, get) -> str:
-    body = get("/repos/" + repo + "/branches/main")
-    return valid_sha((body.get("commit") or {}).get("sha"), repo + ":main")
+    ref = "refs/heads/main"
+    return valid_sha(get(repo, (ref,))[ref], repo + ":main")
 
 
 def target_head(t: Target, get) -> tuple[str, str]:
-    data = get(f"/repos/{t.repo}/pulls/{t.pr}")
-    if data.get("number") != t.pr:
-        raise MonitorError("PR_IDENTITY_CHANGED:" + t.id)
-    if data.get("state") == "closed":
-        if not data.get("merged"):
-            raise MonitorError("TARGET_PR_CLOSED_UNMERGED:" + t.id)
-        return branch_sha(t.repo, get), "main"
-    if data.get("state") != "open":
-        raise MonitorError("TARGET_PR_STATE_INVALID:" + t.id)
-    head = data.get("head") or {}
-    base = data.get("base") or {}
-    user = data.get("user") or {}
-    if (user.get("login") != OWNER or (head.get("repo") or {}).get("full_name") != t.repo
-            or head.get("ref") != BRANCH or base.get("ref") != "main"):
-        raise MonitorError("TARGET_PR_SCOPE_UNTRUSTED:" + t.id)
-    return valid_sha(head.get("sha"), t.id), "pr"
+    pull_ref = f"refs/pull/{t.pr}/head"
+    branch_ref = "refs/heads/" + BRANCH
+    refs = get(t.repo, (pull_ref, branch_ref))
+    head = valid_sha(refs[pull_ref], t.id + ":PR_HEAD")
+    branch = valid_sha(refs[branch_ref], t.id + ":OWNER_BRANCH")
+    if head != branch:
+        raise MonitorError("PR_BRANCH_SOURCE_MISMATCH:" + t.id)
+    return head, "pr"
 
 
 def discover(get) -> dict:
@@ -155,7 +167,7 @@ def main() -> int:
         token = os.environ.get("VF_PRIVATE_READ_TOKEN", "")
         if args.command in ("discover", "recheck") and not token:
             raise MonitorError("PRIVATE_READ_CAPABILITY_NOT_INJECTED")
-        get = lambda path: github_json(path, token)
+        get = lambda repo, refs: git_refs(repo, refs, token)
         if args.command == "discover":
             result = discover(get)
             output = os.environ.get("GITHUB_OUTPUT")
