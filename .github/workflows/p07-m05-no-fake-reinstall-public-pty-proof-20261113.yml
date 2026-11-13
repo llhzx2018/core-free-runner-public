@@ -1,0 +1,128 @@
+name: P07-M05 新服务器初始化 · 假重装选库纠偏正式 Toolbox 交互升级验收
+on:
+  push:
+    branches: [release/p07-m05-no-fake-reinstall-20261113]
+    paths:
+      - .github/workflows/p07-m05-no-fake-reinstall-public-pty-proof-20261113.yml
+permissions:
+  contents: read
+jobs:
+  public-m05-real-toolbox-upgrade:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - name: Checkout exact public distribution PR commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 6b2740ca4a8d8c81252f9f32c0f59787cd28bd98
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify exact source and published artifact identity over public HTTPS
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = 6b2740ca4a8d8c81252f9f32c0f59787cd28bd98
+          test "$(git diff --name-only 33f1135453cb058364fc65e37ef45ba2ae046a4c HEAD)" = installers/p07-toolbox.sh
+          bash -n installers/p07-toolbox.sh
+          grep -Fxq 'M05_BUILD_EXPECTED="0.1.0-m05-no-fake-reinstall1"' installers/p07-toolbox.sh
+          grep -Fxq 'M05_UPGRADE_FROM6="0.1.0-m05-provider-neutral-reinstall1"' installers/p07-toolbox.sh
+          grep -Fxq 'M05_BUNDLE_SHA256="b522367a66e51092eaa003cc264b1a15c9bddc9a36d4bb6d480c71a13223738d"' installers/p07-toolbox.sh
+          grep -Fxq 'M05_BUNDLE_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-no-fake-reinstall1-20261113/P07-M05-0.1.0-m05-no-fake-reinstall1.zip"' installers/p07-toolbox.sh
+          dir="$RUNNER_TEMP/p07-m05-public-pty"
+          mkdir -p "$dir"
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 2 --max-time 120 \
+            https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-provider-neutral-reinstall1-20261113/P07-M05-0.1.0-m05-provider-neutral-reinstall1.zip -o "$dir/old.zip"
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 2 --max-time 120 \
+            https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-no-fake-reinstall1-20261113/P07-M05-0.1.0-m05-no-fake-reinstall1.zip -o "$dir/new.zip"
+          echo "636353ee56d91957e77b8cf3786471f0ecb2aadb6c4f0d51695cd9356164e023  $dir/old.zip" | sha256sum -c --status
+          echo "b522367a66e51092eaa003cc264b1a15c9bddc9a36d4bb6d480c71a13223738d  $dir/new.zip" | sha256sum -c --status
+          echo P07_M05_PUBLIC_BOTH_OFFICIAL_ZIP_REMOTE_SHA256=PASS
+      - name: Real old official install and actual Toolbox Owner TTY N/Y, new module readback and rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dir="$RUNNER_TEMP/p07-m05-public-pty"
+          sudo python3 -B installers/p07-m05-atomic.py install "$dir/old.zip" \
+            636353ee56d91957e77b8cf3786471f0ecb2aadb6c4f0d51695cd9356164e023
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-provider-neutral-reinstall1
+          python3 - <<'PY'
+          import os,pty,select,signal,tempfile,time
+          from pathlib import Path
+          src=Path("installers/p07-toolbox.sh").read_text()
+          marker='\ncase "'+chr(36)+'{1:-}" in'
+          assert src.count(marker)==1
+          with tempfile.TemporaryDirectory(prefix="m05-public-pty-") as d:
+              script=Path(d)/"owner-ssh-toolbox.sh"
+              script.write_text(src.split(marker)[0]+"\nensure_m05_current\n")
+              prompt="确认仅升级 P07-M05 新服务器初始化？[y/N]：".encode()
+              def run(answer):
+                  pid,fd=pty.fork()
+                  if pid==0: os.execvp("sudo",["sudo","bash",str(script)])
+                  output=b"";answered=False;deadline=time.monotonic()+100
+                  while time.monotonic()<deadline:
+                      ok,_,_=select.select([fd],[],[],0.15)
+                      if ok:
+                          try: data=os.read(fd,8192)
+                          except OSError:
+                              _,status=os.waitpid(pid,0);os.close(fd)
+                              return os.waitstatus_to_exitcode(status),output.decode(errors="replace"),answered
+                          output+=data
+                          if prompt in output and not answered:
+                              os.write(fd,(answer+"\n").encode());answered=True
+                      done,status=os.waitpid(pid,os.WNOHANG)
+                      if done:
+                          os.close(fd)
+                          return os.waitstatus_to_exitcode(status),output.decode(errors="replace"),answered
+                  os.kill(pid,signal.SIGKILL);os.waitpid(pid,0);os.close(fd)
+                  raise RuntimeError("Toolbox TTY interaction timed out")
+              current=lambda: os.readlink("/opt/vfops-modules/m05/current")
+              old="releases/0.1.0-m05-provider-neutral-reinstall1"
+              new="releases/0.1.0-m05-no-fake-reinstall1"
+              assert current()==old
+              rc,output,asked=run("n")
+              assert rc!=0 and asked and current()==old and "未确认 M05 升级" in output,(rc,output[-1000:])
+              print("P07_M05_OWNER_TTY_N_PRESERVES_CURRENT=PASS")
+              rc,output,asked=run("y")
+              assert rc==0 and asked and current()==new,(rc,output[-2000:])
+              print("P07_M05_OWNER_TTY_Y_REAL_PUBLIC_RELEASE_ATOMIC=PASS")
+              rc,output,asked=run("n")
+              assert rc==0 and current()==new and not asked,(rc,output[-1000:])
+              print("P07_M05_SAME_VERSION_REOPEN_IDEMPOTENT=PASS")
+          PY
+          test "$(cat /opt/vfops-modules/m05/current/BUILD_ID)" = 0.1.0-m05-no-fake-reinstall1
+          grep -Fq 'm05_reinstall_plan()' /opt/vfops-modules/m05/current/bin/vfops-init-ui
+          grep -Fq 'CloudPanel 重装前准备' /opt/vfops-modules/m05/current/bin/vfops-init-ui
+          python3 - <<'PY'
+          from pathlib import Path
+          ui=Path('/opt/vfops-modules/m05/current/bin/vfops-init-ui').read_text()
+          menu2=ui.split('m05_reinstall_plan() {',1)[1].split('\nrun_initialization() {',1)[0]
+          assert 'db-engine-options' not in menu2
+          assert '重装后目标数据库' not in menu2
+          assert '请选择 [1-' not in menu2
+          assert '本次只显示操作方法' in menu2
+          print('P07_M05_OFFICIAL_OLD_HOST_NO_FAKE_DB_SELECTION=PASS')
+          PY
+          sudo env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX bash \
+            /opt/vfops-modules/m05/current/bin/vfops-init-core server-migrate db-engine-options > "$dir/db-choice.json"
+          python3 - "$dir/db-choice.json" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1]))
+          assert d["plan_only"] is True and d["writes_performed"] is False
+          assert d["db_engine_options"] and d["recommended_db_engine"] in d["db_engine_options"]
+          print("P07_M05_LIVE_UBUNTU_DB_CHOICES_READ_ONLY=PASS")
+          PY
+          test ! -e /opt/vfops-modules/m05/current/lib/__pycache__
+          for other in m01 m02 m03 m04; do test ! -e "/opt/vfops-modules/$other"; done
+          test ! -e /home/clp
+          sudo python3 -B installers/p07-m05-atomic.py rollback 0.1.0-m05-provider-neutral-reinstall1 \
+            --confirm P07-M05:0.1.0-m05-provider-neutral-reinstall1
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-provider-neutral-reinstall1
+          echo P07_M05_ACTUAL_PUBLIC_TOOLBOX_OLD_TO_NEW_AND_ROLLBACK=PASS
+          echo P07_M05_FOUR_SIBLINGS_AND_CLOUDPANEL=UNTOUCHED
+          echo P07_OWNER_PRODUCTION=NOT_RUN
+      - name: Remove temporary public ZIP copies
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- "$RUNNER_TEMP/p07-m05-public-pty"
+          echo P07_M05_PUBLIC_PROOF_NO_PRIVATE_SOURCE=YES
