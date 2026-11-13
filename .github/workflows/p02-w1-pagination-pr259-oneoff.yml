@@ -1,0 +1,137 @@
+name: P02 W1 Search pagination PR259 private exact-source Chromium (one-off)
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p02-w1-pagination-pr259-oneoff.yml']
+permissions:
+  contents: read
+jobs:
+  actual-browser:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: llhzx2018/vf-library
+          ref: 8dff9ef6a803a24b1899372fe924c11a83aee0f2
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Exact P02 code and isolated PHP preflight
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = '8dff9ef6a803a24b1899372fe924c11a83aee0f2'
+          test "$(cat product/VERSION)" = '2.5.129'
+          php -r 'exit(PHP_VERSION_ID>=80300&&extension_loaded("pdo_sqlite")&&extension_loaded("sqlite3")?0:1);'
+          if ! php -r 'exit(extension_loaded("zip")?0:1);'; then
+            timeout 150s sudo apt-get install -y php8.3-zip
+          fi
+          php -r 'exit(extension_loaded("zip")?0:1);'
+          echo P02_W1_E2E_SOURCE_AND_PHP=PASS
+      - name: Exact-source locked Vue build, negative fixtures, repository gates and reproducibility
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd product/frontend/w1-search
+          npm ci --no-audit --no-fund
+          npm run typecheck
+          npm test
+          npm run build
+          before_js="$(sha256sum ../../public/assets/w1/w1-search.js | cut -d' ' -f1)"
+          before_css="$(sha256sum ../../public/assets/w1/w1-search.css | cut -d' ' -f1)"
+          npm run build
+          test "$(sha256sum ../../public/assets/w1/w1-search.js | cut -d' ' -f1)" = "$before_js"
+          test "$(sha256sum ../../public/assets/w1/w1-search.css | cut -d' ' -f1)" = "$before_css"
+          cd ../..
+          python3 scripts/generate-source-manifest.py
+          # The repo delivery gate rejects downloaded third-party node_modules/chunks.
+          # They are test-only dependencies, not project Git source or deliverables.
+          rm -rf frontend/w1-search/node_modules
+          bash scripts/verify-repository.sh
+          echo P02_W1_SEARCH_PAGINATION_VUE_NEGATIVE_AND_REPRODUCIBLE=PASS
+      - name: Real Playwright Chrome with disposable original PHP and SQLite
+        shell: bash
+        env:
+          P02_W1_E2E_SYNTHETIC_PASSWORD: P02-SYNTHETIC-LOCAL-W1-ONLY
+          P02_W1_E2E_BASE: http://127.0.0.1:18765
+        run: |
+          set -Eeuo pipefail
+          root="$(mktemp -d "${RUNNER_TEMP}/p02-w1-XXXXXX")"
+          play="$(mktemp -d "${RUNNER_TEMP}/p02-w1-pw-XXXXXX")"
+          server_pid=''
+          cleanup() {
+            if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || :; wait "$server_pid" 2>/dev/null || :; fi
+            rm -rf "$root" "$play"
+            echo PRIVATE_SOURCE_AND_SQLITE_PERSISTED_IN_PUBLIC=NO
+          }
+          trap cleanup EXIT
+          site="$root/site"
+          mkdir -p "$site/app"
+          cp -a product/public/. "$site/"
+          cp -a product/src/app/. "$site/app/"
+          printf '2.5.129\n' > "$site/VERSION.txt"
+          test -s "$site/assets/w1/w1-search.js"
+          php -S 127.0.0.1:18765 -t "$site" > "$root/synthetic-server.log" 2>&1 &
+          server_pid=$!
+          for n in $(seq 1 20); do if curl -fsS 'http://127.0.0.1:18765/setup.php' -o /dev/null; then break; fi; sleep 0.5; done
+          curl -fsS 'http://127.0.0.1:18765/setup.php' -o /dev/null
+          npm install --prefix "$play" --no-save --no-audit --no-fund playwright@1.57.0
+          export P02_W1_PLAYWRIGHT_PACKAGE="$play/node_modules/playwright"
+          if command -v google-chrome >/dev/null 2>&1; then
+            export P02_W1_BROWSER_CHANNEL=chrome
+          else
+            "$play/node_modules/.bin/playwright" install chromium
+            export P02_W1_BROWSER_CHANNEL=chromium
+          fi
+          node product/tests/e2e/p02_w1_vue_search_real_browser.mjs
+          echo P02_W1_SEARCH_PAGINATION_REAL_BROWSER_INTEGRATION=PASS
+      - name: Commit exact-built JS CSS and manifest to existing private P02 feature branch only
+        shell: bash
+        env:
+          P02_WRITE: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "${P02_WRITE:-}" || { echo P02_FEATURE_WRITE_CAPABILITY_UNAVAILABLE; exit 1; }
+          cd product
+          expected='8dff9ef6a803a24b1899372fe924c11a83aee0f2'
+          target='refs/heads/feat/p02-w1-search-pagination-stage-20261113'
+          test "$(git rev-parse HEAD)" = "$expected"
+          python3 scripts/verify-source-manifest.py
+          git add -- public/assets/w1/w1-search.js public/assets/w1/w1-search.css SOURCE_MANIFEST.json SOURCE_MANIFEST.txt
+          # JS and both source manifests must change; CSS is unchanged for a TS-only fix.
+          # Allow only the four declared generated output paths, never product source.
+          python3 - <<'PY'
+          import subprocess
+          expected={
+            'public/assets/w1/w1-search.js',
+            'public/assets/w1/w1-search.css',
+            'SOURCE_MANIFEST.json',
+            'SOURCE_MANIFEST.txt',
+          }
+          required={
+            'public/assets/w1/w1-search.js',
+            'SOURCE_MANIFEST.json',
+            'SOURCE_MANIFEST.txt',
+          }
+          actual=set(subprocess.check_output(
+            ['git','diff','--cached','--name-only'],text=True).splitlines())
+          assert required.issubset(actual) and actual.issubset(expected),(sorted(actual),sorted(required))
+          print('P02_W1_COMPILED_CHANGED_ASSET_SCOPE=PASS')
+          PY
+          header="$(printf 'x-access-token:%s' "$P02_WRITE" | base64 -w0)"
+          remote='https://github.com/llhzx2018/vf-library.git'
+          current="$(git -c "http.extraheader=AUTHORIZATION: basic $header" ls-remote "$remote" "$target" | cut -f1)"
+          test "$current" = "$expected" || { echo P02_BRANCH_SHA_DRIFT_REJECTED; exit 1; }
+          git config user.name 'VF verified build'
+          git config user.email 'noreply@kewaro.com'
+          git commit -m 'build(P02 W1): bind tested W1 search pagination JS CSS and manifest'
+          git -c "http.extraheader=AUTHORIZATION: basic $header" push "$remote" "HEAD:$target"
+          unset header
+          echo P02_W1_SEARCH_PAGINATION_ASSET_COMMIT=PASS
+      - name: Cleanup private checkout on failure
+        if: always()
+        shell: bash
+        run: |
+          rm -rf product
+          echo PRIVATE_SOURCE_PERSISTED_IN_PUBLIC_GIT_OR_ARTIFACT=NO
