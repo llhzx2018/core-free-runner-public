@@ -11,6 +11,14 @@ fail_env(){ echo "P07_M05_FREE_NATIVE=BLOCKED_ENV_$1" >&2; exit 12; }
    -n "$GITHUB_RUN_ID" && "$(id -u)" == 0 ]] || fail_env NOT_A_VERIFIED_EPHEMERAL_VM
 source /etc/os-release
 [[ "$ID" == ubuntu && "$VERSION_ID" == 24.04 ]] || fail_env UNSUPPORTED_TEST_OS
+# Official CloudPanel matrix: Ubuntu24.04 allows MySQL8.4 or MariaDB10.11.
+# Debian13 MariaDB11.8 is a different independent proof, not substituted here.
+ENGINE="${P07_M05_NATIVE_DB_ENGINE:-MYSQL_8.4}"
+case "$ENGINE" in
+  MYSQL_8.4) CLIENT=mysql; EXPECTED_VERSION='8.4.' ;;
+  MARIADB_10.11) CLIENT=mariadb; EXPECTED_VERSION='10.11.' ;;
+  *) fail_env DB_ENGINE_NOT_IN_UBUNTU24_ALLOWLIST ;;
+esac
 [[ ! -e /home/clp && ! -L /home/clp && ! -e /opt/vf-server-ops ]] ||
   fail_env EXISTING_CLOUDPANEL_OR_M03
 for sibling in /opt/vfops-modules/m01 /opt/vfops-modules/m02 \
@@ -72,16 +80,16 @@ import json,sys
 r=json.load(sys.stdin)
 assert r.get("status")=="READY" and r.get("writes_performed") is False
 assert r.get("os_id")=="ubuntu" and r.get("version_id")=="24.04"
-assert "MYSQL_8.4" in r.get("db_engine_options",[])
+assert set(("MYSQL_8.4","MARIADB_10.11")).issubset(r.get("db_engine_options",[]))
 '
 echo P07_M05_FREE_NATIVE_CLEAN_PREFLIGHT=PASS
-echo P07_M05_FREE_NATIVE_SELECTED_DB=MYSQL_8.4
+echo "P07_M05_FREE_NATIVE_SELECTED_DB=$ENGINE"
 # Actual official CloudPanel installer invoked by exact P07-M05 product backend.
 # Output is kept in transient private temp, never published to public artifact.
 set +e
 timeout --signal=TERM --kill-after=30 2400 \
  bash "$CORE" server-migrate bootstrap-local \
- --db-engine MYSQL_8.4 --confirm BOOTSTRAP_LOCAL_CLOUDPANEL \
+ --db-engine "$ENGINE" --confirm BOOTSTRAP_LOCAL_CLOUDPANEL \
  >"$RUNNER_TEMP/p07-m05-cloudpanel-private-install.log" 2>&1
 install_rc=$?
 set -e
@@ -139,8 +147,9 @@ PY
   exit 13
 fi
 command -v clpctl >/dev/null || fail_env CLOUDPANEL_CLI_NOT_INSTALLED
-command -v mysql >/dev/null || fail_env MYSQL_NOT_INSTALLED
-mysql --version | grep -F '8.4.' >/dev/null || fail_env SELECTED_MYSQL_VERSION_WRONG
+command -v "$CLIENT" >/dev/null || fail_env SELECTED_DB_CLIENT_NOT_INSTALLED
+"$CLIENT" --version | grep -F "$EXPECTED_VERSION" >/dev/null ||
+  fail_env SELECTED_DB_ENGINE_VERSION_MISMATCH
 test -f /home/clp/htdocs/app/data/db.sq3 || fail_env CLOUDPANEL_SQLITE_NOT_INSTALLED
 bash "$CORE" server-migrate target-status | python3 -c '
 import json,sys
@@ -152,7 +161,19 @@ for sibling in /opt/vfops-modules/m01 /opt/vfops-modules/m02 \
                /opt/vfops-modules/m03 /opt/vfops-modules/m04; do
   [[ ! -e "$sibling" && ! -L "$sibling" ]] || fail_env OTHER_MODULE_WAS_MODIFIED
 done
-echo P07_M05_FREE_NATIVE_CLOUDPANEL_MYSQL84=PASS
+# A second bootstrap against this now-populated CloudPanel must refuse
+# any change of engine without touching the installed daemon.
+if bash "$CORE" server-migrate target-status --bootstrap-preflight >/dev/null 2>&1; then
+  fail_env EXISTING_CLOUDPANEL_PREFLIGHT_NOT_BLOCKED
+fi
+if bash "$CORE" server-migrate bootstrap-local --db-engine "$ENGINE" \
+  --confirm BOOTSTRAP_LOCAL_CLOUDPANEL >/dev/null 2>&1; then
+  fail_env EXISTING_CLOUDPANEL_REINSTALL_NOT_BLOCKED
+fi
+"$CLIENT" --version | grep -F "$EXPECTED_VERSION" >/dev/null ||
+  fail_env SELECTED_ENGINE_CHANGED_AFTER_REINSTALL_DENIAL
+echo P07_M05_FREE_NATIVE_EXISTING_CLOUDPANEL_REINSTALL=REJECTED
+echo "P07_M05_FREE_NATIVE_CLOUDPANEL_$ENGINE=PASS"
 echo P07_M05_FREE_NATIVE_OTHER_FOUR_MODULES=UNCHANGED
 echo P07_M05_DEBIAN13_MARIADB118=NOT_RUN
 echo P07_M05_OWNER_VPS=UNTOUCHED
