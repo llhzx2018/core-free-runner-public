@@ -526,6 +526,40 @@ class AllFiveModuleNativeCoexistence(unittest.TestCase):
                              "releases/0.1.0-m05-candidate1")
             verify_modules()
             self.assertEqual(baseline,{name:tree_hash(TARGETS[name]) for name in baseline})
+            # The single private .run is now accepted by the SAME Toolbox;
+            # no second ZIP/installer, Git token, network or CloudPanel setup.
+            offline_file=work/"P07-M05-0.1.0-m05-candidate2-OFFLINE.run"
+            run("python3",str(PRODUCT/"scripts/build_p07_m05_owner_trial_run.py"),
+                "--bundle",str(second["path"]),
+                "--installer",str(ROOT/"installers/p07-m05-atomic.py"),
+                "--output",str(offline_file),timeout=120)
+            offline_digest=hashlib.sha256(offline_file.read_bytes()).hexdigest()
+            self.assertEqual(offline_digest,
+                "e42b6b3c59719f6ec189e4c62b7cfc54385aaa6e566c8f92ca5306246f022bbb")
+            offline_command=["bash",str(ROOT/"installers/p07-toolbox.sh"),
+                             "--install-m05-offline",str(offline_file),"P07-M05:INSTALL"]
+            wrong=subprocess.run(offline_command[:-1]+["P07-M04:INSTALL"],
+                                 capture_output=True,text=True,timeout=30)
+            self.assertEqual(wrong.returncode,13,wrong.stderr)
+            corrupted=work/"P07-M05-BAD.run"
+            corrupted.write_bytes(offline_file.read_bytes()+b"\\n# tampered private trial")
+            rejected=subprocess.run(offline_command[:2]+["--install-m05-offline",str(corrupted),"P07-M05:INSTALL"],
+                                    capture_output=True,text=True,timeout=30)
+            self.assertEqual(rejected.returncode,6,rejected.stderr)
+            self.assertEqual(os.readlink(MODULES/"m05/current"),
+                             "releases/0.1.0-m05-candidate1")
+            run(*offline_command,timeout=120)
+            self.assertEqual(os.readlink(MODULES/"m05/current"),
+                             "releases/0.1.0-m05-candidate2")
+            self.assertEqual(baseline,{name:tree_hash(TARGETS[name]) for name in baseline})
+            run("bash",str(ROOT/"installers/p07-toolbox.sh"),
+                "--rollback-m05","0.1.0-m05-candidate1",
+                "P07-M05:0.1.0-m05-candidate1",timeout=100)
+            self.assertEqual(os.readlink(MODULES/"m05/current"),
+                             "releases/0.1.0-m05-candidate1")
+            print("P07_M05_SINGLE_PRIVATE_FILE_TOOLBOX_INSTALL_AND_ROLLBACK=PASS",flush=True)
+            print("P07_M05_SINGLE_FILE_WRONG_HASH_AND_CONFIRM_DENIED=PASS",flush=True)
+            print("P07_M05_SINGLE_FILE_FOUR_SIBLINGS_UNCHANGED=PASS",flush=True)
             # Re-apply exact existing candidate2 archive after rollback; it is
             # verified byte-for-byte, not overwritten, then re-activated.
             run("python3",str(ROOT/"installers/p07-m05-atomic.py"),
