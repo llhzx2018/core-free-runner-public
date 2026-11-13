@@ -4,18 +4,18 @@ set -Eeuo pipefail
 # P07 V0.1.0 final public distribution readback marker.
 # 公共版本保持简短稳定；内部构建身份仅用于精确校验和工程追溯。
 VERSION="V0.1.0"
-BUILD_ID="0.1.0-five-modules-release4-m05"
+BUILD_ID="0.1.0-five-modules-ux3-release135"
 
 VF_NODE_PUBLIC="V0.1.0"
-VF_NODE_EXPECTED="0.1.0-rc13"
+VF_NODE_EXPECTED="0.1.0-ux1"
 # Legacy M01 installer URL is retained for text/older regression compatibility,
 # but is NEVER executed by this independently upgradable Toolbox route.
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 M01_ROOT="/opt/vfops-modules/m01"
 M01_RUNTIME="$M01_ROOT/current/vf-node.sh"
-M01_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/adf4d8cc0db69255fb4a6aff58857561a0652bf6/installers/p07-vf-node-independent-rc13.sh"
-M01_INSTALLER_BLOB="8313adef7dd235b645fc815a7bded933fc289f82"
-M01_MANIFEST_SHA256="1ca3dc95a5cc6e5aa35c9b7ead415d3b6ea6c6eb9e8307a76310d146ab53c47f"
+M01_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-vf-node-independent-ux1.sh"
+M01_INSTALLER_BLOB="4f9139d001f1d5e2415c3fe883adc1a54ef3bec3"
+M01_MANIFEST_SHA256="56c93541c7fa8386b12769573bd69413a51e3da9f5f4e277a4649e61bbc6cd3d"
 # Historical official source identity stays pinned after a future M01 release.
 M01_BOOTSTRAP_BUILD="0.1.0-rc13"
 M01_BOOTSTRAP_MANIFEST_SHA256="1ca3dc95a5cc6e5aa35c9b7ead415d3b6ea6c6eb9e8307a76310d146ab53c47f"
@@ -23,22 +23,24 @@ M01_TARGET_MANIFEST_SHA256="$M01_MANIFEST_SHA256"
 
 
 VPS_AUDIT_PUBLIC="V2.1.0"
-VPS_AUDIT_EXPECTED="V2.1.0"
-VPS_AUDIT_BUILD_EXPECTED="2.1.0-rc7-field"
-VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/0a851b9fe1819c7970ed5bb8e3633f2fc8e73166/experiments/p07-vps-audit-v21.sh"
-VPS_AUDIT_SHA256="d1846e751bba5c860c623e3db26641908e27ca43b39cf37016758853b65a952d"
+VPS_AUDIT_EXPECTED="V2.1.1"
+VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux1"
+VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/3cacb9e9ccbe60f76e4b4ac90920bc9d06ead877/experiments/p07-vps-audit-v21-ux1.sh"
+VPS_AUDIT_SHA256="7b083e4cf105d40b04b4cbe898fb6b9e1bb7f1ef3385bc1d20829796f6852013"
 VPS_AUDIT_BOOTSTRAP_BUILD="2.1.0-rc7-field"
 VPS_AUDIT_BOOTSTRAP_SHA256="d1846e751bba5c860c623e3db26641908e27ca43b39cf37016758853b65a952d"
 M02_ROOT="/opt/vfops-modules/m02"  # 独立 VPS 验机版本；不写入 M01/M03/M04/M05
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
-VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release115"
-VF_SERVER_OPS_INSTALLER_REF="1986fc0526f583a3a152d92980e21519926bc926"
-VF_SERVER_OPS_INSTALLER_BLOB="c49b26eb900960eeaf3992eaa95f3d3a9a4feb31"
+VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release135"
+VF_SERVER_OPS_INSTALLER_REF="main"
+VF_SERVER_OPS_INSTALLER_BLOB="00acd0caf38ea4cd0f1e264d54763f7f0be3b195"
 # Exact stable P07-M03 runtime manifest; reject a self-edited manifest before execution.
-VF_SERVER_OPS_MANIFEST_BLOB="4acbaca22aac0da681b34376e2cc86d876593181"
-VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07.sh"
+VF_SERVER_OPS_MANIFEST_BLOB="f57e114e0ef23f73a1ec12ba864d8f2e67a5bd30"
+VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07-m03-release135-atomic.sh"
+M03_BOOTSTRAP_BUILD="0.1.0-release115"
+M03_BOOTSTRAP_MANIFEST_BLOB="4acbaca22aac0da681b34376e2cc86d876593181"
 M03_ROLLBACK_INSTALLER_REF="70836f5bba98e8d4ff32ccb6541b4ca1ffc80912"
 M03_ROLLBACK_INSTALLER_BLOB="9571833c4e8a1d737ee47a60e946a030d94c8157"
 M03_ROLLBACK_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${M03_ROLLBACK_INSTALLER_REF}/installers/p07-m03-restore-previous.sh"
@@ -48,14 +50,14 @@ SYSTEM_CARE_PUBLIC="V0.1.0"
 SYSTEM_CARE_EXPECTED="0.1.0-rc82"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
 # P07-M04 服务器维护与安全 independent rc83 candidate, exact immutable source.
-M04_BUILD_EXPECTED="0.1.0-rc83"
-M04_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/75c7336b8467114f8bc3396dc06144e48275a39a/installers/p07-system-care-rc83-isolated.sh"
-M04_INSTALLER_BLOB="d39cef5d0915a99753d688f10fb1dbe74c0dac98"
-M04_UI_BLOB="f140f1158351f9dce2e9f9159611af57047424b1"
+M04_BUILD_EXPECTED="0.1.0-ux2"
+M04_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care-ux2-isolated.sh"
+M04_INSTALLER_BLOB="f9103fabd372c1683beb7ee23dde103874b1e533"
+M04_UI_BLOB="bb5882befd5e15962df39ca1388629b45b5d33fc"
 M04_BOOTSTRAP_BUILD="0.1.0-rc83"
 M04_BOOTSTRAP_UI_BLOB="f140f1158351f9dce2e9f9159611af57047424b1"
 M04_BOOTSTRAP_MANIFEST_BLOB="f82c9e42297c45a54ec6dc2fc4d705cad316dfce"
-M04_TARGET_MANIFEST_BLOB="$M04_BOOTSTRAP_MANIFEST_BLOB"
+M04_TARGET_MANIFEST_BLOB="965aa666b796c8502967a84ccb060695425538e6"
 M04_ROOT="/opt/vfops-modules/m04"
 M04_RUNTIME="$M04_ROOT/current/vf-system-care.sh"
 
@@ -63,19 +65,20 @@ M04_RUNTIME="$M04_ROOT/current/vf-system-care.sh"
 # P07-M05 新服务器初始化 has its OWN runtime/build and no M03/M04 installer calls.
 # Exact published M05 artifact: no fallback to M03/M04 installers.
 # M05-only official build; no other module or Production writes.
-M05_BUILD_EXPECTED="0.1.0-m05-no-fake-reinstall1"
+M05_BUILD_EXPECTED="0.1.0-m05-compact-ux1"
 M05_UPGRADE_FROM="0.1.0-m05-candidate2"
 M05_UPGRADE_FROM2="0.1.0-m05-existing-safe1"
 M05_UPGRADE_FROM3="0.1.0-m05-clean-host-guard1"
 M05_UPGRADE_FROM4="0.1.0-m05-pycache-safe1"
 M05_UPGRADE_FROM5="0.1.0-m05-cp-reinstall-plan1"
 M05_UPGRADE_FROM6="0.1.0-m05-provider-neutral-reinstall1"
+M05_UPGRADE_FROM7="0.1.0-m05-no-fake-reinstall1"
 M05_ROOT="/opt/vfops-modules/m05"
 M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"
 # M05 is published as an immutable reviewed public Release ZIP.
 # Never install M03/M04 in its place and verify SHA-256 before extraction.
-M05_BUNDLE_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-no-fake-reinstall1-20261113/P07-M05-0.1.0-m05-no-fake-reinstall1.zip"
-M05_BUNDLE_SHA256="b522367a66e51092eaa003cc264b1a15c9bddc9a36d4bb6d480c71a13223738d"
+M05_BUNDLE_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-v0.1.0-five-modules-ux3-20261113/P07-M05-0.1.0-m05-compact-ux1.zip"
+M05_BUNDLE_SHA256="36e46e487ce90d01391639806e0dd659ba8881a5235bc5b89459f4da572a11e7"
 # Immutable private Owner Trial .run identity, never a public download source.
 M05_OFFLINE_TRIAL_SHA256="e42b6b3c59719f6ec189e4c62b7cfc54385aaa6e566c8f92ca5306246f022bbb"
 M05_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/35e3fbcb1e8c40042558f9f163e4215570074793/installers/p07-m05-atomic.py"
@@ -441,10 +444,15 @@ m03_verified_current() {
   installed="$(cat "$root/BUILD_ID")"
   # This menu selects the pinned public stable M03, never an older trial
   # or a different future build masquerading as release115.
-  [[ "$installed" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]] || return 1
-  # A mutable manifest checking mutable files against itself is NOT trusted.
-  # Verify the immutably published manifest before parsing or executing M03.
-  [[ "$(p07_git_blob_sha1 "$root/.runtime-manifest.gitblob" 2>/dev/null || true)" == "$VF_SERVER_OPS_MANIFEST_BLOB" ]] || return 1
+  # Current and the ONE verified old official release115 have separate immutable pins.
+  # A self-signed legacy manifest or an unknown historical trial is never upgraded.
+  local trusted_manifest=''
+  case "$installed" in
+    "$VF_SERVER_OPS_BUILD_EXPECTED") trusted_manifest="$VF_SERVER_OPS_MANIFEST_BLOB" ;;
+    "$M03_BOOTSTRAP_BUILD") trusted_manifest="$M03_BOOTSTRAP_MANIFEST_BLOB" ;;
+    *) return 1 ;;
+  esac
+  [[ "$(p07_git_blob_sha1 "$root/.runtime-manifest.gitblob" 2>/dev/null || true)" == "$trusted_manifest" ]] || return 1
   declare -A seen=()
   while read -r expected name; do
     [[ -n "$expected" && -n "$name" ]] || continue
@@ -470,10 +478,21 @@ m03_verified_current() {
 }
 
 ensure_server_ops_current() {
+  local prior='' answer=''
   if m03_verified_current; then
-    return 0
-  fi
-  if [[ -e /opt/vf-server-ops || -L /opt/vf-server-ops ]]; then
+    prior="$(cat /opt/vf-server-ops/BUILD_ID)"
+    if [[ "$prior" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]]; then return 0; fi
+    [[ "$prior" == "$M03_BOOTSTRAP_BUILD" ]] || return 13
+    say "P07-M03 网站与数据：已核验旧正式版 $prior，新版本 $VF_SERVER_OPS_BUILD_EXPECTED。"
+    say '仅升级本模块程序；保留上一个正式运行时用于回滚，不操作网站、数据库或 DNS。'
+    if [[ ! -t 0 || ! -t 1 ]]; then
+      say '需要本人在交互式 SSH 终端确认升级，非交互模式未修改。'
+      return 7
+    fi
+    printf '确认仅升级 P07-M03 网站与数据？[y/N]：'
+    read -r answer || answer=''
+    [[ "$answer" =~ ^[Yy]$ ]] || { say '升级取消，旧版保留。'; return 7; }
+  elif [[ -e /opt/vf-server-ops || -L /opt/vf-server-ops ]]; then
     say "${C_RED}P07-M03 网站与数据：现有模块的独立版本或完整性无法确认，已停止；拒绝降级覆盖。${C_RESET}" >&2
     return 13
   fi
@@ -510,7 +529,10 @@ ensure_server_ops_current() {
   rc=$?
   set -e
   rm -f "$tmp"
-  return "$rc"
+  [[ "$rc" == 0 ]] || return "$rc"
+  m03_verified_current || return 13
+  [[ "$(cat /opt/vf-server-ops/BUILD_ID)" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]] || return 13
+  return 0
 }
 
 rollback_m03_previous() {
@@ -932,10 +954,10 @@ ensure_m05_current() {
     installed="$(readlink "$M05_ROOT/current")"
     case "$installed" in
       "releases/$M05_BUILD_EXPECTED") return 0 ;;
-      "releases/$M05_UPGRADE_FROM"|"releases/$M05_UPGRADE_FROM2"|"releases/$M05_UPGRADE_FROM3"|"releases/$M05_UPGRADE_FROM4"|"releases/$M05_UPGRADE_FROM5"|"releases/$M05_UPGRADE_FROM6")
+      "releases/$M05_UPGRADE_FROM"|"releases/$M05_UPGRADE_FROM2"|"releases/$M05_UPGRADE_FROM3"|"releases/$M05_UPGRADE_FROM4"|"releases/$M05_UPGRADE_FROM5"|"releases/$M05_UPGRADE_FROM6"|"releases/$M05_UPGRADE_FROM7")
         upgrade_from="${installed#releases/}"
         say "${C_CYAN}P07-M05 新服务器初始化：发现已验证的旧版 $upgrade_from。${C_RESET}"
-        say "新版 $M05_BUILD_EXPECTED 修复已有 CloudPanel 上提前选库却不能安装的问题；旧系统仅提示风险和重装前准备，干净新系统才实际选库安装。"
+        say "新版 $M05_BUILD_EXPECTED 优化中文菜单与状态提示；已有系统只做无损检查，干净新系统才主动选择数据库并安装。"
         say "仅更新 M05 自己的程序文件；保留旧版本，可回滚。不执行系统更新、Swap 补齐或 CloudPanel 安装。"
         if [[ ! -t 0 || ! -t 1 ]]; then
           say "${C_YELLOW}升级需要本人在交互式终端确认；本次不变更。${C_RESET}"
@@ -1355,10 +1377,24 @@ main_menu() {
 }
 
 case "${1:-}" in
-  --rollback-m01) [[ "$#" == 3 ]] || exit 13; p07_owned_helper P07-M01 "$M01_INSTALLER_URL" "$M01_INSTALLER_BLOB" bash rollback "$2" "$3" ;;
+  --rollback-m01)
+    [[ "$#" == 3 ]] || exit 13
+    if [[ "$2" == "$M01_BOOTSTRAP_BUILD" ]]; then
+      p07_owned_helper P07-M01 "https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/adf4d8cc0db69255fb4a6aff58857561a0652bf6/installers/p07-vf-node-independent-rc13.sh" "8313adef7dd235b645fc815a7bded933fc289f82" bash rollback "$2" "$3"
+    else
+      p07_owned_helper P07-M01 "$M01_INSTALLER_URL" "$M01_INSTALLER_BLOB" bash rollback "$2" "$3"
+    fi ;;
+
   --rollback-m02) [[ "$#" == 3 ]] || exit 13; rollback_m02_current "$2" "$3" ;;
   --rollback-m03) [[ "$#" == 3 ]] || exit 13; rollback_m03_previous "$2" "$3" ;;
-  --rollback-m04) [[ "$#" == 3 ]] || exit 13; p07_owned_helper P07-M04 "$M04_INSTALLER_URL" "$M04_INSTALLER_BLOB" bash rollback "$2" "$3" ;;
+  --rollback-m04)
+    [[ "$#" == 3 ]] || exit 13
+    if [[ "$2" == "$M04_BOOTSTRAP_BUILD" ]]; then
+      p07_owned_helper P07-M04 "https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/75c7336b8467114f8bc3396dc06144e48275a39a/installers/p07-system-care-rc83-isolated.sh" "d39cef5d0915a99753d688f10fb1dbe74c0dac98" bash rollback "$2" "$3"
+    else
+      p07_owned_helper P07-M04 "$M04_INSTALLER_URL" "$M04_INSTALLER_BLOB" bash rollback "$2" "$3"
+    fi ;;
+
   --rollback-m05) [[ "$#" == 3 ]] || exit 13; p07_owned_helper P07-M05 "$M05_INSTALLER_URL" "$M05_INSTALLER_BLOB" python3 rollback "$2" "$3" ;;
   --install-m05-local) [[ "$#" == 4 ]] || exit 13; install_m05_local_candidate "$2" "$3" "$4" ;;
   --install-m05-offline) [[ "$#" == 3 ]] || exit 13; install_m05_offline_trial "$2" "$3" ;;
