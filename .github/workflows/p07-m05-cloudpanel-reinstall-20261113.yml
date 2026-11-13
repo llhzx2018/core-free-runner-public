@@ -1,0 +1,112 @@
+name: P07-M05 新服务器初始化 · 现有面板重装入口和数据库选择隔离机验
+on:
+  push:
+    branches: [test/p07-m05-cloudpanel-reinstall-20261113]
+    paths: [.github/workflows/p07-m05-cloudpanel-reinstall-20261113.yml]
+permissions:
+  contents: read
+jobs:
+  exact-branch-no-destructive-writes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 14
+    steps:
+      - name: Checkout only public registered runner tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact private M05 development branch transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: fdb8a28970452ac0fa68218d11683c321c9bdf03
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Exact revision and module-local positive/negative tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = fdb8a28970452ac0fa68218d11683c321c9bdf03
+          bash -n product/bin/vfops-init-ui
+          bash -n product/bin/vfops-init-core
+          bash -n product/bin/vfops-init-entry
+          export PYTHONDONTWRITEBYTECODE=1
+          (cd product && python3 -B scripts/check_p07_modules.py)
+          (cd product && python3 -B -m unittest discover -s tests -p 'test_p07_m05_*.py' -v)
+          (cd product && python3 -B -m unittest discover -s tests -p 'test_p07_module_contract.py' -v)
+          echo P07_M05_EXISTING_CLOUDPANEL_REINSTALL_PLANNING_AND_DB_CHOICE_TESTS=PASS
+      - name: Build independent M05 immutable candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/p07-m05"
+          python3 -B product/scripts/build_p07_m05_bundle.py \
+            --output "$RUNNER_TEMP/p07-m05/P07-M05-0.1.0-m05-cp-reinstall-plan1.zip" \
+            > "$RUNNER_TEMP/p07-m05/build.json"
+          python3 - <<'PY'
+          import os, pathlib,json,zipfile,hashlib,stat
+          base=pathlib.Path(os.environ['RUNNER_TEMP'])/'p07-m05'
+          path=base/'P07-M05-0.1.0-m05-cp-reinstall-plan1.zip'
+          j=json.loads((base/'build.json').read_text())
+          assert j['module_id']=='P07-M05'
+          assert j['build_id']=='0.1.0-m05-cp-reinstall-plan1'
+          assert j['sha256']==hashlib.sha256(path.read_bytes()).hexdigest()
+          with zipfile.ZipFile(path) as bundle:
+            assert bundle.testzip() is None
+            names=bundle.namelist()
+            assert len(set(names))==len(names)
+            assert 'p07-m05/lib/m05_db_options.py' in names
+            assert 'p07-m05/bin/vfops-init-ui' in names
+            assert 'p07-m05/bin/vfops-init-core' in names
+            assert all(x.startswith('p07-m05/') and '..' not in pathlib.PurePosixPath(x).parts for x in names)
+            assert all(not stat.S_ISLNK(i.external_attr>>16) for i in bundle.infolist())
+          print('P07_M05_DB_REINSTALL_CANDIDATE_SHA256='+j['sha256'])
+          print('P07_M05_INDEPENDENT_ZIP_MANIFEST=PASS')
+          PY
+      - name: Old published M05 to new M05-only candidate, bad hash and rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --max-time 90 \
+            'https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-pycache-safe1-20261113/P07-M05-0.1.0-m05-pycache-safe1.zip' \
+            -o "$RUNNER_TEMP/p07-m05/old.zip"
+          echo 'fca55ed4c949a1353602d5ed7e5a6184921f650b0320c3dead8a41f9d86b6370  '"$RUNNER_TEMP/p07-m05/old.zip" | sha256sum -c --status
+          sudo python3 -B installers/p07-m05-atomic.py install "$RUNNER_TEMP/p07-m05/old.zip" \
+            fca55ed4c949a1353602d5ed7e5a6184921f650b0320c3dead8a41f9d86b6370
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-pycache-safe1
+          new="$RUNNER_TEMP/p07-m05/P07-M05-0.1.0-m05-cp-reinstall-plan1.zip"
+          sha="$(sha256sum "$new" | cut -d' ' -f1)"
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$sha"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-cp-reinstall-plan1
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$sha"
+          if sudo python3 -B installers/p07-m05-atomic.py install "$new" \
+            0000000000000000000000000000000000000000000000000000000000000000 >/dev/null 2>&1; then exit 13; fi
+          sudo python3 -B installers/p07-m05-atomic.py rollback 0.1.0-m05-pycache-safe1 \
+            --confirm P07-M05:0.1.0-m05-pycache-safe1
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-pycache-safe1
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$sha"
+          sudo env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX \
+            bash /opt/vfops-modules/m05/current/bin/vfops-init-core \
+            server-migrate db-engine-options > "$RUNNER_TEMP/p07-m05/options.json"
+          python3 - <<'PY'
+          import os,pathlib,json
+          p=pathlib.Path(os.environ['RUNNER_TEMP'])/'p07-m05/options.json'
+          j=json.loads(p.read_text())
+          assert j['status']=='READY' and j['plan_only'] is True
+          assert j['writes_performed'] is False
+          assert j['db_engine_options']
+          print('P07_M05_REAL_DB_OPTIONS_READONLY=PASS')
+          PY
+          test ! -e /opt/vfops-modules/m05/current/lib/__pycache__
+          test ! -e /home/clp
+          for sibling in m01 m02 m03 m04; do test ! -e "/opt/vfops-modules/$sibling"; done
+          echo P07_M05_OLD_TO_NEW_ATOMIC_ROLLBACK=PASS
+          echo P07_M05_FOUR_SIBLING_MODULES_AND_CLOUDPANEL_UNTOUCHED=YES
+          echo P07_OWNER_PRODUCTION=NOT_TOUCHED
+      - name: Remove transient private checkout and locally built candidate
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- product "$RUNNER_TEMP/p07-m05"
+          echo P07_M05_PRIVATE_SOURCE_PUBLIC_PERSISTENCE=NONE
