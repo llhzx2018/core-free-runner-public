@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# P07-M05 新服务器初始化 · real blank Debian 13 guest under QEMU TCG.
-# Hosted ONLY on disposable free GitHub Actions. No /dev/kvm, no Owner VPS,
-# no DNS, no production or private data. Private source is transient.
+# P07-M05 新服务器初始化 · real blank Debian 13 guest; optional KVM on an
+# explicitly authorized disposable GH runner, otherwise TCG ENGINE-only.
+# Never run CloudPanel FULL on unaccelerated TCG or any Owner VPS.
+# No DNS, no production or private data. Private source is transient.
 set -Eeuo pipefail
 umask 077
 blocked(){ echo "P07_M05_DEBIAN13_QEMU=BLOCKED_$1" >&2; exit 12; }
@@ -60,10 +61,25 @@ instance-id: p07-m05-free-debian13-$(date +%s)
 local-hostname: p07-m05-clean
 EOF
 cloud-localds "$work/seed.img" "$work/user-data" "$work/meta-data" >/dev/null
+# Never mistake "KVM available" for "QEMU actually using KVM".
+# An explicit FULL request MUST refuse unavailable hardware acceleration,
+# not silently run a 38-minute TCG CloudPanel installation.
+vm_mode=TCG
+vm_opts=(-accel tcg,thread=multi -cpu max)
+case "${P07_M05_EXPLICIT_FULL_INSTALL_ON_KVM:-NO}" in
+  NO) ;;
+  YES)
+    [[ -c /dev/kvm && -r /dev/kvm && -w /dev/kvm ]] ||
+      blocked EXPLICIT_KVM_REQUEST_WITHOUT_ACCESS
+    vm_mode=KVM
+    vm_opts=(-accel kvm -cpu host)
+    ;;
+  *) blocked INVALID_ACCELERATION_OPT_IN ;;
+esac
+echo "P07_M05_DEBIAN13_VM_ACCELERATION=$vm_mode"
 qemu-system-x86_64 \
   -machine q35 \
-  -accel tcg,thread=multi \
-  -cpu max -smp 4 -m 5120 \
+  "${vm_opts[@]}" -smp 4 -m 5120 \
   -drive file="$work/$image",if=virtio,format=qcow2,cache=writeback \
   -drive file="$work/seed.img",if=virtio,format=raw \
   -netdev user,id=p07net,hostfwd=tcp:127.0.0.1:22442-:22 \
@@ -127,8 +143,7 @@ echo P07_M05_DEBIAN13_UNSELECTED_DB=REJECTED
 # timed out (run #43256040818, exit=124). Never rerun that 38-minute
 # experiment automatically on software virtualization. This CI lane owns the
 # REAL Debian13 preflight proof, not a false claim of CloudPanel INSTALL PASS.
-if [[ "${P07_M05_EXPLICIT_FULL_INSTALL_ON_KVM:-NO}" != "YES" ||
-      ! -c /dev/kvm || ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+if [[ "$vm_mode" == TCG ]]; then
   # Direct Debian 13 engine-only stage: verify the ACTUAL MariaDB 11.8
   # daemon on a real guest, plus existing-DB protection. This is NOT
   # CloudPanel installation; it happens AFTER clean-M05 preflight proof.
@@ -192,6 +207,42 @@ guest_ssh p07test@127.0.0.1 \
    command -v clpctl &&
    mariadb --version | grep -F "11.8."' >/dev/null ||
   blocked CLOUDPANEL_MARIADB118_POSTINSTALL_READBACK
+# Prove the actual P07-M05 new-server-init terminal first-admin workflow
+# and final CloudPanel READY on the very same Debian13 KVM guest.
+# Never store a password in argv, logs, artifacts or Git: the existing
+# test drives a disabled-echo PTY using one-time synthetic credentials.
+[[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ ]] || blocked INVALID_EPHEMERAL_RUN_ID
+[[ -f "$GITHUB_WORKSPACE/tests/p07_m05_native_first_admin.py" ]] ||
+  blocked REAL_FIRST_ADMIN_HARNESS_MISSING
+guest_scp "$GITHUB_WORKSPACE/tests/p07_m05_native_first_admin.py" \
+  p07test@127.0.0.1:/tmp/p07-m05-native-first-admin.py ||
+  blocked FIRST_ADMIN_HARNESS_CANNOT_TRANSFER
+P07_GUEST_SSH_TIMEOUT=300 guest_ssh p07test@127.0.0.1 \
+  "sudo env GITHUB_ACTIONS=true GITHUB_REPOSITORY=llhzx2018/core-free-runner-public GITHUB_REF=refs/heads/feat/p07-unified-independent-module-router-20261112 GITHUB_RUN_ID=$GITHUB_RUN_ID P07_M05_THROWAWAY_GITHUB_VM=YES_I_ACKNOWLEDGE_EPHEMERAL_GH_VM P07_M05_TEST_REAL_FIRST_ADMIN=YES RUNNER_TEMP=/tmp python3 -B /tmp/p07-m05-native-first-admin.py" \
+  > "$work/first-admin-safe-stdout.txt" 2> "$work/first-admin-private-stderr.txt" ||
+  blocked FIRST_ADMIN_REAL_UI_FAILED
+grep -Fxq 'P07_M05_FIRST_ADMIN_NONINTERACTIVE_DENIAL=PASS' \
+  "$work/first-admin-safe-stdout.txt" ||
+  blocked FIRST_ADMIN_NONINTERACTIVE_GATE_UNPROVEN
+grep -Fxq 'P07_M05_FIRST_ADMIN_REAL_PRODUCT_UI=PASS' \
+  "$work/first-admin-safe-stdout.txt" ||
+  blocked FIRST_ADMIN_UI_UNPROVEN
+grep -Fxq 'P07_M05_FIRST_ADMIN_CLOUDPANEL_READY_READBACK=PASS' \
+  "$work/first-admin-safe-stdout.txt" ||
+  blocked FIRST_ADMIN_READY_UNPROVEN
+guest_ssh p07test@127.0.0.1 \
+  'if sudo bash /opt/vfops-modules/m05/current/bin/vfops-init-core server-migrate bootstrap-local --db-engine MARIADB_11.8 --confirm BOOTSTRAP_LOCAL_CLOUDPANEL >/dev/null 2>&1; then exit 33; fi;
+   sudo bash /opt/vfops-modules/m05/current/bin/vfops-init-core server-migrate target-status' \
+  > "$work/final-status.json" ||
+  blocked POST_ADMIN_REINSTALL_REJECTED_OR_READBACK_FAILED
+python3 - "$work/final-status.json" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1],encoding="utf-8"))
+assert d.get("status")=="CLOUDPANEL_READY"
+assert d.get("writes_performed") is False
+print("P07_M05_DEBIAN13_CLOUDPANEL_FIRST_ADMIN_AND_READY=PASS")
+print("P07_M05_DEBIAN13_CLOUDPANEL_REINSTALL_DENIED=PASS")
+PY
 echo P07_M05_DEBIAN13_QEMU_CLOUDPANEL_MARIADB118=PASS
 echo P07_M05_DEBIAN13_QEMU_OTHER_MODULES=UNTOUCHED
 echo P07_M05_GITHUB_PUBLIC_PRIVATE_ARTIFACT=NONE
