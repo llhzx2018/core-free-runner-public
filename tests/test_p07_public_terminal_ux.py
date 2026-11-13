@@ -108,6 +108,35 @@ class PublicTerminalUXV3Tests(unittest.TestCase):
             with self.assertRaisesRegex(ux.PublicUXError, "测试函数缺失"):
                 ux.validate_pr(changed, text, root)
 
+    def test_actual_m01_m04_module_package_menus_are_checked(self):
+        self.assertEqual(ux.source_owner(
+            "packages/p07-network-node/0.1.0-ux1/vf-node.sh"), "P07-M01")
+        self.assertEqual(ux.source_owner(
+            "packages/p07-system-care/0.1.0-ux1/vf-system-care.sh"), "P07-M04")
+        with self.assertRaisesRegex(ux.PublicUXError, "缺少 UX PR 证据"):
+            ux.validate_pr(
+                ["packages/p07-network-node/0.1.0-ux1/vf-node.sh"],
+                {"packages/p07-network-node/0.1.0-ux1/vf-node.sh":
+                    'say "请选择节点操作"'})
+        with self.assertRaisesRegex(ux.PublicUXError, "缺少 UX PR 证据"):
+            ux.validate_pr(
+                ["packages/p07-system-care/0.1.0-ux1/vf-system-care.sh"],
+                {"packages/p07-system-care/0.1.0-ux1/vf-system-care.sh":
+                    'ui_menu_info 1 "查看服务器状态"'})
+
+    def test_package_glob_removed_from_ci_is_blocked(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = self.fixtures(temp)
+            wf = root / ux.WORKFLOW
+            script = wf.read_text(encoding="utf-8")
+            self.assertIn("packages/p07-network-node/**/vf-node.sh", script)
+            self.assertIn("packages/p07-system-care/**/vf-system-care.sh", script)
+            wf.write_text(script.replace(
+                "packages/p07-network-node/**/vf-node.sh",
+                "installers/vf-node.sh"), encoding="utf-8")
+            with self.assertRaisesRegex(ux.PublicUXError, "CI 接线缺失"):
+                ux.load_and_check(root)
+
     def test_new_p07_terminal_entry_must_still_trigger_pr_ci(self):
         with tempfile.TemporaryDirectory() as temp:
             root = self.fixtures(temp)
