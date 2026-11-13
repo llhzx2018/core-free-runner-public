@@ -129,6 +129,37 @@ echo P07_M05_DEBIAN13_UNSELECTED_DB=REJECTED
 # REAL Debian13 preflight proof, not a false claim of CloudPanel INSTALL PASS.
 if [[ "${P07_M05_EXPLICIT_FULL_INSTALL_ON_KVM:-NO}" != "YES" ||
       ! -c /dev/kvm || ! -r /dev/kvm || ! -w /dev/kvm ]]; then
+  # Direct Debian 13 engine-only stage: verify the ACTUAL MariaDB 11.8
+  # daemon on a real guest, plus existing-DB protection. This is NOT
+  # CloudPanel installation; it happens AFTER clean-M05 preflight proof.
+  if [[ "${P07_M05_VERIFY_DEBIAN13_MARIADB118_DAEMON:-NO}" == "YES" ]]; then
+    echo P07_M05_DEBIAN13_DIRECT_DB_STAGE=START
+    # Package originates from verified Debian 13 official apt repos.
+    # Never install this database onto a host with user/business data.
+    guest_ssh p07test@127.0.0.1 \
+      'sudo env DEBIAN_FRONTEND=noninteractive apt-get -qq update >/tmp/p07-m05-apt-private.log 2>&1' ||
+      blocked DEBIAN13_APT_INDEX_UPDATE
+    P07_GUEST_SSH_TIMEOUT=1350 guest_ssh p07test@127.0.0.1 \
+      'sudo env DEBIAN_FRONTEND=noninteractive apt-get -qq -y --no-install-recommends install mariadb-server >>/tmp/p07-m05-apt-private.log 2>&1' ||
+      blocked DEBIAN13_MARIADB118_APT_INSTALL
+    guest_ssh p07test@127.0.0.1 \
+      'test "$(sudo systemctl is-active mariadb)" = "active" &&
+       sudo mariadb --batch --skip-column-names -e "SELECT VERSION()" | grep -Eq "^11\\.8\\." &&
+       sudo mariadb --batch --skip-column-names -e "SELECT 2+3" | grep -qx "5"' ||
+      blocked DEBIAN13_MARIADB118_SERVICE_OR_SQL_READBACK
+    echo P07_M05_DEBIAN13_REAL_MARIADB118_DAEMON=PASS
+    echo P07_M05_DEBIAN13_REAL_MARIADB118_SQL=PASS
+    # M05 must DENY CloudPanel install on a non-empty DB host, including
+    # the case where the engine happens to be the selected engine.
+    guest_ssh p07test@127.0.0.1 \
+      'if sudo bash /opt/vfops-modules/m05/current/bin/vfops-init-core server-migrate target-status --bootstrap-preflight >/dev/null 2>&1; then exit 31; fi;
+       if sudo bash /opt/vfops-modules/m05/current/bin/vfops-init-core server-migrate bootstrap-local --db-engine MARIADB_11.8 --confirm BOOTSTRAP_LOCAL_CLOUDPANEL >/dev/null 2>&1; then exit 32; fi;
+       sudo mariadb --batch --skip-column-names -e "SELECT VERSION()" | grep -Eq "^11\\.8\\.";
+       test ! -e /home/clp && ! command -v clpctl' ||
+      blocked DEBIAN13_INSTALLED_DB_NO_OVERWRITE_PROTECTION
+    echo P07_M05_DEBIAN13_EXISTING_DB_INSTALL_REJECTED=PASS
+    echo P07_M05_DEBIAN13_EXISTING_DB_RETAINED=PASS
+  fi
   echo P07_M05_DEBIAN13_ACTUAL_EMPTY_VM_PREFLIGHT=PASS
   echo P07_M05_DEBIAN13_CLOUDPANEL_INSTALL=BLOCKED_TCG_FULL_INSTALL_TIMEOUT
   echo P07_M05_DEBIAN13_MARIADB118_DAEMON_READBACK=NOT_RUN
