@@ -22,7 +22,7 @@ M01_BOOTSTRAP_MANIFEST_SHA256="1ca3dc95a5cc6e5aa35c9b7ead415d3b6ea6c6eb9e8307a76
 M01_TARGET_MANIFEST_SHA256="$M01_MANIFEST_SHA256"
 
 
-VPS_AUDIT_PUBLIC="V2.1.0"
+VPS_AUDIT_PUBLIC="V2.1.1"
 VPS_AUDIT_EXPECTED="V2.1.1"
 VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux1"
 VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/3cacb9e9ccbe60f76e4b4ac90920bc9d06ead877/experiments/p07-vps-audit-v21-ux1.sh"
