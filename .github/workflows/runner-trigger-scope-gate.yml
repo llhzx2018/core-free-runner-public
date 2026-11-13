@@ -1,6 +1,15 @@
 name: Public Runner Trigger Scope Gate
 
 on:
+  schedule:
+    # Scheduled polling is supported on public main; GitHub may delay ticks.
+    - cron: '17 */2 * * *'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/runner-trigger-scope-gate.yml'
+      - 'scripts/monitor_cross_project_public_authority.py'
+      - 'tests/test_monitor_cross_project_public_authority.py'
   pull_request:
     branches: [main]
     paths:
@@ -9,8 +18,14 @@ on:
       - 'tests/test_runner_trigger_scope.py'
       - 'scripts/check_estate_anti_drift.py'
       - 'tests/test_estate_anti_drift.py'
+      - 'scripts/monitor_cross_project_public_authority.py'
+      - 'tests/test_monitor_cross_project_public_authority.py'
   workflow_dispatch:
     inputs:
+      cross_project_ci:
+        description: 'Read-only cross-project public authority check for eight scoped PRs'
+        type: boolean
+        default: false
       entry_check:
         description: 'Verify live VF repository entry coverage (read-only)'
         type: boolean
@@ -25,6 +40,7 @@ permissions:
 
 jobs:
   verify:
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -41,6 +57,9 @@ jobs:
 
       - name: Run trigger-scope owned regression tests
         run: python -m unittest tests.test_runner_trigger_scope tests.test_estate_anti_drift -v
+
+      - name: Verify long-lived CI monitor positive and denial fixtures
+        run: python3 -B -m unittest tests.test_monitor_cross_project_public_authority -v
 
       - name: Verify Git Estate anti-drift
         env:
@@ -100,3 +119,176 @@ jobs:
         run: |
           rm -rf gov-entry-source
           rm -f "$RUNNER_TEMP/entry-tests.log"
+
+  cross-project-discover:
+    name: Discover eight current PR heads and current GOV-DOC SHA
+    if: >-
+      github.event_name == 'schedule' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.cross_project_ci) ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.user.login == 'llhzx2018' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       startsWith(github.head_ref, 'maintenance/gov-entry-longterm-ci-'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    outputs:
+      matrix: ${{ steps.find.outputs.matrix }}
+      gov_sha: ${{ steps.find.outputs.gov_sha }}
+      count: ${{ steps.find.outputs.count }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run monitor positive and denial tests
+        run: python3 -B -m unittest tests.test_monitor_cross_project_public_authority -v
+      - name: Read only latest scoped PR heads and canonical governance main
+        id: find
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          python3 -B scripts/monitor_cross_project_public_authority.py discover
+
+  cross-project-exact-check:
+    name: Exact public authority ${{ matrix.id }}
+    needs: cross-project-discover
+    if: needs.cross-project-discover.result == 'success' && needs.cross-project-discover.outputs.count == '8'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.cross-project-discover.outputs.matrix) }}
+    steps:
+      - name: Checkout current public Runner harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore exact-source successful validation cache
+        id: proof-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .vf-ci-marker/pass
+          key: vf-gov-ci-v1-${{ matrix.id }}-${{ matrix.mode }}-${{ matrix.sha }}-${{ needs.cross-project-discover.outputs.gov_sha }}-${{ hashFiles('scripts/monitor_cross_project_public_authority.py', '.github/workflows/runner-trigger-scope-gate.yml') }}
+
+      - name: Refuse invalid success cache entries
+        if: steps.proof-cache.outputs.cache-hit == 'true'
+        env:
+          TARGET_ID: ${{ matrix.id }}
+          TARGET_SHA: ${{ matrix.sha }}
+          GOV_SHA: ${{ needs.cross-project-discover.outputs.gov_sha }}
+          TARGET_MODE: ${{ matrix.mode }}
+        run: |
+          set -Eeuo pipefail
+          python3 -B scripts/monitor_cross_project_public_authority.py verify-marker --id "$TARGET_ID" --sha "$TARGET_SHA" --gov-sha "$GOV_SHA" --mode "$TARGET_MODE"
+
+      - name: Checkout exact private product source transiently
+        if: steps.proof-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ matrix.repo }}
+          ref: ${{ matrix.sha }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: private-product-src
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout exact current GOV-DOC transiently
+        if: steps.proof-cache.outputs.cache-hit != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: ${{ needs.cross-project-discover.outputs.gov_sha }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: gov-policy-src
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Exact source identity, 17 positive/denial tests and full router coverage
+        if: steps.proof-cache.outputs.cache-hit != 'true'
+        shell: bash
+        env:
+          TARGET_SHA: ${{ matrix.sha }}
+          TARGET_ID: ${{ matrix.id }}
+          TARGET_PROFILE: ${{ matrix.profile }}
+          TARGET_WORKFLOW: ${{ matrix.workflow }}
+          GOV_SHA: ${{ needs.cross-project-discover.outputs.gov_sha }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C private-product-src rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C gov-policy-src rev-parse HEAD)" = "$GOV_SHA"
+          python3 -B -m unittest discover -s private-product-src/.github/checks -p 'test_gov_doc_ci.py' -v
+          python3 -B private-product-src/.github/checks/check_gov_doc_ci.py \
+            --project-root private-product-src --gov-root gov-policy-src \
+            --project-id "$TARGET_ID" --profile "$TARGET_PROFILE" \
+            --workflow "$TARGET_WORKFLOW" --require-git
+          echo "GOV_MONITOR_NEW_SOURCE_MACHINE=PASS;ID=$TARGET_ID"
+
+      - name: Erase private workspaces regardless of outcome
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- private-product-src gov-policy-src
+          test ! -e private-product-src
+          test ! -e gov-policy-src
+
+      - name: Revalidate latest PR and GOV-DOC SHAs before passing
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          TARGET_ID: ${{ matrix.id }}
+          TARGET_SHA: ${{ matrix.sha }}
+          GOV_SHA: ${{ needs.cross-project-discover.outputs.gov_sha }}
+          TARGET_MODE: ${{ matrix.mode }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          python3 -B scripts/monitor_cross_project_public_authority.py recheck --id "$TARGET_ID" --sha "$TARGET_SHA" --gov-sha "$GOV_SHA" --mode "$TARGET_MODE"
+
+      - name: Create non-sensitive success digest for changed source
+        if: steps.proof-cache.outputs.cache-hit != 'true'
+        env:
+          TARGET_ID: ${{ matrix.id }}
+          TARGET_SHA: ${{ matrix.sha }}
+          GOV_SHA: ${{ needs.cross-project-discover.outputs.gov_sha }}
+          TARGET_MODE: ${{ matrix.mode }}
+        run: |
+          set -Eeuo pipefail
+          python3 -B scripts/monitor_cross_project_public_authority.py write-marker --id "$TARGET_ID" --sha "$TARGET_SHA" --gov-sha "$GOV_SHA" --mode "$TARGET_MODE"
+
+      - name: Cache only successful source-policy pair (no source or secrets)
+        if: steps.proof-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .vf-ci-marker/pass
+          key: vf-gov-ci-v1-${{ matrix.id }}-${{ matrix.mode }}-${{ matrix.sha }}-${{ needs.cross-project-discover.outputs.gov_sha }}-${{ hashFiles('scripts/monitor_cross_project_public_authority.py', '.github/workflows/runner-trigger-scope-gate.yml') }}
+
+  cross-project-final-gate:
+    name: All eight scoped public-authority results must PASS
+    if: >-
+      always() &&
+      (github.event_name == 'schedule' ||
+       github.event_name == 'push' ||
+       (github.event_name == 'workflow_dispatch' && inputs.cross_project_ci) ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.user.login == 'llhzx2018' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        startsWith(github.head_ref, 'maintenance/gov-entry-longterm-ci-')))
+    needs: [cross-project-discover, cross-project-exact-check]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    steps:
+      - name: Fail closed if discovery or any project was skipped or failed
+        env:
+          DISCOVERY: ${{ needs.cross-project-discover.result }}
+          MATRIX_RESULT: ${{ needs.cross-project-exact-check.result }}
+          TARGET_COUNT: ${{ needs.cross-project-discover.outputs.count }}
+        run: |
+          set -Eeuo pipefail
+          test "$DISCOVERY" = success
+          test "$TARGET_COUNT" = 8
+          test "$MATRIX_RESULT" = success
+          echo "GOV_MONITOR_LONG_TERM_8_OF_8=PASS"
