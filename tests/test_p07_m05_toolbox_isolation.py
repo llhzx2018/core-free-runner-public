@@ -147,6 +147,47 @@ class ToolboxFiveModuleIsolationTests(unittest.TestCase):
         self.assertEqual(result.returncode,13,result.stderr)
         self.assertFalse(self.marker.exists())
 
+    def test_unlisted_payload_is_rejected_before_root_cli(self):
+        release=self.module_fixture()
+        (release/"lib/extra.py").write_text("print('not declared')\\n")
+        result=self.invoke()
+        self.assertEqual(result.returncode,13,result.stderr)
+        self.assertFalse(self.marker.exists())
+
+    def test_unlisted_directory_is_rejected_before_root_cli(self):
+        release=self.module_fixture()
+        (release/"lib/undeclared").mkdir()
+        result=self.invoke()
+        self.assertEqual(result.returncode,13,result.stderr)
+        self.assertFalse(self.marker.exists())
+
+    def test_symlinked_lib_parent_with_valid_file_hashes_is_rejected(self):
+        release=self.module_fixture()
+        owned=self.folder/"same-bytes-library"
+        (release/"lib").rename(owned)
+        (release/"lib").symlink_to(owned,target_is_directory=True)
+        result=self.invoke()
+        self.assertEqual(result.returncode,13,result.stderr)
+        self.assertFalse(self.marker.exists())
+
+    def test_symlinked_release_directory_is_rejected(self):
+        release=self.module_fixture()
+        moved=self.folder/"real-release"
+        release.rename(moved)
+        release.symlink_to(moved,target_is_directory=True)
+        result=self.invoke()
+        self.assertEqual(result.returncode,13,result.stderr)
+        self.assertFalse(self.marker.exists())
+
+    def test_symlinked_module_root_is_rejected(self):
+        self.module_fixture()
+        real=self.folder/"real-module"
+        self.module.rename(real)
+        self.module.symlink_to(real,target_is_directory=True)
+        result=self.invoke()
+        self.assertEqual(result.returncode,13,result.stderr)
+        self.assertFalse(self.marker.exists())
+
 
 if __name__=="__main__":
     unittest.main()
