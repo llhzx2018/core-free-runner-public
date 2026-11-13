@@ -1,0 +1,129 @@
+name: P07-M05 新服务器初始化 · Python 缓存误拦截恢复机器验证
+on:
+  push:
+    branches: [fix/p07-m05-cache-recovery-20261113]
+    paths: [.github/workflows/p07-m05-cache-recovery-proof-20261113.yml]
+permissions:
+  contents: read
+jobs:
+  verified-cache-quarantine-and-module-upgrade:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: dfd155aae6302b47142d5eb3708208f3ade0b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Exact private source and all relevant M05/module tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = dfd155aae6302b47142d5eb3708208f3ade0b
+          bash -n installers/p07-toolbox.sh
+          bash -n product/bin/vfops-init-core
+          (cd product && python3 -B scripts/check_p07_modules.py)
+          (cd product && python3 -B -m unittest discover -s tests -p 'test_p07_m05_*.py' -q)
+          (cd product && python3 -B -m unittest discover -s tests -p 'test_p07_module_contract.py' -q)
+          echo P07_M05_NEW_CORE_REGRESSIONS=PASS
+      - name: Reproduce official self-lock and prove safe/cache-only recovery in isolation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 2 \
+            https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-clean-host-guard1-20261113/P07-M05-0.1.0-m05-clean-host-guard1.zip \
+            -o "$RUNNER_TEMP/old.zip"
+          echo "b2b72275980f7c2220f0c95fce18f644967bd69a17fa0a8320f96149a4096a1a  $RUNNER_TEMP/old.zip" | sha256sum -c --status
+          sudo python3 -B installers/p07-m05-atomic.py install "$RUNNER_TEMP/old.zip" \
+            b2b72275980f7c2220f0c95fce18f644967bd69a17fa0a8320f96149a4096a1a
+          python3 - <<'PY'
+          from pathlib import Path
+          x=Path('installers/p07-toolbox.sh').read_text()
+          start=x.index('m05_verified_current() {')
+          stop=x.index('\n# P07-M05 新服务器初始化 · identity-failure diagnostic',start)
+          Path('/tmp/m05-verify.sh').write_text(
+            '#!/bin/bash\nset -Eeuo pipefail\nM05_ROOT=/opt/vfops-modules/m05\n'
+            'M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"\n'
+            +x[start:stop]+'\nm05_verified_current\n')
+          PY
+          bash /tmp/m05-verify.sh
+          bash /opt/vfops-modules/m05/current/bin/vfops-init-core \
+             server-migrate target-status >/dev/null
+          n="$(find /opt/vfops-modules/m05/current/lib -type f -name '*.pyc' | wc -l)"
+          test "$n" -gt 30
+          if bash /tmp/m05-verify.sh >/dev/null 2>&1; then exit 13; fi
+          sudo python3 -B installers/p07-m05-cache-recovery.py inspect | grep -Fq 'P07_M05_REPAIR_STATUS=CACHE_ONLY'
+          sudo python3 -B - <<'PY'
+          from pathlib import Path
+          import subprocess
+          root=Path('/opt/vfops-modules/m05/current')
+          check=['python3','-B','installers/p07-m05-cache-recovery.py','inspect']
+          core=root/'bin/vfops-init-core';original=core.read_bytes()
+          core.write_bytes(original+b'\n#tamper')
+          p=subprocess.run(check,capture_output=True,text=True)
+          assert p.returncode==13 and 'MODULE_CODE_DIGEST_MISMATCH' in p.stdout,p
+          core.write_bytes(original)
+          bad=root/'lib/unlisted.py'
+          bad.write_text('BAD')
+          p=subprocess.run(check,capture_output=True,text=True)
+          assert p.returncode==13 and 'MODULE_UNLISTED_RUNTIME_FILE' in p.stdout,p
+          bad.unlink()
+          print('P07_M05_TAMPERED_SOURCE_AND_UNLISTED_FILE_FAIL_CLOSED=PASS')
+          PY
+          if sudo python3 -B installers/p07-m05-cache-recovery.py recover \
+            --build 0.1.0-m05-clean-host-guard1 --confirm INCORRECT >/dev/null 2>&1; then exit 13; fi
+          test -d /opt/vfops-modules/m05/current/lib/__pycache__
+          sudo python3 -B installers/p07-m05-cache-recovery.py recover \
+            --build 0.1.0-m05-clean-host-guard1 --confirm P07-M05:CACHE:0.1.0-m05-clean-host-guard1
+          test ! -e /opt/vfops-modules/m05/current/lib/__pycache__
+          test "$(find /opt/vfops-modules/m05/.cache-quarantine -type f -name '*.pyc' | wc -l)" -gt 30
+          bash /tmp/m05-verify.sh
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-clean-host-guard1
+          echo "P07_M05_OLD_VERIFIED_CACHE_MOVED_NOT_DELETED=$n"
+      - name: New exact M05 candidate survives first use, rollback and corruption protection
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -B product/scripts/build_p07_m05_bundle.py --output "$RUNNER_TEMP/p07-m05-new.zip" \
+            > "$RUNNER_TEMP/m05-build.json"
+          python3 - <<'PY'
+          import json,hashlib,os,pathlib,zipfile
+          p=pathlib.Path(os.environ['RUNNER_TEMP'])/'p07-m05-new.zip'
+          j=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'m05-build.json').read_text())
+          assert j['module_id']=='P07-M05' and j['build_id']=='0.1.0-m05-pycache-safe1'
+          assert j['sha256']==hashlib.sha256(p.read_bytes()).hexdigest()
+          with zipfile.ZipFile(p) as z:
+            assert z.read('p07-m05/bin/vfops-init-core').count(
+              b'exec python3 -B "$ROOT_DIR/lib/server_migration_pull.py"')==3
+          print('P07_M05_NEW_ZIP_SHA256='+j['sha256'])
+          PY
+          hash="$(sha256sum "$RUNNER_TEMP/p07-m05-new.zip" | cut -d' ' -f1)"
+          sudo python3 -B installers/p07-m05-atomic.py install "$RUNNER_TEMP/p07-m05-new.zip" "$hash"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-pycache-safe1
+          sudo env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX \
+             bash /opt/vfops-modules/m05/current/bin/vfops-init-core server-migrate target-status >/dev/null
+          test ! -e /opt/vfops-modules/m05/current/lib/__pycache__
+          bash /tmp/m05-verify.sh
+          if sudo python3 -B installers/p07-m05-atomic.py install "$RUNNER_TEMP/p07-m05-new.zip" \
+            0000000000000000000000000000000000000000000000000000000000000000 >/dev/null 2>&1; then exit 13; fi
+          sudo python3 -B installers/p07-m05-atomic.py rollback 0.1.0-m05-clean-host-guard1 \
+            --confirm P07-M05:0.1.0-m05-clean-host-guard1
+          bash /tmp/m05-verify.sh
+          sudo python3 -B installers/p07-m05-atomic.py install "$RUNNER_TEMP/p07-m05-new.zip" "$hash"
+          bash /tmp/m05-verify.sh
+          for m in m01 m02 m03 m04; do test ! -e "/opt/vfops-modules/$m"; done
+          test ! -e /home/clp
+          echo P07_M05_BUGFIX_OLD_NEW_ATOMIC_ROLLBACK=PASS
+          echo P07_M05_M01_TO_M04_AND_CLOUDPANEL_UNTOUCHED=YES
+          echo P07_OWNER_PRODUCTION=NOT_TOUCHED
+      - name: Remove transient private checkout and generated packages
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- product "$RUNNER_TEMP/old.zip" "$RUNNER_TEMP/p07-m05-new.zip" "$RUNNER_TEMP/m05-build.json"
+          echo P07_M05_PUBLIC_PRIVATE_SOURCE_PERSISTENCE=NONE
