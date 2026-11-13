@@ -40,18 +40,18 @@ HELP
 
 show_header() {
   screen_clear
-  ui_title "服务器维护与安全  ${VERSION}"
+  ui_title '服务器维护与安全'
   local health advisory evidence
   cache_get summary STATUS health
   cache_get summary SECURITY_ADVISORIES advisory
   cache_get intrusion STATUS evidence
   if [[ "$health" == ATTENTION ]]; then
-    ui_attention '服务器有项目需检查，可选择 1 查看'
+    ui_attention '服务器有待检查项'
   elif [[ "$health" == HEALTHY ]]; then
-    ui_good '服务器检查：正常'
+    ui_good '服务器状态：正常'
   fi
   if [[ "$evidence" == ATTENTION || "$evidence" == FAILED ]]; then
-    ui_attention '网站安全有项目需要处理，可选择 6 查看'
+    ui_attention 'WordPress 安全需检查'
   fi
   say
 }
@@ -152,7 +152,7 @@ resource_flow_beginner() {
 
 selfcheck_local_module() {
   screen_clear
-  ui_title 'P07-M04 服务器维护与安全 · 模块检查'
+  ui_title '检查本模块'
   ui_rule
   local name missing=0 actual=''
   for name in vf-system-care.sh status.sh audit.sh updates.sh cleanup.sh memory.sh services.sh security-audit.sh resource-profile.sh resource-apply.sh lib/common.sh; do
@@ -181,7 +181,7 @@ selfcheck_local_module() {
 
 recent_local_actions() {
   screen_clear
-  ui_title 'P07-M04 服务器维护与安全 · 最近检查状态'
+  ui_title '最近检查结果'
   ui_rule
   local name value found=0
   # Read M04-owned cache only, not M03 migration history.
@@ -221,23 +221,18 @@ menu() {
   while true; do
     wordpress_present && has_wordpress=1 || has_wordpress=0
     show_header
-    ui_rule
-    say
-    ui_menu_good 1 '服务器健康检查'
-    ui_menu_warn 2 '系统更新'
-    ui_menu_warn 3 '磁盘空间清理'
-    ui_menu_good 4 '性能配置'
-    ui_menu_warn 5 '服务器登录安全'
+    ui_menu_good 1 '检查服务器健康（完整）'
+    ui_menu_warn 2 '检查并安装系统更新'
+    ui_menu_warn 3 '扫描并清理磁盘空间'
+    ui_menu_good 4 '查看性能配置'
+    ui_menu_warn 5 '检查服务器登录安全'
     if [[ "$has_wordpress" -eq 1 ]]; then
-      ui_menu_info 6 'WordPress 网站安全'
+      ui_menu_info 6 '检查 WordPress 网站安全'
     fi
-    ui_menu_good 7 '工具检查 / 修复'
-    ui_menu_info 8 '最近操作'
-    ui_menu_back 0 '返回'
-    say
-    ui_note '只读检查不改配置；清理、更新和安全应用均需确认。'
-    say
-    printf '%b' "${C_BOLD}请选择 [0-8]：${C_RESET}"
+    ui_menu_good 7 '检查本模块（只读）'
+    ui_menu_info 8 '查看最近检查结果'
+    ui_menu_back 0 '返回工具箱'
+    ui_prompt '请选择 [0-8]：'
     read -r choice || return 0
     case "$choice" in
       1) screen_clear; run_action_friendly audit.sh; pause_menu ;;
@@ -249,18 +244,15 @@ menu() {
         if [[ "$has_wordpress" -eq 1 ]]; then
           wordpress_flow_beginner
         else
-          warn '当前没有检测到 WordPress 网站。'
-          sleep 1
-        fi
-        ;;
+          ui_attention '未发现 WordPress 网站，未执行扫描。'
+        fi ;;
       7) selfcheck_local_module ;;
       8) recent_local_actions ;;
       0) return 0 ;;
-      *) warn '无效选择，请输入 0-8。'; sleep 1 ;;
+      *) ui_attention '无效选择，请输入 0-8。' ;;
     esac
   done
 }
-
 case "${1:-menu}" in
   --version|-V) printf '服务器维护与安全 %s\n' "$VERSION" ;;
   --ui-contract) printf 'P07_BEGINNER_ZH_V1\n' ;;
