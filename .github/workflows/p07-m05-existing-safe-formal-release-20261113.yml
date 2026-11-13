@@ -1,0 +1,232 @@
+name: P07-M05 新服务器初始化安全补全版正式发行与公共升级验收
+on:
+  push:
+    branches: [feat/p07-m05-existing-safe-release-20261113]
+    paths: [.github/workflows/p07-m05-existing-safe-formal-release-20261113.yml]
+permissions:
+  contents: write
+jobs:
+  publish-reviewed-M05:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    steps:
+      - name: Checkout exact public distribution candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact approved P07 product main transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: a79d2a7f8050c76f2d8da9d30754b759171eec47
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: product
+      - name: Verify source, regression, existing-data guards and module boundaries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = a79d2a7f8050c76f2d8da9d30754b759171eec47
+          git -C product cat-file -e 0a819d13fbae5afd91eb80df8e3f18e1bb29b84b^{commit}
+          git -C product diff --exit-code \
+            0a819d13fbae5afd91eb80df8e3f18e1bb29b84b \
+            a79d2a7f8050c76f2d8da9d30754b759171eec47 \
+            -- bin/vfops-init-ui bin/vfops-init-core bin/vfops-init-entry lib/ \
+               scripts/build_p07_m05_bundle.py scripts/install_p07_m05_bundle.py \
+               tests/test_p07_m05_host_write_gate.py tests/test_p07_m05_db_engine_boundary.py \
+               tests/test_p07_m05_isolated_module.py
+          bash -n installers/p07-toolbox.sh
+          bash -n product/bin/vfops-init-ui
+          bash -n product/bin/vfops-init-core
+          bash -n product/bin/vfops-init-entry
+          export PYTHONDONTWRITEBYTECODE=1
+          (
+            cd product
+            python3 -B scripts/check_p07_modules.py
+            python3 -B -m unittest discover -s tests -p 'test_p07_m05_*.py' -v
+            python3 -B -m unittest discover -s tests -p 'test_p07_module_contract.py' -v
+          )
+          echo P07_M05_EXACT_MAIN_SOURCE_AND_MACHINE_PROOF_REUSE=PASS
+      - name: Build immutable M05-only ZIP and verify old release compatibility
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          pkg="$RUNNER_TEMP/p07-m05-formal"
+          mkdir -p "$pkg"
+          python3 -B product/scripts/build_p07_m05_bundle.py \
+            --output "$pkg/P07-M05-0.1.0-m05-existing-safe1.zip" > "$pkg/build-output.json"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --max-time 90 \
+            'https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-v0.1.0-five-modules-20261113/P07-M05-0.1.0-m05-candidate2.zip' \
+            -o "$pkg/previous-m05.zip"
+          echo "835356e2af2f89877e79d904f47b1ad38602983aa760978657ac4bb3c7593adb  $pkg/previous-m05.zip" | sha256sum -c --status
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,re,stat,zipfile
+          folder=pathlib.Path(os.environ['RUNNER_TEMP'])/'p07-m05-formal'
+          znew=folder/'P07-M05-0.1.0-m05-existing-safe1.zip'
+          zold=folder/'previous-m05.zip'
+          good='ff67f7563baf197892b698fe978eab6deafd6c8d432c5c7c20eaf18d4fcb48ad'
+          digest=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+          if digest(znew)!=good: raise RuntimeError('new approved M05 hash changed')
+          old_expected='835356e2af2f89877e79d904f47b1ad38602983aa760978657ac4bb3c7593adb'
+          if digest(zold)!=old_expected: raise RuntimeError('previous official M05 changed')
+          patterns={
+            'private_key':rb'-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----',
+            'github_token':rb'(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})',
+            'aws_access':rb'(?:AKIA|ASIA)[A-Z0-9]{16}',
+            'credential_url':rb'https?://[A-Za-z0-9._-]+:[^/@\s]+@[A-Za-z0-9.-]+',
+            'known_owner_ip':rb'(?:45\.76\.171\.57|45\.63\.52\.90)',
+          }
+          with zipfile.ZipFile(znew) as new,zipfile.ZipFile(zold) as old:
+            infos=new.infolist()
+            if len(infos)!=88 or len(set(z.filename for z in infos))!=88 or new.testzip() is not None:
+                raise RuntimeError('M05 file count/CRC')
+            name_new=set(new.namelist());name_old=set(old.namelist())
+            if name_new!=name_old: raise RuntimeError('unexpected new runtime paths')
+            changed={name for name in name_new if new.read(name)!=old.read(name)}
+            expected_changed={'p07-m05/bin/vfops-init-ui','p07-m05/BUILD_ID',
+                              'p07-m05/MODULE_BUILD_ID','p07-m05/MODULE_MANIFEST.json'}
+            if changed!=expected_changed:
+                raise RuntimeError('unexpected changed runtime files: '+repr(changed))
+            for info in infos:
+                path=pathlib.PurePosixPath(info.filename)
+                if (not info.filename.startswith('p07-m05/') or '..' in path.parts
+                    or info.is_dir() or stat.S_ISLNK(info.external_attr>>16)
+                    or info.file_size>8*1024*1024):
+                    raise RuntimeError('unsafe package path')
+                rel=info.filename[len('p07-m05/'):]
+                allowed=rel in {
+                    'bin/vfops-init-ui','bin/vfops-init-core','bin/vfops-init-entry',
+                    'VERSION','BUILD_ID','MODULE_ID','MODULE_BUILD_ID','MODULE_MANIFEST.json'
+                } or (rel.startswith('lib/') and path.suffix in {'.py','.sh','.json'})
+                if not allowed: raise RuntimeError('unexpected packed asset')
+                b=new.read(info)
+                for pname,pattern in patterns.items():
+                    if re.search(pattern,b):
+                        raise RuntimeError('sensitive pattern '+pname+' at '+rel)
+            m=json.loads(new.read('p07-m05/MODULE_MANIFEST.json'))
+            if (m.get('module_id')!='P07-M05' or
+                m.get('module_build_id')!='0.1.0-m05-existing-safe1' or
+                m.get('installation_isolation')!='P07-M05_ONLY' or
+                m.get('entrypoint')!='bin/vfops-init-entry'):
+                raise RuntimeError('wrong bundle identity')
+          manifest={
+            'schema':'vf.p07.m05.formal-release.v1',
+            'tag':'p07-m05-v0.1.0-existing-safe1-20261113',
+            'module_id':'P07-M05','module_name':'新服务器初始化',
+            'build_id':'0.1.0-m05-existing-safe1',
+            'source_repo':'llhzx2018/vf-server-ops',
+            'source_commit':'a79d2a7f8050c76f2d8da9d30754b759171eec47',
+            'distribution_repo':'llhzx2018/core-free-runner-public',
+            'previous_formal_release':'p07-v0.1.0-five-modules-20261113',
+            'from_versions':['0.1.0-m05-candidate2'],
+            'zip_asset':znew.name,'zip_sha256':good,
+            'unchanged_source_modules':['P07-M01','P07-M02','P07-M03','P07-M04'],
+            'changed_runtime_members':sorted(expected_changed),
+            'owner_authorized_public_runtime':True,
+            'production_executed':False,
+            'evidence':[
+              'https://github.com/llhzx2018/core-free-runner-public/actions/runs/43379542165',
+              'https://github.com/llhzx2018/core-free-runner-public/actions/runs/43377845554',
+              'https://github.com/llhzx2018/vf-server-ops/runs/131671979315'
+            ]
+          }
+          (folder/'P07-M05-EXISTING-SAFE-RELEASE.json').write_text(
+            json.dumps(manifest,ensure_ascii=False,sort_keys=True,indent=2)+'\n',encoding='utf-8')
+          files=[znew,folder/'P07-M05-EXISTING-SAFE-RELEASE.json']
+          (folder/'SHA256SUMS').write_text(
+            ''.join(digest(p)+'  '+p.name+'\n' for p in sorted(files)),encoding='utf-8')
+          echo P07_M05_PUBLIC_SOURCE_SECURITY_SCAN=PASS
+          echo P07_M05_UNCHANGED_FOUR_OTHER_MODULES=YES
+          echo P07_M05_PREVIOUS_OFFICIAL_PACKAGE_VERIFIED=YES
+          echo P07_M05_NEW_SHA256=ff67f7563baf197892b698fe978eab6deafd6c8d432c5c7c20eaf18d4fcb48ad
+      - name: Install exact old official ZIP then new, negative, rollback and retention
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          pkg="$RUNNER_TEMP/p07-m05-formal"
+          old="$pkg/previous-m05.zip"
+          new="$pkg/P07-M05-0.1.0-m05-existing-safe1.zip"
+          oldhash=835356e2af2f89877e79d904f47b1ad38602983aa760978657ac4bb3c7593adb
+          newhash=ff67f7563baf197892b698fe978eab6deafd6c8d432c5c7c20eaf18d4fcb48ad
+          test ! -e /opt/vfops-modules/m05
+          test ! -e /home/clp
+          sudo python3 -B installers/p07-m05-atomic.py install "$old" "$oldhash"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-candidate2
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$newhash"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-existing-safe1
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$newhash"
+          test -d /opt/vfops-modules/m05/releases/0.1.0-m05-candidate2
+          cp "$new" "$pkg/bad.zip"
+          printf X >> "$pkg/bad.zip"
+          if sudo python3 -B installers/p07-m05-atomic.py install "$pkg/bad.zip" "$newhash" >/dev/null 2>&1; then
+             echo "P07_M05_CORRUPT_PACKAGE_ACCEPTED"; exit 13
+          fi
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-existing-safe1
+          sudo python3 -B installers/p07-m05-atomic.py rollback 0.1.0-m05-candidate2 \
+             --confirm P07-M05:0.1.0-m05-candidate2
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-candidate2
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$newhash"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-existing-safe1
+          for other in m01 m02 m03 m04; do
+            test ! -e "/opt/vfops-modules/$other"
+          done
+          test ! -e /home/clp
+          echo P07_M05_OLD_FORMAL_TO_NEW_ATOMIC=PASS
+          echo P07_M05_ROLLBACK_AND_REINSTALL=PASS
+          echo P07_M05_BAD_ZIP_FAIL_CLOSED=PASS
+          echo P07_M05_NO_PRODUCTION_SERVER_OR_OTHER_MODULE=PASS
+      - name: Publish authorized M05-only product and public Release assets; remote hash readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN" || { echo 'P07_M05_RELEASE_CREDENTIAL_MISSING'; exit 13; }
+          tag=p07-m05-v0.1.0-existing-safe1-20261113
+          pkg="$RUNNER_TEMP/p07-m05-formal"
+          cat >"$pkg/release-notes.md" <<'EOF'
+          P07-M05 新服务器初始化 · 已有 CloudPanel 数据安全补全版
+          构建：0.1.0-m05-existing-safe1
+          正式来源：llhzx2018/vf-server-ops@a79d2a7f8050c76f2d8da9d30754b759171eec47
+          仅变更 M05，其他四个模块不升级、不迁移、不替换。
+          已有 CloudPanel/网站/数据库只读检查时区、APT、Swap，缺 Swap 时由 Owner 二次单项确认才可安全新建。
+          已验证从旧正式 M05 0.1.0-m05-candidate2 原子升级/错误包拒绝/旧版回滚。
+          公开内容仅经审批的 M05 Python/Shell 运行包、发布清单和 SHA256；不含 Production Secret、业务资料或备份。
+          公共工具箱分发入口后续由独立 public main PR 更新并验证。Production / VPS / DNS 未执行。
+          EOF
+          for repo in llhzx2018/vf-server-ops llhzx2018/core-free-runner-public; do
+            if [[ "$repo" == llhzx2018/vf-server-ops ]]; then
+              target=a79d2a7f8050c76f2d8da9d30754b759171eec47
+            else
+              target=c159f1361f15a0613228c4a4cb703cba9ffbfd70
+            fi
+            if ! gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+              gh release create "$tag" \
+                "$pkg/P07-M05-0.1.0-m05-existing-safe1.zip" \
+                "$pkg/P07-M05-EXISTING-SAFE-RELEASE.json" \
+                "$pkg/SHA256SUMS" \
+                --repo "$repo" --target "$target" --latest=false \
+                --title 'P07-M05 新服务器初始化 · 已有数据安全补全版' \
+                --notes-file "$pkg/release-notes.md"
+            fi
+            dest="$RUNNER_TEMP/remote-$(basename "$repo")"
+            mkdir -p "$dest"
+            gh release download "$tag" --repo "$repo" --dir "$dest" --clobber
+            test "$(find "$dest" -type f | wc -l)" = 3
+            (cd "$dest" && sha256sum -c SHA256SUMS --status)
+            cmp "$pkg/P07-M05-0.1.0-m05-existing-safe1.zip" \
+                "$dest/P07-M05-0.1.0-m05-existing-safe1.zip"
+            cmp "$pkg/P07-M05-EXISTING-SAFE-RELEASE.json" \
+                "$dest/P07-M05-EXISTING-SAFE-RELEASE.json"
+            echo "P07_M05_OFFICIAL_REMOTE_READBACK=PASS:$repo"
+          done
+      - name: Remove transient private checkout and staged packages
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- product "$RUNNER_TEMP/p07-m05-formal" \
+            "$RUNNER_TEMP/remote-vf-server-ops" "$RUNNER_TEMP/remote-core-free-runner-public"
+          echo P07_M05_PRIVATE_SOURCE_PERSISTED_IN_PUBLIC_ARTIFACT=NO
