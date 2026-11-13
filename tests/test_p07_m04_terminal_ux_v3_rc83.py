@@ -92,6 +92,7 @@ recent_local_actions(){ printf 'ACTION:own-history\n'; }
         self.assertNotIn("ACTION:updates", out)
         stubs = r'''
 set -Eeuo pipefail
+screen_clear(){ :; }
 ui_title(){ :; }
 ui_rule(){ :; }
 ui_bad(){ echo "BAD:$1"; }
@@ -113,6 +114,7 @@ VERSION='0.1.0-ux2'
         self.assertNotIn("VFOPS_INSTALLER", self.ui)
         stubs = r'''
 set -Eeuo pipefail
+screen_clear(){ :; }
 ui_title(){ :; }
 ui_rule(){ :; }
 ui_bad(){ echo "BAD:$1"; }
