@@ -688,8 +688,8 @@ run_server_ops_owner143_trial() {
 
 run_server_ops() {
   # P07-M03 网站与数据: one selected module, one verified stable entry.
-  # Historical release124/143 trials remain in the archive/explicit test
-  # machinery; they are not an everyday installation or migration choice.
+  # Legacy one-off trials have their own historical evidence and are not
+  # selectable through the ordinary toolbox menu or migration flow.
   screen_clear
   ensure_server_ops_current || return $?
   vfops
