@@ -35,7 +35,7 @@ VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
 VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release135"
 VF_SERVER_OPS_INSTALLER_REF="main"
-VF_SERVER_OPS_INSTALLER_BLOB="25f233b3220a3d6ec2529e4b4cec4649c85fe95b"
+VF_SERVER_OPS_INSTALLER_BLOB="ede84039edc66fdbb5f218b6b505b9edd00bb3a7"
 # Exact stable P07-M03 runtime manifest; reject a self-edited manifest before execution.
 VF_SERVER_OPS_MANIFEST_BLOB="f57e114e0ef23f73a1ec12ba864d8f2e67a5bd30"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07-m03-release135-repair.sh"
