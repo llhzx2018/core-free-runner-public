@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # P07 V0.1.0 final public distribution readback marker.
 # 公共版本保持简短稳定；内部构建身份仅用于精确校验和工程追溯。
 VERSION="V0.1.0"
-BUILD_ID="0.1.0-five-modules-ux3-release135"
+BUILD_ID="0.1.0-five-modules-ux3-fieldfix1"
 
 VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-ux1"
@@ -35,10 +35,10 @@ VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
 VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release135"
 VF_SERVER_OPS_INSTALLER_REF="main"
-VF_SERVER_OPS_INSTALLER_BLOB="00acd0caf38ea4cd0f1e264d54763f7f0be3b195"
+VF_SERVER_OPS_INSTALLER_BLOB="25f233b3220a3d6ec2529e4b4cec4649c85fe95b"
 # Exact stable P07-M03 runtime manifest; reject a self-edited manifest before execution.
 VF_SERVER_OPS_MANIFEST_BLOB="f57e114e0ef23f73a1ec12ba864d8f2e67a5bd30"
-VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07-m03-release135-atomic.sh"
+VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07-m03-release135-repair.sh"
 M03_BOOTSTRAP_BUILD="0.1.0-release115"
 M03_BOOTSTRAP_MANIFEST_BLOB="4acbaca22aac0da681b34376e2cc86d876593181"
 M03_ROLLBACK_INSTALLER_REF="70836f5bba98e8d4ff32ccb6541b4ca1ffc80912"
@@ -49,15 +49,18 @@ M03_ROLLBACK_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-fre
 SYSTEM_CARE_PUBLIC="V0.1.0"
 SYSTEM_CARE_EXPECTED="0.1.0-rc82"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
-# P07-M04 服务器维护与安全 independent rc83 candidate, exact immutable source.
-M04_BUILD_EXPECTED="0.1.0-ux2"
-M04_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care-ux2-isolated.sh"
-M04_INSTALLER_BLOB="f9103fabd372c1683beb7ee23dde103874b1e533"
+# P07-M04 服务器维护与安全 independent UX3 repaired menu; verified legacy UX2 accepted.
+M04_BUILD_EXPECTED="0.1.0-ux3"
+M04_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care-ux3-isolated.sh"
+M04_INSTALLER_BLOB="b22bc0af418d84b4686aff665605afd8674f98e5"
 M04_UI_BLOB="bb5882befd5e15962df39ca1388629b45b5d33fc"
 M04_BOOTSTRAP_BUILD="0.1.0-rc83"
 M04_BOOTSTRAP_UI_BLOB="f140f1158351f9dce2e9f9159611af57047424b1"
 M04_BOOTSTRAP_MANIFEST_BLOB="f82c9e42297c45a54ec6dc2fc4d705cad316dfce"
-M04_TARGET_MANIFEST_BLOB="965aa666b796c8502967a84ccb060695425538e6"
+M04_TARGET_MANIFEST_BLOB="f597bb586dd29059210befea0e09d93d2d87cb41"
+M04_PREVIOUS_BUILD="0.1.0-ux2"
+M04_PREVIOUS_UI_BLOB="bb5882befd5e15962df39ca1388629b45b5d33fc"
+M04_PREVIOUS_MANIFEST_BLOB="965aa666b796c8502967a84ccb060695425538e6"
 M04_ROOT="/opt/vfops-modules/m04"
 M04_RUNTIME="$M04_ROOT/current/vf-system-care.sh"
 
@@ -1207,6 +1210,9 @@ m04_verified_current() {
     "$M04_BOOTSTRAP_BUILD")
       expected_ui="$M04_BOOTSTRAP_UI_BLOB"
       expected_manifest="$M04_BOOTSTRAP_MANIFEST_BLOB" ;;
+    "$M04_PREVIOUS_BUILD")
+      expected_ui="$M04_PREVIOUS_UI_BLOB"
+      expected_manifest="$M04_PREVIOUS_MANIFEST_BLOB" ;;
     "$M04_BUILD_EXPECTED")
       expected_ui="$M04_UI_BLOB"
       expected_manifest="$M04_TARGET_MANIFEST_BLOB" ;;
