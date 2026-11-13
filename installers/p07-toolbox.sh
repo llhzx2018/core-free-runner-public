@@ -61,6 +61,8 @@ M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"
 # install M03/M04 in its place; only fill these pins after approved distribution.
 M05_BUNDLE_URL=""
 M05_BUNDLE_SHA256=""
+# Immutable private Owner Trial .run identity, never a public download source.
+M05_OFFLINE_TRIAL_SHA256="e42b6b3c59719f6ec189e4c62b7cfc54385aaa6e566c8f92ca5306246f022bbb"
 M05_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/35e3fbcb1e8c40042558f9f163e4215570074793/installers/p07-m05-atomic.py"
 M05_INSTALLER_BLOB="17e47121ac27f31162d93a72aa0b1dbea602ea01"
 
@@ -918,6 +920,56 @@ install_m05_local_candidate() {
   say "${C_GREEN}P07-M05 新服务器初始化：仅本模块本地候选安装通过；不等于正式发布或 CloudPanel 已初始化。${C_RESET}"
 }
 
+# P07-M05 新服务器初始化: an Owner-supplied ONE-FILE private trial.
+# No Git/token, no public URL, no separate installer, no CloudPanel apply.
+# The private executable is copied into a root-owned 0600 temporary file,
+# verified against the immutable owner-trial hash, then executed ONLY for
+# the independent M05 runtime install. Not an automatic Toolbox upgrade.
+install_m05_offline_trial() {
+  local archive="${1:-}" confirmation="${2:-}" canonical tmp actual rc
+  [[ "$(id -u)" == 0 &&
+     "$confirmation" == "P07-M05:INSTALL" &&
+     "$archive" == /* && -f "$archive" && ! -L "$archive" &&
+     "$M05_OFFLINE_TRIAL_SHA256" =~ ^[a-f0-9]{64}$ ]] || return 13
+  for cmd in realpath cp curl sha256sum mktemp python3; do
+    # curl is NOT required for this offline-only path.
+    [[ "$cmd" != curl ]] || continue
+    command -v "$cmd" >/dev/null 2>&1 || return 3
+  done
+  canonical="$(realpath -e -- "$archive" 2>/dev/null || true)"
+  [[ "$canonical" == "$archive" &&
+     "$canonical" != /opt/vfops-modules/* &&
+     "$canonical" != /opt/vf-server-ops/* &&
+     "$canonical" != /opt/vf-server-ops.previous/* &&
+     ! -L /opt/vfops-modules && ! -L "$M05_ROOT" ]] || return 13
+  if ! m05_verified_current && [[ -e "$M05_ROOT/current" || -L "$M05_ROOT/current" ]]; then
+    say "${C_RED}P07-M05 新服务器初始化：已有模块校验异常，拒绝覆盖。${C_RESET}" >&2
+    return 13
+  fi
+  tmp="$(mktemp -t p07-m05-one-file.XXXXXXXX)" || return 13
+  chmod 0600 "$tmp"
+  if ! cp -- "$archive" "$tmp"; then rm -f -- "$tmp"; return 13; fi
+  actual="$(sha256_file "$tmp" 2>/dev/null || true)"
+  if [[ "$actual" != "$M05_OFFLINE_TRIAL_SHA256" ]]; then
+    rm -f -- "$tmp"
+    say "${C_RED}P07-M05 新服务器初始化：私有单文件哈希不匹配；没有安装。${C_RESET}" >&2
+    return 6
+  fi
+  set +e
+  bash "$tmp" --verify-only >/dev/null
+  rc=$?
+  set -e
+  if [[ "$rc" -ne 0 ]]; then rm -f -- "$tmp"; return 13; fi
+  set +e
+  bash "$tmp" --install-only
+  rc=$?
+  set -e
+  rm -f -- "$tmp"
+  [[ "$rc" -eq 0 ]] || return "$rc"
+  m05_verified_current || return 13
+  say "${C_GREEN}P07-M05 新服务器初始化：仅独立模块试用运行时已安装；CloudPanel 未自动初始化。${C_RESET}"
+}
+
 p07_git_blob_sha1() {
   local file="$1" bytes
   bytes="$(wc -c < "$file" | tr -d '[:space:]')"
@@ -1095,6 +1147,7 @@ case "${1:-}" in
   --rollback-m04) [[ "$#" == 3 ]] || exit 13; p07_owned_helper P07-M04 "$M04_INSTALLER_URL" "$M04_INSTALLER_BLOB" bash rollback "$2" "$3" ;;
   --rollback-m05) [[ "$#" == 3 ]] || exit 13; p07_owned_helper P07-M05 "$M05_INSTALLER_URL" "$M05_INSTALLER_BLOB" python3 rollback "$2" "$3" ;;
   --install-m05-local) [[ "$#" == 4 ]] || exit 13; install_m05_local_candidate "$2" "$3" "$4" ;;
+  --install-m05-offline) [[ "$#" == 3 ]] || exit 13; install_m05_offline_trial "$2" "$3" ;;
   --modules) modules_status_readonly ;;
   --version|-V) printf '服务器工具箱 %s\n' "$VERSION" ;;
   --help|-h)
@@ -1117,7 +1170,9 @@ case "${1:-}" in
   --rollback-m03 <版本> <P07-M03:版本>
   --rollback-m04 <版本> <P07-M04:版本>
   --rollback-m05 <版本> <P07-M05:版本>
-M05 私有试用包手动验证安装（不会初始化 CloudPanel）：
+M05 私有单文件试用安装（无 Git/Token/网络/额外安装器，不会初始化 CloudPanel）：
+  --install-m05-offline <RUN绝对路径> <P07-M05:INSTALL>
+M05 私有 ZIP 候选手动验证安装（可能需要在线取得安装器）：
   --install-m05-local <ZIP绝对路径> <SHA-256> <P07-M05:INSTALL:SHA-256>
 正式公共版本尚未发布；请勿在已有业务生产环境试装候选。
 EOF
