@@ -137,9 +137,14 @@ def state() -> tuple[str, int]:
         if (not match or "lib/" + match.group(1) + ".py" not in declared):
             fail("MODULE_UNLISTED_RUNTIME_FILE")
         info = item.stat()
-        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-                or info.st_uid != 0 or info.st_size > 8 * 1024 * 1024):
-            fail("CACHE_FILE_UNSAFE")
+        if not stat.S_ISREG(info.st_mode):
+            fail("CACHE_FILE_NOT_REGULAR")
+        if info.st_nlink != 1:
+            fail("CACHE_FILE_HARDLINKED")
+        if info.st_uid != 0:
+            fail("CACHE_FILE_NOT_ROOT_OWNED")
+        if info.st_size > 8 * 1024 * 1024:
+            fail("CACHE_FILE_EXCEEDS_ITEM_LIMIT")
         caches.add(rel)
         cache_size += info.st_size
         if len(caches) > 400 or cache_size > 48 * 1024 * 1024:
