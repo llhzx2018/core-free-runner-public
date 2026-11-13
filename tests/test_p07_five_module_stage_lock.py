@@ -42,6 +42,22 @@ def verify(stage,toolbox):
         raise ValueError("unique five module IDs")
     if {m["install_root"] for m in modules}!=set(ROOTS.values()):
         raise ValueError("module root collision or drift")
+    # Every Toolbox bootstrap build must match its OWN immutable module
+    # candidate. Never silently route M05's candidate2 as old candidate1.
+    pin_names={
+        "P07-M01":"VF_NODE_EXPECTED",
+        "P07-M02":"VPS_AUDIT_BUILD_EXPECTED",
+        "P07-M03":"VF_SERVER_OPS_BUILD_EXPECTED",
+        "P07-M04":"M04_BUILD_EXPECTED",
+        "P07-M05":"M05_BUILD_EXPECTED",
+    }
+    for candidate in modules:
+        key=pin_names[candidate["id"]]
+        prefix=key+'="'
+        matches=[line[len(prefix):-1] for line in toolbox.splitlines()
+                 if line.startswith(prefix) and line.endswith('"')]
+        if matches!=[candidate["build"]]:
+            raise ValueError("candidate build drift for "+candidate["id"])
     for m in modules:
         ident=m["id"]
         if m.get("name")!=NAMES[ident]:
@@ -193,6 +209,24 @@ class StageLock(unittest.TestCase):
                 offline=next(x for x in altered["modules"] if x["id"]=="P07-M05")["offline_owner_trial"]
                 offline[key]=value
                 with self.assertRaises(ValueError): verify(altered,self.toolbox)
+
+    def test_all_five_module_builds_fail_closed_on_drift(self):
+        self.assertTrue(verify(self.stage,self.toolbox))
+        for module,key in (
+            ("P07-M01","VF_NODE_EXPECTED"),
+            ("P07-M02","VPS_AUDIT_BUILD_EXPECTED"),
+            ("P07-M03","VF_SERVER_OPS_BUILD_EXPECTED"),
+            ("P07-M04","M04_BUILD_EXPECTED"),
+            ("P07-M05","M05_BUILD_EXPECTED"),
+        ):
+            with self.subTest(module=module):
+                changed=self.toolbox.replace(key+'="',key+'="bad-',1)
+                with self.assertRaisesRegex(ValueError,"candidate build drift"):
+                    verify(self.stage,changed)
+        stale=copy.deepcopy(self.stage)
+        stale["modules"][4]["build"]="0.1.0-m05-candidate1"
+        with self.assertRaisesRegex(ValueError,"candidate build drift"):
+            verify(stale,self.toolbox)
 
     def test_toolbox_help_has_independent_m05_without_stale_m03_label(self):
         self.assertIn("5. 新服务器初始化        系统更新/CloudPanel/数据库选择",self.toolbox)
