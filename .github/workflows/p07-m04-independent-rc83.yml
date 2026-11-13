@@ -1,0 +1,83 @@
+name: P07 M04 independent module candidate install and no cross-module upgrades
+on:
+  push:
+    branches: [feat/p07-m04-independent-rc83-20261112]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'packages/p07-system-care/0.1.0-rc83/**'
+      - 'installers/p07-system-care-rc83-isolated.sh'
+      - 'tests/test_p07_m04_independent_rc83.py'
+      - '.github/workflows/p07-m04-independent-rc83.yml'
+permissions:
+  contents: read
+jobs:
+  static-package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify all 24 immutable files, own UI and M03 auto-upgrade refusal
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          python3 -B -m unittest discover -s tests -p 'test_p07_m04_independent_rc83.py' -v
+          for f in packages/p07-system-care/0.1.0-rc83/*.sh; do bash -n "$f"; done
+          bash -n installers/p07-system-care-rc83-isolated.sh
+          echo P07_M04_NO_M03_INSTALLER=PASS
+          echo P07_M04_RC82_OLD_PACKAGE=UNCHANGED
+  disposable-native-install:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Plant all four other module identities in disposable runner
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          for module in m01 m02 m03 m05; do
+            sudo mkdir -p "/opt/vfops-modules/$module"
+            printf 'P07-%s=UNCHANGED\n' "$module" | sudo tee "/opt/vfops-modules/$module/MODULE_ID" >/dev/null
+          done
+          sudo find /opt/vfops-modules -mindepth 2 -maxdepth 2 -name MODULE_ID -exec sha256sum '{}' \; | sort > /tmp/p07-other-modules-before
+      - name: Actually install candidate into its ONLY M04 directory, then retry idempotently
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          sudo bash installers/p07-system-care-rc83-isolated.sh install
+          test "$(readlink /opt/vfops-modules/m04/current)" = "releases/0.1.0-rc83"
+          NO_COLOR=1 bash /opt/vfops-modules/m04/current/vf-system-care.sh --version | grep -F '0.1.0-rc83'
+          sudo bash installers/p07-system-care-rc83-isolated.sh install
+          sudo find /opt/vfops-modules -mindepth 2 -maxdepth 2 -name MODULE_ID -exec sha256sum '{}' \; | sort > /tmp/p07-other-modules-after
+          diff -u /tmp/p07-other-modules-before /tmp/p07-other-modules-after
+          echo P07_M04_NATIVE_STANDALONE_INSTALL=PASS
+          echo P07_M01_M02_M03_M05_UNCHANGED=PASS
+      - name: Tamper installed M04 and prove refusing same-build reuse without touching other modules
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          echo '# synthetic corruption' | sudo tee -a /opt/vfops-modules/m04/releases/0.1.0-rc83/updates.sh >/dev/null
+          set +e
+          sudo bash installers/p07-system-care-rc83-isolated.sh install >/tmp/p07-m04-denial.log 2>&1
+          rc=$?
+          set -e
+          test "$rc" = 13
+          grep -Fq '独立安装已停止' /tmp/p07-m04-denial.log
+          sudo find /opt/vfops-modules -mindepth 2 -maxdepth 2 -name MODULE_ID -exec sha256sum '{}' \; | sort >/tmp/p07-other-modules-after-denial
+          diff -u /tmp/p07-other-modules-before /tmp/p07-other-modules-after-denial
+          echo P07_M04_TAMPER_REUSE_REFUSED=PASS
+          echo P07_M01_M02_M03_M05_UNCHANGED_AFTER_FAILURE=PASS
+      - name: Remove ephemeral M04 and synthetic sentinels
+        if: always()
+        shell: bash
+        run: |
+          sudo rm -rf /opt/vfops-modules/m01 /opt/vfops-modules/m02 /opt/vfops-modules/m03 /opt/vfops-modules/m04 /opt/vfops-modules/m05
+          echo P07_EPHEMERAL_MODULE_CLEANUP=YES
