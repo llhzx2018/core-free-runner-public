@@ -68,8 +68,8 @@ M05_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-
 M05_INSTALLER_BLOB="17e47121ac27f31162d93a72aa0b1dbea602ea01"
 # Read-only first; on exact cache-only diagnosis, Owner can explicitly quarantine
 # generated *.pyc from an otherwise byte-identical M05 release. Never delete.
-M05_CACHE_RECOVERY_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/f1cb71ac52b1607303af43d228429e6d847f6d99/installers/p07-m05-cache-recovery.py"
-M05_CACHE_RECOVERY_BLOB="f4b4a66c51f708d453b6d9a4f8fa76a5411185ce"
+M05_CACHE_RECOVERY_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/80b13d4051fbb3a7f900a8a5282e092582d449ab/installers/p07-m05-cache-recovery.py"
+M05_CACHE_RECOVERY_BLOB="3877b3b540db12bfd03c028f5eb3697b07a61083"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
