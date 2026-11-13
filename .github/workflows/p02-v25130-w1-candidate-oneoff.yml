@@ -1,0 +1,271 @@
+name: P02 v2.5.130 W1 Owner-scoped current-only Atomic and rollback (one-off)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/p02-v25130-w1-candidate-oneoff.yml
+permissions:
+  contents: read
+jobs:
+  current-source-only:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PRODUCT_SHA: e408ea8871fab53ac7ad105ba898a39c6c39f254
+      PRODUCT_TREE: ef2dd78c40bc3a761b426bd19a8f819549a20969
+      OLD_FULL_SHA256: 4f786effcf8410528f7c0a990d841029b426436bfa42b36b636b662352dd2387
+    steps:
+      - name: Temporary private checkout exact P02 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 Node24
+        with:
+          repository: llhzx2018/vf-library
+          ref: e408ea8871fab53ac7ad105ba898a39c6c39f254
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Exact source, official mirror identity, PHP SQLite + ZIP tools
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(git -C product show -s --format=%T HEAD)" = "$PRODUCT_TREE"
+          test "$(cat product/VERSION)" = "2.5.130"
+          (cd product && python3 scripts/verify-source-manifest.py)
+          curl -fsSL https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/projects/P02.json -o "$RUNNER_TEMP/P02.json"
+          test "$(git hash-object "$RUNNER_TEMP/P02.json")" = "04fc2dc171880fce813cc1e38c96eb825fa54f6c"
+          python3 - "$RUNNER_TEMP/P02.json" <<'PY'
+          import json,sys
+          x=json.load(open(sys.argv[1]))
+          assert x["target_version"]=="2.5.129" and x["from_versions"]==["2.5.128"]
+          assert x["repository"]=="llhzx2018/vf-library"
+          print("P02_130_OFFICIAL_129_CHANNEL_IDENTITY=PASS")
+          PY
+          if ! php -r 'exit(extension_loaded("pdo_sqlite") && extension_loaded("sqlite3") && extension_loaded("zip") ? 0 : 1);'; then
+            sudo apt-get update -qq
+            sudo apt-get install -y php-cli php-sqlite3 php-zip sqlite3 unzip
+          fi
+          php -r 'exit(extension_loaded("pdo_sqlite") && extension_loaded("sqlite3") && extension_loaded("zip") ? 0 : 1);'
+          echo P02_130_SOURCE_AND_ENVIRONMENT=PASS
+      - name: Build isolated candidate UPDATE payload only; no formal Release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash product/scripts/build-deploy-tree.sh "$RUNNER_TEMP/p02-deploy"
+          python3 -m unittest discover -s product/tests/unit -p test_p02_owner_legacy_release_scope.py -v
+          python3 -m unittest discover -s product/tests/unit -p test_p02_owner_v25130_source_scope.py -v
+          sources=(2.5.129)
+          test "${#sources[@]}" -eq 1
+          args=()
+          for v in "${sources[@]}"; do args+=(--source-version "$v"); done
+          python3 product/scripts/build-multisource-update.py --deploy-root "$RUNNER_TEMP/p02-deploy" --output "$RUNNER_TEMP/VF_Library_V2.5.130_UPDATE.zip" --target-version 2.5.130 --channel-json "$RUNNER_TEMP/P02.json" --owner-decision config/p02-release-source-decision-2.5.130.json "${args[@]}" --source-schema 2401 --target-schema 2401 --timestamp "$(git -C product show -s --format=%cI HEAD)"
+          python3 - "$RUNNER_TEMP/VF_Library_V2.5.130_UPDATE.zip" "product/SOURCE_MANIFEST.json" "$RUNNER_TEMP/P02.json" "$RUNNER_TEMP/p02-synthetic-future-channel.json" <<'PY'
+          import json,zipfile,hashlib,sys
+          from pathlib import Path
+          path=Path(sys.argv[1])
+          with zipfile.ZipFile(path) as z:
+              m=json.loads(z.read("atomic-manifest.json"))
+              files=m["files"]
+              original=json.load(open(sys.argv[2]))
+              expected={e['full_path']:(e['bytes'],e['sha256']) for e in original['entries']}
+              actual={e['path']:(e['bytes'],e['sha256']) for e in files}
+              assert original['version']=='2.5.130' and actual==expected,('TARGET_PAYLOAD_DIFFERS_FROM_EXACT_SOURCE_MANIFEST',set(actual)^set(expected))
+              assert m["target_version"]=="2.5.130" and m["format_version"]==1 and m["source_version"]=="2.5.129" and "source_versions" not in m and len(files)==73
+              for x in files:
+                  body=z.read("payload/"+x["path"])
+                  assert len(body)==x["bytes"] and hashlib.sha256(body).hexdigest()==x["sha256"]
+          official=json.load(open(sys.argv[3]))
+          official.update(current_version="2.5.129",target_version="2.5.130",from_versions=[m["source_version"]],release_tag="v2.5.130",asset_name="VF_Library_V2.5.130_UPDATE.zip",asset_bytes=path.stat().st_size,asset_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),released_at="2026-11-13T00:00:00Z")
+          Path(sys.argv[4]).write_text(json.dumps(official),encoding="utf-8")
+          print("P02_130_OWNER_SCOPED_SOURCE_ONLY_128=PASS")
+          PY
+      - name: Formal-format eight-asset deterministic preflight with Owner v1 single-source gate (NO RELEASE)
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          (
+            cd product
+            VF_RELEASE_FROM_VERSIONS="2.5.129" \
+            VF_RELEASE_OWNER_DECISION="config/p02-release-source-decision-2.5.130.json" \
+            VF_RELEASE_CHANNEL_JSON="$RUNNER_TEMP/P02.json" \
+            bash scripts/verify-release-artifacts.sh
+          )
+          test -f product/build/release-preflight/VF_Library_V2.5.130_UPDATE.zip
+          cmp "$RUNNER_TEMP/VF_Library_V2.5.130_UPDATE.zip" product/build/release-preflight/VF_Library_V2.5.130_UPDATE.zip
+          echo P02_130_OWNER_SCOPED_FORMAL_FORMAT_8_ASSETS_AND_UPDATE_BYTES=PASS
+      - name: Read ONLY published source V2.5.129 FULL
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/p02-old-site"
+          gh release download v2.5.129 -R llhzx2018/vf-library -p VF_Library_V2.5.129_FULL.zip -D "$RUNNER_TEMP"
+          echo "$OLD_FULL_SHA256  $RUNNER_TEMP/VF_Library_V2.5.129_FULL.zip" | sha256sum -c -
+          unzip -q "$RUNNER_TEMP/VF_Library_V2.5.129_FULL.zip" -d "$RUNNER_TEMP/p02-old-site"
+          test "$(cat "$RUNNER_TEMP/p02-old-site/VERSION.txt")" = "2.5.129"
+          echo P02_130_OFFICIAL_CURRENT_SOURCE_FULL_BYTES=PASS
+      - name: Isolated UpdateService actual apply plus injected rollback with synthetic data
+        shell: bash
+        env:
+          VFTB_TEST_MODE: "1"
+          TEST_PASSWORD: "P02-SYNTHETIC-TEST-ONLY-20261113!"
+        run: |
+          set -Eeuo pipefail
+          cat > "$RUNNER_TEMP/p02-execute.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require $argv[1].'/app/bootstrap.php';
+          $manifest=json_decode(file_get_contents($argv[2]),true,512,JSON_THROW_ON_ERROR);
+          $path=$argv[3];$mode=$argv[4];
+          $loader=static fn():array=>$manifest;
+          $downloader=static fn($identity,$destination):bool=>copy($path,$destination);
+          $opts=$mode==='fault'?['fail_after_file'=>1]:[];
+          $service=new VfLibraryUpdateService($loader,$downloader,null,null,$opts);
+          if($mode==='fault'){
+            try{$service->execute();fwrite(STDERR,"EXPECTED_FAULT_NOT_TRIGGERED");exit(3);}
+            catch(Throwable $e){
+              if(strpos($e->getMessage(),'Atomic test fault: file replacement')===false){
+                fwrite(STDERR,"UNEXPECTED_FAILURE_CLASS: ".$e->getMessage());exit(4);
+              }
+            }
+            echo "P02_130_CURRENT_OFFICIAL_INJECTED_ROLLBACK_TRIGGERED=PASS\n";
+          }else{
+            $result=$service->execute();
+            if(($result['result']??'')!=='success'||($result['to_version']??'')!=='2.5.130')exit(6);
+            echo "P02_130_CURRENT_OFFICIAL_UPDATE_SERVICE_APPLY=PASS\n";
+          }
+          PHP
+          python3 - "$RUNNER_TEMP" <<'PY'
+          from pathlib import Path
+          import subprocess,tempfile,zipfile,re,json,html,os,time,http.cookiejar,sqlite3
+          import urllib.request,urllib.parse,urllib.error
+          parent=Path(__import__('sys').argv[1]);site=parent/'p02-old-site'
+          base='http://127.0.0.1:18492'
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,*args):return None
+          op=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),NoRedirect())
+          def req(url,data=None,headers=None):
+              x=urllib.request.Request(url,data,headers or {},method='POST' if data is not None else 'GET')
+              try:
+                  r=op.open(x,timeout=30);return r.status,r.read().decode('utf8',errors='replace')
+              except urllib.error.HTTPError as e:
+                  return e.code,e.read().decode('utf8',errors='replace')
+          def post(action,payload,csrf):
+              endpoint='/scratch-action.php?action='+action[8:] if action.startswith('scratch_') else '/api.php?action='+action
+              c,b=req(base+endpoint,json.dumps(payload).encode(),{'Origin':base,'Content-Type':'application/json','X-CSRF-Token':csrf})
+              v=json.loads(b)
+              assert c in (200,201) and v.get('ok') is True,('POST_FAILED',action,c,b[-200:])
+              return v
+          server=subprocess.Popen(['php','-S','127.0.0.1:18492','-t',str(site)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+          try:
+              for n in range(80):
+                  try:
+                      status,body=req(base+'/setup.php')
+                      if status==200:break
+                  except Exception:pass
+                  time.sleep(.15)
+              else:raise RuntimeError('P02_OFFICIAL_SOURCE_SETUP_UNAVAILABLE')
+              m=re.search(r'name="setup_csrf" value="([^"]+)"',body)
+              assert m
+              pw=os.environ["TEST_PASSWORD"]
+              data=urllib.parse.urlencode({'setup_csrf':html.unescape(m.group(1)),'password':pw,'password_confirm':pw}).encode()
+              c,_=req(base+'/setup.php',data,{'Origin':base,'Content-Type':'application/x-www-form-urlencoded'})
+              assert c==303,('SETUP_HTTP_STATUS',c)
+              c,body=req(base+'/api.php?action=session')
+              v=json.loads(body);assert c==200 and v.get('ok') and v.get('site',{}).get('auth') and v['version']=='2.5.129'
+              csrf=v['csrf']
+              cat=post('category_save',{'name':'SYNTHETIC_UPGRADE_CHECK','icon':'folder'},csrf)
+              mat=post('content_save',{'category_id':cat['id'],'title':'SYNTHETIC_CURRENT_TO_TARGET',
+                'content':'Non-private 2.5.129 synthetic article content','content_mode':'article',
+                'content_format':'markdown','primary_action':'read','status':'active'},csrf)
+              itemid=int(mat['id']);tab=post('scratch_create',{},csrf);tabid=int(tab['tab']['id'])
+              boundary='P02-V130-SYNTHETIC-BOUNDARY'
+              bdy=(
+                ('--'+boundary+'\r\nContent-Disposition: form-data; name="item_id"\r\n\r\n'+str(itemid)+'\r\n'
+                 +'--'+boundary+'\r\nContent-Disposition: form-data; name="attachments"; filename="p02-upgrade-safe.txt"\r\nContent-Type: text/plain\r\n\r\n'
+                 +'P02 SYNTHETIC PRIVATE ATTACHMENT\r\n--'+boundary+'--\r\n').encode()
+              )
+              s_upload,upload_body=req(base+'/api.php?action=attachment_upload',bdy,{
+                  'Origin':base,'X-CSRF-Token':csrf,
+                  'Content-Type':'multipart/form-data; boundary='+boundary})
+              assert s_upload==201 and json.loads(upload_body).get('ok'),('ATTACHMENT_UPLOAD',s_upload,upload_body[-250:])
+              print('P02_130_PRIVATE_ATTACHMENT_OLD_RUNTIME=PASS')
+              scratch='SYNTHETIC_SCRATCH_SAFE_DURING_ATOMIC'
+              s=post('scratch_save',{'id':tabid,'content':scratch,'cursor_pos':4,'scroll_top':0},csrf)
+              assert s['tab']['content']==scratch
+              def check_state(version):
+                  assert (site/'VERSION.txt').read_text().strip()==version,('VERSION_DIFFERS',version)
+                  c,b=req(base+'/api.php?action=content_get&id='+str(itemid))
+                  assert c==200 and json.loads(b)['item']['title']=='SYNTHETIC_CURRENT_TO_TARGET'
+                  rows=json.loads(b)['item'].get('attachments',[])
+                  assert isinstance(rows,list) and any(row.get('original_name')=='p02-upgrade-safe.txt' for row in rows),('PRIVATE_ATTACHMENT_LOST',version)
+                  if version=='2.5.130':
+                      assert (site/'assets/w1/w1-search.js').is_file()
+                      assert (site/'assets/w1/w1-search.css').is_file()
+                  c,b=req(base+'/scratch-action.php?action=list')
+                  assert c==200 and any(t['id']==tabid and t['content']==scratch for t in json.loads(b)['data']['open'])
+                  db=list(parent.rglob('textbox-*.sqlite'));assert db,'NO_PRIVATE_DB'
+                  for file in db:
+                      with sqlite3.connect(file) as cn:
+                          assert cn.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+                          assert cn.execute('PRAGMA foreign_key_check').fetchall()==[]
+              check_state('2.5.129')
+              args=['php',str(parent/'p02-execute.php'),str(site),str(parent/'p02-synthetic-future-channel.json'),str(parent/'VF_Library_V2.5.130_UPDATE.zip')]
+              failed=subprocess.run([*args,'fault'],capture_output=True,text=True,timeout=100,env=dict(os.environ,VFTB_TEST_MODE='1'))
+              assert failed.returncode==0,('ATOMIC_INJECTION_FAILED',failed.stderr[-260:],failed.stdout[-260:])
+              assert 'P02_130_CURRENT_OFFICIAL_INJECTED_ROLLBACK_TRIGGERED=PASS' in failed.stdout
+              check_state('2.5.129')
+              print('P02_130_CURRENT_SOURCE_ROLLBACK_RETAINS_MATERIAL_AND_SCRATCH=PASS')
+              success=subprocess.run([*args,'success'],capture_output=True,text=True,timeout=140,env=dict(os.environ,VFTB_TEST_MODE='1'))
+              assert success.returncode==0,('ATOMIC_APPLY_FAILED',success.stderr[-260:],success.stdout[-260:])
+              assert 'P02_130_CURRENT_OFFICIAL_UPDATE_SERVICE_APPLY=PASS' in success.stdout
+              check_state('2.5.130')
+              verify=subprocess.run(['php',str(site/'cli/verify.php')],capture_output=True,text=True,timeout=60)
+              assert verify.returncode==0 and json.loads(verify.stdout).get('ok') is True,('CLI_FAILED',verify.stderr[-260:])
+              print('P02_130_REAL_129_TO_130_UPGRADE_INTEGRITY=PASS')
+              print('P02_130_UNSUPPORTED_OLDER_VERSIONS_NOT_CLAIMED=YES')
+              print('P02_130_GITHUB_RELEASE_OR_CHANNEL=NOT_EXECUTED')
+          finally:
+              server.terminate();server.wait(timeout=10)
+          PY
+      - name: Real 390 768 1440 Chromium W1 on candidate FULL runtime
+        shell: bash
+        env:
+          P02_W1_E2E_SYNTHETIC_PASSWORD: P02-SYNTHETIC-LOCAL-W1-ONLY
+          P02_W1_E2E_BASE: http://127.0.0.1:18765
+        run: |
+          set -Eeuo pipefail
+          root="$(mktemp -d "${RUNNER_TEMP}/p02-w1-XXXXXX")"
+          play="$(mktemp -d "${RUNNER_TEMP}/p02-w1-pw-XXXXXX")"
+          server_pid=''
+          cleanup() {
+            if [ -n "$server_pid" ]; then kill "$server_pid" 2>/dev/null || :; wait "$server_pid" 2>/dev/null || :; fi
+            rm -rf "$root" "$play"
+            echo P02_130_W1_PRIVATE_RUNTIME_CLEANED=YES
+          }
+          trap cleanup EXIT
+          site="$root/site"
+          mkdir -p "$site"
+          unzip -q "product/build/release-preflight/VF_Library_V2.5.130_FULL.zip" -d "$site"
+          test "$(cat "$site/VERSION.txt")" = 2.5.130
+          php -S 127.0.0.1:18765 -t "$site" > "$root/server.log" 2>&1 &
+          server_pid=$!
+          for n in $(seq 1 25); do if curl -fsS 'http://127.0.0.1:18765/setup.php' -o /dev/null; then break; fi; sleep 0.5; done
+          curl -fsS 'http://127.0.0.1:18765/setup.php' -o /dev/null
+          npm install --prefix "$play" --no-save --no-audit --no-fund playwright@1.57.0
+          export P02_W1_PLAYWRIGHT_PACKAGE="$play/node_modules/playwright"
+          if command -v google-chrome >/dev/null 2>&1; then
+            export P02_W1_BROWSER_CHANNEL=chrome
+          else
+            "$play/node_modules/.bin/playwright" install chromium
+            export P02_W1_BROWSER_CHANNEL=chromium
+          fi
+          node product/tests/e2e/p02_w1_vue_search_real_browser.mjs
+          echo P02_130_W1_FULL_BROWSER_248_SMOKE=PASS
+      - name: Delete ephemeral private material regardless of result
+        if: always()
+        shell: bash
+        run: |
+          rm -rf product "$RUNNER_TEMP/p02-deploy" "$RUNNER_TEMP/p02-old-site" "$RUNNER_TEMP/P02.json" "$RUNNER_TEMP/p02-synthetic-future-channel.json" "$RUNNER_TEMP/VF_Library_V2.5.130_UPDATE.zip" "$RUNNER_TEMP/VF_Library_V2.5.129_FULL.zip" "$RUNNER_TEMP/p02-execute.php"
+          echo P02_130_PRIVATE_RUNTIME_AND_DATA_CLEANED=YES
+          echo P02_130_PRIVATE_DATA_OR_BINARY_PERSISTED_IN_PUBLIC=NO
