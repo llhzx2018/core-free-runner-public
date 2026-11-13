@@ -1,0 +1,179 @@
+name: P08 0.1.1 one-off verified GitHub Release and SHA256
+on:
+  push:
+    branches: [test/p08-r85-formal-release-20261113]
+permissions:
+  contents: read
+concurrency:
+  group: p08-adops-011-official-publication
+  cancel-in-progress: false
+jobs:
+  publish-after-gates:
+    if: ${{ github.repository == 'llhzx2018/core-free-runner-public' && github.ref == 'refs/heads/test/p08-r85-formal-release-20261113' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: 9c7f76434fe2d064f2f1ac15c58a760f778cf055
+          path: source
+          fetch-depth: 0
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: f84c0d22769520cea1becccd9e277b9753cc3912
+          path: gov
+          fetch-depth: 0
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring,ctype,xml,zip,curl,sodium,pdo_sqlite,pdo_mysql
+          coverage: none
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Exact main and V3.10 source only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C source rev-parse HEAD)" = '9c7f76434fe2d064f2f1ac15c58a760f778cf055'
+          test "$(git -C source rev-parse origin/main)" = '9c7f76434fe2d064f2f1ac15c58a760f778cf055'
+          test "$(git -C gov rev-parse HEAD)" = 'f84c0d22769520cea1becccd9e277b9753cc3912'
+          grep -Fq '| skill-release | V3.10 |' gov/CURRENT.md
+          test "$(tr -d '\r\n ' < source/VERSION)" = 0.1.1
+          git -C source merge-base --is-ancestor 'dd1ad4d881ae232ec5e817d05402ce1753b640e7' HEAD
+          python3 source/scripts/check_bridge_runtime_parity.py
+          python3 source/scripts/check_stack_contract.py --root "$GITHUB_WORKSPACE/source" --phase foundation
+          (cd source && python3 -m unittest tests/test_stack_contract.py tests/test_full_builder.py -q)
+          php source/tests/test_official_github_sha256_job.php
+          echo P08_OFFICIAL_EXACT_MAIN_AND_SECURITY_TESTS=PASS
+      - name: Build real Bridge and target FULL plus Atomic ZIP and verify hashes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          ART="$RUNNER_TEMP/p08-official"
+          python3 source/scripts/build_owner_atomic_pair.py \
+            --repo "$GITHUB_WORKSPACE/source" --target-sha '9c7f76434fe2d064f2f1ac15c58a760f778cf055' --output-dir "$ART"
+          python3 source/scripts/verify_owner_atomic_pair.py "$ART" 'dd1ad4d881ae232ec5e817d05402ce1753b640e7' '9c7f76434fe2d064f2f1ac15c58a760f778cf055'
+          for file in VF_AdOps_V0.1.0_BRIDGE_FULL.zip VF_AdOps_V0.1.1_FULL.zip VF_AdOps_V0.1.1_UPDATE.zip; do
+            test -s "$ART/$file"
+          done
+          echo P08_OFFICIAL_BUILD_AND_ATOMIC_ZIP_BYTE_AUDIT=PASS
+      - name: Canonical GOV-DOC actual FULL source/delivery acceptance
+        shell: bash
+        env:
+          P08_SOURCE_SHA: 9c7f76434fe2d064f2f1ac15c58a760f778cf055
+        run: |
+          set -Eeuo pipefail
+          mkdir "$RUNNER_TEMP/p08-full-delivery"
+          cp "$RUNNER_TEMP/p08-official/VF_AdOps_V0.1.1_FULL.zip" "$RUNNER_TEMP/p08-full-delivery/"
+          PYTHONPATH=source/scripts python3 - <<'PY'
+          import os
+          from pathlib import Path
+          from build_full import verify_canonical_full_contract
+          source=Path("source").resolve()
+          gov=Path("gov").resolve()
+          zipfile=Path(os.environ["RUNNER_TEMP"])/"p08-full-delivery"/"VF_AdOps_V0.1.1_FULL.zip"
+          for phase in ("resolve","delivery"):
+              verify_canonical_full_contract(source,zipfile,os.environ["P08_SOURCE_SHA"],gov,phase)
+          print("P08_OFFICIAL_GOV_DOC_CANONICAL_FULL_GATE=PASS")
+          PY
+          cmp -s "$RUNNER_TEMP/p08-official/VF_AdOps_V0.1.1_FULL.zip" "$RUNNER_TEMP/p08-full-delivery/VF_AdOps_V0.1.1_FULL.zip"
+      - name: Rebuild actual pre-Bridge flat 0.1.0 FULL for supported-source digest
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir "$RUNNER_TEMP/p08-old"
+          git -C source archive '55ecbc8461a4d90fe7241a00caffa55e557cde1c' | tar -xf - -C "$RUNNER_TEMP/p08-old"
+          test "$(cat "$RUNNER_TEMP/p08-old/VERSION")" = 0.1.0
+          cd "$RUNNER_TEMP/p08-old"
+          composer install --no-dev --no-scripts --prefer-dist --no-interaction --no-progress --classmap-authoritative >/dev/null
+          npm ci --no-audit --no-fund >/dev/null
+          npm run build >/dev/null
+          python3 scripts/build_full.py --source "$RUNNER_TEMP/p08-old" \
+            --output "$RUNNER_TEMP/p08-old-flat.zip" --version 0.1.0 --source-sha '55ecbc8461a4d90fe7241a00caffa55e557cde1c'
+          unzip -p "$RUNNER_TEMP/p08-old-flat.zip" FULL_MANIFEST.json | \
+            jq -e '.project_id=="P08" and .source_sha=="55ecbc8461a4d90fe7241a00caffa55e557cde1c" and .target_version=="0.1.0"' >/dev/null
+          echo P08_OFFICIAL_TRUE_OLD_FLAT_MANIFEST=PASS
+      - name: Bind exact archive and manifest identities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p08-official"
+          sha256sum VF_AdOps_V0.1.0_BRIDGE_FULL.zip VF_AdOps_V0.1.1_FULL.zip VF_AdOps_V0.1.1_UPDATE.zip > SHA256SUMS
+          unzip -p VF_AdOps_V0.1.0_BRIDGE_FULL.zip FULL_MANIFEST.json | jq -e '.project_id=="P08" and .source_sha=="dd1ad4d881ae232ec5e817d05402ce1753b640e7"' >/dev/null
+          unzip -p VF_AdOps_V0.1.1_FULL.zip FULL_MANIFEST.json | jq -e '.project_id=="P08" and .source_sha=="9c7f76434fe2d064f2f1ac15c58a760f778cf055"' >/dev/null
+          unzip -p VF_AdOps_V0.1.1_UPDATE.zip ATOMIC_MANIFEST.json | jq -e '.source_sha=="dd1ad4d881ae232ec5e817d05402ce1753b640e7" and .target_sha=="9c7f76434fe2d064f2f1ac15c58a760f778cf055" and .schema_changes==false' >/dev/null
+          echo "P08_OFFICIAL_FLAT_FULL_MANIFEST_SHA256=$(unzip -p "$RUNNER_TEMP/p08-old-flat.zip" FULL_MANIFEST.json | sha256sum | awk '{print $1}')"
+          echo "P08_OFFICIAL_BRIDGE_FULL_MANIFEST_SHA256=$(unzip -p VF_AdOps_V0.1.0_BRIDGE_FULL.zip FULL_MANIFEST.json | sha256sum | awk '{print $1}')"
+          echo P08_OFFICIAL_SHA256SUMS_AND_THREE_MANIFESTS=PASS
+      - name: Create official v0.1.1 tag and Release only after all gates
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          REPO=llhzx2018/vf-adops
+          TAG=v0.1.1
+          ART="$RUNNER_TEMP/p08-official"
+          if gh api "repos/$REPO/git/ref/tags/$TAG" >"$RUNNER_TEMP/p08-tag.json" 2>/dev/null; then
+            test "$(jq -r '.object.sha' "$RUNNER_TEMP/p08-tag.json")" = '9c7f76434fe2d064f2f1ac15c58a760f778cf055'
+          else
+            gh api --method POST "repos/$REPO/git/refs" \
+              -f ref="refs/tags/$TAG" -f sha='9c7f76434fe2d064f2f1ac15c58a760f778cf055' >"$RUNNER_TEMP/p08-tag.json"
+            test "$(jq -r '.object.sha' "$RUNNER_TEMP/p08-tag.json")" = '9c7f76434fe2d064f2f1ac15c58a760f778cf055'
+          fi
+          cat >"$RUNNER_TEMP/p08-notes.txt" <<'NOTES'
+          VF AdOps 0.1.1 · GitHub Token + 官方 Release + SHA256 + 备份优先 Atomic
+          Production 不自动修改。Owner 必须先核对正式站旧 flat 0.1.0 来源、全量备份与停写，再手工启用 0.1.0 Bridge 后才能在后台检查并点击 Atomic 升级。
+          FULL 仅适用于全新空站，禁止覆盖旧站。vf-lander 历史 P08.json 不适用。Owner 实际使用验收在正式发行之后手工完成。
+          NOTES
+          if ! gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              "$ART/VF_AdOps_V0.1.0_BRIDGE_FULL.zip" \
+              "$ART/VF_AdOps_V0.1.1_FULL.zip" \
+              "$ART/VF_AdOps_V0.1.1_UPDATE.zip" "$ART/SHA256SUMS" \
+              -R "$REPO" --title "VF AdOps 0.1.1" \
+              --notes-file "$RUNNER_TEMP/p08-notes.txt" --verify-tag
+          fi
+          gh api "repos/$REPO/releases/tags/$TAG" >"$RUNNER_TEMP/p08-release.json"
+          jq -e '.tag_name=="v0.1.1" and .draft==false and .prerelease==false' "$RUNNER_TEMP/p08-release.json" >/dev/null
+          test "$(gh api "repos/$REPO/git/ref/tags/$TAG" --jq '.object.sha')" = '9c7f76434fe2d064f2f1ac15c58a760f778cf055'
+          mkdir "$RUNNER_TEMP/p08-remote"
+          gh release download "$TAG" -R "$REPO" -D "$RUNNER_TEMP/p08-remote" \
+            -p "VF_AdOps_V0.1.0_BRIDGE_FULL.zip" -p "VF_AdOps_V0.1.1_FULL.zip" \
+            -p "VF_AdOps_V0.1.1_UPDATE.zip" -p "SHA256SUMS"
+          cd "$ART"
+          for file in VF_AdOps_V0.1.0_BRIDGE_FULL.zip VF_AdOps_V0.1.1_FULL.zip VF_AdOps_V0.1.1_UPDATE.zip SHA256SUMS; do
+            cmp -s "$file" "$RUNNER_TEMP/p08-remote/$file"
+          done
+          sha256sum -c SHA256SUMS >/dev/null
+          echo "P08_OFFICIAL_RELEASE_ID=$(jq -r '.id' "$RUNNER_TEMP/p08-release.json")"
+          echo "P08_OFFICIAL_RELEASED_AT=$(jq -r '.published_at' "$RUNNER_TEMP/p08-release.json")"
+          for file in VF_AdOps_V0.1.0_BRIDGE_FULL.zip VF_AdOps_V0.1.1_FULL.zip VF_AdOps_V0.1.1_UPDATE.zip; do
+            echo "P08_OFFICIAL_ASSET=$file:$(stat -c%s "$file"):$(sha256sum "$file" | awk '{print $1}')"
+          done
+          echo P08_OFFICIAL_GITHUB_RELEASE_REMOTE_BYTES_SHA256=PASS
+          echo P08_OFFICIAL_DISTRIBUTION_CHANNEL_NOT_YET_PUBLISHED=YES
+          echo P08_OWNER_PRODUCTION_CHANGED=NO
+      - name: Erase public Runner transient private source and ZIPs
+        if: always()
+        shell: bash
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          for folder in source gov; do
+            if [ -d "$folder" ]; then
+              find "$folder" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf -- {} +
+            fi
+          done
+          rm -rf "$RUNNER_TEMP/p08-official" "$RUNNER_TEMP/p08-full-delivery" \
+            "$RUNNER_TEMP/p08-old" "$RUNNER_TEMP/p08-remote"
+          rm -f "$RUNNER_TEMP/p08-old-flat.zip" "$RUNNER_TEMP/p08-tag.json" \
+            "$RUNNER_TEMP/p08-notes.txt" "$RUNNER_TEMP/p08-release.json"
+          echo P08_OFFICIAL_PUBLIC_RUNNER_PRIVATE_SOURCE_AND_ZIPS_CLEANED=YES
