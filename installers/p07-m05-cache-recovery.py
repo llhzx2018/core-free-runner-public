@@ -138,11 +138,11 @@ def state() -> tuple[str, int]:
             fail("MODULE_UNLISTED_RUNTIME_FILE")
         info = item.stat()
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-                or info.st_uid != 0 or info.st_size > 1_048_576):
+                or info.st_uid != 0 or info.st_size > 8 * 1024 * 1024):
             fail("CACHE_FILE_UNSAFE")
         caches.add(rel)
         cache_size += info.st_size
-        if len(caches) > 400 or cache_size > 24 * 1024 * 1024:
+        if len(caches) > 400 or cache_size > 48 * 1024 * 1024:
             fail("CACHE_LIMIT_EXCEEDED")
     if seen_files != declared | {"MODULE_MANIFEST.json"} | caches:
         fail("MODULE_UNLISTED_RUNTIME_FILE")
