@@ -29,6 +29,7 @@ ALLOWED_BUILDS = frozenset({
     "0.1.0-m05-candidate2",
     "0.1.0-m05-existing-safe1",
     "0.1.0-m05-clean-host-guard1",
+    "0.1.0-m05-pycache-safe1",
 })
 METADATA = {"VERSION", "BUILD_ID", "MODULE_ID", "MODULE_BUILD_ID"}
 BINARIES = {"bin/vfops-init-entry", "bin/vfops-init-ui", "bin/vfops-init-core"}
@@ -76,6 +77,8 @@ def state() -> tuple[str, int]:
     try:
         data = json.loads(manifest_file.read_text("utf-8"))
     except (ValueError, UnicodeError):
+        fail("MODULE_MANIFEST_INVALID")
+    if not isinstance(data, dict):
         fail("MODULE_MANIFEST_INVALID")
     if (data.get("schema") != "vf.p07.module-bundle.v1"
             or data.get("module_id") != "P07-M05"
