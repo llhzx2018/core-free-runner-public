@@ -53,18 +53,19 @@ M04_RUNTIME="$M04_ROOT/current/vf-system-care.sh"
 # P07-M05 新服务器初始化 has its OWN runtime/build and no M03/M04 installer calls.
 # Exact published M05 artifact: no fallback to M03/M04 installers.
 # M05-only official build; no other module or Production writes.
-M05_BUILD_EXPECTED="0.1.0-m05-provider-neutral-reinstall1"
+M05_BUILD_EXPECTED="0.1.0-m05-no-fake-reinstall1"
 M05_UPGRADE_FROM="0.1.0-m05-candidate2"
 M05_UPGRADE_FROM2="0.1.0-m05-existing-safe1"
 M05_UPGRADE_FROM3="0.1.0-m05-clean-host-guard1"
 M05_UPGRADE_FROM4="0.1.0-m05-pycache-safe1"
 M05_UPGRADE_FROM5="0.1.0-m05-cp-reinstall-plan1"
+M05_UPGRADE_FROM6="0.1.0-m05-provider-neutral-reinstall1"
 M05_ROOT="/opt/vfops-modules/m05"
 M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"
 # M05 is published as an immutable reviewed public Release ZIP.
 # Never install M03/M04 in its place and verify SHA-256 before extraction.
-M05_BUNDLE_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-provider-neutral-reinstall1-20261113/P07-M05-0.1.0-m05-provider-neutral-reinstall1.zip"
-M05_BUNDLE_SHA256="636353ee56d91957e77b8cf3786471f0ecb2aadb6c4f0d51695cd9356164e023"
+M05_BUNDLE_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-no-fake-reinstall1-20261113/P07-M05-0.1.0-m05-no-fake-reinstall1.zip"
+M05_BUNDLE_SHA256="b522367a66e51092eaa003cc264b1a15c9bddc9a36d4bb6d480c71a13223738d"
 # Immutable private Owner Trial .run identity, never a public download source.
 M05_OFFLINE_TRIAL_SHA256="e42b6b3c59719f6ec189e4c62b7cfc54385aaa6e566c8f92ca5306246f022bbb"
 M05_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/35e3fbcb1e8c40042558f9f163e4215570074793/installers/p07-m05-atomic.py"
@@ -880,10 +881,10 @@ ensure_m05_current() {
     installed="$(readlink "$M05_ROOT/current")"
     case "$installed" in
       "releases/$M05_BUILD_EXPECTED") return 0 ;;
-      "releases/$M05_UPGRADE_FROM"|"releases/$M05_UPGRADE_FROM2"|"releases/$M05_UPGRADE_FROM3"|"releases/$M05_UPGRADE_FROM4"|"releases/$M05_UPGRADE_FROM5")
+      "releases/$M05_UPGRADE_FROM"|"releases/$M05_UPGRADE_FROM2"|"releases/$M05_UPGRADE_FROM3"|"releases/$M05_UPGRADE_FROM4"|"releases/$M05_UPGRADE_FROM5"|"releases/$M05_UPGRADE_FROM6")
         upgrade_from="${installed#releases/}"
         say "${C_CYAN}P07-M05 新服务器初始化：发现已验证的旧版 $upgrade_from。${C_RESET}"
-        say "新版 $M05_BUILD_EXPECTED 提供已有 CloudPanel 的通用重装两阶段向导和数据库选择；旧系统不原地清盘，干净新系统才能真正安装。"
+        say "新版 $M05_BUILD_EXPECTED 修复已有 CloudPanel 上提前选库却不能安装的问题；旧系统仅提示风险和重装前准备，干净新系统才实际选库安装。"
         say "仅更新 M05 自己的程序文件；保留旧版本，可回滚。不执行系统更新、Swap 补齐或 CloudPanel 安装。"
         if [[ ! -t 0 || ! -t 1 ]]; then
           say "${C_YELLOW}升级需要本人在交互式终端确认；本次不变更。${C_RESET}"
