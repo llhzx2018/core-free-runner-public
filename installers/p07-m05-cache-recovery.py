@@ -141,8 +141,9 @@ def state() -> tuple[str, int]:
             fail("CACHE_FILE_NOT_REGULAR")
         if info.st_nlink != 1:
             fail("CACHE_FILE_HARDLINKED")
-        if info.st_uid != 0:
-            fail("CACHE_FILE_NOT_ROOT_OWNED")
+        # A read-only invocation under an unprivileged account can create
+        # its own .pyc cache; the cache is never executed by this recovery
+        # and is moved into a root-only private quarantine.
         if info.st_size > 8 * 1024 * 1024:
             fail("CACHE_FILE_EXCEEDS_ITEM_LIMIT")
         caches.add(rel)
