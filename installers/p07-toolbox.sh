@@ -30,6 +30,8 @@ VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
 VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release115"
 VF_SERVER_OPS_INSTALLER_REF="1986fc0526f583a3a152d92980e21519926bc926"
 VF_SERVER_OPS_INSTALLER_BLOB="c49b26eb900960eeaf3992eaa95f3d3a9a4feb31"
+# Exact stable P07-M03 runtime manifest; reject a self-edited manifest before execution.
+VF_SERVER_OPS_MANIFEST_BLOB="4acbaca22aac0da681b34376e2cc86d876593181"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07.sh"
 M03_ROLLBACK_INSTALLER_REF="70836f5bba98e8d4ff32ccb6541b4ca1ffc80912"
 M03_ROLLBACK_INSTALLER_BLOB="9571833c4e8a1d737ee47a60e946a030d94c8157"
@@ -362,7 +364,7 @@ local_server_ops_build() {
 }
 
 m03_verified_current() {
-  local root='/opt/vf-server-ops' entry expected name actual count=0
+  local root='/opt/vf-server-ops' entry entry_rel expected name actual count=0
   [[ -d "$root" && ! -L "$root" ]] || return 1
   command -v vfops >/dev/null 2>&1 || return 1
   entry="$(readlink -f "$(command -v vfops)" 2>/dev/null || true)"
@@ -375,9 +377,12 @@ m03_verified_current() {
      ! -L "$root/.runtime-manifest.gitblob" ]] || return 1
   local installed
   installed="$(cat "$root/BUILD_ID")"
-  [[ "$installed" =~ ^[A-Za-z0-9._-]+$ ]] || return 1
-  [[ "$(NO_COLOR=1 vfops --build-id 2>/dev/null || true)" == "$installed" ]] || return 1
-  [[ "$(NO_COLOR=1 vfops --version 2>/dev/null || true)" == "$VF_SERVER_OPS_EXPECTED" ]] || return 1
+  # This menu selects the pinned public stable M03, never an older trial
+  # or a different future build masquerading as release115.
+  [[ "$installed" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]] || return 1
+  # A mutable manifest checking mutable files against itself is NOT trusted.
+  # Verify the immutably published manifest before parsing or executing M03.
+  [[ "$(p07_git_blob_sha1 "$root/.runtime-manifest.gitblob" 2>/dev/null || true)" == "$VF_SERVER_OPS_MANIFEST_BLOB" ]] || return 1
   declare -A seen=()
   while read -r expected name; do
     [[ -n "$expected" && -n "$name" ]] || continue
@@ -392,7 +397,14 @@ m03_verified_current() {
     count=$((count + 1))
     [[ "$count" -le 240 ]] || return 1
   done < "$root/.runtime-manifest.gitblob"
-  [[ "$count" -ge 50 ]]
+  [[ "$count" -ge 50 ]] || return 1
+  # The CLI that will execute must itself be in the verified manifest.
+  entry_rel="${entry#/opt/vf-server-ops/}"
+  [[ -v seen[$entry_rel] ]] || return 1
+  # Only after the pinned manifest and runtime tree pass may root execute
+  # even harmless-looking --build-id/--version calls from the installed tree.
+  [[ "$(NO_COLOR=1 vfops --build-id 2>/dev/null || true)" == "$installed" ]] || return 1
+  [[ "$(NO_COLOR=1 vfops --version 2>/dev/null || true)" == "$VF_SERVER_OPS_EXPECTED" ]]
 }
 
 ensure_server_ops_current() {
