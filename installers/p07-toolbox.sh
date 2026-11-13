@@ -703,7 +703,9 @@ m05_verified_current() {
   [[ "$link" =~ ^releases/([A-Za-z0-9._-]+)$ ]] || return 1
   installed="${BASH_REMATCH[1]}"
   [[ -d "$M05_ROOT/releases/$installed" &&
-     ! -L "/opt/vfops-modules/m05/releases/$installed" ]] || return 1
+     ! -L "$M05_ROOT" &&
+     ! -L "$M05_ROOT/releases" &&
+     ! -L "$M05_ROOT/releases/$installed" ]] || return 1
   command -v python3 >/dev/null 2>&1 || return 1
   # Read-only module-own manifest, NOT the Toolbox's hardcoded bootstrap build:
   # a properly upgraded local M05 can continue working without changing M01-M04.
@@ -711,7 +713,14 @@ m05_verified_current() {
 import hashlib,json,pathlib,re,sys
 root,build=pathlib.Path(sys.argv[1]),sys.argv[2]
 try:
-    manifest=root/"MODULE_MANIFEST.json"
+    # The "current" symlink was checked by Bash. Never trust a second
+    # symlink in the module root, release directory, or any unpacked parent.
+    # An undeclared file can otherwise be imported by a verified launcher.
+    release=root.parent/"releases"/build
+    for owned in (root.parent.parent,root.parent,release.parent,release):
+        if owned.is_symlink() or not owned.is_dir():
+            raise ValueError("release path")
+    manifest=release/"MODULE_MANIFEST.json"
     if manifest.is_symlink() or not manifest.is_file():
         raise ValueError("manifest")
     data=json.loads(manifest.read_text(encoding="utf-8"))
@@ -731,6 +740,25 @@ try:
     if not {"bin/vfops-init-entry","bin/vfops-init-ui",
             "bin/vfops-init-core","MODULE_ID","MODULE_BUILD_ID"}.issubset(files):
         raise ValueError("expected")
+    # Byte identity only covers declared content. Reject undeclared files,
+    # directory substitutions and untracked dirs before running --version.
+    file_names=set()
+    directory_names=set()
+    for item in release.rglob("*"):
+        rel=item.relative_to(release).as_posix()
+        if item.is_symlink():
+            raise ValueError("symlink")
+        if item.is_dir():
+            directory_names.add(rel)
+        elif item.is_file():
+            file_names.add(rel)
+        else:
+            raise ValueError("special node")
+    expected_dirs={str(parent) for name in files for parent in
+                   pathlib.PurePosixPath(name).parents
+                   if str(parent)!="."}
+    if file_names!=set(files)|{"MODULE_MANIFEST.json"} or directory_names!=expected_dirs:
+        raise ValueError("unlisted payload")
     for name,digest in files.items():
         if not isinstance(name,str) or not isinstance(digest,str):
             raise ValueError("types")
@@ -740,7 +768,7 @@ try:
             or not (name.startswith(("bin/","lib/")) or name in
                     ("VERSION","BUILD_ID","MODULE_ID","MODULE_BUILD_ID"))):
             raise ValueError("path")
-        item=root/name
+        item=release/name
         if item.is_symlink() or not item.is_file():
             raise ValueError("file")
         if hashlib.sha256(item.read_bytes()).hexdigest()!=digest:
