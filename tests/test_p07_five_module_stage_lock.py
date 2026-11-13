@@ -194,7 +194,7 @@ class StageLock(unittest.TestCase):
 
     def test_m05_integrity_checks_full_tree_before_executing_launcher(self):
         source=self.toolbox
-        guard=source.split("m05_verified_current() {",1)[1].split("\\n}\\n",1)[0]
+        guard=source.split("m05_verified_current() {",1)[1].split("\n}\n",1)[0]
         for required in (
             '! -L "$M05_ROOT"',
             '! -L "$M05_ROOT/releases"',
