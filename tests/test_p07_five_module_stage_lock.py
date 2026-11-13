@@ -104,6 +104,24 @@ def verify(stage,toolbox):
             if (m["final_installer_source_ref"] not in final or
                 m["final_installer_blob"] not in final):
                 raise ValueError("M03 nested final installer mismatch")
+            # A self-edited manifest must never authorize arbitrary root CLI
+            # execution; the selected stable M03 build is an exact locked source.
+            m03_guard=toolbox.split("m03_verified_current() {",1)[1].split("\n}\n",1)[0]
+            pin='VF_SERVER_OPS_MANIFEST_BLOB="'+m["package_identity_digest"]+'"'
+            if pin not in toolbox:
+                raise ValueError("M03 stable manifest pin absent")
+            gate_order=[
+                '[[ "$installed" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]] || return 1',
+                '[[ "$(p07_git_blob_sha1 "$root/.runtime-manifest.gitblob" 2>/dev/null || true)" == "$VF_SERVER_OPS_MANIFEST_BLOB" ]] || return 1',
+                'done < "$root/.runtime-manifest.gitblob"',
+                '[[ "$count" -ge 50 ]] || return 1',
+                '[[ -v seen[$entry_rel] ]] || return 1',
+                'NO_COLOR=1 vfops --build-id',
+                'NO_COLOR=1 vfops --version',
+            ]
+            indices=[m03_guard.find(token) for token in gate_order]
+            if any(i<0 for i in indices) or indices!=sorted(indices) or len(set(indices))!=len(indices):
+                raise ValueError("M03 may execute before exact pinned integrity check")
             if m.get("rollback_scope")!="M03_RUNTIME_ONLY_NO_SITE_OR_DATABASE_RESTORE":
                 raise ValueError("M03 rollback contract must exclude business data")
             if m.get("previous_snapshot_protection")!="NEVER_OVERWRITE_OR_DELETE":
@@ -233,6 +251,25 @@ class StageLock(unittest.TestCase):
         self.assertIn("系统更新/CloudPanel/数据库选择",self.toolbox)
         self.assertIn("--modules) modules_status_readonly",self.toolbox)
         self.assertIn("P07-M05 新服务器初始化",self.toolbox)
+
+    def test_m03_never_runs_unverified_or_foreign_current_runtime(self):
+        self.assertTrue(verify(self.stage,self.toolbox))
+        # Release-115 must be checked against immutable bytes, not only a
+        # self-maintained local SHA list. Four other module pins are untouched.
+        for needle in (
+            '[[ "$installed" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]] || return 1',
+            '[[ "$(p07_git_blob_sha1 "$root/.runtime-manifest.gitblob" 2>/dev/null || true)" == "$VF_SERVER_OPS_MANIFEST_BLOB" ]] || return 1',
+            '[[ -v seen[$entry_rel] ]] || return 1',
+        ):
+            with self.subTest(missing=needle):
+                bad=self.toolbox.replace(needle,"# removed proof",1)
+                with self.assertRaisesRegex(ValueError,"M03 may execute before exact pinned integrity check"):
+                    verify(self.stage,bad)
+        # The manifest pin is tied to the exact current stable module stage.
+        bad=self.toolbox.replace('VF_SERVER_OPS_MANIFEST_BLOB="4acbaca22aac0da681b34376e2cc86d876593181"',
+                                 'VF_SERVER_OPS_MANIFEST_BLOB="0000000000000000000000000000000000000000"',1)
+        with self.assertRaisesRegex(ValueError,"M03 stable manifest pin absent"):
+            verify(self.stage,bad)
 
 
 if __name__=="__main__":
