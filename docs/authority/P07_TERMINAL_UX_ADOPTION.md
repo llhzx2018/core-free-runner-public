@@ -1,4 +1,4 @@
-# P07 · 服务器工具箱 · 公共入口终端 UX V3 强制接线
+# P07 · 服务器工具箱 · Public Terminal UX V3 强制接线
 
 > CURRENT PUBLIC P07 UI APPLICABILITY / REQUIRED。唯一项目规范：[`vf-server-ops/docs/authority/P07_TERMINAL_UX_STANDARD_V3.md`](https://github.com/llhzx2018/vf-server-ops/blob/main/docs/authority/P07_TERMINAL_UX_STANDARD_V3.md)。模块与子模块以 [P07 UX 机器矩阵](https://github.com/llhzx2018/vf-server-ops/blob/main/docs/authority/P07_TERMINAL_UX_MODULES_V1.json) 为准。本文件只记录**公共分发仓的接线**，不创建第二份 UX 标准。
 
@@ -6,8 +6,8 @@
 
 - 公共 Toolbox `installers/p07-toolbox.sh`：五项一级入口、按需分发、用户确认与错误反馈（统一入口，绝不自动跨模块升级）。
 - **P07-M01 网络代理节点（V2Ray）**：`installers/vf-node.sh` 及同模块后续用户交互入口。
-- **P07-M02 服务器性能检测（VPS 验机）**：公共 Toolbox 调用独立 VPS Audit 正式资源；未来 `experiments/p07-vps-audit-*.sh`、`installers/p07-vpscheck.sh` 的普通交互。原 `v21` 属于 Toolbox **固定 Git commit** 的历史发行资源，公共 `main` 无同名文件不是可将本模块标为无 UX 的理由。
-- **P07-M03 网站与数据**：`installers/p07.sh` 调度和公共分发提示；实际 D01 概况、D02 备份、D03 恢复、D04 服务器迁移的终端运行时由 P07 产品仓的同一 UX V3 Gate 约束。
+- **P07-M02 服务器性能检测（VPS 验机）**：公共 Toolbox 调用独立 VPS Audit 正式资源；未来 `experiments/p07-vps-audit-*.sh`、`installers/p07-vpscheck.sh` 的普通交互。原 `experiments/p07-vps-audit-v21.sh` 属于 Toolbox **固定 Git commit** 的历史发行资源，公共 `main` 无同名文件不是可将本模块标为无 UX 的理由。
+- **P07-M03 网站与数据**：`installers/p07.sh` 调度和公共分发提示；实际 P07-M03-D01 网站与数据概况、P07-M03-D02 网站备份、P07-M03-D03 网站恢复、P07-M03-D04 服务器迁移的终端运行时由 P07 产品仓的同一 UX V3 Gate 约束。
 - **P07-M04 服务器维护与安全**：`installers/p07-system-care.sh` 和本模块对用户可见的分发/提示。
 - **P07-M05 新服务器初始化**：公共 Toolbox 对 M05 的升级确认与安装状态；实际 `bin/vfops-init-ui` 由 P07 产品仓负责，公共层不得冒称其已通过现场 UX 验收。
 
