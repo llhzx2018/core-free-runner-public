@@ -1,0 +1,117 @@
+name: P07 five modules current-source pre-release package checks
+on:
+  push:
+    branches: [test/p07-five-modules-ux-upgrade-preflight-20261113]
+    paths:
+      - .github/workflows/p07-five-modules-ux-upgrade-preflight-20261113.yml
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Exact public module candidate checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: d46326df97d9bde6112d5505dac68aeda0c930d5
+          persist-credentials: false
+          path: public
+      - name: Temporary exact private P07 source checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 6c49886b8dda5df6d4959bc5f7a9dd1e41edd6c7
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Test real module manifest and version identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C public rev-parse HEAD)" = d46326df97d9bde6112d5505dac68aeda0c930d5
+          test "$(git -C product rev-parse HEAD)" = 6c49886b8dda5df6d4959bc5f7a9dd1e41edd6c7
+          (cd public/packages/p07-network-node/0.1.0-ux1 && sha256sum -c MANIFEST.sha256 >/dev/null)
+          test "$(bash public/packages/p07-network-node/0.1.0-ux1/vf-node.sh --version | awk '{print $NF}')" = 0.1.0-ux1
+          echo P07_M01_NETWORK_NODE_CANDIDATE_MANIFEST=PASS
+          test "$(bash public/experiments/p07-vps-audit-v21-ux1.sh --build-id)" = 2.1.1-ux1
+          bash -n public/experiments/p07-vps-audit-v21-ux1.sh
+          echo P07_M02_VPS_AUDIT_CANDIDATE_IDENTITY=PASS
+          (cd public/packages/p07-system-care/0.1.0-ux2 && while read -r hash file; do test "$(git hash-object "$file")" = "$hash"; done < MANIFEST.gitblob)
+          test "$(bash public/packages/p07-system-care/0.1.0-ux2/vf-system-care.sh --version | awk '{print $NF}')" = 0.1.0-ux2
+          echo P07_M04_SYSTEM_CARE_CANDIDATE_MANIFEST=PASS
+          test "$(cat product/BUILD_ID)" = 0.1.0-release135
+          test "$(grep '^VF_SERVER_OPS_BUILD_EXPECTED=' public/installers/p07-toolbox.sh | cut -d '"' -f2)" = 0.1.0-release115
+          echo P07_M03_WEBSITE_DATA_UPGRADE_NOT_DISTRIBUTED=YES
+          test "$(grep '^M05_BUILD_EXPECTED=' public/installers/p07-toolbox.sh | cut -d '"' -f2)" = 0.1.0-m05-no-fake-reinstall1
+          echo P07_M05_NEW_SERVER_UX_NOT_DISTRIBUTED=YES
+      - name: Build new P07-M05 and recover old official release asset
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export PYTHONDONTWRITEBYTECODE=1
+          python3 -B product/scripts/build_p07_m05_bundle.py --output "$RUNNER_TEMP/new.zip" > "$RUNNER_TEMP/build-private.json"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --retry 2 --max-time 120 \
+            'https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-no-fake-reinstall1-20261113/P07-M05-0.1.0-m05-no-fake-reinstall1.zip' \
+            -o "$RUNNER_TEMP/old.zip"
+          echo "b522367a66e51092eaa003cc264b1a15c9bddc9a36d4bb6d480c71a13223738d  $RUNNER_TEMP/old.zip" | sha256sum -c - >/dev/null
+          echo P07_M05_OLD_OFFICIAL_ZIP_AUTHENTIC=PASS
+      - name: Real isolated old-to-new P07-M05 atomic install and rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export PYTHONDONTWRITEBYTECODE=1
+          python3 -B - <<'PY'
+          import hashlib, importlib.util, os, tempfile
+          from pathlib import Path
+          root=Path(os.environ["GITHUB_WORKSPACE"])
+          temp=Path(os.environ["RUNNER_TEMP"])
+          spec=importlib.util.spec_from_file_location("m05",root/"public/installers/p07-m05-atomic.py")
+          m=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(m)
+          old=temp/"old.zip"; new=temp/"new.zip"
+          oldsum="b522367a66e51092eaa003cc264b1a15c9bddc9a36d4bb6d480c71a13223738d"
+          newsum=hashlib.sha256(new.read_bytes()).hexdigest()
+          oldid,_=m.read_verified_archive(old,oldsum)
+          newid,_=m.read_verified_archive(new,newsum)
+          assert oldid=="0.1.0-m05-no-fake-reinstall1"
+          assert newid=="0.1.0-m05-compact-ux1"
+          with tempfile.TemporaryDirectory(prefix="p07-m05-atomic-preflight-") as t:
+              m.BASE=Path(t)/"vfops-modules"
+              m.os.geteuid=lambda:0
+              markers={}
+              for id in ("m01","m02","m03","m04"):
+                  folder=m.BASE/id; folder.mkdir(parents=True)
+                  marker=folder/"marker"; marker.write_text("KEEP")
+                  markers[id]=marker
+              assert m.install(old,oldsum)==oldid
+              current=m.BASE/"m05/current"
+              assert os.readlink(current)=="releases/"+oldid
+              try: m.install(new,"0"*64)
+              except m.Unsafe: pass
+              else: raise AssertionError("bad checksum accepted")
+              assert os.readlink(current)=="releases/"+oldid
+              assert m.install(new,newsum)==newid
+              assert m.install(new,newsum)==newid
+              assert os.readlink(current)=="releases/"+newid
+              try: m.rollback(oldid,"WRONG-CONFIRMATION")
+              except m.Unsafe: pass
+              else: raise AssertionError("unconfirmed rollback accepted")
+              assert os.readlink(current)=="releases/"+newid
+              assert m.rollback(oldid,"P07-M05:"+oldid)==oldid
+              assert os.readlink(current)=="releases/"+oldid
+              assert m.install(new,newsum)==newid
+              assert os.readlink(current)=="releases/"+newid
+              for marker in markers.values(): assert marker.read_text()=="KEEP"
+          print("P07_M05_NEW_SERVER_OLD_TO_UX_UPGRADE_BAD_HASH_IDEMPOTENT_ROLLBACK=PASS")
+          print("P07_ALL_FOUR_SIBLING_MODULE_MARKERS=UNCHANGED")
+          print("P07_OWNER_PRODUCTION=NOT_RUN")
+          PY
+      - name: Always erase all transient private sources and packages
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- product public
+          rm -f -- "$RUNNER_TEMP/new.zip" "$RUNNER_TEMP/old.zip" "$RUNNER_TEMP/build-private.json"
+          echo P07_PRIVATE_SOURCE_PERSISTED=NO
