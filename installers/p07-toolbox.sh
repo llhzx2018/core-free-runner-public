@@ -66,6 +66,10 @@ M05_BUNDLE_SHA256="b2b72275980f7c2220f0c95fce18f644967bd69a17fa0a8320f96149a4096
 M05_OFFLINE_TRIAL_SHA256="e42b6b3c59719f6ec189e4c62b7cfc54385aaa6e566c8f92ca5306246f022bbb"
 M05_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/35e3fbcb1e8c40042558f9f163e4215570074793/installers/p07-m05-atomic.py"
 M05_INSTALLER_BLOB="17e47121ac27f31162d93a72aa0b1dbea602ea01"
+# Read-only first; on exact cache-only diagnosis, Owner can explicitly quarantine
+# generated *.pyc from an otherwise byte-identical M05 release. Never delete.
+M05_CACHE_RECOVERY_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/58f3db5546db4634f283a98c9b4f88b9574ede6a/installers/p07-m05-cache-recovery.py"
+M05_CACHE_RECOVERY_BLOB="f2fcfacc60ae1abd10056f47afed300fed8963e5"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
 if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
@@ -782,8 +786,93 @@ PY
   [[ "$actual_version" == "P07-M05 新服务器初始化 $installed" ]]
 }
 
+
+# P07-M05 新服务器初始化 · identity-failure diagnostic and narrowly scoped
+# recovery of generated CPython cache ONLY. No foreign runtime overwrite.
+m05_try_cache_only_recovery() {
+  local helper='' actual='' inspection='' build='' count='' answer='' reason=''
+  if [[ "$(id -u)" != "0" ]]; then
+    say "${C_RED}P07-M05：身份异常需要 root 只读诊断；没有任何修改。${C_RESET}" >&2
+    return 13
+  fi
+  for cmd in curl python3 mktemp; do
+    command -v "$cmd" >/dev/null 2>&1 || return 13
+  done
+  helper="$(mktemp -t p07-m05-cache-recovery.XXXXXXXX)" || return 13
+  chmod 0600 "$helper"
+  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+        --location --max-time 60 "$M05_CACHE_RECOVERY_URL" -o "$helper"; then
+    rm -f "$helper"
+    say "${C_RED}P07-M05：只读诊断工具无法下载，原模块保持不变。${C_RESET}" >&2
+    return 13
+  fi
+  actual="$(p07_git_blob_sha1 "$helper" 2>/dev/null || true)"
+  if [[ "$actual" != "$M05_CACHE_RECOVERY_BLOB" ]]; then
+    rm -f "$helper"
+    say "${C_RED}P07-M05：诊断工具校验不一致，已安全停止。${C_RESET}" >&2
+    return 13
+  fi
+  if ! inspection="$(python3 -B "$helper" inspect 2>&1)"; then
+    rm -f "$helper"
+    reason="$(printf '%s\n' "$inspection" | sed -n 's/^P07_M05_REPAIR_REASON=//p' | head -n1)"
+    case "$reason" in
+      MODULE_CODE_DIGEST_MISMATCH|MODULE_FILE_TYPE_MISMATCH|MODULE_UNLISTED_RUNTIME_FILE|MODULE_UNEXPECTED_SYMLINK)
+        say "${C_RED}P07-M05：不是单纯缓存，检测到模块代码/文件异常；拒绝自动修复。${C_RESET}" >&2 ;;
+      CURRENT_NOT_MODULE_SYMLINK|CURRENT_LINK_UNSAFE|UNSUPPORTED_LOCAL_BUILD)
+        say "${C_RED}P07-M05：版本指针或原版身份未通过验证；不替换旧文件。${C_RESET}" >&2 ;;
+      *)
+        say "${C_RED}P07-M05：只读诊断不能证明缓存是唯一异常；已停止。${C_RESET}" >&2 ;;
+    esac
+    [[ -z "$reason" ]] || say "只读诊断代码：$reason"
+    return 13
+  fi
+  if ! grep -Fxq 'P07_M05_REPAIR_STATUS=CACHE_ONLY' <<<"$inspection"; then
+    rm -f "$helper"
+    say "${C_RED}P07-M05：未检测到可单独恢复的 Python 缓存；仍拒绝覆盖。${C_RESET}" >&2
+    return 13
+  fi
+  build="$(printf '%s\n' "$inspection" | sed -n 's/^P07_M05_REPAIR_BUILD=//p' | head -n1)"
+  count="$(printf '%s\n' "$inspection" | sed -n 's/^P07_M05_REPAIR_PYC_COUNT=//p' | head -n1)"
+  if [[ ! "$build" =~ ^[A-Za-z0-9._-]+$ || ! "$count" =~ ^[0-9]{1,3}$ ]]; then
+    rm -f "$helper"; return 13
+  fi
+  say "${C_YELLOW}P07-M05：已验证模块源码/清单正确，仅多出 $count 个 Python 自动缓存。${C_RESET}"
+  say '可以只将本模块的缓存保存到私有隔离目录，不删除文件、不修改版本指针、不碰网站/数据库。'
+  if [[ ! -t 0 || ! -t 1 ]]; then
+    rm -f "$helper"
+    say '仅在 Owner 的交互式 SSH 终端确认后才允许缓存隔离。'
+    return 13
+  fi
+  printf '确认仅隔离 M05 Python 缓存并重新校验？[y/N]：'
+  read -r answer || answer=''
+  if [[ ! "$answer" =~ ^[Yy]$ ]]; then
+    rm -f "$helper"
+    say '已取消；原版本与所有数据未变。'
+    return 13
+  fi
+  if ! python3 -B "$helper" recover --build "$build" \
+        --confirm "P07-M05:CACHE:$build"; then
+    rm -f "$helper"
+    say "${C_RED}P07-M05：缓存隔离未完成；拒绝继续安装/升级。${C_RESET}" >&2
+    return 13
+  fi
+  rm -f "$helper"
+  if ! m05_verified_current; then
+    say "${C_RED}P07-M05：隔离后完整性检查仍未通过；未运行模块。${C_RESET}" >&2
+    return 13
+  fi
+  say "${C_GREEN}P07-M05：缓存已单独保存，原模块完整性恢复 ✓${C_RESET}"
+  return 0
+}
+
 ensure_m05_current() {
   local installed='' upgrade_response='' upgrade_from=''
+  # Do not turn a cache-only self-rejection into an unlimited overwrite:
+  # first verify all declared M05 files byte-for-byte, then Owner may move
+  # only generated Python caches aside (no deletion, no other modules).
+  if ! m05_verified_current && [[ -e "$M05_ROOT/current" || -L "$M05_ROOT/current" ]]; then
+    m05_try_cache_only_recovery || return $?
+  fi
   if m05_verified_current; then
     installed="$(readlink "$M05_ROOT/current")"
     case "$installed" in
