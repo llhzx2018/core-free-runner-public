@@ -90,6 +90,58 @@ jobs:
           bash /tmp/m05-verify.sh
           test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-clean-host-guard1
           echo "P07_M05_OLD_VERIFIED_CACHE_MOVED_NOT_DELETED=$n"
+      - name: Actual Toolbox prompt in synthetic PTY refuses and repairs only on Owner Y
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash /opt/vfops-modules/m05/current/bin/vfops-init-core server-migrate target-status >/dev/null
+          test -d /opt/vfops-modules/m05/current/lib/__pycache__
+          python3 - <<'PY'
+          import os,pty,select,signal,tempfile,time
+          from pathlib import Path
+          source=Path('installers/p07-toolbox.sh').read_text()
+          marker='\ncase "'+chr(36)+'{1:-}" in'
+          assert source.count(marker)==1
+          with tempfile.TemporaryDirectory(prefix='m05-owner-cache-') as tmp:
+            script=Path(tmp)/'check.sh'
+            script.write_text(source.split(marker)[0]+'\nensure_m05_current\n')
+            prompt='确认仅隔离 M05 Python 缓存并重新校验？[y/N]：'.encode()
+            def check(answer):
+              pid,pty_master=pty.fork()
+              if pid==0:
+                os.execvp('sudo',['sudo','bash',str(script)])
+              log=b'';answered=False;deadline=time.monotonic()+60
+              while time.monotonic()<deadline:
+                r,_,_=select.select([pty_master],[],[],0.2)
+                if r:
+                  try: chunk=os.read(pty_master,8192)
+                  except OSError:
+                    _,st=os.waitpid(pid,0);os.close(pty_master)
+                    return os.waitstatus_to_exitcode(st),log.decode(errors='replace'),answered
+                  if not chunk:
+                    _,st=os.waitpid(pid,0);os.close(pty_master)
+                    return os.waitstatus_to_exitcode(st),log.decode(errors='replace'),answered
+                  log+=chunk
+                  if answer and not answered and prompt in log:
+                    os.write(pty_master,(answer+'\n').encode());answered=True
+                done,st=os.waitpid(pid,os.WNOHANG)
+                if done:
+                  os.close(pty_master)
+                  return os.waitstatus_to_exitcode(st),log.decode(errors='replace'),answered
+              os.kill(pid,signal.SIGKILL);os.waitpid(pid,0);os.close(pty_master)
+              raise RuntimeError('interactive recovery test timed out')
+            code,log,got=check('n')
+            assert code!=0 and got and '已取消' in log,(code,log[-1800:])
+            assert Path('/opt/vfops-modules/m05/current/lib/__pycache__').is_dir()
+            print('P07_M05_INTERACTIVE_OWNER_NO_PRESERVES_CACHE=PASS')
+            code,log,got=check('y')
+            assert code==0 and got and '缓存已单独保存' in log,(code,log[-2100:])
+            assert not Path('/opt/vfops-modules/m05/current/lib/__pycache__').exists()
+            print('P07_M05_INTERACTIVE_OWNER_YES_QUARANTINES_CACHE=PASS')
+          PY
+          bash /tmp/m05-verify.sh
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-clean-host-guard1
+          echo P07_M05_TOOLBOX_OWNER_CONFIRMED_CACHE_ONLY_RECOVERY=PASS
       - name: New exact M05 candidate survives first use, rollback and corruption protection
         shell: bash
         run: |
