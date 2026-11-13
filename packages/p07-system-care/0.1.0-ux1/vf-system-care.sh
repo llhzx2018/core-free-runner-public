@@ -40,18 +40,18 @@ HELP
 
 show_header() {
   screen_clear
-  ui_title "服务器维护与安全  ${VERSION}"
+  ui_title '服务器维护与安全'
   local health advisory evidence
   cache_get summary STATUS health
   cache_get summary SECURITY_ADVISORIES advisory
   cache_get intrusion STATUS evidence
   if [[ "$health" == ATTENTION ]]; then
-    ui_attention '服务器有项目需检查，可选择 1 查看'
+    ui_attention '服务器有待检查项'
   elif [[ "$health" == HEALTHY ]]; then
-    ui_good '服务器检查：正常'
+    ui_good '服务器状态：正常'
   fi
   if [[ "$evidence" == ATTENTION || "$evidence" == FAILED ]]; then
-    ui_attention '网站安全有项目需要处理，可选择 6 查看'
+    ui_attention 'WordPress 安全需检查'
   fi
   say
 }
@@ -140,7 +140,7 @@ resource_flow_beginner() {
     return 0
   fi
   say
-  printf '按 Enter 返回；输入 A 申请安全应用：'
+  printf '按 Enter 返回；输入 A 申请执行安全应用：'
   read -r choice || return 0
   if [[ "$choice" == [Aa] ]]; then
     say
@@ -159,25 +159,29 @@ vfops_build_current() {
 
 ensure_vfops_tools() {
   local required="$1"
-  if [[ -x "$VFOPS_DIR/bin/$required" && "$(vfops_build_current 2>/dev/null || true)" == "$VFOPS_BUILD_EXPECTED" ]]; then
+  if [[ -x "$VFOPS_DIR/bin/$required" &&
+        "$(vfops_build_current 2>/dev/null || true)" == "$VFOPS_BUILD_EXPECTED" ]]; then
     return 0
   fi
-  command -v curl >/dev/null 2>&1 || { fail '缺少下载工具 curl，无法准备服务器工具箱运行文件。'; return 1; }
-  local tmp
-  tmp="$(mktemp -t p07-shared-runtime.XXXXXX)"
-  ui_note '正在同步当前正式版服务器工具箱运行文件...'
-  if ! curl -fsSL "$VFOPS_INSTALLER" -o "$tmp"; then
-    rm -f "$tmp"; fail '服务器工具箱运行文件下载失败。'; return 1
+  ui_attention '相关历史功能暂未就绪，请先从工具箱进入「网站与数据」。'
+  ui_note '本模块不会自动安装或升级网站与数据。'
+  return 1
+}
+
+m04_module_selfcheck() {
+  local file failed=0
+  ui_page '检查维护模块'
+  for file in vf-system-care.sh status.sh audit.sh updates.sh cleanup.sh security-audit.sh; do
+    if [[ ! -f "$SCRIPT_DIR/$file" ]] || ! bash -n "$SCRIPT_DIR/$file" >/dev/null 2>&1; then
+      ui_attention "文件异常：$file"
+      failed=1
+    fi
+  done
+  if [[ "$failed" -eq 0 ]]; then
+    ui_good '本模块文件检查通过（只读，未修改）'
+  else
+    ui_attention '部分文件无法读取或语法不正确；未执行修复。'
   fi
-  if ! P07_NO_EXEC=1 bash "$tmp"; then
-    rm -f "$tmp"; fail '服务器工具箱运行文件准备失败。'; return 1
-  fi
-  rm -f "$tmp"
-  [[ -x "$VFOPS_DIR/bin/$required" ]] || { fail '需要的工具功能仍未就绪。'; return 1; }
-  [[ "$(vfops_build_current 2>/dev/null || true)" == "$VFOPS_BUILD_EXPECTED" ]] || {
-    fail '服务器工具箱版本仍未同步到当前正式版。'
-    return 1
-  }
 }
 
 run_vfops_tool() {
@@ -212,26 +216,21 @@ menu() {
   while true; do
     wordpress_present && has_wordpress=1 || has_wordpress=0
     show_header
-    ui_rule
-    say
-    ui_menu_good 1 '服务器健康检查'
-    ui_menu_warn 2 '系统更新'
-    ui_menu_warn 3 '磁盘空间清理'
-    ui_menu_good 4 '性能配置'
-    ui_menu_warn 5 '服务器登录安全'
+    ui_menu_good 1 '查看服务器状态（只读）'
+    ui_menu_warn 2 '检查并安装系统更新'
+    ui_menu_warn 3 '扫描并清理磁盘空间'
+    ui_menu_good 4 '查看性能配置'
+    ui_menu_warn 5 '检查服务器登录安全'
     if [[ "$has_wordpress" -eq 1 ]]; then
-      ui_menu_info 6 'WordPress 网站安全'
+      ui_menu_info 6 '检查 WordPress 网站安全'
     fi
-    ui_menu_good 7 '工具检查 / 修复'
-    ui_menu_info 8 '最近操作'
-    ui_menu_back 0 '返回'
-    say
-    ui_note '只读检查不改配置；清理、更新和安全应用均需确认。'
-    say
-    printf '%b' "${C_BOLD}请选择 [0-8]：${C_RESET}"
+    ui_menu_good 7 '检查本模块文件（只读）'
+    ui_menu_info 8 '查看最近操作'
+    ui_menu_back 0 '返回工具箱'
+    ui_prompt '请选择 [0-8]：'
     read -r choice || return 0
     case "$choice" in
-      1) run_vfops_tool vfops-diagnostics-ui ;;
+      1) screen_clear; run_action_friendly status.sh quick; pause_menu ;;
       2) updates_flow_beginner ;;
       3) cleanup_flow_beginner ;;
       4) resource_flow_beginner ;;
@@ -240,21 +239,18 @@ menu() {
         if [[ "$has_wordpress" -eq 1 ]]; then
           wordpress_flow_beginner
         else
-          warn '当前没有检测到 WordPress 网站。'
-          sleep 1
-        fi
-        ;;
-      7) run_vfops_tool vfops-selfcheck-ui ;;
+          ui_attention '未发现 WordPress 网站，未执行扫描。'
+        fi ;;
+      7) screen_clear; m04_module_selfcheck; pause_menu ;;
       8) run_vfops_tool vfops-history-ui ;;
       0) return 0 ;;
-      *) warn '无效选择，请输入 0-8。'; sleep 1 ;;
+      *) ui_attention '无效选择，请输入 0-8。' ;;
     esac
   done
 }
-
 case "${1:-menu}" in
   --version|-V) printf '服务器维护与安全 %s\n' "$VERSION" ;;
-  --ui-contract) printf 'P07_BEGINNER_ZH_V1\n' ;;
+  --ui-contract) printf 'P07_TERMINAL_UX_V3\n' ;;
   --help|-h) show_help ;;
   status|check) exec bash "$SCRIPT_DIR/status.sh" ;;
   audit) exec bash "$SCRIPT_DIR/audit.sh" ;;
