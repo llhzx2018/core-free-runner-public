@@ -1,0 +1,206 @@
+name: P07-M05 新服务器初始化 · 多厂商重装向导与数据库选择正式发行
+on:
+  push:
+    branches: [release/p07-m05-provider-neutral-reinstall-20261113]
+    paths:
+      - .github/workflows/p07-m05-provider-neutral-formal-20261113.yml
+permissions:
+  contents: read
+jobs:
+  m05-formal-reinstall-plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout public approved installer without stored credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Transient checkout exact merged P07 product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 032b07dbc9f2a00ea85db402fb3ec4edbbb7c501
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Verify exact merged source tree and 61 M05 plus scope regressions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = 032b07dbc9f2a00ea85db402fb3ec4edbbb7c501
+          test "$(git -C product rev-parse HEAD^{tree})" = 57c9a686e571f1c56fa7e5c690ace4e278a22577
+          test "$(git -C product show HEAD:VERSION)" = 0.1.0
+          grep -Fqx 'BUILD_ID = "0.1.0-m05-provider-neutral-reinstall1"' product/scripts/build_p07_m05_bundle.py
+          test -f product/lib/m05_db_options.py
+          grep -Fq 'm05_reinstall_plan()' product/bin/vfops-init-ui
+          grep -Fq '第二阶段：在干净系统上真正安装 CloudPanel' product/bin/vfops-init-ui
+          grep -Fq '备份由用户自行决定' product/bin/vfops-init-ui
+          test ! -e product/lib/m05_vultr_reinstall.py
+          ! grep -Fq 'vultr-reinstall' product/bin/vfops-init-core
+          bash -n product/bin/vfops-init-ui
+          bash -n product/bin/vfops-init-core
+          bash -n product/bin/vfops-init-entry
+          bash -n installers/p07-toolbox.sh
+          export PYTHONDONTWRITEBYTECODE=1
+          (cd product && python3 -B scripts/check_p07_modules.py)
+          (cd product && python3 -B -m unittest discover -s tests -p 'test_p07_m05_*.py' -q)
+          (cd product && python3 -B -m unittest discover -s tests -p 'test_p07_module_contract.py' -q)
+          echo P07_M05_EXACT_MERGED_TREE_AND_RELEVANT_TESTS=PASS
+      - name: Build deterministic M05-only ZIP; strict hash and public payload guard
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dir="$RUNNER_TEMP/p07-m05-provider-release"
+          mkdir -p "$dir"
+          python3 -B product/scripts/build_p07_m05_bundle.py \
+            --output "$dir/P07-M05-0.1.0-m05-provider-neutral-reinstall1.zip" > "$dir/build.json"
+          python3 - <<'PY'
+          import os,pathlib,json,hashlib,zipfile,re,stat
+          root=pathlib.Path(os.environ["RUNNER_TEMP"])/"p07-m05-provider-release"
+          z=root/"P07-M05-0.1.0-m05-provider-neutral-reinstall1.zip"
+          dig=lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+          target="636353ee56d91957e77b8cf3786471f0ecb2aadb6c4f0d51695cd9356164e023"
+          assert dig(z)==target,"source-package hash drift"
+          build=json.loads((root/"build.json").read_text())
+          assert build["module_id"]=="P07-M05" and build["build_id"]=="0.1.0-m05-provider-neutral-reinstall1"
+          assert build["sha256"]==target and build["file_count"]>=89
+          with zipfile.ZipFile(z) as pack:
+              members=pack.infolist()
+              assert pack.testzip() is None and len(members)==build["file_count"]
+              assert len({x.filename for x in members})==len(members)
+              manifest=json.loads(pack.read("p07-m05/MODULE_MANIFEST.json"))
+              assert manifest["schema"]=="vf.p07.module-bundle.v1"
+              assert manifest["module_id"]=="P07-M05"
+              assert manifest["module_build_id"]=="0.1.0-m05-provider-neutral-reinstall1"
+              assert manifest["installation_isolation"]=="P07-M05_ONLY"
+              assert len(manifest["files"])==len(members)-1
+              assert "p07-m05/lib/m05_db_options.py" in pack.namelist()
+              assert b'm05_reinstall_plan()' in pack.read("p07-m05/bin/vfops-init-ui")
+              for item in members:
+                  name=item.filename
+                  assert name.startswith("p07-m05/") and ".." not in pathlib.PurePosixPath(name).parts
+                  assert not item.is_dir() and stat.S_ISREG(item.external_attr>>16)
+                  assert item.file_size<=8*1024*1024
+                  rel=name[len("p07-m05/"):]
+                  assert rel.startswith(("lib/","bin/")) or rel in {"VERSION","BUILD_ID","MODULE_ID","MODULE_BUILD_ID","MODULE_MANIFEST.json"}
+                  data=pack.read(item)
+                  for pattern in (rb"-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----",
+                      rb"(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})",
+                      rb"(?:AKIA|ASIA)[A-Z0-9]{16}",
+                      rb"(?:45\.76\.171\.57|45\.63\.52\.90)"):
+                      assert not re.search(pattern,data),("secret-like payload",name)
+          meta={
+            "schema":"vf.p07.m05.module-formal-release.v1",
+            "module_id":"P07-M05","module_name":"新服务器初始化",
+            "product_repo":"llhzx2018/vf-server-ops",
+            "product_main_sha":"032b07dbc9f2a00ea85db402fb3ec4edbbb7c501",
+            "product_source_tree":"57c9a686e571f1c56fa7e5c690ace4e278a22577",
+            "public_repo":"llhzx2018/core-free-runner-public",
+            "public_release_tag":"p07-m05-v0.1.0-provider-neutral-reinstall1-20261113",
+            "build_id":"0.1.0-m05-provider-neutral-reinstall1",
+            "runtime_asset":z.name,"runtime_sha256":target,
+            "from_builds":["0.1.0-m05-cp-reinstall-plan1"],
+            "other_modules_not_updated":["P07-M01","P07-M02","P07-M03","P07-M04"],
+            "existing_cloudpanel_reinstall_behavior":"owner_two_stage_portable_os_rebuild_then_explicit_clean_os_install",
+            "actual_os_reinstall":"owner_only_vps_console_backup_optional",
+            "owner_production_executed":False,
+            "no_auto_cloudpanel_db_dns":True,
+            "machine_regression":"https://github.com/llhzx2018/core-free-runner-public/actions/runs/43412841224"
+          }
+          mf=root/"P07-M05-PROVIDER-NEUTRAL-RELEASE.json"
+          mf.write_text(json.dumps(meta,ensure_ascii=False,sort_keys=True,indent=2)+"\n")
+          (root/"SHA256SUMS").write_text("".join(dig(p)+"  "+p.name+"\n" for p in (z,mf)))
+          print("P07_M05_CP_REINSTALL_ZIP_SHA256="+target)
+          print("P07_M05_CP_RELEASE_SAFE_ZIP_SCAN=PASS")
+          PY
+      - name: Install real prior public M05, upgrade only M05, verify rollback and unchanged modules
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dir="$RUNNER_TEMP/p07-m05-provider-release"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --max-time 120 \
+            https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-cp-reinstall-plan1-20261113/P07-M05-0.1.0-m05-cp-reinstall-plan1.zip \
+            -o "$dir/old.zip"
+          echo "e8451350d59aff71878924ebd991ae616ab63cc0ebbd893e50a70f87a83137b8  $dir/old.zip" | sha256sum -c --status
+          new="$dir/P07-M05-0.1.0-m05-provider-neutral-reinstall1.zip"
+          target=636353ee56d91957e77b8cf3786471f0ecb2aadb6c4f0d51695cd9356164e023
+          sudo python3 -B installers/p07-m05-atomic.py install "$dir/old.zip" e8451350d59aff71878924ebd991ae616ab63cc0ebbd893e50a70f87a83137b8
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-cp-reinstall-plan1
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$target"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-provider-neutral-reinstall1
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$target"
+          if sudo python3 -B installers/p07-m05-atomic.py install "$new" \
+            0000000000000000000000000000000000000000000000000000000000000000 >/dev/null 2>&1; then
+            echo P07_M05_BAD_DIGEST_WRONGLY_ACCEPTED; exit 13
+          fi
+          sudo env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX \
+            bash /opt/vfops-modules/m05/current/bin/vfops-init-core server-migrate db-engine-options >/dev/null
+          test ! -e /opt/vfops-modules/m05/current/lib/__pycache__
+          for other in m01 m02 m03 m04; do test ! -e "/opt/vfops-modules/$other"; done
+          test ! -e /home/clp
+          sudo python3 -B installers/p07-m05-atomic.py rollback 0.1.0-m05-cp-reinstall-plan1 \
+            --confirm P07-M05:0.1.0-m05-cp-reinstall-plan1
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-cp-reinstall-plan1
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$target"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-provider-neutral-reinstall1
+          for other in m01 m02 m03 m04; do test ! -e "/opt/vfops-modules/$other"; done
+          echo P07_M05_OLD_FORMAL_TO_NEW_ATOMIC_AND_ROLLBACK=PASS
+          echo P07_M05_FOUR_OTHER_MODULES_UNCHANGED=YES
+          echo P07_OWNER_PRODUCTION=NOT_RUN
+      - name: Publish immutable official product and public Releases and remote byte readback
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN" || { echo P07_M05_RELEASE_WRITE_CAPABILITY_MISSING; exit 13; }
+          tag=p07-m05-v0.1.0-provider-neutral-reinstall1-20261113
+          dir="$RUNNER_TEMP/p07-m05-provider-release"
+          cat > "$dir/release-notes.md" <<'EOF'
+          P07-M05 新服务器初始化 · 多厂商通用 CloudPanel 重装向导与数据库选择新版。
+          用户在已有 CloudPanel 的服务器上选择“重装 CloudPanel（包括已有安装）”后，会得到两阶段路径：
+          第一阶段在任意 VPS 厂商控制台由 Owner 手工重新安装干净 OS，从而删除旧 CloudPanel 与原网站/数据库；
+          第二阶段重新 SSH 登录同一 VPS，运行唯一公共工具箱，进入 M05 → 1，选择 MySQL/MariaDB 并确认执行官方 CloudPanel 安装。
+          备份仅提示风险并由用户自己决定，如需备份使用独立 P07-M03 网站与数据模块；不会强制备份或执行数据恢复。
+          不采用 Vultr/AWS/任何厂商 API 或要求 Token，不在现有 Linux 内删除服务/目录/数据库伪装安全重装。
+          前台展示两阶段流程，不等于已经清盘或重装成功；真正安装必须在 Owner 手工重建的干净 OS 上执行。
+          新版只更新 P07-M05 独立 ZIP；M01～M04 不升级，不运行迁移/DNS/清盘或现有业务覆盖。
+          旧公开 cp-reinstall-plan1 → 新版独立 Atomic、幂等、错误哈希拒绝、回滚及四模块隔离已获 Runner 证明。
+          精确合并源码：llhzx2018/vf-server-ops@032b07dbc9f2a00ea85db402fb3ec4edbbb7c501
+          新 ZIP SHA-256：636353ee56d91957e77b8cf3786471f0ecb2aadb6c4f0d51695cd9356164e023
+          Owner Production VPS 未被自动触碰；OS 重装和现场数据库变更需要 Owner 手工操作。
+          EOF
+          for repo in llhzx2018/vf-server-ops llhzx2018/core-free-runner-public; do
+            case "$repo" in
+              llhzx2018/vf-server-ops) target=032b07dbc9f2a00ea85db402fb3ec4edbbb7c501;;
+              llhzx2018/core-free-runner-public) target=fc954f2c1f6755409a41c87cfd6d01890311688e;;
+            esac
+            if ! gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+              gh release create "$tag" \
+                "$dir/P07-M05-0.1.0-m05-provider-neutral-reinstall1.zip" \
+                "$dir/P07-M05-PROVIDER-NEUTRAL-RELEASE.json" "$dir/SHA256SUMS" \
+                --repo "$repo" --target "$target" --latest=false \
+                --title 'P07-M05 新服务器初始化 · CloudPanel通用重装向导与数据库选择' \
+                --notes-file "$dir/release-notes.md"
+            fi
+            output="$RUNNER_TEMP/p07-m05-readback-$(basename "$repo")"
+            mkdir -p "$output"
+            gh release download "$tag" --repo "$repo" --dir "$output" --clobber
+            test "$(find "$output" -maxdepth 1 -type f | wc -l)" = 3
+            (cd "$output" && sha256sum -c SHA256SUMS --status)
+            cmp "$dir/P07-M05-0.1.0-m05-provider-neutral-reinstall1.zip" \
+              "$output/P07-M05-0.1.0-m05-provider-neutral-reinstall1.zip"
+            cmp "$dir/P07-M05-PROVIDER-NEUTRAL-RELEASE.json" \
+              "$output/P07-M05-PROVIDER-NEUTRAL-RELEASE.json"
+            echo "P07_M05_OFFICIAL_REMOTE_BYTE_READBACK=PASS:$repo"
+          done
+          echo P07_M05_GITHUB_DUAL_FORMAL_RELEASE=PASS
+      - name: Clean transient private checkout and package on every result
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- product "$RUNNER_TEMP/p07-m05-provider-release" \
+            "$RUNNER_TEMP/p07-m05-readback-vf-server-ops" \
+            "$RUNNER_TEMP/p07-m05-readback-core-free-runner-public"
+          echo P07_M05_PRIVATE_SOURCE_PUBLIC_PERSISTENCE=NO
