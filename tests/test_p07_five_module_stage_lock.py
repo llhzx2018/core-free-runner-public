@@ -192,6 +192,36 @@ class StageLock(unittest.TestCase):
         bad["implicit_cross_module_installs_allowed"]=True
         with self.assertRaises(ValueError): verify(bad,self.toolbox)
 
+    def test_debian13_kvm_proof_must_use_hardware_acceleration_and_real_first_admin(self):
+        # Release-readiness guard: passing the fast MariaDB engine-only lane
+        # must never be mistaken for Debian13's full CloudPanel install.
+        proof=(ROOT/"tests/p07_m05_debian13_qemu_tcg.sh").read_text(encoding="utf-8")
+        required=(
+            'vm_mode=TCG',
+            'vm_opts=(-accel tcg,thread=multi -cpu max)',
+            'blocked EXPLICIT_KVM_REQUEST_WITHOUT_ACCESS',
+            'vm_mode=KVM',
+            'vm_opts=(-accel kvm -cpu host)',
+            '"${vm_opts[@]}" -smp 4 -m 5120',
+            'if [[ "$vm_mode" == TCG ]]; then',
+            'P07_M05_DEBIAN13_CLOUDPANEL_INSTALL=BLOCKED_TCG_FULL_INSTALL_TIMEOUT',
+            'P07_M05_EXPLICIT_FULL_INSTALL_ON_KVM',
+            'tests/p07_m05_native_first_admin.py',
+            'P07_M05_FIRST_ADMIN_REAL_PRODUCT_UI=PASS',
+            'P07_M05_FIRST_ADMIN_CLOUDPANEL_READY_READBACK=PASS',
+            'P07_M05_DEBIAN13_CLOUDPANEL_FIRST_ADMIN_AND_READY=PASS',
+            'P07_M05_DEBIAN13_CLOUDPANEL_REINSTALL_DENIED=PASS',
+        )
+        for needle in required:
+            with self.subTest(needle=needle):
+                self.assertIn(needle,proof)
+        self.assertLess(proof.index('vm_opts=(-accel kvm -cpu host)'),
+                        proof.index('qemu-system-x86_64 \\'))
+        self.assertLess(proof.index('if [[ "$vm_mode" == TCG ]]; then'),
+                        proof.index('P07_M05_DEBIAN13_CLOUDPANEL_FIRST_ADMIN_AND_READY=PASS'))
+        self.assertLess(proof.index('P07_M05_FIRST_ADMIN_CLOUDPANEL_READY_READBACK=PASS'),
+                        proof.index('P07_M05_DEBIAN13_QEMU_CLOUDPANEL_MARIADB118=PASS'))
+
     def test_m05_integrity_checks_full_tree_before_executing_launcher(self):
         source=self.toolbox
         guard=source.split("m05_verified_current() {",1)[1].split("\n}\n",1)[0]
