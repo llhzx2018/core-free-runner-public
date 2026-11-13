@@ -158,3 +158,124 @@ jobs:
           rm -f "$RUNNER_TEMP/p08-r90-composer.log" "$RUNNER_TEMP/p08-r90-npm.log"
           rm -rf "$RUNNER_TEMP/p08-r90-local-browser-site"
           rm -f "$RUNNER_TEMP/p08-r90-local-browser-full.zip" "$RUNNER_TEMP/p08-r90-router.php" "$RUNNER_TEMP/p08-r90-local-build.json" "$RUNNER_TEMP/p08-r90-php.log" "$RUNNER_TEMP/p08-r90-playwright.log" "$RUNNER_TEMP/p08-r90-browser.sqlite"
+  p08-r90-real-sql-schema-and-image:
+    name: P08 R90 SQL ${{ matrix.driver }} real migration and CPS asset
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - driver: mysql
+            image: mysql:8.4
+            health: mysqladmin ping --silent
+          - driver: mariadb
+            image: mariadb:11.8
+            health: healthcheck.sh --connect --innodb_initialized
+    services:
+      sql:
+        image: ${{ matrix.image }}
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic-only-p08-ci-pass
+          MARIADB_ROOT_PASSWORD: synthetic-only-p08-ci-pass
+          MYSQL_ROOT_HOST: "%"
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="${{ matrix.health }}"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - name: Transient checkout pinned private P08 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: 90e26f6ec15d47e756c61150ecebd5b7e1c26b95
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-p08-r90
+      - name: Real PHP 8.4 with MySQL PDO and matching locked Composer
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: zip, mbstring, dom, fileinfo, pdo_mysql, intl, sodium
+      - name: Real SQL ${{ matrix.driver }} schema Owner image and CPS revision
+        env:
+          R90_ENGINE: ${{ matrix.driver }}
+        run: |
+          set -euo pipefail
+          cd private-p08-r90
+          test "$(git rev-parse HEAD)" = 90e26f6ec15d47e756c61150ecebd5b7e1c26b95
+          test ! -e .env
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs storage/app/private/adops
+          composer install --no-interaction --no-progress --prefer-dist --no-scripts > "$RUNNER_TEMP/p08-r90-sql-composer.log" 2>&1 || { tail -n 25 "$RUNNER_TEMP/p08-r90-sql-composer.log"; exit 1; }
+          php -r '
+            $db=new PDO("mysql:host=127.0.0.1;port=3306;charset=utf8mb4","root","synthetic-only-p08-ci-pass", [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION]);
+            $db->exec("CREATE DATABASE p08_r90_sql CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+          '
+          key="$(php -r 'echo base64_encode(random_bytes(32));')"
+          cat > .env <<EOF
+          APP_NAME=P08_R90_Isolated_SQL
+          APP_ENV=testing
+          APP_DEBUG=false
+          APP_KEY=base64:$key
+          APP_URL=http://localhost
+          DB_CONNECTION=$R90_ENGINE
+          DB_HOST=127.0.0.1
+          DB_PORT=3306
+          DB_DATABASE=p08_r90_sql
+          DB_USERNAME=root
+          DB_PASSWORD=synthetic-only-p08-ci-pass
+          SESSION_DRIVER=array
+          CACHE_STORE=array
+          QUEUE_CONNECTION=sync
+          LOG_CHANNEL=stack
+          EOF
+          chmod 0600 .env
+          php artisan migrate --force --no-interaction >/dev/null
+          php -r '
+            require "vendor/autoload.php";
+            $app=require "bootstrap/app.php";
+            $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+            $db=Illuminate\Support\Facades\DB::connection();
+            $owner=$db->table("users")->insertGetId([
+              "name"=>"Synthetic R90 Owner",
+              "email"=>"r90-native-sql@isolated.example",
+              "password"=>Illuminate\Support\Facades\Hash::make("Synthetic-pass-12345678"),
+              "created_at"=>now(),"updated_at"=>now()
+            ]);
+            if(!Illuminate\Support\Facades\Schema::hasTable("landing_assets"))throw new RuntimeException("R90_MISSING_NATIVE_SQL_IMAGE_SCHEMA");
+            $bytes=base64_decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a6eoAAAAASUVORK5CYII=",true);
+            $tmp=tempnam(sys_get_temp_dir(),"r90native");
+            try {
+              file_put_contents($tmp,$bytes);
+              $upload=new Illuminate\Http\UploadedFile($tmp,"native.png","image/png",null,true);
+              $asset=(new App\Modules\Landing\Actions\LandingAssetLibrary())->upload((int)$owner,$upload);
+              $payload=["kind"=>"cps","template"=>"focus",
+                "title"=>"SQL isolated CPS","headline"=>"CPS isolated header",
+                "body"=>"Synthetic only","cta_text"=>"View",
+                "cta_url"=>"https://example.com/offer",
+                "offer_reference"=>"OFFER-NATIVE-SQL-90",
+                "image_asset_id"=>$asset["id"],"image_alt"=>"Native SQL test image"];
+              $id=(new App\Modules\Landing\Actions\CreateLanding())->execute($payload,(int)$owner);
+              $page=$db->table("landing_pages")->where("id",$id)->first();
+              $revision=$db->table("landing_revisions")->where("landing_page_id",$id)->where("revision",1)->first();
+              if($page===null||$revision===null||$page->kind!=="cps"
+                 ||json_decode((string)$revision->source_payload,true)["offer_reference"]!=="OFFER-NATIVE-SQL-90")throw new RuntimeException("R90_CPS_SQL_PERSISTENCE_FAIL");
+              $root=storage_path("app/private/adops/landings/".$id);
+              $manifest=(new VF\AdOps\Landing\LandingVersionStore())->verify($root,1,(string)$revision->bundle_sha256);
+              if($manifest["file_count"]!==3||!isset($manifest["files"]["media/hero.png"]))throw new RuntimeException("R90_SQL_IMAGE_MANIFEST_FAIL");
+              if(file_get_contents($root."/versions/1/media/hero.png")!==$bytes)throw new RuntimeException("R90_SQL_IMAGE_BYTES_FAIL");
+              (new App\Modules\Landing\Actions\LandingAssetLibrary())->archive((int)$owner,$asset["id"]);
+              if(!is_file($root."/versions/1/media/hero.png"))throw new RuntimeException("R90_SQL_ARCHIVE_REMOVED_IMMUTABLE_IMAGE");
+              echo "P08_R90_".strtoupper(getenv("R90_ENGINE"))."_SQL_SCHEMA_OWNER_CPS_IMAGE_REVISION=PASS\n";
+            } finally { @unlink($tmp); }
+          '
+      - name: Always clean private source and disposable credentials
+        if: always()
+        run: |
+          rm -rf private-p08-r90
+          rm -f "$RUNNER_TEMP/p08-r90-sql-composer.log"
