@@ -158,6 +158,10 @@ def verify(stage,toolbox):
                 raise ValueError("private Owner Trial cannot become Release or VPS PASS")
             if not re.fullmatch(r"[a-f0-9]{64}",offline.get("sha256","")):
                 raise ValueError("private offline executable SHA256 missing")
+            if 'M05_OFFLINE_TRIAL_SHA256="'+offline["sha256"]+'"' not in toolbox:
+                raise ValueError("private offline executable identity drift")
+            if '--install-m05-offline) ' not in toolbox:
+                raise ValueError("missing private one-file dispatch")
             if not re.fullmatch(r"[a-f0-9]{40}",offline.get("private_git_commit","")):
                 raise ValueError("private offline Git commit missing")
             if not re.fullmatch(r"[a-f0-9]{40}",offline.get("private_git_blob_sha1","")):
@@ -187,6 +191,17 @@ class StageLock(unittest.TestCase):
         bad=copy.deepcopy(self.stage)
         bad["implicit_cross_module_installs_allowed"]=True
         with self.assertRaises(ValueError): verify(bad,self.toolbox)
+
+    def test_m05_offline_single_file_identity_and_route_cannot_drift(self):
+        self.assertTrue(verify(self.stage,self.toolbox))
+        offline=next(m for m in self.stage["modules"] if m["id"]=="P07-M05")["offline_owner_trial"]
+        old='M05_OFFLINE_TRIAL_SHA256="'+offline["sha256"]+'"' 
+        bad=self.toolbox.replace(old,'M05_OFFLINE_TRIAL_SHA256="'+'0'*64+'"',1)
+        with self.assertRaisesRegex(ValueError,"private offline executable identity drift"):
+            verify(self.stage,bad)
+        bad=self.toolbox.replace('--install-m05-offline) ','--deleted-offline) ',1)
+        with self.assertRaisesRegex(ValueError,"missing private one-file dispatch"):
+            verify(self.stage,bad)
 
     def test_m05_claimed_public_distribution_is_denied(self):
         bad=copy.deepcopy(self.stage)
