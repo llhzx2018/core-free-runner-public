@@ -171,9 +171,19 @@ for sibling in /opt/vfops-modules/m01 /opt/vfops-modules/m02 \
 done
 # A second bootstrap against this now-populated CloudPanel must refuse
 # any change of engine without touching the installed daemon.
-if bash "$CORE" server-migrate target-status --bootstrap-preflight >/dev/null 2>&1; then
-  fail_env EXISTING_CLOUDPANEL_PREFLIGHT_NOT_BLOCKED
+# target-status is a READ-ONLY discovery command. Once CloudPanel exists it
+# intentionally exits 0 and reports CLOUDPANEL_ADMIN_REQUIRED / CLOUDPANEL_READY
+# instead of raising a process error. Correctly assert its JSON state.
+already="$(bash "$CORE" server-migrate target-status --bootstrap-preflight)"
+if ! printf '%s' "$already" | python3 -c '
+import json,sys
+r=json.load(sys.stdin)
+assert r.get("status") in ("CLOUDPANEL_ADMIN_REQUIRED","CLOUDPANEL_READY")
+assert r.get("writes_performed") is False
+'; then
+  fail_env EXISTING_CLOUDPANEL_READONLY_STATUS_WRONG
 fi
+echo P07_M05_FREE_NATIVE_EXISTING_CLOUDPANEL_PREFLIGHT=ALREADY_INSTALLED_NO_WRITES
 if bash "$CORE" server-migrate bootstrap-local --db-engine "$ENGINE" \
   --confirm BOOTSTRAP_LOCAL_CLOUDPANEL >/dev/null 2>&1; then
   fail_env EXISTING_CLOUDPANEL_REINSTALL_NOT_BLOCKED
