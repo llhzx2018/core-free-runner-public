@@ -74,7 +74,7 @@ class FiveIndependentToolboxSlots(unittest.TestCase):
         source = SOURCE.read_text(encoding="utf-8")
         fragment = body_of(source, "run_server_ops")
         self.assertIn("ensure_server_ops_current || return $?",fragment)
-        self.assertIn("\\n  vfops\\n",fragment)
+        self.assertIn("\n  vfops\n",fragment)
         for historical in ("run_server_ops_owner124_trial",
                            "run_server_ops_owner143_trial",
                            "release124","release143"):
