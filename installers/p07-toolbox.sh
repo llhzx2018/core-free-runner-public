@@ -16,6 +16,10 @@ M01_RUNTIME="$M01_ROOT/current/vf-node.sh"
 M01_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/adf4d8cc0db69255fb4a6aff58857561a0652bf6/installers/p07-vf-node-independent-rc13.sh"
 M01_INSTALLER_BLOB="8313adef7dd235b645fc815a7bded933fc289f82"
 M01_MANIFEST_SHA256="1ca3dc95a5cc6e5aa35c9b7ead415d3b6ea6c6eb9e8307a76310d146ab53c47f"
+# Historical official source identity stays pinned after a future M01 release.
+M01_BOOTSTRAP_BUILD="0.1.0-rc13"
+M01_BOOTSTRAP_MANIFEST_SHA256="1ca3dc95a5cc6e5aa35c9b7ead415d3b6ea6c6eb9e8307a76310d146ab53c47f"
+M01_TARGET_MANIFEST_SHA256="$M01_MANIFEST_SHA256"
 
 
 VPS_AUDIT_PUBLIC="V2.1.0"
@@ -23,6 +27,8 @@ VPS_AUDIT_EXPECTED="V2.1.0"
 VPS_AUDIT_BUILD_EXPECTED="2.1.0-rc7-field"
 VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/0a851b9fe1819c7970ed5bb8e3633f2fc8e73166/experiments/p07-vps-audit-v21.sh"
 VPS_AUDIT_SHA256="d1846e751bba5c860c623e3db26641908e27ca43b39cf37016758853b65a952d"
+VPS_AUDIT_BOOTSTRAP_BUILD="2.1.0-rc7-field"
+VPS_AUDIT_BOOTSTRAP_SHA256="d1846e751bba5c860c623e3db26641908e27ca43b39cf37016758853b65a952d"
 M02_ROOT="/opt/vfops-modules/m02"  # 独立 VPS 验机版本；不写入 M01/M03/M04/M05
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
@@ -46,6 +52,10 @@ M04_BUILD_EXPECTED="0.1.0-rc83"
 M04_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/75c7336b8467114f8bc3396dc06144e48275a39a/installers/p07-system-care-rc83-isolated.sh"
 M04_INSTALLER_BLOB="d39cef5d0915a99753d688f10fb1dbe74c0dac98"
 M04_UI_BLOB="f140f1158351f9dce2e9f9159611af57047424b1"
+M04_BOOTSTRAP_BUILD="0.1.0-rc83"
+M04_BOOTSTRAP_UI_BLOB="f140f1158351f9dce2e9f9159611af57047424b1"
+M04_BOOTSTRAP_MANIFEST_BLOB="f82c9e42297c45a54ec6dc2fc4d705cad316dfce"
+M04_TARGET_MANIFEST_BLOB="$M04_BOOTSTRAP_MANIFEST_BLOB"
 M04_ROOT="/opt/vfops-modules/m04"
 M04_RUNTIME="$M04_ROOT/current/vf-system-care.sh"
 
@@ -116,11 +126,15 @@ m01_verified_current() {
   [[ -f "$root/MANIFEST.sha256" && ! -L "$root/MANIFEST.sha256" &&
      -f "$root/VERSION" && ! -L "$root/VERSION" ]] || return 1
   [[ "$(cat "$root/VERSION")" == "$installed" ]] || return 1
-  # Bootstrap rc13 is checked against the original public SHA pin.
-  # A newer release may carry its OWN verified manifest and version identity.
-  if [[ "$installed" == "$VF_NODE_EXPECTED" ]]; then
-    [[ "$(sha256_file "$root/MANIFEST.sha256" 2>/dev/null || true)" == "$M01_MANIFEST_SHA256" ]] || return 1
-  fi
+  # Verify BOTH exact old and exact future target; never accept a self-signed
+  # former manager simply because its files match its own rewritten manifest.
+  local expected_manifest=''
+  case "$installed" in
+    "$M01_BOOTSTRAP_BUILD") expected_manifest="$M01_BOOTSTRAP_MANIFEST_SHA256" ;;
+    "$VF_NODE_EXPECTED") expected_manifest="$M01_TARGET_MANIFEST_SHA256" ;;
+    *) return 1 ;;
+  esac
+  [[ "$(sha256_file "$root/MANIFEST.sha256" 2>/dev/null || true)" == "$expected_manifest" ]] || return 1
   declare -A seen=()
   while read -r expected name; do
     [[ -n "$expected" && -n "$name" ]] || continue
@@ -138,8 +152,20 @@ m01_verified_current() {
 }
 
 ensure_m01_current() {
-  m01_verified_current && return 0
-  if [[ -e "$M01_ROOT/current" || -L "$M01_ROOT/current" ]]; then
+  local upgrade_from='' answer=''
+  if m01_verified_current; then
+    upgrade_from="$(readlink "$M01_ROOT/current")"
+    if [[ "$upgrade_from" == "releases/$VF_NODE_EXPECTED" ]]; then return 0; fi
+    say "P07-M01 网络代理节点（V2Ray）：发现已验证旧版 ${upgrade_from#releases/}；目标版本 $VF_NODE_EXPECTED。"
+    say "仅升级本模块管理文件；不安装、停止或更换 V2Ray 节点。"
+    if [[ ! -t 0 || ! -t 1 ]]; then
+      say '非交互模式不自动升级 P07-M01；当前模块及其他四模块保持原样。'
+      return 7
+    fi
+    printf '确认升级 P07-M01 网络代理节点管理器？[y/N]：'
+    read -r answer || answer=''
+    [[ "$answer" =~ ^[Yy]$ ]] || { say '已取消，本次没有升级。'; return 7; }
+  elif [[ -e "$M01_ROOT/current" || -L "$M01_ROOT/current" ]]; then
     say "${C_RED}P07-M01 网络代理节点（V2Ray）：已安装模块身份异常；拒绝用旧版回退或覆盖，请从本模块更新器修复。${C_RESET}" >&2
     return 13
   fi
@@ -173,6 +199,7 @@ ensure_m01_current() {
   rm -f "$tmp"
   [[ "$rc" == 0 ]] || return "$rc"
   m01_verified_current || return 13
+  [[ "$(readlink "$M01_ROOT/current")" == "releases/$VF_NODE_EXPECTED" ]] || return 13
 }
 
 run_network_node() {
@@ -203,15 +230,22 @@ m02_verified_current() {
   [[ -f "$script" && ! -L "$script" ]] || return 1
   actual="$(sha256_file "$script" 2>/dev/null || true)"
   [[ "$actual" =~ ^[a-f0-9]{64}$ ]] || return 1
+  # Keep the existing official no-manifest install valid after a later update.
+  # Do not trust a newer release solely on a self-edited local checksum.
+  local required_sha=''
+  case "$installed" in
+    "$VPS_AUDIT_BOOTSTRAP_BUILD") required_sha="$VPS_AUDIT_BOOTSTRAP_SHA256" ;;
+    "$VPS_AUDIT_BUILD_EXPECTED") required_sha="$VPS_AUDIT_SHA256" ;;
+    *) return 1 ;;
+  esac
+  [[ "$actual" == "$required_sha" ]] || return 1
   if [[ -f "$current/MANIFEST.sha256" && ! -L "$current/MANIFEST.sha256" ]]; then
     local expected name
     read -r expected name < "$current/MANIFEST.sha256" || return 1
     [[ "$name" == "vps-audit.sh" && "$expected" == "$actual" ]] || return 1
     [[ "$(wc -l < "$current/MANIFEST.sha256")" -eq 1 ]] || return 1
   else
-    # Legacy first-install candidate had no local manifest.
-    [[ "$installed" == "$VPS_AUDIT_BUILD_EXPECTED" &&
-       "$actual" == "$VPS_AUDIT_SHA256" ]] || return 1
+    [[ "$installed" == "$VPS_AUDIT_BOOTSTRAP_BUILD" ]] || return 1
   fi
   version="$(NO_COLOR=1 bash "$script" --version 2>/dev/null | awk '{print $NF}' || true)"
   build="$(NO_COLOR=1 bash "$script" --build-id 2>/dev/null || true)"
@@ -220,8 +254,20 @@ m02_verified_current() {
 }
 
 ensure_m02_current() {
-  if m02_verified_current; then return 0; fi
-  if [[ -e "$M02_ROOT/current" || -L "$M02_ROOT/current" ]]; then
+  local upgrade_from='' answer=''
+  if m02_verified_current; then
+    upgrade_from="$(readlink "$M02_ROOT/current")"
+    if [[ "$upgrade_from" == "releases/$VPS_AUDIT_BUILD_EXPECTED" ]]; then return 0; fi
+    say "P07-M02 服务器性能检测（VPS 验机）：发现已验证旧版 ${upgrade_from#releases/}；目标版本 $VPS_AUDIT_BUILD_EXPECTED。"
+    say "只更新本模块检测脚本；此时不运行 fio、网络或磁盘测速。"
+    if [[ ! -t 0 || ! -t 1 ]]; then
+      say '非交互模式不自动升级 P07-M02；当前模块及其他四模块保持原样。'
+      return 7
+    fi
+    printf '确认升级 P07-M02 服务器性能检测？[y/N]：'
+    read -r answer || answer=''
+    [[ "$answer" =~ ^[Yy]$ ]] || { say '已取消，本次没有升级。'; return 7; }
+  elif [[ -e "$M02_ROOT/current" || -L "$M02_ROOT/current" ]]; then
     say "${C_RED}P07-M02 服务器性能检测（VPS 验机）：现有版本或文件校验异常；拒绝自动回退。${C_RESET}" >&2
     return 13
   fi
@@ -240,7 +286,12 @@ ensure_m02_current() {
   local fd current dest tmp stage link version build actual
   exec {fd}>"$M02_ROOT/.install.lock" || return 13
   flock -x "$fd" || return 13
-  if m02_verified_current; then return 0; fi
+  if m02_verified_current && [[ "$(readlink "$M02_ROOT/current")" == "releases/$VPS_AUDIT_BUILD_EXPECTED" ]]; then return 0; fi
+  if [[ -n "$upgrade_from" ]]; then
+    m02_verified_current && [[ "$(readlink "$M02_ROOT/current")" == "$upgrade_from" ]] || return 13
+  elif [[ -e "$M02_ROOT/current" || -L "$M02_ROOT/current" ]]; then
+    return 13
+  fi
   current="$M02_ROOT/current"
   dest="$M02_ROOT/releases/$VPS_AUDIT_BUILD_EXPECTED"
   if [[ -e "$current" || -L "$current" ]]; then
@@ -1129,9 +1180,18 @@ m04_verified_current() {
      -f "$M04_RUNTIME" && ! -L "$M04_RUNTIME" ]] || return 1
   [[ "$(cat "$root/VERSION")" == "$installed" ]] || return 1
   # The bootstrapped rc83 retains the exact public Git blob pin.
-  if [[ "$installed" == "$M04_BUILD_EXPECTED" ]]; then
-    [[ "$(p07_git_blob_sha1 "$M04_RUNTIME" 2>/dev/null || true)" == "$M04_UI_BLOB" ]] || return 1
-  fi
+  local expected_ui='' expected_manifest=''
+  case "$installed" in
+    "$M04_BOOTSTRAP_BUILD")
+      expected_ui="$M04_BOOTSTRAP_UI_BLOB"
+      expected_manifest="$M04_BOOTSTRAP_MANIFEST_BLOB" ;;
+    "$M04_BUILD_EXPECTED")
+      expected_ui="$M04_UI_BLOB"
+      expected_manifest="$M04_TARGET_MANIFEST_BLOB" ;;
+    *) return 1 ;;
+  esac
+  [[ "$(p07_git_blob_sha1 "$M04_RUNTIME" 2>/dev/null || true)" == "$expected_ui" &&
+     "$(p07_git_blob_sha1 "$root/MANIFEST.gitblob" 2>/dev/null || true)" == "$expected_manifest" ]] || return 1
   declare -A seen=()
   while read -r expected name; do
     [[ -n "$expected" && -n "$name" ]] || continue
@@ -1154,8 +1214,20 @@ m04_verified_current() {
 }
 
 ensure_m04_current() {
-  m04_verified_current && return 0
-  if [[ -e "$M04_ROOT/current" || -L "$M04_ROOT/current" ]]; then
+  local upgrade_from='' answer=''
+  if m04_verified_current; then
+    upgrade_from="$(readlink "$M04_ROOT/current")"
+    if [[ "$upgrade_from" == "releases/$M04_BUILD_EXPECTED" ]]; then return 0; fi
+    say "P07-M04 服务器维护与安全：发现已验证旧版 ${upgrade_from#releases/}；目标版本 $M04_BUILD_EXPECTED。"
+    say "只更新本模块程序，不运行系统升级、清理或服务器重启。"
+    if [[ ! -t 0 || ! -t 1 ]]; then
+      say '非交互模式不自动升级 P07-M04；当前模块及其他四模块保持原样。'
+      return 7
+    fi
+    printf '确认升级 P07-M04 服务器维护与安全？[y/N]：'
+    read -r answer || answer=''
+    [[ "$answer" =~ ^[Yy]$ ]] || { say '已取消，本次没有升级。'; return 7; }
+  elif [[ -e "$M04_ROOT/current" || -L "$M04_ROOT/current" ]]; then
     say "${C_RED}P07-M04 服务器维护与安全：现有版本文件验收失败，拒绝退回旧版。${C_RESET}" >&2
     return 13
   fi
@@ -1188,6 +1260,7 @@ ensure_m04_current() {
   rm -f "$tmp"
   [[ "$rc" -eq 0 ]] || return "$rc"
   m04_verified_current || return 13
+  [[ "$(readlink "$M04_ROOT/current")" == "releases/$M04_BUILD_EXPECTED" ]] || return 13
 }
 
 run_system_care() {
