@@ -4,6 +4,7 @@ import copy
 import json
 from pathlib import Path
 import re
+import subprocess
 import unittest
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -191,6 +192,47 @@ class StageLock(unittest.TestCase):
         bad=copy.deepcopy(self.stage)
         bad["implicit_cross_module_installs_allowed"]=True
         with self.assertRaises(ValueError): verify(bad,self.toolbox)
+
+    def test_native_debian13_free_cirrus_fallback_is_real_vm_and_public_safe(self):
+        # A different repo on the same GitHub runner does not supply KVM.
+        # This *additional CI provider* uses a native Debian13 GCE VM and
+        # only proves upstream platform installation without private source.
+        ci=(ROOT/".cirrus.yml").read_text(encoding="utf-8")
+        shell_path=ROOT/"tests/p07_m05_cirrus_native_cloudpanel.sh"
+        shell=shell_path.read_text(encoding="utf-8")
+        for needle in (
+            "compute_engine_instance:",
+            "image_project: debian-cloud",
+            "image: family/debian-13",
+            "only_if: $CIRRUS_BRANCH == 'feat/p07-unified-independent-module-router-20261112'",
+            "bash tests/p07_m05_cirrus_native_cloudpanel.sh",
+        ):
+            self.assertIn(needle,ci)
+        for needle in (
+            "CIRRUS_REPO_FULL_NAME",
+            "CIRRUS_BRANCH",
+            "CIRRUS_BUILD_ID",
+            "NOT_REAL_DEBIAN13_AMD64",
+            "NOT_NATIVE_SYSTEMD_VM",
+            "NOT_GCE_NATIVE_COMPUTE",
+            "EXISTING_INSTALL_OR_MODULE",
+            "8146dbe0a488e7088b04071b0c34d59aa0ab1fe9dcec382d395fd155c9e6c476",
+            "sha256sum --check --status",
+            "DB_ENGINE=MARIADB_11.8",
+            "P07_M05_CIRRUS_OFFICIAL_CLOUDPANEL_BOOTSTRAP=PASS_PLATFORM_ONLY",
+            "P07_M05_CIRRUS_P07_EXACT_SOURCE_FULL=NOT_RUN",
+            "P07_M05_CIRRUS_PRODUCT_FIRST_ADMIN_AND_ROLLBACK=NOT_RUN",
+            "P07_M05_CIRRUS_FORMAL_RELEASE_GATE=BLOCKED_EXACT_PRODUCT_PROOF",
+        ):
+            self.assertIn(needle,shell)
+        self.assertNotIn("P07_M05_CIRRUS_FORMAL_RELEASE_GATE=PASS",shell)
+        self.assertNotIn("VF_PRIVATE_READ_TOKEN",shell)
+        self.assertNotIn("OFFLINE.run",shell)
+        self.assertNotIn("curl | bash",shell)
+        self.assertLess(shell.index("sha256sum --check --status"),
+                        shell.index("DB_ENGINE=MARIADB_11.8"))
+        subprocess.run(["bash","-n",str(shell_path)],
+                       check=True,capture_output=True,text=True,timeout=15)
 
     def test_debian13_kvm_proof_must_use_hardware_acceleration_and_real_first_admin(self):
         # Release-readiness guard: passing the fast MariaDB engine-only lane
