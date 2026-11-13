@@ -1,0 +1,123 @@
+name: P07-M05 新服务器初始化 · 通用重装向导精确源码隔离验收
+on:
+  push:
+    branches: [test/p07-m05-provider-neutral-20261113]
+    paths:
+      - '.github/workflows/p07-m05-provider-neutral-20261113.yml'
+permissions:
+  contents: read
+jobs:
+  m05-provider-neutral:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout public atomic installer only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Ephemeral checkout exact private P07 PR SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: e798b9ce0eb30320609d73aea307143511d833fa
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Exact source identity, module scope, TTY, negative cases
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = 'e798b9ce0eb30320609d73aea307143511d833fa'
+          test "$(git -C product show HEAD:VERSION)" = '0.1.0'
+          grep -Fqx 'BUILD_ID = "0.1.0-m05-provider-neutral-reinstall1"' product/scripts/build_p07_m05_bundle.py
+          bash -n product/bin/vfops-init-ui product/bin/vfops-init-core product/bin/vfops-init-entry
+          export PYTHONDONTWRITEBYTECODE=1
+          (cd product && python3 -B scripts/check_p07_modules.py)
+          (cd product && python3 -B -m unittest discover -s tests -p 'test_p07_m05_*.py' -q)
+          (cd product && python3 -B -m unittest discover -s tests -p 'test_p07_module_contract.py' -q)
+          python3 - <<'PY'
+          from pathlib import Path
+          ui=Path("product/bin/vfops-init-ui").read_text()
+          part=ui.split("m05_reinstall_plan() {",1)[1].split("\nrun_initialization() {",1)[0]
+          assert "第一阶段：清除旧 CloudPanel" in part
+          assert "第二阶段：在干净系统上真正安装 CloudPanel" in part
+          assert "备份由用户自行决定" in part
+          assert "VPS 服务商控制台重装操作系统" in part
+          assert "main/installers/p07-toolbox.sh" in part
+          for forbidden in ("vultr-reinstall", "VULTR_API", "Vultr API", "AWS API", "rm -rf", "apt purge", "mkfs", "reboot"):
+              assert forbidden not in part, forbidden
+          print("P07_M05_PROVIDER_NEUTRAL_UI_CONTRACT=PASS")
+          PY
+      - name: Build reproducible M05-only ZIP and scan before real isolated install
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/m05-neutral"
+          python3 -B product/scripts/build_p07_m05_bundle.py --output "$RUNNER_TEMP/m05-neutral/new.zip" > "$RUNNER_TEMP/m05-neutral/build.json"
+          python3 - <<'PY'
+          import os,json,pathlib,zipfile,hashlib,stat,re
+          root=pathlib.Path(os.environ["RUNNER_TEMP"])/"m05-neutral"
+          j=json.loads((root/"build.json").read_text())
+          assert j["module_id"]=="P07-M05"
+          assert j["build_id"]=="0.1.0-m05-provider-neutral-reinstall1"
+          z=root/"new.zip"
+          assert j["sha256"]==hashlib.sha256(z.read_bytes()).hexdigest()
+          with zipfile.ZipFile(z) as pack:
+              assert pack.testzip() is None
+              names=pack.namelist()
+              assert len(names)==len(set(names))
+              assert all(p.startswith("p07-m05/") and ".." not in pathlib.PurePosixPath(p).parts for p in names)
+              manifest=json.loads(pack.read("p07-m05/MODULE_MANIFEST.json"))
+              assert manifest["module_id"]=="P07-M05"
+              assert manifest["module_build_id"]==j["build_id"]
+              assert "p07-m05/bin/vfops-init-ui" in names
+              assert "p07-m05/lib/m05_db_options.py" in names
+              for item in pack.infolist():
+                  assert stat.S_ISREG(item.external_attr>>16)
+                  d=pack.read(item)
+                  for regex in (rb"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----",rb"github_pat_[A-Za-z0-9_]{20,}",rb"45\.76\.171\.57"):
+                      assert not re.search(regex,d), item.filename
+          print("P07_M05_PROVIDER_NEUTRAL_ZIP_SHA256="+j["sha256"])
+          print("P07_M05_PACKAGE_MANIFEST_AND_SECRET_SCAN=PASS")
+          PY
+      - name: Atomic prior official -> new M05; idempotence, wrong-hash refusal, rollback, four-slot isolation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --max-time 90 \
+            'https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-cp-reinstall-plan1-20261113/P07-M05-0.1.0-m05-cp-reinstall-plan1.zip' \
+            -o "$RUNNER_TEMP/m05-neutral/old.zip"
+          echo "e8451350d59aff71878924ebd991ae616ab63cc0ebbd893e50a70f87a83137b8  $RUNNER_TEMP/m05-neutral/old.zip" | sha256sum -c --status
+          sudo python3 -B installers/p07-m05-atomic.py install "$RUNNER_TEMP/m05-neutral/old.zip" e8451350d59aff71878924ebd991ae616ab63cc0ebbd893e50a70f87a83137b8
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-cp-reinstall-plan1
+          sha="$(sha256sum "$RUNNER_TEMP/m05-neutral/new.zip" | cut -d' ' -f1)"
+          sudo python3 -B installers/p07-m05-atomic.py install "$RUNNER_TEMP/m05-neutral/new.zip" "$sha"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-provider-neutral-reinstall1
+          sudo python3 -B installers/p07-m05-atomic.py install "$RUNNER_TEMP/m05-neutral/new.zip" "$sha"
+          if sudo python3 -B installers/p07-m05-atomic.py install "$RUNNER_TEMP/m05-neutral/new.zip" \
+            0000000000000000000000000000000000000000000000000000000000000000 >/dev/null 2>&1; then
+            echo P07_M05_INVALID_HASH_WAS_ACCEPTED; exit 13
+          fi
+          sudo python3 -B installers/p07-m05-atomic.py rollback 0.1.0-m05-cp-reinstall-plan1 \
+            --confirm P07-M05:0.1.0-m05-cp-reinstall-plan1
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-cp-reinstall-plan1
+          sudo python3 -B installers/p07-m05-atomic.py install "$RUNNER_TEMP/m05-neutral/new.zip" "$sha"
+          sudo env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX bash \
+            /opt/vfops-modules/m05/current/bin/vfops-init-core server-migrate db-engine-options > "$RUNNER_TEMP/m05-neutral/dboptions.json"
+          python3 - <<'PY'
+          import json,os,pathlib
+          d=json.loads((pathlib.Path(os.environ["RUNNER_TEMP"])/"m05-neutral/dboptions.json").read_text())
+          assert d["plan_only"] is True and d["writes_performed"] is False
+          assert d["db_engine_options"]
+          PY
+          test ! -e /opt/vfops-modules/m05/current/lib/__pycache__
+          test ! -e /home/clp
+          for sibling in m01 m02 m03 m04; do test ! -e "/opt/vfops-modules/$sibling"; done
+          echo P07_M05_UPGRADE_ROLLBACK_IDEMPOTENCE_ISOLATION=PASS
+          echo P07_OWNER_PRODUCTION=NOT_RUN
+      - name: Remove private source and temporary test package on all outcomes
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- product "$RUNNER_TEMP/m05-neutral"
+          echo P07_M05_PUBLIC_PRIVATE_SOURCE_PERSISTENCE=NO
