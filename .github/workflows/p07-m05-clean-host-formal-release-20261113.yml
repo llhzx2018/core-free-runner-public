@@ -1,0 +1,206 @@
+name: P07-M05 新服务器初始化 · 旧面板拦截正式发行
+on:
+  push:
+    branches: [feat/p07-m05-existing-safe-release-20261113]
+    paths: [.github/workflows/p07-m05-clean-host-formal-release-20261113.yml]
+permissions:
+  contents: write
+jobs:
+  release-exact-safe-M05:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    steps:
+      - name: Checkout public control with no credentials saved
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact merged product main transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 06d561596cbd6c22244ae95cf24f68e50d9cbd82
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Final exact source and security acceptance
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = 06d561596cbd6c22244ae95cf24f68e50d9cbd82
+          bash -n product/bin/vfops-init-core
+          bash -n product/bin/vfops-init-ui
+          bash -n product/bin/vfops-init-entry
+          bash -n installers/p07-toolbox.sh
+          export PYTHONDONTWRITEBYTECODE=1
+          (cd product && python3 -B scripts/check_p07_modules.py)
+          (cd product && python3 -B -m unittest discover -s tests -p 'test_p07_m05_*.py' -q)
+          (cd product && python3 -B -m unittest discover -s tests -p 'test_p07_module_contract.py' -q)
+          echo P07_M05_FINAL_MERGED_SOURCE_AND_53_TESTS=PASS
+      - name: Produce single-module immutable ZIP and verify prior proof byte identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dir="$RUNNER_TEMP/p07-m05-release"
+          mkdir -p "$dir"
+          python3 -B product/scripts/build_p07_m05_bundle.py \
+            --output "$dir/P07-M05-0.1.0-m05-clean-host-guard1.zip" > "$dir/build.json"
+          python3 - <<'PY'
+          import os,pathlib,json,re,hashlib,zipfile,stat
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'p07-m05-release'
+          p=root/'P07-M05-0.1.0-m05-clean-host-guard1.zip'
+          sha=lambda data:hashlib.sha256(data).hexdigest()
+          digest=sha(p.read_bytes())
+          proven='b2b72275980f7c2220f0c95fce18f644967bd69a17fa0a8320f96149a4096a1a'
+          if digest!=proven: raise RuntimeError('source/runtime SHA drift from prior runner proof')
+          obj=json.loads((root/'build.json').read_text())
+          if obj['module_id']!='P07-M05' or obj['build_id']!='0.1.0-m05-clean-host-guard1' or obj['sha256']!=proven:
+            raise RuntimeError('wrong module identity')
+          patterns={
+            'private_key':rb'-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----',
+            'github_token':rb'(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})',
+            'aws_key':rb'(?:AKIA|ASIA)[A-Z0-9]{16}',
+            'credential_url':rb'https?://[A-Za-z0-9._-]+:[^/@\s]+@[A-Za-z0-9.-]+',
+            'production_ip':rb'(?:45\.76\.171\.57|45\.63\.52\.90)',
+          }
+          with zipfile.ZipFile(p) as z:
+            members=z.infolist()
+            if len(members)!=89 or len(set(x.filename for x in members))!=89 or z.testzip() is not None:
+              raise RuntimeError('module contents/count/CRC')
+            for member in members:
+              name=member.filename
+              if (not name.startswith('p07-m05/') or member.is_dir() or
+                  '..' in pathlib.PurePosixPath(name).parts or
+                  stat.S_ISLNK(member.external_attr>>16) or member.file_size>8*1024*1024):
+                raise RuntimeError('unsafe packaged path')
+              rel=name[len('p07-m05/'):]
+              valid=rel in {
+                'bin/vfops-init-core','bin/vfops-init-entry','bin/vfops-init-ui',
+                'VERSION','BUILD_ID','MODULE_ID','MODULE_BUILD_ID','MODULE_MANIFEST.json'
+              } or (rel.startswith('lib/') and pathlib.PurePosixPath(rel).suffix in {'.py','.sh','.json'})
+              if not valid: raise RuntimeError('unexpected bundled file')
+              data=z.read(member)
+              for label,pattern in patterns.items():
+                if re.search(pattern,data):
+                  raise RuntimeError('potential secret '+label+' in '+rel)
+            manifest=json.loads(z.read('p07-m05/MODULE_MANIFEST.json'))
+            if (manifest['module_id']!='P07-M05' or
+                manifest['module_build_id']!='0.1.0-m05-clean-host-guard1' or
+                manifest['installation_isolation']!='P07-M05_ONLY'):
+              raise RuntimeError('manifest incorrect')
+            assert b'm05_require_clean_host' in z.read('p07-m05/bin/vfops-init-core')
+            assert b'def inspect(' in z.read('p07-m05/lib/m05_environment_guard.py')
+          release={
+            'schema':'vf.p07.m05.formal-release.v1',
+            'module_id':'P07-M05','module_name':'新服务器初始化',
+            'product_main_sha':'06d561596cbd6c22244ae95cf24f68e50d9cbd82',
+            'product':'llhzx2018/vf-server-ops',
+            'distribution':'llhzx2018/core-free-runner-public',
+            'tag':'p07-m05-v0.1.0-clean-host-guard1-20261113',
+            'build_id':'0.1.0-m05-clean-host-guard1',
+            'runtime_zip':p.name,'runtime_sha256':proven,
+            'upgrade_from_versions':['0.1.0-m05-candidate2','0.1.0-m05-existing-safe1'],
+            'unchanged_modules':['P07-M01','P07-M02','P07-M03','P07-M04'],
+            'owner_authorized_m05_publication':True,
+            'production_executed':False,
+            'owner_reimage_executed':False,
+            'evidence':['https://github.com/llhzx2018/core-free-runner-public/actions/runs/43383353628',
+                        'https://github.com/llhzx2018/vf-server-ops/pull/322']
+          }
+          manifestpath=root/'P07-M05-CLEAN-HOST-RELEASE.json'
+          manifestpath.write_text(json.dumps(release,ensure_ascii=False,sort_keys=True,indent=2)+'\n')
+          checksum=root/'SHA256SUMS'
+          checksum.write_text(''.join(sha(x.read_bytes())+'  '+x.name+'\n' for x in (p,manifestpath)))
+          print('P07_M05_FINAL_RUNTIME_SHA256='+digest)
+          print('P07_M05_SENSITIVE_PATH_AND_SOURCE_SCAN=PASS')
+          print('P07_M05_SOURCE_EQUIVALENT_TO_PROVEN_CANDIDATE=YES')
+          PY
+      - name: Verify genuine old public release to new install and rollback in disposable runner
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          p="$RUNNER_TEMP/p07-m05-release"
+          new="$p/P07-M05-0.1.0-m05-clean-host-guard1.zip"
+          hash=b2b72275980f7c2220f0c95fce18f644967bd69a17fa0a8320f96149a4096a1a
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --max-time 90 \
+            https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-v0.1.0-five-modules-20261113/P07-M05-0.1.0-m05-candidate2.zip \
+            -o "$p/previous-candidate2.zip"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --max-time 90 \
+            https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-existing-safe1-20261113/P07-M05-0.1.0-m05-existing-safe1.zip \
+            -o "$p/previous-existing-safe1.zip"
+          echo "835356e2af2f89877e79d904f47b1ad38602983aa760978657ac4bb3c7593adb  $p/previous-candidate2.zip" | sha256sum -c --status
+          echo "ff67f7563baf197892b698fe978eab6deafd6c8d432c5c7c20eaf18d4fcb48ad  $p/previous-existing-safe1.zip" | sha256sum -c --status
+          sudo python3 -B installers/p07-m05-atomic.py install "$p/previous-candidate2.zip" \
+            835356e2af2f89877e79d904f47b1ad38602983aa760978657ac4bb3c7593adb
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$hash"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-clean-host-guard1
+          sudo python3 -B installers/p07-m05-atomic.py rollback 0.1.0-m05-candidate2 --confirm P07-M05:0.1.0-m05-candidate2
+          sudo python3 -B installers/p07-m05-atomic.py install "$p/previous-existing-safe1.zip" \
+            ff67f7563baf197892b698fe978eab6deafd6c8d432c5c7c20eaf18d4fcb48ad
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$hash"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-clean-host-guard1
+          if sudo python3 -B installers/p07-m05-atomic.py install "$new" \
+            0000000000000000000000000000000000000000000000000000000000000000 >/dev/null 2>&1; then
+            echo 'P07_M05_BAD_HASH_ACCEPTED'; exit 13
+          fi
+          sudo python3 -B installers/p07-m05-atomic.py rollback 0.1.0-m05-existing-safe1 --confirm P07-M05:0.1.0-m05-existing-safe1
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$hash"
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$hash"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-clean-host-guard1
+          for sibling in m01 m02 m03 m04; do test ! -e "/opt/vfops-modules/$sibling"; done
+          test ! -e /home/clp
+          echo P07_M05_TWO_OLD_FORMAL_TO_CURRENT_INSTALL_AND_ROLLBACK=PASS
+          echo P07_M05_PRODUCTION_VPS_NOT_USED=YES
+      - name: Publish M05 only to product and public GitHub Release; remote verify all 3 assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN" || { echo 'P07_M05_RELEASE_WRITE_NOT_AVAILABLE'; exit 13; }
+          tag=p07-m05-v0.1.0-clean-host-guard1-20261113
+          dir="$RUNNER_TEMP/p07-m05-release"
+          cat > "$dir/notes.md" <<'EOF'
+          P07-M05 新服务器初始化 · 干净空机 / 旧面板残留安全拦截版。
+          仅更新 M05，保留 M01–M04 独立版本和运行目录。
+          检测到宝塔/1Panel/其他面板、已装软件、业务目录/服务或未能完成安全扫描时，
+          在任何初始化系统写入前停止。真正清空旧 VPS 必须先外部备份、验证恢复，
+          由 Owner 亲自在 VPS 服务商控制台重装操作系统，再进入全新初始化。
+          此次发布不触碰 Owner 的 VPS、不清理数据、不迁移、不改 DNS。
+          源码：llhzx2018/vf-server-ops@06d561596cbd6c22244ae95cf24f68e50d9cbd82。
+          ZIP：0.1.0-m05-clean-host-guard1；SHA256 b2b72275980f7c2220f0c95fce18f644967bd69a17fa0a8320f96149a4096a1a。
+          支持从正式旧 M05 0.1.0-m05-candidate2 与 0.1.0-m05-existing-safe1 原子升级/回滚。
+          已通过 53 项相关测试、公开旧包→新包安装/校验/回滚；Owner VPS 实机 NOT_RUN。
+          公共 Toolbox main 的更新是独立分发步骤，需继续按实际 main 回读。
+          EOF
+          for repo in llhzx2018/vf-server-ops llhzx2018/core-free-runner-public; do
+            if [[ "$repo" == llhzx2018/vf-server-ops ]]; then
+              target=06d561596cbd6c22244ae95cf24f68e50d9cbd82
+            else
+              target=c159f1361f15a0613228c4a4cb703cba9ffbfd70
+            fi
+            if ! gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
+              gh release create "$tag" \
+                "$dir/P07-M05-0.1.0-m05-clean-host-guard1.zip" \
+                "$dir/P07-M05-CLEAN-HOST-RELEASE.json" \
+                "$dir/SHA256SUMS" \
+                --repo "$repo" --target "$target" --latest=false \
+                --title 'P07-M05 新服务器初始化 · 干净空机安全拦截版' \
+                --notes-file "$dir/notes.md"
+            fi
+            remote="$RUNNER_TEMP/readback-$(basename "$repo")"
+            mkdir -p "$remote"
+            gh release download "$tag" --repo "$repo" --dir "$remote" --clobber
+            test "$(find "$remote" -type f | wc -l)" = 3
+            (cd "$remote" && sha256sum -c SHA256SUMS --status)
+            cmp "$dir/P07-M05-0.1.0-m05-clean-host-guard1.zip" "$remote/P07-M05-0.1.0-m05-clean-host-guard1.zip"
+            cmp "$dir/P07-M05-CLEAN-HOST-RELEASE.json" "$remote/P07-M05-CLEAN-HOST-RELEASE.json"
+            echo "P07_M05_FORMAL_REMOTE_RELEASE_BYTES=PASS:$repo"
+          done
+      - name: Delete private source and temporary ZIP copies
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- product "$RUNNER_TEMP/p07-m05-release" \
+            "$RUNNER_TEMP/readback-vf-server-ops" "$RUNNER_TEMP/readback-core-free-runner-public"
+          echo P07_M05_PRIVATE_SOURCE_RETAINED_PUBLIC=NO
