@@ -49,10 +49,81 @@ verify_installed_current() {
   verify_tree_from_manifest "$INSTALL_DIR" "$INSTALL_DIR/.runtime-manifest.gitblob"
 }
 
+# P07-M03 网站与数据: before ANY upgrade of an existing runtime, prove
+# its own on-disk manifest, paths and build identity are self-consistent.
+# An unknown/corrupt or symlinked directory is never displaced or renamed.
+# No site/DB/SQLite/config/DNS content is opened or migrated here.
+verify_existing_module_before_upgrade() {
+  local root="$INSTALL_DIR"
+  [[ -d "$root" && ! -L "$root" &&
+     -f "$root/BUILD_ID" && ! -L "$root/BUILD_ID" &&
+     -f "$root/.runtime-manifest.gitblob" &&
+     ! -L "$root/.runtime-manifest.gitblob" &&
+     -f "$root/bin/vfops-user" && ! -L "$root/bin/vfops-user" &&
+     -L "$BIN_LINK" ]] || return 1
+  [[ "$(readlink "$BIN_LINK" 2>/dev/null || true)" == "$root/bin/vfops-user" ]] || return 1
+  python3 -B - "$root" <<'PY'
+import hashlib
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+try:
+    build = (root / "BUILD_ID").read_text(encoding="utf-8").strip()
+    if re.fullmatch(r"0\.1\.0-release[0-9]+", build) is None:
+        raise ValueError("foreign M03 build")
+    rows = (root / ".runtime-manifest.gitblob").read_text(encoding="utf-8").splitlines()
+    if not 50 <= len(rows) <= 240:
+        raise ValueError("unknown M03 manifest size")
+    seen = set()
+    for row in rows:
+        item = re.fullmatch(
+            r"([a-f0-9]{40})  ((?:bin|lib)/[A-Za-z0-9_./-]+|BUILD_ID)", row
+        )
+        if item is None:
+            raise ValueError("unexpected M03 manifest item")
+        sha, name = item.groups()
+        parts = pathlib.PurePosixPath(name).parts
+        if ".." in parts or name in seen:
+            raise ValueError("duplicate or escaped M03 path")
+        seen.add(name)
+        f = root / name
+        if f.is_symlink() or not f.is_file():
+            raise ValueError("missing or linked M03 file")
+        data = f.read_bytes()
+        actual = hashlib.sha1(
+            b"blob " + str(len(data)).encode("ascii") + b"\0" + data
+        ).hexdigest()
+        if actual != sha:
+            raise ValueError("changed M03 file")
+    if not {"BUILD_ID", "bin/vfops-user"}.issubset(seen):
+        raise ValueError("missing M03 identity")
+except (OSError, UnicodeError, ValueError, TypeError, KeyError, RecursionError):
+    sys.exit(13)
+PY
+}
+
 if verify_installed_current; then
   say "网站与数据功能已是当前版本，无需下载或重复安装 ✓"
   if [[ -t 0 && -t 1 && "${P07_NO_EXEC:-0}" != "1" ]]; then exec "$BIN_LINK"; fi
   exit 0
+fi
+
+# M03 install must never remove an unknown existing rollback snapshot or
+# existing staged directory. Only the M03 owner may decide how to retain it.
+if [[ -e "$PREVIOUS_DIR" || -L "$PREVIOUS_DIR" ]]; then
+  fail "P07-M03 网站与数据：存在上次升级的恢复目录；拒绝覆盖或删除。"
+fi
+if [[ -e "${INSTALL_DIR}.new" || -L "${INSTALL_DIR}.new" ]]; then
+  fail "P07-M03 网站与数据：目标临时目录已有内容；拒绝清理或覆盖。"
+fi
+
+# Guard any previous runtime before downloading/upgrading it. A verified
+# earlier M03 build is upgradeable; a dirty or foreign M03 must be preserved.
+if [[ -e "$INSTALL_DIR" || -L "$INSTALL_DIR" ]]; then
+  verify_existing_module_before_upgrade ||
+    fail "P07-M03 网站与数据：原运行时归属或完整性无法确认，拒绝升级覆盖。"
 fi
 
 if [[ "${P07_ALLOW_NONROOT:-0}" != "1" ]]; then
@@ -145,12 +216,12 @@ find "$SRC_DIR/lib" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/nu
 verify_tree_from_manifest "$SRC_DIR" "$TMP_DIR/RUNTIME.gitblob" || fail "运行时完整性自检失败。"
 
 say "安装当前版本..."
-rm -rf "$NEW_DIR"
+[[ ! -e "$NEW_DIR" && ! -L "$NEW_DIR" ]] || fail "M03 临时路径发生并发冲突，拒绝覆盖。"
 mkdir -p "$NEW_DIR"
 cp -a "$SRC_DIR"/. "$NEW_DIR"/
 
 if [[ -e "$INSTALL_DIR" ]]; then
-  rm -rf "$PREVIOUS_DIR"
+  [[ ! -e "$PREVIOUS_DIR" && ! -L "$PREVIOUS_DIR" ]] || fail "M03 原恢复版本已存在，拒绝覆盖。"
   mv "$INSTALL_DIR" "$PREVIOUS_DIR"
   OLD_MOVED=1
 fi
