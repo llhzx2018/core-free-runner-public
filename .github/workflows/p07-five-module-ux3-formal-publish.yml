@@ -1,0 +1,244 @@
+# Owner-authorized P07 Formal Release: PR stages bytes; exact main merge publishes and rechecks.
+# Never persist PRIVATE_DATA, secrets, test sources, or private runner artifacts.
+name: P07 five independent UX3 Formal Release exact source publication
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/p07-five-module-ux3-formal-publish.yml]
+  push:
+    branches: [main]
+    paths: [.github/workflows/p07-five-module-ux3-formal-publish.yml]
+permissions:
+  contents: read
+jobs:
+  stage:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NO_COLOR: '1'
+    steps:
+      - name: Checkout immutable public module source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: 3cacb9e9ccbe60f76e4b4ac90920bc9d06ead877
+          persist-credentials: false
+          path: public
+      - name: Checkout exact private P07 source in temporary workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 2100748b179ad044ffd7c36e0b26f44f64ca6828
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Build isolated current M03 and M05 from exact private source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C public rev-parse HEAD)" = 3cacb9e9ccbe60f76e4b4ac90920bc9d06ead877
+          test "$(git -C product rev-parse HEAD)" = 2100748b179ad044ffd7c36e0b26f44f64ca6828
+          test "$(cat product/BUILD_ID)" = 0.1.0-release135
+          mkdir -p "$RUNNER_TEMP/p07-five/stage"
+          python3 -B product/scripts/p07_candidate_bundle.py \
+            --product-root product --public-root public \
+            --output "$RUNNER_TEMP/p07-five/stage" \
+            --product-sha 2100748b179ad044ffd7c36e0b26f44f64ca6828 \
+            --build 0.1.0-release135 --care 0.1.0-rc84
+          python3 -B product/scripts/build_p07_m05_bundle.py \
+            --output "$RUNNER_TEMP/p07-five/P07-M05-0.1.0-m05-compact-ux1.zip" >/dev/null
+      - name: Build five standalone, byte-reproducible release candidates and verify package contents
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import hashlib,os,re,shutil,stat,zipfile
+          base=Path(os.environ["RUNNER_TEMP"])/"p07-five"
+          public=Path("public")
+          def bundle(path,entries):
+              if path.exists(): raise ValueError("EXISTING_ARTIFACT")
+              with zipfile.ZipFile(path,"x",compression=zipfile.ZIP_DEFLATED,compresslevel=9,allowZip64=False) as z:
+                  for name,original in sorted(entries):
+                      if not isinstance(original,Path) or not original.is_file() or original.is_symlink():
+                          raise ValueError("MISSING_OR_LINKED_SOURCE:"+name)
+                      if ".." in Path(name).parts or name.startswith("/") or len(name)>200:
+                          raise ValueError("UNSAFE_PACKAGE_PATH")
+                      info=zipfile.ZipInfo(name,(2026,1,1,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.external_attr=(stat.S_IFREG|(0o755 if name.endswith(".sh") else 0o644))<<16
+                      z.writestr(info,original.read_bytes())
+              return hashlib.sha256(path.read_bytes()).hexdigest()
+          m01=public/"packages/p07-network-node/0.1.0-ux1"
+          m04=public/"packages/p07-system-care/0.1.0-ux2"
+          m03=base/"stage"
+          def package_dir(src,prefix):
+              return [(prefix+"/"+f.relative_to(src).as_posix(),f) for f in src.rglob("*") if f.is_file()]
+          m03runtime=m03/"dist/p07/0.1.0/overlay"
+          allowed=[]
+          for line in (m03runtime/"RUNTIME.gitblob").read_text().splitlines():
+              _,path=line.split("  ",1)
+              assert re.fullmatch(r"(?:bin|lib)/[A-Za-z0-9_./-]+|BUILD_ID",path)
+              assert ".." not in Path(path).parts
+              allowed.append(("dist/p07/0.1.0/overlay/"+path,m03runtime/path))
+          allowed.extend([
+             ("dist/p07/0.1.0/overlay/RUNTIME.gitblob",m03runtime/"RUNTIME.gitblob"),
+             ("dist/p07/0.1.0-rc2/P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz",m03/"dist/p07/0.1.0-rc2/P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"),
+             ("installers/p07-final.sh",m03/"installers/p07-final.sh"),
+          ])
+          outputs=[
+            (base/"P07-M01-0.1.0-ux1.zip",package_dir(m01,"p07-m01")),
+            (base/"P07-M03-0.1.0-release135.zip",allowed),
+            (base/"P07-M04-0.1.0-ux2.zip",package_dir(m04,"p07-m04")),
+          ]
+          for output,items in outputs:
+              checksum=bundle(output,items)
+              candidate=base/("rebuild-"+output.name)
+              assert bundle(candidate,items)==checksum,"NONDETERMINISTIC_ZIP"
+              candidate.unlink()
+              with zipfile.ZipFile(output) as z:
+                  assert len(z.namelist())==len(set(z.namelist())) and len(z.namelist())>=10
+              print("P07_STAGED_"+output.name+" SHA256="+checksum)
+          m02=base/"P07-M02-2.1.1-ux1.sh"
+          shutil.copyfile(public/"experiments/p07-vps-audit-v21-ux1.sh",m02)
+          m05=base/"P07-M05-0.1.0-m05-compact-ux1.zip"
+          with zipfile.ZipFile(m05) as z:
+              assert "p07-m05/MODULE_MANIFEST.json" in z.namelist()
+          for path in (m02,m05):
+              assert path.is_file() and not path.is_symlink() and path.stat().st_size>0
+              print("P07_STAGED_"+path.name+" SHA256="+hashlib.sha256(path.read_bytes()).hexdigest())
+          print("P07_FIVE_INDEPENDENT_ARTIFACT_IDENTITIES=STAGED_NOT_PUBLISHED")
+          PY
+      - name: Verify exact public module versions and absence of accidental server action
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          (cd public/packages/p07-network-node/0.1.0-ux1 && sha256sum -c MANIFEST.sha256 >/dev/null)
+          (cd public/packages/p07-system-care/0.1.0-ux2 && while read -r hash file; do test "$(git hash-object "$file")" = "$hash"; done < MANIFEST.gitblob)
+          test "$(NO_COLOR=1 bash public/packages/p07-network-node/0.1.0-ux1/vf-node.sh --version | awk '{print $NF}')" = 0.1.0-ux1
+          test "$(NO_COLOR=1 bash public/experiments/p07-vps-audit-v21-ux1.sh --build-id)" = 2.1.1-ux1
+          test "$(NO_COLOR=1 bash public/packages/p07-system-care/0.1.0-ux2/vf-system-care.sh --version | awk '{print $NF}')" = 0.1.0-ux2
+          echo "P07_M01_UX1_MANIFEST_SHA256=$(sha256sum public/packages/p07-network-node/0.1.0-ux1/MANIFEST.sha256 | cut -d ' ' -f1)"
+          echo "P07_M04_UX2_UI_GIT_BLOB=$(git -C public hash-object packages/p07-system-care/0.1.0-ux2/vf-system-care.sh)"
+          echo "P07_M03_RUNTIME_GIT_BLOB=$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/p07-five/stage/candidate_attestation.json"))["runtime_manifest_blob"])')"
+          echo "P07_M03_FINAL_INSTALLER_GIT_BLOB=$(python3 -c 'import json,os; print(json.load(open(os.environ["RUNNER_TEMP"]+"/p07-five/stage/candidate_attestation.json"))["final_installer_blob"])')"
+          echo P07_FIVE_ARTIFACT_BUILD_GATES=PASS
+          echo P07_M03_M04_GENERATED_LEGACY_COUPLED_STAGE=NOT_DISTRIBUTED
+          echo P07_RELEASE_ASSETS=NOT_UPLOADED
+          echo P07_TOOLBOX_CHANGED=NO
+          echo P07_OWNER_VPS_WRITES=NONE
+      - name: Verify existing public exact-source package machines and registered Depot provenance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          # The private-read credential is allowed to checkout exact source, but
+          # GitHub intentionally returns 403 for private check-runs API.
+          # Reuse the independently verified exact Depot checks recorded in
+          # the release case, and machine-verify two public package run results.
+          for run in 43456000669 43456897631; do
+            result="$(gh api "repos/llhzx2018/core-free-runner-public/actions/runs/$run" --jq '.conclusion')"
+            test "$result" = success || { echo "P07_PUBLIC_EXACT_PACKAGE_GATE_MISSING:$run"; exit 78; }
+          done
+          test "$(git -C product rev-parse HEAD)" = 2100748b179ad044ffd7c36e0b26f44f64ca6828
+          echo P07_PUBLIC_EXACT_ARTIFACT_PRECEDENT_GATES=PASS
+          echo P07_DEPOT_PRODUCT_CHECKS=SEPARATELY_READ_BY_OWNER_AUTHORIZED_AGENT
+          echo P07_PRIVATE_CHECK_RUNS_API=403_PERMISSION_SCOPED_NOT_SOURCE_FAIL
+      - name: Record final five released SHA256 and machine source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          import json,hashlib,os
+          root=Path(os.environ["RUNNER_TEMP"])/"p07-five"
+          expected={
+            "P07-M01-0.1.0-ux1.zip":"19b86bd35116c0c2215c57eee7cc46f054276e7a81e6fc7397df5a3dd415cfe3",
+            "P07-M02-2.1.1-ux1.sh":"7b083e4cf105d40b04b4cbe898fb6b9e1bb7f1ef3385bc1d20829796f6852013",
+            "P07-M03-0.1.0-release135.zip":"2e5509bf7f2d36c5bc9f4ec9e2e05016e9e30f94cff546880e93e441af8af866",
+            "P07-M04-0.1.0-ux2.zip":"b34dd413ad130d8690091766e3524295443aaaabc9075b71044263125d993f5c",
+            "P07-M05-0.1.0-m05-compact-ux1.zip":"36e46e487ce90d01391639806e0dd659ba8881a5235bc5b89459f4da572a11e7",
+          }
+          for name,expected_sha in expected.items():
+              actual=hashlib.sha256((root/name).read_bytes()).hexdigest()
+              assert actual==expected_sha,(name,actual)
+          attestation={
+            "schema":"p07.five-independent-modules.ux3.formal-release.v1",
+            "status":"FORMAL_ASSETS_ONLY_NO_PRODUCTION",
+            "public_source_sha":os.environ["GITHUB_SHA"],
+            "p07_product_source_sha":"2100748b179ad044ffd7c36e0b26f44f64ca6828",
+            "public_base_sha":"3cacb9e9ccbe60f76e4b4ac90920bc9d06ead877",
+            "tag":"p07-v0.1.0-five-modules-ux3-20261113",
+            "modules":expected,
+            "machine":"DEPOT_THREE_EXACT_SOURCE_SUCCESS_AND_PUBLIC_ARTIFACT_BUILD_PASS",
+            "owner_production":"NOT_RUN",
+            "migration":"NOT_RUN",
+            "dns_cutover":"NOT_RUN",
+          }
+          (root/"P07-FIVE-MODULES-UX3-RELEASE.json").write_text(
+              json.dumps(attestation,sort_keys=True,ensure_ascii=False,indent=2)+"\n",
+              encoding="utf-8")
+          (root/"SHA256SUMS").write_text(
+              "".join(sha+"  "+name+"\n" for name,sha in sorted(expected.items())),
+              encoding="utf-8")
+          print("P07_FIVE_IMMUTABLE_ASSET_SHA256=PASS")
+          PY
+      - name: Publish formal source tag and public immutable Release assets only on exact authorized main merge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'P07 five-module UX3 formal publish')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$GH_TOKEN" ]] || { echo P07_RELEASE_WRITE_TOKEN_NOT_AVAILABLE; exit 78; }
+          public_repo='llhzx2018/core-free-runner-public'
+          private_repo='llhzx2018/vf-server-ops'
+          tag='p07-v0.1.0-five-modules-ux3-20261113'
+          product_sha='2100748b179ad044ffd7c36e0b26f44f64ca6828'
+          test "$(gh api "repos/$public_repo/git/ref/heads/main" --jq '.object.sha')" = "$GITHUB_SHA"
+          test "$(gh api "repos/$private_repo/git/ref/heads/main" --jq '.object.sha')" = "$product_sha"
+          if gh release view "$tag" -R "$private_repo" >/dev/null 2>&1; then
+            test "$(gh api "repos/$private_repo/git/ref/tags/$tag" --jq '.object.sha')" = "$product_sha" || exit 81
+          else
+            if gh api "repos/$private_repo/git/ref/tags/$tag" >/dev/null 2>&1; then exit 81; fi
+            gh release create "$tag" -R "$private_repo" --target "$product_sha" \
+              --title 'P07 VF Server Ops 0.1.0 · 五模块 UX3 正式源码' \
+              --notes 'Exact source 2100748b. 五模块隔离构建及 Depot 机器安全验收；真实 VPS、迁移、DNS 全部未执行；公共独立更新包在 core-free-runner-public 对应 Release。'
+          fi
+          if gh release view "$tag" -R "$public_repo" >/dev/null 2>&1; then
+            test "$(gh api "repos/$public_repo/git/ref/tags/$tag" --jq '.object.sha')" = "$GITHUB_SHA" || exit 81
+            test "$(gh api "repos/$public_repo/releases/tags/$tag" --jq '.assets|length')" = 7 || exit 81
+          else
+            if gh api "repos/$public_repo/git/ref/tags/$tag" >/dev/null 2>&1; then exit 81; fi
+            gh release create "$tag" -R "$public_repo" --target "$GITHUB_SHA" \
+              --title 'P07 五模块独立正式更新 · UX3 / 0.1.0' \
+              --notes '五个独立模块与 SHA256SUMS；P07 私有源码固定 2100748b；M03 release115→135 失败/回滚及其它模块不变通过 Depot 隔离机验。仅 Release 分发，不自动升级任何 VPS、迁移或切换 DNS。'
+            gh release upload "$tag" -R "$public_repo" \
+              "$RUNNER_TEMP/p07-five/P07-M01-0.1.0-ux1.zip" \
+              "$RUNNER_TEMP/p07-five/P07-M02-2.1.1-ux1.sh" \
+              "$RUNNER_TEMP/p07-five/P07-M03-0.1.0-release135.zip" \
+              "$RUNNER_TEMP/p07-five/P07-M04-0.1.0-ux2.zip" \
+              "$RUNNER_TEMP/p07-five/P07-M05-0.1.0-m05-compact-ux1.zip" \
+              "$RUNNER_TEMP/p07-five/P07-FIVE-MODULES-UX3-RELEASE.json" \
+              "$RUNNER_TEMP/p07-five/SHA256SUMS"
+          fi
+          test "$(gh api "repos/$public_repo/releases/tags/$tag" --jq '.assets|length')" = 7
+          dir="$(mktemp -d)"
+          trap 'rm -rf -- "$dir"' EXIT
+          gh release download "$tag" -R "$public_repo" --dir "$dir"
+          (cd "$dir"; sha256sum -c SHA256SUMS)
+          cmp "$dir/P07-FIVE-MODULES-UX3-RELEASE.json" "$RUNNER_TEMP/p07-five/P07-FIVE-MODULES-UX3-RELEASE.json"
+          test "$(gh api "repos/$private_repo/git/ref/tags/$tag" --jq '.object.sha')" = "$product_sha"
+          echo P07_FIVE_MODULE_UX3_PUBLIC_RELEASE_ASSETS_REMOTE_READBACK=PASS
+          echo P07_PRIVATE_PRODUCT_FORMAL_TAG=PASS
+          echo P07_PRODUCTION_MIGRATION_DNS=NOT_RUN
+      - name: Always securely remove private product checkout and temporary packages
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- product public "$RUNNER_TEMP/p07-five"
+          echo P07_PRIVATE_SOURCE_OR_PACKAGES_PUBLIC_ARTIFACT=NONE
+          echo P07_PRODUCTION_MIGRATION_DNS=NOT_RUN
