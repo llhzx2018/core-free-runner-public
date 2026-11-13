@@ -65,8 +65,62 @@ jobs:
           php tests/run.php
           ./vendor/bin/phpunit --no-progress tests/Feature/LandingHistoryPreviewTest.php
           echo P08_R89_STATIC_LAYOUTS_OWNER_REVISION_SQLITE=PASS
+      - name: Real isolated Chromium Owner template edit and restore
+        run: |
+          set -euo pipefail
+          cd private-p08-r89
+          site="$RUNNER_TEMP/p08-r89-local-browser-site"
+          package="$RUNNER_TEMP/p08-r89-local-browser-full.zip"
+          test ! -e "$site"
+          python3 scripts/build_full.py --source . --output "$package" --version 0.1.1 --source-sha a1c0917b24736b4dbe80b77750ae9409419b8665 > "$RUNNER_TEMP/p08-r89-local-build.json"
+          mkdir -p "$site"
+          unzip -q "$package" -d "$site"
+          name="$(openssl rand -hex 16).sqlite"
+          touch "$site/database/$name"
+          chmod 0600 "$site/database/$name"
+          php -r '
+            $site=$argv[1];$db=$argv[2];require $site."/vendor/autoload.php";
+            $password="Synthetic-SQLite-Owner-12345!";
+            $res=(new VF\AdOps\Installation\OwnerWebInstaller())->install([
+              "db_driver"=>"sqlite","db_database"=>$db,
+              "site_name"=>"R89 isolated browser","owner_username"=>"synthetic_owner",
+              "owner_email"=>"owner@isolated.example","owner_password"=>$password,
+              "owner_confirm"=>$password
+            ],$site);
+            if(($res["status"]??"")!=="INSTALLED")throw new RuntimeException("R89_ISOLATED_INSTALL_FAILED");
+            echo "P08_R89_CLEAN_FULL_SQLITE_OWNER_INSTALL=PASS\n";
+          ' "$site" "$name"
+          cat > "$RUNNER_TEMP/p08-r89-router.php" <<'PHP'
+          <?php
+          $site=(string)getenv('P08_R89_BROWSER_SITE');
+          $path=parse_url((string)($_SERVER['REQUEST_URI']??''),PHP_URL_PATH);
+          if (!is_string($path) || !str_starts_with($path,'/') || str_contains($path,'..')) {
+              http_response_code(404); return true;
+          }
+          $public=$site.'/public';
+          $candidate=$public.$path;
+          if (is_file($candidate) && str_starts_with((string)realpath($candidate),$public.'/')) return false;
+          require $public.'/index.php';
+          PHP
+          export P08_R89_BROWSER_SITE="$site"
+          # Plain HTTP and nonsecure cookies ONLY within disposable 127.0.0.1
+          # so the Owner's installed HTTPS and secure-cookie defaults stay intact.
+          SESSION_SECURE_COOKIE=false APP_URL=http://127.0.0.1:18989 php -S 127.0.0.1:18989 -t "$site/public" "$RUNNER_TEMP/p08-r89-router.php" > "$RUNNER_TEMP/p08-r89-php.log" 2>&1 &
+          server_pid="$!"
+          trap 'kill "$server_pid" >/dev/null 2>&1 || true' EXIT
+          for i in $(seq 1 50); do
+            if curl -fsS http://127.0.0.1:18989/login -o /dev/null; then break; fi
+            sleep 0.2
+          done
+          curl -fsS http://127.0.0.1:18989/login -o /dev/null
+          npx playwright install chromium > "$RUNNER_TEMP/p08-r89-playwright.log" 2>&1 || { tail -n 25 "$RUNNER_TEMP/p08-r89-playwright.log"; exit 1; }
+          P08_TEST_BASE_URL=http://127.0.0.1:18989 npx playwright test tests/e2e/owner-workspace.spec.ts --grep 'Owner login, Landing create' --workers=1
+          echo P08_R89_CHROMIUM_EDITOR_TEMPLATE_FLOW=PASS
+          kill "$server_pid" >/dev/null 2>&1 || true
+          trap - EXIT
+          rm -rf "$site" "$package" "$RUNNER_TEMP/p08-r89-router.php" "$RUNNER_TEMP/p08-r89-local-build.json" "$RUNNER_TEMP/p08-r89-php.log" "$RUNNER_TEMP/p08-r89-playwright.log"
       - name: Always delete private checkout and temporary output
         if: always()
         run: |
           rm -rf private-p08-r89
-          rm -f "$RUNNER_TEMP/p08-r89-composer.log" "$RUNNER_TEMP/p08-r89-npm.log"
+          rm -f "$RUNNER_TEMP/p08-r89-composer.log" "$RUNNER_TEMP/p08-r89-npm.log"\n          rm -rf "$RUNNER_TEMP/p08-r89-local-browser-site"\n          rm -f "$RUNNER_TEMP/p08-r89-local-browser-full.zip" "$RUNNER_TEMP/p08-r89-router.php" "$RUNNER_TEMP/p08-r89-local-build.json" "$RUNNER_TEMP/p08-r89-php.log" "$RUNNER_TEMP/p08-r89-playwright.log"
