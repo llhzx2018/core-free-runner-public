@@ -29,7 +29,7 @@ PUBLIC_ROUTES = {
     "installers/p07-system-care.sh": "P07-M04",
 }
 USER_COPY = re.compile(
-    r"\b(?:printf|echo|say|read|ui_[a-z]+|menu_[a-z]+)\b"
+    r"\b(?:printf|echo|say|read|ui_[a-z_]+|menu_[a-z_]+)\b"
     r"|菜单|选择|确认|返回|检查|安装|完成|失败|重试|按 Enter|\bprompt\b",
     re.I,
 )
@@ -63,7 +63,9 @@ def load_and_check(root: Path = ROOT) -> None:
     for token in ("pull_request:", "check_p07_public_terminal_ux.py",
                   "--base-ref", "BASE_SHA",
                   "test_p07_public_terminal_ux.py",
-                  "installers/p07-*.sh", "experiments/p07-*.sh"):
+                  "installers/p07-*.sh", "experiments/p07-*.sh",
+                  "packages/p07-network-node/**/vf-node.sh",
+                  "packages/p07-system-care/**/vf-system-care.sh"):
         require(token in content, f"P07 Public UX CI 接线缺失：{token}")
     for route in PUBLIC_ROUTES:
         require((root / route).is_file(), f"公共 P07 用户入口不存在：{route}")
@@ -78,6 +80,11 @@ def source_owner(path: str) -> str | None:
         return PUBLIC_ROUTES[path]
     if re.fullmatch(r"experiments/p07-vps-audit-[\w.-]+\.sh", path):
         return "P07-M02"
+    if re.fullmatch(r"packages/p07-network-node/[^/]+/vf-node\.sh", path):
+        return "P07-M01"
+    if re.fullmatch(r"packages/p07-system-care/[^/]+/vf-system-care\.sh", path):
+        return "P07-M04"
+
     if re.fullmatch(r"installers/p07-[\w.-]*(?:menu|ui)[\w.-]*\.sh", path):
         raise PublicUXError(f"P07 新公共菜单源 {path} 未登记 UI 模块归属")
     return None
