@@ -70,6 +70,18 @@ class FiveIndependentToolboxSlots(unittest.TestCase):
                       "网站与数据", "服务器维护与安全", "新服务器初始化"):
             self.assertIn(title, body_of(source, "show_menu"))
 
+    def test_m03_default_route_is_stable_only_not_historical_trial(self):
+        source = SOURCE.read_text(encoding="utf-8")
+        fragment = body_of(source, "run_server_ops")
+        self.assertIn("ensure_server_ops_current || return $?",fragment)
+        self.assertIn("\\n  vfops\\n",fragment)
+        for historical in ("run_server_ops_owner124_trial",
+                           "run_server_ops_owner143_trial",
+                           "release124","release143"):
+            self.assertNotIn(historical,fragment)
+        self.assertNotIn("read -r",fragment)
+        self.assertNotIn("请选择 [0-3]",fragment)
+
     def test_main_entry_does_not_install_all_modules_on_start(self):
         source = SOURCE.read_text(encoding="utf-8")
         startup = source[:source.index("main_menu() {")]
