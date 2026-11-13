@@ -687,22 +687,12 @@ run_server_ops_owner143_trial() {
 }
 
 run_server_ops() {
+  # P07-M03 网站与数据: one selected module, one verified stable entry.
+  # Historical release124/143 trials remain in the archive/explicit test
+  # machinery; they are not an everyday installation or migration choice.
   screen_clear
-  say "网站与数据"
-  say "  1. 当前正式版 release115"
-  say "  2. 历史试用 release124（原生只读分类）"
-  say "  3. 最新试用 release143（原18站迁移；安装/只读验收）"
-  say "  0. 返回"
-  printf '请选择 [0-3]：'
-  local selected
-  read -r selected || return 0
-  case "$selected" in
-    1) ensure_server_ops_current || return $?; vfops ;;
-    2) run_server_ops_owner124_trial ;;
-    3) run_server_ops_owner143_trial ;;
-    0) return 0 ;;
-    *) say "请输入 0-3。"; return 0 ;;
-  esac
+  ensure_server_ops_current || return $?
+  vfops
 }
 
 
@@ -931,9 +921,7 @@ install_m05_offline_trial() {
      "$confirmation" == "P07-M05:INSTALL" &&
      "$archive" == /* && -f "$archive" && ! -L "$archive" &&
      "$M05_OFFLINE_TRIAL_SHA256" =~ ^[a-f0-9]{64}$ ]] || return 13
-  for cmd in realpath cp curl sha256sum mktemp python3; do
-    # curl is NOT required for this offline-only path.
-    [[ "$cmd" != curl ]] || continue
+  for cmd in realpath cp sha256sum mktemp python3; do
     command -v "$cmd" >/dev/null 2>&1 || return 3
   done
   canonical="$(realpath -e -- "$archive" 2>/dev/null || true)"
