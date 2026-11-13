@@ -1,0 +1,101 @@
+name: P07 five-module UX3 independent old-to-new and rollback machine gate
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'installers/p07-toolbox.sh'
+      - 'installers/p07-vf-node-independent-ux1.sh'
+      - 'installers/p07-system-care-ux2-isolated.sh'
+      - 'installers/p07-m03-release135-atomic.sh'
+      - '.github/workflows/p07-five-module-ux3-upgrade-machine.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'installers/p07-toolbox.sh'
+      - '.github/workflows/p07-five-module-ux3-upgrade-machine.yml'
+permissions:
+  contents: read
+jobs:
+  independent-module-upgrade:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Official download URL and original source pins
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -n installers/p07-toolbox.sh installers/p07-m03-release135-atomic.sh \
+            installers/p07-vf-node-independent-ux1.sh installers/p07-system-care-ux2-isolated.sh
+          python3 -B scripts/check_p07_public_terminal_ux.py
+          python3 -B -m unittest discover -s tests -p 'test_p07_module_target_upgrade_gate.py' -q
+          python3 -B -m unittest discover -s tests -p 'test_p07_five_slot_route_isolation.py' -q
+          test "$(bash installers/p07-vf-node-independent-ux1.sh --version | awk '{print $NF}')" = 0.1.0-ux1
+          test "$(bash installers/p07-system-care-ux2-isolated.sh --version | awk '{print $NF}')" = 0.1.0-ux2
+          test "$(bash installers/p07-m03-release135-atomic.sh --version | awk '{print $NF}')" = 0.1.0-release135
+          test "$(bash experiments/p07-vps-audit-v21-ux1.sh --build-id)" = 2.1.1-ux1
+          echo P07_FIVE_UX3_UPDATED_PINS_AND_SOURCE_GATE=PASS
+      - name: Independently install actual old M01 and M04 managers on disposable Runner
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test -n "$RUNNER_TEMP"
+          test ! -e /opt/vfops-modules
+          sudo -n mkdir -p /opt/vfops-modules/m02 /opt/vfops-modules/m03 /opt/vfops-modules/m05
+          for m in m02 m03 m05; do echo ORIGINAL | sudo -n tee "/opt/vfops-modules/$m/TEST_ONLY" >/dev/null; done
+          sudo -n bash installers/p07-vf-node-independent-rc13.sh install
+          sudo -n bash installers/p07-system-care-rc83-isolated.sh install
+          test "$(sudo -n cat /opt/vfops-modules/m01/current/VERSION)" = 0.1.0-rc13
+          test "$(sudo -n cat /opt/vfops-modules/m04/current/VERSION)" = 0.1.0-rc83
+          echo P07_M01_M04_OFFICIAL_PREVIOUS_MANAGERS_INSTALLED=PASS
+      - name: Install both new independent managers without node/system writes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo -n bash installers/p07-vf-node-independent-ux1.sh install
+          sudo -n bash installers/p07-system-care-ux2-isolated.sh install
+          test "$(sudo -n cat /opt/vfops-modules/m01/current/VERSION)" = 0.1.0-ux1
+          test "$(sudo -n cat /opt/vfops-modules/m04/current/VERSION)" = 0.1.0-ux2
+          sudo -n bash installers/p07-vf-node-independent-ux1.sh install
+          sudo -n bash installers/p07-system-care-ux2-isolated.sh install
+          for m in m02 m03 m05; do test "$(sudo -n cat /opt/vfops-modules/$m/TEST_ONLY)" = ORIGINAL; done
+          test ! -e /opt/vf-server-ops
+          echo P07_M01_M04_REAL_OLD_TO_UX3_IDEMPOTENT_AND_THREE_SIBLING_MARKERS=PASS
+      - name: Reject wrong confirmation, rollback old and safely reupgrade
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if sudo -n bash installers/p07-vf-node-independent-rc13.sh rollback 0.1.0-rc13 WRONG >/dev/null 2>&1; then exit 41; fi
+          if sudo -n bash installers/p07-system-care-rc83-isolated.sh rollback 0.1.0-rc83 WRONG >/dev/null 2>&1; then exit 42; fi
+          test "$(sudo -n cat /opt/vfops-modules/m01/current/VERSION)" = 0.1.0-ux1
+          test "$(sudo -n cat /opt/vfops-modules/m04/current/VERSION)" = 0.1.0-ux2
+          sudo -n bash installers/p07-vf-node-independent-rc13.sh rollback 0.1.0-rc13 P07-M01:0.1.0-rc13
+          sudo -n bash installers/p07-system-care-rc83-isolated.sh rollback 0.1.0-rc83 P07-M04:0.1.0-rc83
+          test "$(sudo -n cat /opt/vfops-modules/m01/current/VERSION)" = 0.1.0-rc13
+          test "$(sudo -n cat /opt/vfops-modules/m04/current/VERSION)" = 0.1.0-rc83
+          sudo -n bash installers/p07-vf-node-independent-ux1.sh install
+          sudo -n bash installers/p07-system-care-ux2-isolated.sh install
+          test "$(sudo -n cat /opt/vfops-modules/m01/current/VERSION)" = 0.1.0-ux1
+          test "$(sudo -n cat /opt/vfops-modules/m04/current/VERSION)" = 0.1.0-ux2
+          for m in m02 m03 m05; do test "$(sudo -n cat /opt/vfops-modules/$m/TEST_ONLY)" = ORIGINAL; done
+          echo P07_M01_M04_REAL_ROLLBACK_AND_REUPGRADE=PASS
+          echo P07_OTHER_MODULES_VPS_DATA_DNS=UNTOUCHED
+      - name: Remote official 5 asset SHA256 readback without installing anything on VPS
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          tag='p07-v0.1.0-five-modules-ux3-20261113'
+          url="https://github.com/llhzx2018/core-free-runner-public/releases/download/$tag"
+          dir="$(mktemp -d)"
+          trap 'rm -rf -- "$dir"' EXIT
+          curl --proto '=https' --tlsv1.2 -fsSL "$url/SHA256SUMS" -o "$dir/SHA256SUMS"
+          while read -r sha name; do
+            test -n "$sha" && test -n "$name"
+            curl --proto '=https' --tlsv1.2 -fsSL --max-time 90 "$url/$name" -o "$dir/$name"
+          done < "$dir/SHA256SUMS"
+          (cd "$dir" && sha256sum -c SHA256SUMS)
+          test "$(wc -l < "$dir/SHA256SUMS")" -eq 5
+          echo P07_FIVE_OFFICIAL_RELEASE_ASSETS_REMOTE_READBACK=PASS
+          echo P07_OWNER_PRODUCTION=NOT_RUN
