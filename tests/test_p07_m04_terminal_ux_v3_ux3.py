@@ -100,7 +100,7 @@ ui_attention(){ echo "ATTENTION:$1"; }
 ui_good(){ echo "GOOD:$1"; }
 pause_menu(){ :; }
 SCRIPT_DIR="$P07_PACKAGE"
-VERSION='0.1.0-ux2'
+VERSION='0.1.0-ux3'
 '''
         p = subprocess.run(["bash", "-c", stubs + self.check_function +
                             "\nselfcheck_local_module\n"],
@@ -122,7 +122,7 @@ ui_attention(){ echo "ATTENTION:$1"; }
 ui_good(){ echo "GOOD:$1"; }
 pause_menu(){ :; }
 SCRIPT_DIR='/nonexistent/p07-m04-missing'
-VERSION='0.1.0-ux2'
+VERSION='0.1.0-ux3'
 '''
         p = subprocess.run(["bash", "-c", stubs + self.check_function +
                             "\nselfcheck_local_module\n"],
@@ -135,7 +135,7 @@ VERSION='0.1.0-ux2'
     def test_no_color_non_tty(self):
         out = self.run_menu()
         self.assertNotIn("\x1b", out)
-        for arg, expected in (("--version", "0.1.0-ux2"),
+        for arg, expected in (("--version", "0.1.0-ux3"),
                               ("--ui-contract", "P07_BEGINNER_ZH_V1")):
             p = subprocess.run(["bash", str(SCRIPT), arg],
                                capture_output=True, text=True,
