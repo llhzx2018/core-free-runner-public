@@ -29,7 +29,7 @@ PUBLIC_ROUTES = {
     "installers/p07-system-care.sh": "P07-M04",
 }
 USER_COPY = re.compile(
-    r"\b(?:printf|echo|say|read|ui_[a-z]+|menu_[a-z]+)\b"
+    r"\b(?:printf|echo|say|read|ui_[a-z_]+|menu_[a-z_]+)\b"
     r"|菜单|选择|确认|返回|检查|安装|完成|失败|重试|按 Enter|\bprompt\b",
     re.I,
 )
