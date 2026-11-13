@@ -1,0 +1,146 @@
+name: P07-M05 Existing CloudPanel Safe Upgrade Candidate - old release to new
+on:
+  push:
+    branches:
+      - test/p07-m05-existing-safe-upgrade-20261113
+    paths:
+      - .github/workflows/p07-m05-existing-safe-upgrade-20261113.yml
+permissions:
+  contents: read
+jobs:
+  exact-verified-module-upgrade:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 14
+    steps:
+      - name: Public installer checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: c159f1361f15a0613228c4a4cb703cba9ffbfd70
+          persist-credentials: false
+      - name: Exact private candidate transient checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 0a819d13fbae5afd91eb80df8e3f18e1bb29b84b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: product
+      - name: Run new M05 source-locked safety and regression cases
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "0a819d13fbae5afd91eb80df8e3f18e1bb29b84b"
+          bash -n product/bin/vfops-init-ui
+          bash -n product/bin/vfops-init-core
+          bash -n product/bin/vfops-init-entry
+          (
+            cd product
+            export PYTHONDONTWRITEBYTECODE=1
+            python3 -B scripts/check_p07_modules.py
+            python3 -B -m unittest discover -s tests -p 'test_p07_m05_*.py' -v
+            python3 -B -m unittest discover -s tests -p 'test_p07_module_contract.py' -v
+          )
+      - name: Build exact candidate and verify its manifest and ZIP security
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/p07-m05-test"
+          python3 -B product/scripts/build_p07_m05_bundle.py \
+            --output "$RUNNER_TEMP/p07-m05-test/new.zip" \
+            > "$RUNNER_TEMP/p07-m05-test/build.json"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,re,stat,zipfile
+          p=pathlib.Path(os.environ["RUNNER_TEMP"])/"p07-m05-test"/"new.zip"
+          with zipfile.ZipFile(p) as z:
+              files=z.infolist()
+              assert len(files)==88,len(files)
+              names=[f.filename for f in files]
+              assert len(names)==len(set(names))
+              assert z.testzip() is None
+              for f in files:
+                  assert f.filename.startswith("p07-m05/"),f.filename
+                  assert not pathlib.PurePosixPath(f.filename).is_absolute()
+                  assert ".." not in pathlib.PurePosixPath(f.filename).parts
+                  assert not stat.S_ISLNK(f.external_attr>>16)
+                  assert f.file_size<8*1024*1024
+              j=json.loads(z.read("p07-m05/MODULE_MANIFEST.json"))
+              assert j["module_id"]=="P07-M05"
+              assert j["module_build_id"]=="0.1.0-m05-existing-safe1"
+              ui=z.read("p07-m05/bin/vfops-init-ui")
+              assert b"m05_existing_server_reconcile()" in ui
+              for label,pat in {
+                "private_key":rb"-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----",
+                "github_token":rb"(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})",
+                "aws_key":rb"(?:AKIA|ASIA)[A-Z0-9]{16}",
+                "credential_url":rb"https?://[A-Za-z0-9._-]+:[^/@\s]+@[A-Za-z0-9.-]+",
+                "known_owner_ip":rb"(?:45\.76\.171\.57|45\.63\.52\.90)",
+              }.items():
+                  for f in files:
+                      if re.search(pat,z.read(f)):
+                          raise AssertionError(label+" in "+f.filename)
+          print("P07_M05_NEW_BUILD_ID=0.1.0-m05-existing-safe1")
+          print("P07_M05_NEW_SHA256="+hashlib.sha256(p.read_bytes()).hexdigest())
+          print("P07_M05_SOURCE_SECURITY_REVIEW=PASS")
+          PY
+      - name: Download old published M05 ZIP anonymously
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          url='https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-v0.1.0-five-modules-20261113/P07-M05-0.1.0-m05-candidate2.zip'
+          curl -fsSL --proto '=https' --tlsv1.2 --retry 2 --max-time 75 "$url" \
+            -o "$RUNNER_TEMP/p07-m05-test/old.zip"
+          echo "835356e2af2f89877e79d904f47b1ad38602983aa760978657ac4bb3c7593adb  $RUNNER_TEMP/p07-m05-test/old.zip" | sha256sum -c --status
+          echo P07_M05_PREVIOUS_OFFICIAL_PUBLIC_PACKAGE=VERIFIED
+      - name: Real prior official package to new isolated upgrade and rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test ! -e /opt/vfops-modules/m05
+          test ! -e /opt/vfops-modules/m01
+          test ! -e /opt/vfops-modules/m02
+          test ! -e /opt/vfops-modules/m03
+          test ! -e /opt/vfops-modules/m04
+          test ! -e /home/clp
+          old="$RUNNER_TEMP/p07-m05-test/old.zip"
+          new="$RUNNER_TEMP/p07-m05-test/new.zip"
+          oldsha=835356e2af2f89877e79d904f47b1ad38602983aa760978657ac4bb3c7593adb
+          newsha="$(sha256sum "$new" | awk '{print $1}')"
+          sudo python3 -B installers/p07-m05-atomic.py install "$old" "$oldsha"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-candidate2
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$newsha"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-existing-safe1
+          test -d /opt/vfops-modules/m05/releases/0.1.0-m05-candidate2
+          test "$(bash /opt/vfops-modules/m05/current/bin/vfops-init-entry --version)" = 'P07-M05 新服务器初始化 0.1.0-m05-existing-safe1'
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$newsha"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-existing-safe1
+          cp "$new" "$RUNNER_TEMP/p07-m05-test/corrupt.zip"
+          printf X >> "$RUNNER_TEMP/p07-m05-test/corrupt.zip"
+          if sudo python3 -B installers/p07-m05-atomic.py install "$RUNNER_TEMP/p07-m05-test/corrupt.zip" "$newsha" >/dev/null 2>&1; then
+            echo P07_BAD_BUNDLE_ACCEPTED
+            exit 13
+          fi
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-existing-safe1
+          sudo python3 -B installers/p07-m05-atomic.py rollback '0.1.0-m05-candidate2' \
+            --confirm 'P07-M05:0.1.0-m05-candidate2'
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-candidate2
+          sudo python3 -B installers/p07-m05-atomic.py install "$new" "$newsha"
+          test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-existing-safe1
+          for sibling in m01 m02 m03 m04; do
+            test ! -e "/opt/vfops-modules/$sibling"
+          done
+          test ! -e /home/clp
+          echo P07_M05_OFFICIAL_OLD_TO_NEW_ATOMIC_UPGRADE=PASS
+          echo P07_M05_CORRUPT_BUNDLE_FAIL_CLOSED=PASS
+          echo P07_M05_OLD_RELEASE_ROLLBACK=PASS
+          echo P07_M05_OTHER_FOUR_MODULES_UNTOUCHED=YES
+          echo P07_M05_CLOUDPANEL_NOT_INSTALLED=YES
+          echo P07_OWNER_PRODUCTION_UNTOUCHED=YES
+      - name: Erase private checkout and disposable candidate bytes
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- product "$RUNNER_TEMP/p07-m05-test"
+          echo P07_PRIVATE_CODE_PUBLIC_PERSISTENCE=NONE
