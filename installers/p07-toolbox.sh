@@ -51,7 +51,8 @@ M04_RUNTIME="$M04_ROOT/current/vf-system-care.sh"
 # P07-M05 新服务器初始化 has its OWN runtime/build and no M03/M04 installer calls.
 # The isolated M05 artifact is not publicly distributed yet: do not invent a
 # download URL or silently fall back to the legacy M03+M04 installers.
-M05_BUILD_EXPECTED="0.1.0-m05-candidate1"
+# Matches the private, exact-source M05 candidate; not a public distribution pin.
+M05_BUILD_EXPECTED="0.1.0-m05-candidate2"
 M05_ROOT="/opt/vfops-modules/m05"
 M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"
 # M05 official artifact has not been published. Never invent a URL or
