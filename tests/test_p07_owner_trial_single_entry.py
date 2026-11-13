@@ -33,7 +33,7 @@ class FiveModuleSelectedOwnerOperations(unittest.TestCase):
         # Historical M03 Owner trials remain inert without a selected
         # development operation; the common Owner menu never runs them.
         start=source.index("run_server_ops() {")
-        end=source.index("\\n}\\n",start) if False else source.index("\n}\n",start)
+        end=source.index("\n}\n",start)
         m03_entry=source[start:end]
         self.assertNotIn("run_server_ops_owner124_trial",m03_entry)
         self.assertNotIn("run_server_ops_owner143_trial",m03_entry)
