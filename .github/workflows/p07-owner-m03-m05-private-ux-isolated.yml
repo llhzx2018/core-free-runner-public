@@ -136,3 +136,97 @@ jobs:
           set +e
           rm -rf -- product
           echo PRIVATE_SOURCE_PERSISTED_TO_PUBLIC=NO
+
+  m05-official-old-to-new:
+    name: P07-M05 新服务器初始化 · real previous official ZIP to new DB-first UX2
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NO_COLOR: '1'
+    steps:
+      - name: Checkout exact new M05 private source only in temporary worker
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 8ee3567054a09d50ce33d6c47cebb183be7adc33
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Fetch real previous public P07-M05 official ZIP with independent SHA256
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = 8ee3567054a09d50ce33d6c47cebb183be7adc33
+          mkdir -p "$RUNNER_TEMP/m05"
+          source='https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-v0.1.0-five-modules-ux3-20261113/P07-M05-0.1.0-m05-compact-ux1.zip'
+          curl --proto '=https' --tlsv1.2 -fsSL --max-time 90 "$source" -o "$RUNNER_TEMP/m05/old.zip"
+          echo "36e46e487ce90d01391639806e0dd659ba8881a5235bc5b89459f4da572a11e7  $RUNNER_TEMP/m05/old.zip" | sha256sum -c -
+          echo P07_M05_REAL_PREVIOUS_OFFICIAL_SHA256=PASS
+      - name: Deterministic new M05 full ZIP from new exact source
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          python3 -B scripts/build_p07_m05_bundle.py --output "$RUNNER_TEMP/m05/new-a.zip"
+          python3 -B scripts/build_p07_m05_bundle.py --output "$RUNNER_TEMP/m05/new-b.zip"
+          cmp "$RUNNER_TEMP/m05/new-a.zip" "$RUNNER_TEMP/m05/new-b.zip"
+          python3 -B -m unittest discover -s tests -p 'test_p07_m05_isolated_module.py' -q
+          python3 -B -m unittest discover -s tests -p 'test_p07_m05_first_install_order.py' -q
+          echo P07_M05_DB_FIRST_UX2_DETERMINISTIC_PACKAGE_AND_SHELL=PASS
+      - name: Actual old official ZIP install, new independent upgrade, rollback and four sibling hashes
+        shell: bash
+        working-directory: product
+        run: |
+          set -Eeuo pipefail
+          python3 - "$RUNNER_TEMP/m05/old.zip" "$RUNNER_TEMP/m05/new-a.zip" <<'PY'
+          import hashlib,os,sys,tempfile
+          from pathlib import Path
+          import subprocess
+          sys.path.insert(0,"scripts")
+          import install_p07_m05_bundle as installer
+          old,new=map(Path,sys.argv[1:])
+          sha=lambda file:hashlib.sha256(file.read_bytes()).hexdigest()
+          os.environ["P07_M05_DISPOSABLE_TEST"]="1"
+          with tempfile.TemporaryDirectory(prefix="p07-m05-official-to-ux2-") as folder:
+              root=Path(folder)/"modules"
+              markers={}
+              for idx in range(1,5):
+                  name=f"m0{idx}"
+                  path=root/name
+                  path.mkdir(parents=True)
+                  marker=path/"KEEP"
+                  marker.write_text(f"{name}:OWNER-UNCHANGED")
+                  markers[str(marker)]=sha(marker)
+              first=installer.install(old,sha(old),root,test_mode=True)
+              assert first["installed_build"]=="0.1.0-m05-compact-ux1",first
+              second=installer.install(new,sha(new),root,test_mode=True)
+              assert second["installed_build"]=="0.1.0-m05-db-first-ux2",second
+              current=root/"m05/current"
+              assert current.readlink().as_posix()=="releases/0.1.0-m05-db-first-ux2"
+              version=subprocess.run(["bash",str(current/"bin/vfops-init-entry"),"--version"],capture_output=True,text=True,timeout=5)
+              assert version.returncode==0,version.stderr
+              assert "0.1.0-m05-db-first-ux2" in version.stdout
+              assert installer.install(new,sha(new),root,test_mode=True)["already_current"] is True
+              try:
+                  installer.install(new,"0"*64,root,test_mode=True)
+              except installer.IsolatedInstallError:
+                  pass
+              else:
+                  raise AssertionError("WRONG_HASH_ACCEPTED")
+              assert current.readlink().as_posix()=="releases/0.1.0-m05-db-first-ux2"
+              restored=installer.rollback("0.1.0-m05-compact-ux1",root,test_mode=True)
+              assert restored["restored_build"]=="0.1.0-m05-compact-ux1"
+              assert current.readlink().as_posix()=="releases/0.1.0-m05-compact-ux1"
+              assert {p:sha(Path(p)) for p in markers}==markers
+          print("P07_M05_OFFICIAL_OLD_ZIP_TO_UX2_ROLLBACK_IDEMPOTENT_BAD_HASH=PASS")
+          print("P07_M05_FOUR_OTHER_MODULES_UNCHANGED=PASS")
+          print("P07_M05_OWNER_VPS_CLOUDPANEL_DNS=NOT_RUN")
+          PY
+      - name: Erase private checkout, temporary old/new packages and no public artifact
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- product "$RUNNER_TEMP/m05"
+          echo P07_M05_PRIVATE_TEST_ARTIFACT_PUBLICATION=NONE
