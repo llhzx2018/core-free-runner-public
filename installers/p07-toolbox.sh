@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # P07 V0.1.0 final public distribution readback marker.
 # 公共版本保持简短稳定；内部构建身份仅用于精确校验和工程追溯。
 VERSION="V0.1.0"
-BUILD_ID="0.1.0-five-modules-ux4-m03-m05-20261114"
+BUILD_ID="0.1.0-owner-field-recovery-m03-m04-20261114"
 
 VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-ux1"
@@ -41,6 +41,8 @@ VF_SERVER_OPS_MANIFEST_BLOB="59153685ef834114e01e0330c78ae174a042c1fa"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07-m03-release136-atomic.sh"
 M03_BOOTSTRAP_BUILD="0.1.0-release135"
 M03_BOOTSTRAP_MANIFEST_BLOB="f57e114e0ef23f73a1ec12ba864d8f2e67a5bd30"
+M03_LEGACY115_BUILD="0.1.0-release115"
+M03_LEGACY115_MANIFEST_BLOB="4acbaca22aac0da681b34376e2cc86d876593181"
 M03_ROLLBACK_INSTALLER_REF="70836f5bba98e8d4ff32ccb6541b4ca1ffc80912"
 M03_ROLLBACK_INSTALLER_BLOB="9571833c4e8a1d737ee47a60e946a030d94c8157"
 M03_ROLLBACK_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${M03_ROLLBACK_INSTALLER_REF}/installers/p07-m03-restore-previous.sh"
@@ -50,17 +52,20 @@ SYSTEM_CARE_PUBLIC="V0.1.0"
 SYSTEM_CARE_EXPECTED="0.1.0-rc82"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
 # P07-M04 服务器维护与安全 independent UX3 repaired menu; verified legacy UX2 accepted.
-M04_BUILD_EXPECTED="0.1.0-ux3"
-M04_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care-ux3-isolated.sh"
-M04_INSTALLER_BLOB="b22bc0af418d84b4686aff665605afd8674f98e5"
+M04_BUILD_EXPECTED="0.1.0-ux4"
+M04_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care-ux4-isolated.sh"
+M04_INSTALLER_BLOB="b74b9d5fbe6d0fe2fe545d8cdbb1b5b762959617"
 M04_UI_BLOB="bb5882befd5e15962df39ca1388629b45b5d33fc"
 M04_BOOTSTRAP_BUILD="0.1.0-rc83"
 M04_BOOTSTRAP_UI_BLOB="f140f1158351f9dce2e9f9159611af57047424b1"
 M04_BOOTSTRAP_MANIFEST_BLOB="f82c9e42297c45a54ec6dc2fc4d705cad316dfce"
-M04_TARGET_MANIFEST_BLOB="f597bb586dd29059210befea0e09d93d2d87cb41"
-M04_PREVIOUS_BUILD="0.1.0-ux2"
+M04_TARGET_MANIFEST_BLOB="4a20bbe1f1c7622ee54a10761f52fe719130024a"
+M04_PREVIOUS_BUILD="0.1.0-ux3"
 M04_PREVIOUS_UI_BLOB="bb5882befd5e15962df39ca1388629b45b5d33fc"
-M04_PREVIOUS_MANIFEST_BLOB="965aa666b796c8502967a84ccb060695425538e6"
+M04_PREVIOUS_MANIFEST_BLOB="f597bb586dd29059210befea0e09d93d2d87cb41"
+M04_LEGACY2_BUILD="0.1.0-ux2"
+M04_LEGACY2_UI_BLOB="bb5882befd5e15962df39ca1388629b45b5d33fc"
+M04_LEGACY2_MANIFEST_BLOB="965aa666b796c8502967a84ccb060695425538e6"
 M04_ROOT="/opt/vfops-modules/m04"
 M04_RUNTIME="$M04_ROOT/current/vf-system-care.sh"
 
@@ -117,7 +122,7 @@ show_menu() {
   say "  ${C_GREEN}2.${C_RESET} 服务器性能检测      ${C_GRAY}VPS验机${C_RESET}"
   say "  ${C_GREEN}3.${C_RESET} 网站与数据          ${C_GRAY}网站/数据库/备份${C_RESET}"
   say "  ${C_GREEN}4.${C_RESET} 服务器维护与安全    ${C_GRAY}更新/清理/安全${C_RESET}"
-  say "  ${C_GREEN}5.${C_RESET} 新服务器初始化      ${C_GRAY}系统更新/CloudPanel/数据库选择${C_RESET}"
+  say "  ${C_GREEN}5.${C_RESET} 新服务器初始化      ${C_GRAY}空机安装/现有环境检查${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
   say "${C_GRAY}版本信息进入对应功能后查看；主菜单只保留常用操作。${C_RESET}"
@@ -446,13 +451,13 @@ m03_verified_current() {
      ! -L "$root/.runtime-manifest.gitblob" ]] || return 1
   local installed
   installed="$(cat "$root/BUILD_ID")"
-  # Only the pinned public stable M03 and the immediately previous formally released
-  # release135 are eligible; older unproven variants are intentionally blocked.
-  # A self-signed legacy manifest or an unknown historical trial is never upgraded.
+  # Accept both exact, previously FORMALLY distributed M03 release115 and release135.
+  # All file Git blobs must match the pinned manifest; unknown builds fail closed.
   local trusted_manifest=''
   case "$installed" in
     "$VF_SERVER_OPS_BUILD_EXPECTED") trusted_manifest="$VF_SERVER_OPS_MANIFEST_BLOB" ;;
     "$M03_BOOTSTRAP_BUILD") trusted_manifest="$M03_BOOTSTRAP_MANIFEST_BLOB" ;;
+    "$M03_LEGACY115_BUILD") trusted_manifest="$M03_LEGACY115_MANIFEST_BLOB" ;;
     *) return 1 ;;
   esac
   [[ "$(p07_git_blob_sha1 "$root/.runtime-manifest.gitblob" 2>/dev/null || true)" == "$trusted_manifest" ]] || return 1
@@ -485,7 +490,7 @@ ensure_server_ops_current() {
   if m03_verified_current; then
     prior="$(cat /opt/vf-server-ops/BUILD_ID)"
     if [[ "$prior" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]]; then return 0; fi
-    [[ "$prior" == "$M03_BOOTSTRAP_BUILD" ]] || return 13
+    [[ "$prior" == "$M03_BOOTSTRAP_BUILD" || "$prior" == "$M03_LEGACY115_BUILD" ]] || return 13
     say "P07-M03 网站与数据：已核验旧正式版 $prior，新版本 $VF_SERVER_OPS_BUILD_EXPECTED。"
     say '仅升级本模块程序；保留上一个正式运行时用于回滚，不操作网站、数据库或 DNS。'
     if [[ ! -t 0 || ! -t 1 ]]; then
@@ -496,7 +501,15 @@ ensure_server_ops_current() {
     read -r answer || answer=''
     [[ "$answer" =~ ^[Yy]$ ]] || { say '升级取消，旧版保留。'; return 7; }
   elif [[ -e /opt/vf-server-ops || -L /opt/vf-server-ops ]]; then
-    say "${C_RED}P07-M03 网站与数据：现有模块的独立版本或完整性无法确认，已停止；拒绝降级覆盖。${C_RESET}" >&2
+    # Read only a bounded, sanitized build identity. Do not execute unknown code.
+    local detected='无法识别'
+    if [[ -f /opt/vf-server-ops/BUILD_ID && ! -L /opt/vf-server-ops/BUILD_ID ]]; then
+      local build_text=''
+      IFS= read -r build_text < /opt/vf-server-ops/BUILD_ID || true
+      [[ "$build_text" =~ ^0[.]1[.]0-release[0-9]+$ ]] && detected="$build_text"
+    fi
+    say "${C_RED}P07-M03 网站与数据：现有安装未通过可信来源与逐文件校验；检测版本：$detected。${C_RESET}" >&2
+    say '已保留原有程序、网站和数据库。只有逐文件核验的正式旧版才可升级；不会强行覆盖异常运行时。' >&2
     return 13
   fi
 
@@ -1216,6 +1229,9 @@ m04_verified_current() {
     "$M04_PREVIOUS_BUILD")
       expected_ui="$M04_PREVIOUS_UI_BLOB"
       expected_manifest="$M04_PREVIOUS_MANIFEST_BLOB" ;;
+    "$M04_LEGACY2_BUILD")
+      expected_ui="$M04_LEGACY2_UI_BLOB"
+      expected_manifest="$M04_LEGACY2_MANIFEST_BLOB" ;;
     "$M04_BUILD_EXPECTED")
       expected_ui="$M04_UI_BLOB"
       expected_manifest="$M04_TARGET_MANIFEST_BLOB" ;;
@@ -1380,6 +1396,7 @@ main_menu() {
         [[ $rc -eq 0 ]] || { say "${C_YELLOW}⚠ 初始化服务器模块返回退出码 ${rc}。${C_RESET}"; pause_menu; }
         ;;
       0) return 0 ;;
+      "") continue ;; # Extra Enter after a returned sub-menu is not a bad choice.
       *) say "${C_YELLOW}⚠ 无效选择，请输入 0-5。${C_RESET}" ;;
     esac
   done
@@ -1408,6 +1425,14 @@ case "${1:-}" in
   --install-m05-local) [[ "$#" == 4 ]] || exit 13; install_m05_local_candidate "$2" "$3" "$4" ;;
   --install-m05-offline) [[ "$#" == 3 ]] || exit 13; install_m05_offline_trial "$2" "$3" ;;
   --modules) modules_status_readonly ;;
+  --check-m03)
+    # Read-only exact-manifest proof; never executes unverified installed code.
+    if m03_verified_current; then
+      printf 'P07-M03 网站与数据：已验证 %s（未修改系统）\n' "$(cat /opt/vf-server-ops/BUILD_ID)"
+    else
+      printf 'P07-M03 网站与数据：现有程序身份或运行入口未通过验证；没有覆盖或升级。\n' >&2
+      exit 13
+    fi ;;
   --version|-V) printf '服务器工具箱 %s\n' "$VERSION" ;;
   --help|-h)
     cat <<EOF
