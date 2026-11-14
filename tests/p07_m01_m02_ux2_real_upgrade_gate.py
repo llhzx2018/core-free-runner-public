@@ -62,7 +62,7 @@ def tty(script: Path, selection: bytes, timeout: float = 135) -> str:
                     break
             if proc.poll() is not None:
                 break
-        check(proc.poll() is not None, "Toolbox TTY hung; aborted without claiming success")
+        check(proc.poll() is not None, "Toolbox TTY hung; stopped without success: " + output.decode("utf-8", "replace")[-1900:])
         check(proc.wait(timeout=2) == 0, "Toolbox TTY command rejected: " + output.decode("utf-8", "replace")[-1800:])
         return output.decode("utf-8", "replace")
     finally:
@@ -133,8 +133,8 @@ def main() -> None:
             (m02_root / "current").symlink_to("releases/" + M02_OLD)
 
             # No write for declined upgrades, no automatic test, no cross-module mutation.
-            tty(script, b"1\nn\n0\n", 25)
-            tty(script, b"2\nn\n0\n", 25)
+            tty(script, b"1\nn\n\n0\n0\n", 25)
+            tty(script, b"2\nn\n\n0\n0\n", 25)
             check(os.readlink(m01_root / "current") == "releases/" + M01_OLD,
                   "M01 no must leave old current unchanged")
             check(os.readlink(m02_root / "current") == "releases/" + M02_OLD,
@@ -143,7 +143,7 @@ def main() -> None:
             # Corrupt published-M02 expected digest; no switch must happen.
             bad_script = Path(tmp) / "p07-wrong-hash.sh"
             bad_script.write_text(toolbox.replace(M02_NEW_SHA, "0" * 64, 1), encoding="utf-8")
-            tty(bad_script, b"2\ny\n0\n", 45)
+            tty(bad_script, b"2\ny\n\n0\n0\n", 45)
             check(os.readlink(m02_root / "current") == "releases/" + M02_OLD,
                   "bad hash changed M02 pointer")
 
