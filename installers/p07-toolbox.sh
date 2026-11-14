@@ -7,26 +7,30 @@ VERSION="V0.1.0"
 BUILD_ID="0.1.0-owner-field-recovery-m03-m04-20261114"
 
 VF_NODE_PUBLIC="V0.1.0"
-VF_NODE_EXPECTED="0.1.0-ux1"
+VF_NODE_EXPECTED="0.1.0-ux2"
 # Legacy M01 installer URL is retained for text/older regression compatibility,
 # but is NEVER executed by this independently upgradable Toolbox route.
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 M01_ROOT="/opt/vfops-modules/m01"
 M01_RUNTIME="$M01_ROOT/current/vf-node.sh"
-M01_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-vf-node-independent-ux1.sh"
-M01_INSTALLER_BLOB="4f9139d001f1d5e2415c3fe883adc1a54ef3bec3"
-M01_MANIFEST_SHA256="56c93541c7fa8386b12769573bd69413a51e3da9f5f4e277a4649e61bbc6cd3d"
+M01_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/b0fb4c253958de46c4fc207f8872af9b78b77ab0/installers/p07-vf-node-independent-ux2-candidate.sh"
+M01_INSTALLER_BLOB="0919751da9038b6db51a88c7052195becc152e32"
+M01_MANIFEST_SHA256="1f66f642769848e5be0c9a25ccb58a60e97e40fe2eb58a088233a5c129f1cb90"
 # Historical official source identity stays pinned after a future M01 release.
 M01_BOOTSTRAP_BUILD="0.1.0-rc13"
 M01_BOOTSTRAP_MANIFEST_SHA256="1ca3dc95a5cc6e5aa35c9b7ead415d3b6ea6c6eb9e8307a76310d146ab53c47f"
+M01_PREVIOUS_BUILD="0.1.0-ux1"
+M01_PREVIOUS_MANIFEST_SHA256="56c93541c7fa8386b12769573bd69413a51e3da9f5f4e277a4649e61bbc6cd3d"
 M01_TARGET_MANIFEST_SHA256="$M01_MANIFEST_SHA256"
 
 
 VPS_AUDIT_PUBLIC="V2.1.1"
 VPS_AUDIT_EXPECTED="V2.1.1"
-VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux1"
-VPS_AUDIT_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/3cacb9e9ccbe60f76e4b4ac90920bc9d06ead877/experiments/p07-vps-audit-v21-ux1.sh"
-VPS_AUDIT_SHA256="7b083e4cf105d40b04b4cbe898fb6b9e1bb7f1ef3385bc1d20829796f6852013"
+VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux2"
+VPS_AUDIT_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m01-m02-v0.1.0-original-ux2-20261114/P07-M02-2.1.1-ux2.sh"
+VPS_AUDIT_SHA256="18a7a7dc401772fda7344845b952bc307a46f05443d086ec5e38a1954308587d"
+VPS_AUDIT_PREVIOUS_BUILD="2.1.1-ux1"
+VPS_AUDIT_PREVIOUS_SHA256="7b083e4cf105d40b04b4cbe898fb6b9e1bb7f1ef3385bc1d20829796f6852013"
 VPS_AUDIT_BOOTSTRAP_BUILD="2.1.0-rc7-field"
 VPS_AUDIT_BOOTSTRAP_SHA256="d1846e751bba5c860c623e3db26641908e27ca43b39cf37016758853b65a952d"
 M02_ROOT="/opt/vfops-modules/m02"  # 独立 VPS 验机版本；不写入 M01/M03/M04/M05
@@ -147,6 +151,7 @@ m01_verified_current() {
   local expected_manifest=''
   case "$installed" in
     "$M01_BOOTSTRAP_BUILD") expected_manifest="$M01_BOOTSTRAP_MANIFEST_SHA256" ;;
+    "$M01_PREVIOUS_BUILD") expected_manifest="$M01_PREVIOUS_MANIFEST_SHA256" ;;
     "$VF_NODE_EXPECTED") expected_manifest="$M01_TARGET_MANIFEST_SHA256" ;;
     *) return 1 ;;
   esac
@@ -251,6 +256,7 @@ m02_verified_current() {
   local required_sha=''
   case "$installed" in
     "$VPS_AUDIT_BOOTSTRAP_BUILD") required_sha="$VPS_AUDIT_BOOTSTRAP_SHA256" ;;
+    "$VPS_AUDIT_PREVIOUS_BUILD") required_sha="$VPS_AUDIT_PREVIOUS_SHA256" ;;
     "$VPS_AUDIT_BUILD_EXPECTED") required_sha="$VPS_AUDIT_SHA256" ;;
     *) return 1 ;;
   esac
@@ -317,6 +323,24 @@ ensure_m02_current() {
   # Existing immutable release with wrong bytes must never be overwritten
   # or 'repaired' by a different module's installer.
   if [[ -e "$dest" || -L "$dest" ]]; then
+    # A verified UX2 tree may already exist after an Owner-initiated rollback.
+    # Never overwrite an unknown tree, and never trust a self-signed manifest.
+    if [[ -d "$dest" && ! -L "$dest" &&
+          -f "$dest/vps-audit.sh" && ! -L "$dest/vps-audit.sh" &&
+          -f "$dest/MANIFEST.sha256" && ! -L "$dest/MANIFEST.sha256" &&
+          "$(find "$dest" -mindepth 1 -maxdepth 1 | wc -l)" -eq 2 &&
+          "$(sha256_file "$dest/vps-audit.sh" 2>/dev/null || true)" == "$VPS_AUDIT_SHA256" &&
+          "$(cat "$dest/MANIFEST.sha256")" == "$VPS_AUDIT_SHA256  vps-audit.sh" &&
+          "$(NO_COLOR=1 bash "$dest/vps-audit.sh" --build-id 2>/dev/null || true)" == "$VPS_AUDIT_BUILD_EXPECTED" &&
+          "$(NO_COLOR=1 bash "$dest/vps-audit.sh" --version 2>/dev/null | awk '{print $NF}' || true)" == "$VPS_AUDIT_EXPECTED" ]]; then
+      link="$M02_ROOT/.current-reapply-$"
+      [[ ! -e "$link" && ! -L "$link" ]] || return 13
+      ln -s "releases/$VPS_AUDIT_BUILD_EXPECTED" "$link" || return 13
+      mv -Tf -- "$link" "$current" || { rm -f -- "$link"; return 13; }
+      m02_verified_current || return 13
+      say "${C_GREEN}P07-M02 服务器性能检测：已切回校验通过的正式新版；其他模块未操作。${C_RESET}"
+      return 0
+    fi
     say "${C_RED}P07-M02 服务器性能检测：已有候选身份未通过校验，已保护原文件。${C_RESET}" >&2
     return 13
   fi
