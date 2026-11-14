@@ -34,7 +34,7 @@ show_yabs_original_version() {
     return 0
   fi
   if [[ "$content" =~ YABS_VERSION=\"(v[0-9]{4}-[0-9]{2}-[0-9]{2})\" ]]; then
-    version="\${BASH_REMATCH[1]}"
+    version="${BASH_REMATCH[1]}"
     printf '原作者脚本当前版本：%s\n' "$version"
   else
     printf '原作者版本字段未能验证，不猜测版本号；未改变系统。\n'
