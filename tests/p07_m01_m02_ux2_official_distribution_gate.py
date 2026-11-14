@@ -94,8 +94,8 @@ def main() -> None:
     official_url = "https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m01-m02-v0.1.0-original-ux2-20261114/P07-M02-2.1.1-ux2.sh"
     expected = expected.replace(
         "https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/"
-        + ref + "/experiments/p07-vps-audit-v21-ux2.sh", official_url)
-    check(official_url in toolbox, "Toolbox does not use official Release artifact")
+        + "c83059495c59244f3b8328e33c10df1bb775a4e1" + "/experiments/p07-vps-audit-v21-ux2.sh", official_url)
+    check(official_url in expected and official_url in toolbox, "Toolbox or generated candidate does not use official Release artifact")
     # Only one audited reapply branch may vary from the old-to-new candidate.
     def normalized(x: str) -> str:
         start = x.index("  if [[ -e \"$dest\" || -L \"$dest\" ]]; then", x.index("ensure_m02_current() {"))
