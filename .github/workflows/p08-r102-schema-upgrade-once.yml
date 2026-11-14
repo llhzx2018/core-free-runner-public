@@ -21,7 +21,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: llhzx2018/vf-adops
-          ref: 4536c62029a390f2c91536f52eaece7e2417c5db
+          ref: 49dba3f5030afd6fba817bb5bb9bf09f7aa1d9db
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           path: private-p08-r102
@@ -29,7 +29,7 @@ jobs:
       - name: Reject wrong SHA or installed Owner state
         run: |
           set -euo pipefail
-          test "$(git -C private-p08-r102 rev-parse HEAD)" = 4536c62029a390f2c91536f52eaece7e2417c5db
+          test "$(git -C private-p08-r102 rev-parse HEAD)" = 49dba3f5030afd6fba817bb5bb9bf09f7aa1d9db
           test "$(cat private-p08-r102/VERSION)" = 0.1.2
           test ! -e private-p08-r102/.env
           test ! -e private-p08-r102/storage/app/private/adops/installation/installed.json
@@ -365,6 +365,98 @@ jobs:
           php "$src/tests/compatibility/r102_clicked_upgrade_sqlite.php" fault "$click_fault" "$new" "$schema_zip"
           php "$src/tests/compatibility/r102_clicked_upgrade_sqlite.php" success "$click_ok" "$new" "$schema_zip"
           echo R102_REAL_OLD_OWNER_INTENT_TO_V012_ATOMIC_AND_FAULT_ROLLBACK=PASS
+      - name: Genuine published old-v0.1.1 Owner Chromium HTTPS login -> Bridge button -> isolated v0.1.2 Atomic
+        env:
+          P08_ISOLATED_INSTALL_TEST: YES
+          P08_R102_DISPOSABLE_SCHEMA: YES
+          P08_R102_OLD_BROWSER: YES
+          P08_R102_BROWSER_SOURCE: PUBLISHED_011_BRIDGE
+        run: |
+          set -euo pipefail
+          src="$PWD/private-p08-r102"
+          old_zip="$RUNNER_TEMP/r102-old-v011-FULL.zip"
+          bridge="$RUNNER_TEMP/r102-composite-bridge-full"
+          target="$RUNNER_TEMP/r102-v012-clean-target"
+          schema_zip="$RUNNER_TEMP/r102-sqlite-schema-atomic.zip"
+          site="$RUNNER_TEMP/r102-bridge-browser-site"
+          test ! -e "$site"
+          test -f "$bridge/FULL_MANIFEST.json" && test -f "$schema_zip"
+          mkdir -m 0700 "$site"
+          unzip -q "$old_zip" -d "$site"
+          php "$src/tests/compatibility/r102_install_published_sqlite.php" "$site"
+          P08_R102_BRIDGE_BROWSER_READY=YES \
+            php "$src/tests/compatibility/r102_bridge_installed_sqlite.php" success "$site" "$bridge"
+          test ! -e "$site/storage/app/private/adops/upgrade/r102-owner-intent.json"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout "$RUNNER_TEMP/r102-bridge-tls-key.pem" \
+            -out "$RUNNER_TEMP/r102-bridge-tls-cert.pem" \
+            -subj "/CN=r102-v011.isolated.example" \
+            -addext "subjectAltName=DNS:r102-v011.isolated.example" >/dev/null 2>&1
+          cat > "$RUNNER_TEMP/r102-old-owner-router.php" <<'PHP'
+          <?php
+          $site=(string)getenv('P08_R102_BROWSER_SITE');
+          if (getenv('GITHUB_ACTIONS')!=='true'
+              || getenv('P08_R102_BROWSER_SOURCE')!=='PUBLISHED_011_BRIDGE'
+              || !str_starts_with($site,'/home/runner/work/_temp/r102-bridge-browser-site')
+              || realpath($site)!==$site) {
+              http_response_code(503);exit;
+          }
+          $_SERVER['HTTPS']='on';
+          $_SERVER['REQUEST_SCHEME']='https';
+          $_SERVER['SERVER_PORT']='443';
+          $path=parse_url((string)($_SERVER['REQUEST_URI']??''),PHP_URL_PATH);
+          if (!is_string($path) || !str_starts_with($path,'/')
+              || str_contains($path,'..') || str_contains($path,"\0")) {
+              http_response_code(404);return true;
+          }
+          $public=$site.'/public';
+          $candidate=$public.$path;
+          if (is_file($candidate)
+              && str_starts_with((string)realpath($candidate),$public.'/'))return false;
+          require $public.'/index.php';
+          PHP
+          export P08_R102_BROWSER_SITE="$site"
+          export P08_R102_TEST_CERT="$RUNNER_TEMP/r102-bridge-tls-cert.pem"
+          export P08_R102_TEST_KEY="$RUNNER_TEMP/r102-bridge-tls-key.pem"
+          php -S 127.0.0.1:18990 -t "$site/public" "$RUNNER_TEMP/r102-old-owner-router.php" \
+            > "$RUNNER_TEMP/r102-old-owner-php.log" 2>&1 &
+          php_pid="$!"
+          node "$src/tests/compatibility/r102_local_https_proxy.mjs" \
+            > "$RUNNER_TEMP/r102-old-owner-tls.log" 2>&1 &
+          tls_pid="$!"
+          cleanup_browser() {
+            kill "$tls_pid" "$php_pid" >/dev/null 2>&1 || true
+            rm -f "$RUNNER_TEMP/r102-bridge-tls-key.pem" "$RUNNER_TEMP/r102-bridge-tls-cert.pem"
+            rm -f "$RUNNER_TEMP/r102-old-owner-router.php" "$RUNNER_TEMP/r102-old-owner-php.log"
+            rm -f "$RUNNER_TEMP/r102-old-owner-tls.log"
+          }
+          trap cleanup_browser EXIT
+          ready=NO
+          for n in $(seq 1 40); do
+            if curl --silent --fail --noproxy '*' -k \
+              --resolve r102-v011.isolated.example:18989:127.0.0.1 \
+              https://r102-v011.isolated.example:18989/login -o /dev/null; then
+              ready=YES;break
+            fi
+            sleep 0.25
+          done
+          test "$ready" = YES || {
+            tail -n 20 "$RUNNER_TEMP/r102-old-owner-php.log"
+            tail -n 20 "$RUNNER_TEMP/r102-old-owner-tls.log"
+            exit 1
+          }
+          cd "$src"
+          npx playwright test --config tests/e2e/r102-old-owner-bridge.config.ts
+          cd -
+          kill "$tls_pid" "$php_pid" >/dev/null 2>&1 || true
+          trap - EXIT
+          cleanup_browser
+          # The browser only records an authenticated intent. Independently
+          # check that the old DB and pointer did NOT upgrade inside the
+          # HTTP request, then run the isolated source-locked CLI worker.
+          php "$src/tests/compatibility/r102_clicked_upgrade_sqlite.php" \
+            success "$site" "$target" "$schema_zip"
+          echo R102_REAL_OLD_OWNER_HTTPS_CHROMIUM_CLICK_AND_ATOMIC_SQLITE=PASS
       - name: Native non-root Linux TAR checksum version switch and rollback
         run: |
           set -euo pipefail
@@ -457,6 +549,8 @@ jobs:
           rm -f "$RUNNER_TEMP/r102-sqlite-schema-atomic.zip" "$RUNNER_TEMP/p08-r102-composer.log" "$RUNNER_TEMP/p08-r102-npm.log"
           rm -rf "$RUNNER_TEMP/p08-r102-local-browser-site" "$RUNNER_TEMP/r102-old-v011-src" "$RUNNER_TEMP/r102-v011-installed-success" "$RUNNER_TEMP/r102-v011-installed-fault" "$RUNNER_TEMP/r102-v012-clean-target"
           rm -rf "$RUNNER_TEMP/r102-verified-restore-r102-v011-installed-success" "$RUNNER_TEMP/r102-verified-restore-r102-v011-installed-fault"
+          rm -rf "$RUNNER_TEMP/r102-bridge-browser-site"
+          rm -f "$RUNNER_TEMP/r102-bridge-tls-key.pem" "$RUNNER_TEMP/r102-bridge-tls-cert.pem" "$RUNNER_TEMP/r102-old-owner-router.php" "$RUNNER_TEMP/r102-old-owner-php.log" "$RUNNER_TEMP/r102-old-owner-tls.log"
           rm -rf "$RUNNER_TEMP/p08-r102-extracted-FULL"
           rm -f "$RUNNER_TEMP/r102-old-v011-FULL.zip"
           rm -f "$RUNNER_TEMP/p08-r102-dev-only-FULL.zip"
@@ -494,7 +588,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: llhzx2018/vf-adops
-          ref: 4536c62029a390f2c91536f52eaece7e2417c5db
+          ref: 49dba3f5030afd6fba817bb5bb9bf09f7aa1d9db
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           path: private-p08-r102
@@ -512,7 +606,7 @@ jobs:
         run: |
           set -euo pipefail
           cd private-p08-r102
-          test "$(git rev-parse HEAD)" = 4536c62029a390f2c91536f52eaece7e2417c5db
+          test "$(git rev-parse HEAD)" = 49dba3f5030afd6fba817bb5bb9bf09f7aa1d9db
           test ! -e .env
           mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs storage/app/private/adops
           composer install --no-interaction --no-progress --prefer-dist --no-scripts > "$RUNNER_TEMP/p08-r102-sql-composer.log" 2>&1 || { tail -n 25 "$RUNNER_TEMP/p08-r102-sql-composer.log"; exit 1; }
@@ -701,7 +795,7 @@ jobs:
           for path in "$older" "$cleanNew" "$older_zip" "$target_zip" "$target" "$success" "$fault"; do test ! -e "$path"; done
           git -C "$src" worktree add --detach "$older" v0.1.1
           git -C "$src" worktree add --detach "$cleanNew" HEAD
-          test "$(git -C "$cleanNew" rev-parse HEAD)" = 4536c62029a390f2c91536f52eaece7e2417c5db
+          test "$(git -C "$cleanNew" rev-parse HEAD)" = 49dba3f5030afd6fba817bb5bb9bf09f7aa1d9db
           test "$(git -C "$older" rev-parse HEAD)" = 9c7f76434fe2d064f2f1ac15c58a760f778cf055
           cmp "$older/composer.lock" "$src/composer.lock"
           cmp "$older/package-lock.json" "$src/package-lock.json"
