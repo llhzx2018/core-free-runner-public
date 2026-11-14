@@ -528,7 +528,10 @@ ensure_server_ops_current() {
   fi
 
   set +e
-  P07_TOOLBOX_PARENT=1 P07_NO_EXEC=1 bash "$tmp"
+  # P07-M03 public updater's CLI contract REQUIRES explicit `install`.
+  # A bare invocation fails its argument guard before attempting any ZIP read.
+  # This Toolbox is the sole Owner-confirmed caller; never infer a default verb.
+  P07_TOOLBOX_PARENT=1 P07_NO_EXEC=1 bash "$tmp" install
   rc=$?
   set -e
   rm -f "$tmp"
