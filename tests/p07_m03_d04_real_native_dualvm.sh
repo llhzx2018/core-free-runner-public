@@ -11,7 +11,7 @@ mkdir -p "$WORK"
 cleanup() {
   set +e
   for vm in old new; do
-    test -f "$WORK/$vm.pid" && sudo kill "$(cat "$WORK/$vm.pid")" 2>/dev/null || true
+    test -f "$WORK/$vm.pid" && sudo kill "$(sudo cat "$WORK/$vm.pid")" 2>/dev/null || true
   done
   for tap in p07tapold p07tapnew; do sudo ip link del "$tap" >/dev/null 2>&1 || true; done
   sudo ip link del p07br0 >/dev/null 2>&1 || true
@@ -129,18 +129,38 @@ INSTALL
 done
 ssh_vm "$OLD" 'bash -se' <<'SOURCE'
 set -Eeuo pipefail
-clpctl site:add:static --domainName=alpha.p07.test --siteUser=p07alpha --siteUserPassword=SyntheticOnly2026ABC > /root/p07-create.log 2>&1
-clpctl site:add:static --domainName=beta.p07.test --siteUser=p07beta --siteUserPassword=SyntheticOnly2026ABC >> /root/p07-create.log 2>&1
-clpctl db:add --domainName=alpha.p07.test --databaseName=p07_alpha --databaseUserName=p07_alpha_user --databaseUserPassword=SyntheticOnly2026ABC >> /root/p07-create.log 2>&1
+stage=INITIAL
+report_source_fixture_error() {
+  rc=$?
+  echo "P07_M03_D04_SOURCE_FIXTURE_FAILED_AT=$stage RC=$rc"
+  if test -f /root/p07-create.log; then
+    tail -n 9 /root/p07-create.log | sed -E 's/(Password=)[^[:space:]]+/\1[REDACTED]/Ig' | cut -c 1-260
+  fi
+  exit "$rc"
+}
+trap report_source_fixture_error ERR
+stage=CREATE_ALPHA
+clpctl site:add:static --domainName=alpha.p07.example.com --siteUser=p07alpha --siteUserPassword=SyntheticOnly2026ABC > /root/p07-create.log 2>&1
+stage=CREATE_BETA
+clpctl site:add:static --domainName=beta.p07.example.com --siteUser=p07beta --siteUserPassword=SyntheticOnly2026ABC >> /root/p07-create.log 2>&1
+stage=CREATE_DATABASE
+clpctl db:add --domainName=alpha.p07.example.com --databaseName=p07_alpha --databaseUserName=p07_alpha_user --databaseUserPassword=SyntheticOnly2026ABC >> /root/p07-create.log 2>&1
+stage=INSERT_SYNTHETIC_MYSQL
 mariadb p07_alpha -e 'CREATE TABLE p07_marker (id INT PRIMARY KEY, marker VARCHAR(40)); INSERT INTO p07_marker VALUES(1,"SYNTHETIC_MIGRATE_42");'
-printf 'P07_ALPHA_STATIC_42\n' > /home/p07alpha/htdocs/alpha.p07.test/index.html
-printf 'P07_BETA_STATIC_23\n' > /home/p07beta/htdocs/beta.p07.test/index.html
-sqlite3 /home/p07alpha/htdocs/alpha.p07.test/test.sqlite 'CREATE TABLE marker (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO marker VALUES(1,"SYNTHETIC_SQLITE_42");'
+stage=WRITE_SYNTHETIC_FILES
+printf 'P07_ALPHA_STATIC_42\n' > /home/p07alpha/htdocs/alpha.p07.example.com/index.html
+printf 'P07_BETA_STATIC_23\n' > /home/p07beta/htdocs/beta.p07.example.com/index.html
+sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'CREATE TABLE marker (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO marker VALUES(1,"SYNTHETIC_SQLITE_42");'
 mkdir -p /home/p07alpha/.vf-data
 printf 'P07_EXTERNAL_ASSET_42\n' > /home/p07alpha/.vf-data/proof.txt
+stage=CHECK_MYSQL
 test "$(mariadb -N p07_alpha -e 'SELECT marker FROM p07_marker WHERE id=1')" = SYNTHETIC_MIGRATE_42
-test "$(sqlite3 /home/p07alpha/htdocs/alpha.p07.test/test.sqlite 'SELECT value FROM marker WHERE id=1')" = SYNTHETIC_SQLITE_42
-test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: alpha.p07.test' http://127.0.0.1/)" = 200
+stage=CHECK_SQLITE
+test "$(sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'SELECT value FROM marker WHERE id=1')" = SYNTHETIC_SQLITE_42
+stage=CHECK_HTTP
+http_code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: alpha.p07.example.com' http://127.0.0.1/)"
+echo "P07_M03_D04_SOURCE_HTTP_CODE=$http_code"
+test "$http_code" = 200
 SOURCE
 echo P07_M03_D04_OLD_TWO_SITES_SQL_SQLITE_EXTERNAL_HTTP=PASS
 cd "$ROOT"
@@ -156,7 +176,17 @@ rsync -aq -e "ssh -i $KEY -o StrictHostKeyChecking=accept-new -o UserKnownHostsF
 echo P07_M03_D04_EXACT_SOURCE_PR348_STAGED=PASS
 ssh_vm "$NEW" 'bash -se' <<'TARGET'
 set -Eeuo pipefail
+stage=INITIAL
+report_target_error() {
+  rc=$?
+  echo "P07_M03_D04_TARGET_FAILED_AT=$stage RC=$rc"
+  if test -f /root/p07-plan.err; then tail -n 12 /root/p07-plan.err | cut -c 1-260; fi
+  if test -f /root/p07-prepare.err; then tail -n 12 /root/p07-prepare.err | cut -c 1-260; fi
+  exit "$rc"
+}
+trap report_target_error ERR
 CMD=/opt/vf-server-ops/bin/vfops
+stage=PLAN
 "$CMD" server-migrate plan --source-ip 172.29.71.11 --identity-file /root/.ssh/p07_test_key \
   --confirm-source-helper-staging ALLOW_SOURCE_HELPER_STAGING >/root/p07-plan.json 2>/root/p07-plan.err
 python3 - <<'PY'
@@ -171,6 +201,7 @@ assert p['automatic_dns_change'] is False
 assert p['existing_target_overwrite_allowed'] is False
 print('P07_M03_D04_REAL_ALL_SITES_PLAN=PASS')
 PY
+stage=PREPARE
 "$CMD" server-migrate prepare --source-ip 172.29.71.11 --identity-file /root/.ssh/p07_test_key \
   --confirm PREPARE_PULL_MIGRATION >/root/p07-prepare.json 2>/root/p07-prepare.err
 python3 - <<'PY'
@@ -180,18 +211,22 @@ assert p['status']=='PREPARED'
 assert p['site_count']==2
 print('P07_M03_D04_REAL_TARGET_PREPARED=PASS')
 PY
-test "$(cat /home/p07alpha/htdocs/alpha.p07.test/index.html)" = P07_ALPHA_STATIC_42
-test "$(cat /home/p07beta/htdocs/beta.p07.test/index.html)" = P07_BETA_STATIC_23
-test "$(sqlite3 /home/p07alpha/htdocs/alpha.p07.test/test.sqlite 'SELECT value FROM marker WHERE id=1')" = SYNTHETIC_SQLITE_42
+stage=VERIFY_FILES
+test "$(cat /home/p07alpha/htdocs/alpha.p07.example.com/index.html)" = P07_ALPHA_STATIC_42
+test "$(cat /home/p07beta/htdocs/beta.p07.example.com/index.html)" = P07_BETA_STATIC_23
+test "$(sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'SELECT value FROM marker WHERE id=1')" = SYNTHETIC_SQLITE_42
+stage=VERIFY_MYSQL
 test "$(mariadb -N p07_alpha -e 'SELECT marker FROM p07_marker WHERE id=1')" = SYNTHETIC_MIGRATE_42
+stage=VERIFY_EXTERNAL
 test "$(cat /home/p07alpha/.vf-data/proof.txt)" = P07_EXTERNAL_ASSET_42
-test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: alpha.p07.test' http://127.0.0.1/)" = 200
+stage=VERIFY_HTTP
+test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: alpha.p07.example.com' http://127.0.0.1/)" = 200
 echo P07_M03_D04_TARGET_HTTP_FILES_SQL_SQLITE_PRIVATE=PASS
 TARGET
 ssh_vm "$OLD" 'bash -se' <<'VERIFY'
 set -Eeuo pipefail
 test "$(mariadb -N p07_alpha -e 'SELECT marker FROM p07_marker WHERE id=1')" = SYNTHETIC_MIGRATE_42
-test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: alpha.p07.test' http://127.0.0.1/)" = 200
+test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: alpha.p07.example.com' http://127.0.0.1/)" = 200
 VERIFY
 echo P07_M03_D04_SOURCE_CONTINUES_OPERATING=PASS
 echo P07_M03_D04_DNS_CUTOVER=NOT_RUN
