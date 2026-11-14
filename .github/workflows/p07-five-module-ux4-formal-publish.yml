@@ -187,6 +187,93 @@ jobs:
               print("P07_UX4_EXPECTED_PIN_FOR_"+name+"="+expected[name])
           print("P07_FIVE_IMMUTABLE_ASSET_SHA256=PASS")
           PY
+      - name: Exact release ZIPs real old-to-new install, unsafe-manifest reject, rollback and untouched siblings
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          t="$RUNNER_TEMP/p07-five/runtime-proof"
+          mkdir -p "$t/m03-old" "$t/m03-new" "$t/m03-bad" "$t/bin" "$t/data" "$t/modules"
+          old_url='https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-v0.1.0-five-modules-ux3-20261113'
+          curl --proto '=https' --tlsv1.2 -fsSL --max-time 120 "$old_url/P07-M03-0.1.0-release135.zip" -o "$t/m03-old.zip"
+          curl --proto '=https' --tlsv1.2 -fsSL --max-time 120 "$old_url/P07-M05-0.1.0-m05-compact-ux1.zip" -o "$t/m05-old.zip"
+          echo "2e5509bf7f2d36c5bc9f4ec9e2e05016e9e30f94cff546880e93e441af8af866  $t/m03-old.zip" | sha256sum -c - >/dev/null
+          echo "36e46e487ce90d01391639806e0dd659ba8881a5235bc5b89459f4da572a11e7  $t/m05-old.zip" | sha256sum -c - >/dev/null
+          python3 - "$t" "$RUNNER_TEMP/p07-five/P07-M03-0.1.0-release136.zip" <<'PY'
+          import pathlib,sys,zipfile
+          t=pathlib.Path(sys.argv[1])
+          sources=[(t/"m03-old.zip",t/"m03-old"),(pathlib.Path(sys.argv[2]),t/"m03-new")]
+          for archive,target in sources:
+              with zipfile.ZipFile(archive) as z:
+                  for f in z.infolist():
+                      name=pathlib.PurePosixPath(f.filename)
+                      if f.is_dir() or name.is_absolute() or ".." in name.parts or f.filename.startswith("-"):
+                          raise AssertionError("unsafe release path")
+                      p=target.joinpath(*name.parts)
+                      p.parent.mkdir(parents=True,exist_ok=True)
+                      p.write_bytes(z.read(f))
+          PY
+          export P07_INSTALL_DIR="$t/active"
+          export P07_PREVIOUS_DIR="$t/previous"
+          export P07_BIN_LINK="$t/bin/vfops"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          echo 'OWNER-SITE-DATA-UNCHANGED' > "$t/data/site"
+          echo 'OWNER-DB-DATA-UNCHANGED' > "$t/data/db"
+          cp -a "$t/m03-new/." "$t/m03-bad/"
+          echo CORRUPTED > "$t/m03-bad/dist/p07/0.1.0/overlay/RUNTIME.gitblob"
+          P07_PUBLIC_ROOT="file://$t/m03-old" bash "$t/m03-old/installers/p07-final.sh" > "$t/old-install.log"
+          test "$(bash "$P07_INSTALL_DIR/bin/vfops-user" --build-id)" = 0.1.0-release135
+          if P07_PUBLIC_ROOT="file://$t/m03-bad" bash "$t/m03-new/installers/p07-final.sh" > "$t/bad-install.log" 2>&1; then
+            echo P07_UX4_BAD_M03_RUNTIME_ACCEPTED >&2
+            exit 13
+          fi
+          test "$(bash "$P07_INSTALL_DIR/bin/vfops-user" --build-id)" = 0.1.0-release135
+          P07_PUBLIC_ROOT="file://$t/m03-new" bash "$t/m03-new/installers/p07-final.sh" > "$t/new-install.log"
+          test "$(bash "$P07_INSTALL_DIR/bin/vfops-user" --build-id)" = 0.1.0-release136
+          test "$(cat "$P07_PREVIOUS_DIR/BUILD_ID")" = 0.1.0-release135
+          grep -Fq '查看网站和数据库' "$P07_INSTALL_DIR/bin/vfops-user"
+          grep -Fq '输入 n / p 翻页，0 返回' "$P07_INSTALL_DIR/bin/vfops-site-ui"
+          grep -Fq '复制旧 VPS 的全部网站' "$P07_INSTALL_DIR/bin/vfops-migrate-ui"
+          test "$(cat "$t/data/site")" = OWNER-SITE-DATA-UNCHANGED
+          test "$(cat "$t/data/db")" = OWNER-DB-DATA-UNCHANGED
+          python3 - "$t" "$RUNNER_TEMP/p07-five/P07-M05-0.1.0-m05-db-first-ux2.zip" <<'PY'
+          import hashlib,os,pathlib,subprocess,sys
+          t=pathlib.Path(sys.argv[1]);new=pathlib.Path(sys.argv[2]);old=t/"m05-old.zip"
+          sys.path.insert(0,"product/scripts")
+          import install_p07_m05_bundle as ins
+          os.environ["P07_M05_DISPOSABLE_TEST"]="1"
+          root=t/"modules"
+          marked={}
+          for mod in ("m01","m02","m03","m04"):
+              p=root/mod
+              p.mkdir()
+              marker=p/"OTHER_MODULE"
+              marker.write_text(mod+":UNTOUCHED")
+              marked[mod]=hashlib.sha256(marker.read_bytes()).hexdigest()
+          sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+          assert ins.install(old,sha(old),root,test_mode=True)["installed_build"]=="0.1.0-m05-compact-ux1"
+          assert ins.install(new,sha(new),root,test_mode=True)["installed_build"]=="0.1.0-m05-db-first-ux2"
+          current=root/"m05/current"
+          assert current.readlink().as_posix()=="releases/0.1.0-m05-db-first-ux2"
+          v=subprocess.run(["bash",str(current/"bin/vfops-init-entry"),"--version"],
+                          capture_output=True,text=True,timeout=10)
+          assert v.returncode==0 and "db-first-ux2" in v.stdout
+          assert ins.install(new,sha(new),root,test_mode=True)["already_current"] is True
+          try:
+              ins.install(new,"0"*64,root,test_mode=True)
+          except ins.IsolatedInstallError:
+              pass
+          else:
+              raise AssertionError("corrupt hash accepted")
+          result=ins.rollback("0.1.0-m05-compact-ux1",root,test_mode=True)
+          assert result["restored_build"]=="0.1.0-m05-compact-ux1"
+          assert current.readlink().as_posix()=="releases/0.1.0-m05-compact-ux1"
+          assert all(hashlib.sha256((root/mod/"OTHER_MODULE").read_bytes()).hexdigest()==hash
+                     for mod,hash in marked.items())
+          print("P07_UX4_RELEASE_EXACT_M05_OLD_OFFICIAL_TO_NEW_AND_ROLLBACK=PASS")
+          PY
+          echo P07_UX4_RELEASE_EXACT_M03_OLD_TO_NEW_BAD_MANIFEST_PREVIOUS_RETAINED=PASS
+          echo P07_UX4_RELEASE_M03_M05_SIBLINGS_AND_SERVER_DATA_UNTOUCHED=PASS
+          echo P07_UX4_REAL_OWNER_VPS_PRODUCTION_MIGRATION_DNS=NOT_RUN
       - name: Publish formal source tag and public immutable Release assets only on exact authorized main merge
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'P07 five-module UX4 formal publish')
         shell: bash
