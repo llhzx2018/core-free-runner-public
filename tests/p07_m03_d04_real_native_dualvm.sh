@@ -180,9 +180,8 @@ grep -Fq SYNTHETIC_MIGRATE_42 /root/p07-check.sql
 stage=CHECK_SQLITE
 test "$(sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'SELECT value FROM marker WHERE id=1')" = SYNTHETIC_SQLITE_42
 stage=CHECK_HTTP
-http_code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: alpha.p07.example.com' http://127.0.0.1/)"
-echo "P07_M03_D04_SOURCE_HTTP_CODE=$http_code"
-test "$http_code" = 200
+curl -ksS --resolve alpha.p07.example.com:443:127.0.0.1 https://alpha.p07.example.com/ | grep -Fq P07_ALPHA_WEB_42
+echo P07_M03_D04_SOURCE_HTTPS_PHP_MARKER=PASS
 SOURCE
 echo P07_M03_D04_OLD_TWO_SITES_SQL_SQLITE_EXTERNAL_HTTP=PASS
 cd "$ROOT"
@@ -245,7 +244,7 @@ grep -Fq SYNTHETIC_MIGRATE_42 /root/p07-check.sql
 stage=VERIFY_EXTERNAL
 test "$(cat /home/p07alpha/.vf-data/proof.txt)" = P07_EXTERNAL_ASSET_42
 stage=VERIFY_HTTP
-test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: alpha.p07.example.com' http://127.0.0.1/)" = 200
+curl -ksS --resolve alpha.p07.example.com:443:127.0.0.1 https://alpha.p07.example.com/ | grep -Fq P07_ALPHA_WEB_42
 echo P07_M03_D04_TARGET_HTTP_FILES_SQL_SQLITE_PRIVATE=PASS
 TARGET
 ssh_vm "$OLD" 'bash -se' <<'VERIFY'
@@ -253,7 +252,7 @@ set -Eeuo pipefail
 rm -f /root/p07-check.sql
 clpctl db:export --databaseName=p07alpha --file=/root/p07-check.sql >/root/p07-db-export.log 2>&1
 grep -Fq SYNTHETIC_MIGRATE_42 /root/p07-check.sql
-test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: alpha.p07.example.com' http://127.0.0.1/)" = 200
+curl -ksS --resolve alpha.p07.example.com:443:127.0.0.1 https://alpha.p07.example.com/ | grep -Fq P07_ALPHA_WEB_42
 VERIFY
 echo P07_M03_D04_SOURCE_CONTINUES_OPERATING=PASS
 echo P07_M03_D04_DNS_CUTOVER=NOT_RUN
