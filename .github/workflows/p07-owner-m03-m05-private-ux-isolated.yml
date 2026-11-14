@@ -230,3 +230,103 @@ jobs:
           set +e
           rm -rf -- product "$RUNNER_TEMP/m05"
           echo P07_M05_PRIVATE_TEST_ARTIFACT_PUBLICATION=NONE
+
+  m03-real-official135-to-136:
+    name: P07-M03 网站与数据 · previous official release135 ZIP to new exact UX release136
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      NO_COLOR: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      P07_ALLOW_NONROOT: '1'
+      P07_NO_EXEC: '1'
+    steps:
+      - name: Exact private P07 source only in temporary Runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 36b9818b5132695f75bc1d0f0e6c1b6f51fdbfb8
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: product
+      - name: Locked published public baseline used by candidate builder
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: 3cacb9e9ccbe60f76e4b4ac90920bc9d06ead877
+          persist-credentials: false
+          path: public_baseline
+      - name: Build exact source M03 current newer installer and read official previous release ZIP
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = 36b9818b5132695f75bc1d0f0e6c1b6f51fdbfb8
+          test "$(git -C public_baseline rev-parse HEAD)" = 3cacb9e9ccbe60f76e4b4ac90920bc9d06ead877
+          test "$(cat product/BUILD_ID)" = 0.1.0-release136
+          t="$RUNNER_TEMP/p07-m03-ux136"
+          mkdir -p "$t/old" "$t/new" "$t/bin" "$t/data"
+          curl --proto '=https' --tlsv1.2 -fsSL --max-time 120 \
+            'https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-v0.1.0-five-modules-ux3-20261113/P07-M03-0.1.0-release135.zip' \
+            -o "$t/previous-official.zip"
+          echo "2e5509bf7f2d36c5bc9f4ec9e2e05016e9e30f94cff546880e93e441af8af866  $t/previous-official.zip" | sha256sum -c - >/dev/null
+          python3 - "$t/previous-official.zip" "$t/old" <<'PY'
+          from pathlib import Path
+          import sys,zipfile
+          target=Path(sys.argv[2])
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              for item in z.infolist():
+                  if item.filename.startswith("/") or ".." in Path(item.filename).parts or item.is_dir(): raise ValueError("unsafe old release")
+                  path=target/item.filename
+                  path.parent.mkdir(parents=True,exist_ok=True)
+                  path.write_bytes(z.read(item))
+          PY
+          python3 -B product/scripts/p07_candidate_bundle.py \
+            --product-root "$GITHUB_WORKSPACE/product" \
+            --public-root "$GITHUB_WORKSPACE/public_baseline" \
+            --output "$t/new" \
+            --product-sha 36b9818b5132695f75bc1d0f0e6c1b6f51fdbfb8 \
+            --build 0.1.0-release136 --care 0.1.0-rc84
+          bash -n "$t/old/installers/p07-final.sh" "$t/new/installers/p07-final.sh"
+          echo P07_M03_NEW136_SOURCE_EXACT_CANDIDATE_BUILD=PASS
+      - name: Run actual official previous release135→new release136 and failure/rollback paths, M01/M02/M04/M05 untouched
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          t="$RUNNER_TEMP/p07-m03-ux136"
+          export P07_INSTALL_DIR="$t/current"
+          export P07_PREVIOUS_DIR="$t/previous"
+          export P07_BIN_LINK="$t/bin/vfops"
+          for m in m01 m02 m04 m05; do
+            mkdir -p "$t/$m"
+            echo "$m UNCHANGED" > "$t/$m/MARKER"
+          done
+          echo 'website data untouched' > "$t/data/site"
+          echo 'DB data untouched' > "$t/data/database"
+          (cd "$t"; sha256sum data/* m01/* m02/* m04/* m05/*) > "$t/before.sha256"
+          P07_PUBLIC_ROOT="file://$t/old" bash "$t/old/installers/p07-final.sh" > "$t/old-install.log"
+          test "$(bash "$P07_INSTALL_DIR/bin/vfops-user" --build-id)" = 0.1.0-release135
+          # Broken blob must stop before switching from verified old.
+          mkdir -p "$t/broken"
+          cp -a "$t/new/." "$t/broken/"
+          echo corrupt > "$t/broken/dist/p07/0.1.0/overlay/RUNTIME.gitblob"
+          if P07_PUBLIC_ROOT="file://$t/broken" bash "$t/new/installers/p07-final.sh" >/dev/null 2>&1; then exit 41; fi
+          test "$(bash "$P07_INSTALL_DIR/bin/vfops-user" --build-id)" = 0.1.0-release135
+          P07_PUBLIC_ROOT="file://$t/new" bash "$t/new/installers/p07-final.sh" > "$t/new-install.log"
+          test "$(bash "$P07_INSTALL_DIR/bin/vfops-user" --build-id)" = 0.1.0-release136
+          test "$(cat "$P07_PREVIOUS_DIR/BUILD_ID")" = 0.1.0-release135
+          (cd "$t"; sha256sum -c before.sha256 >/dev/null)
+          # The new installed binary must carry real shorter menu and paging source.
+          grep -Fq '查看网站和数据库' "$P07_INSTALL_DIR/bin/vfops-user"
+          grep -Fq "输入 n / p 翻页，0 返回" "$P07_INSTALL_DIR/bin/vfops-site-ui"
+          grep -Fq '复制旧 VPS 的全部网站' "$P07_INSTALL_DIR/bin/vfops-migrate-ui"
+          echo P07_M03_OLD_OFFICIAL_RELEASE135_TO_NEW136_AND_BAD_MANIFEST=PASS
+          echo P07_M03_NEW_REAL_INSTALLED_UI=PASS
+          echo P07_M03_SIBLING_FOUR_MODULES_AND_WEBSITE_DB_MARKERS_UNCHANGED=PASS
+          echo P07_M03_OWNER_PRODUCTION_MIGRATION_DNS=NOT_RUN
+      - name: Delete private source, official old ZIP and staged private candidate
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- product public_baseline "$RUNNER_TEMP/p07-m03-ux136"
+          echo P07_PRIVATE_PACKAGE_PUBLIC_ARTIFACT=NO
