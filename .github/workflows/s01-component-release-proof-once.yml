@@ -1,0 +1,88 @@
+name: S01 component candidate source checks (temporary)
+on:
+  push:
+    branches: [test/s01-component-release-proof-20261114]
+    paths: ['.github/workflows/s01-component-release-proof-once.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    name: Verify ${{ matrix.id }} candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: S01-C01
+            repo: llhzx2018/vf-tools-theme
+            head: 43efacc75f90fa7d1225221f798fe9d6403a49c3
+            base: 1ad2145603b6bee2d07df79c3fe6e7d2e4cfe6a2
+          - id: S01-C02
+            repo: llhzx2018/vf-tools-ops
+            head: 2720631d65be43d5b4db23a10a239ae18693c26a
+            base: 52be84e4717a0f81427579f9c3faa3f8e9e317ec
+          - id: S01-C03
+            repo: llhzx2018/vf-tools-m3u8
+            head: e557ab1d7754d0fe67065af8f4a9d5490edcc649
+            base: 2ca422865b4a4c8faf69670f60801cec49cd09c7
+    steps:
+      - name: Checkout candidate in temporary worker
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ matrix.repo }}
+          ref: ${{ matrix.head }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: private-product
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout governance in temporary worker
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: private-governance
+          persist-credentials: false
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run original source gates with private output suppressed
+        shell: bash
+        env:
+          COMPONENT: ${{ matrix.id }}
+          CANDIDATE: ${{ matrix.head }}
+          BASE: ${{ matrix.base }}
+        run: |
+          set -Eeuo pipefail
+          cd private-product
+          [[ "$(git rev-parse HEAD)" == "$CANDIDATE" ]]
+          base="$(git merge-base "$BASE" HEAD)"
+          govern="$GITHUB_WORKSPACE/private-governance"
+          run_check() {
+            local label="$1"
+            shift
+            if "$@" >"$RUNNER_TEMP/s01-gate.log" 2>&1; then
+              echo "$COMPONENT $label PASS"
+            else
+              echo "::error::$COMPONENT $label FAIL. Output was kept inside the temporary runner."
+              return 1
+            fi
+          }
+          run_check architecture-fixtures python3 -B -m unittest discover -s .github/checks -p test_architecture_gate.py
+          run_check governance-fixtures python3 -B -m unittest discover -s .github/checks -p test_gov_doc_ci.py
+          run_check current-authority python3 -B .github/checks/check_gov_doc_ci.py --project-root . --gov-root "$govern" --project-id "$COMPONENT" --profile wordpress_static --workflow .github/workflows/s01-static-modernization-contract.yml --require-git
+          run_check shared-architecture-fixtures python3 -B -m unittest discover -s "$govern/governance/agent" -p test_code_architecture_lint.py -q
+          run_check architecture-delta python3 -B .github/checks/architecture_gate.py --manifest .github/checks/code_architecture.json --gov-root "$govern" --git-root . --base-sha "$base" --head-sha "$CANDIDATE"
+          run_check static-source python3 -B scripts/check_s01_static_modernization.py --phase auto
+          run_check static-denial-fixtures python3 -B -m unittest discover -s tests/unit -p test_s01_static_modernization.py
+          if [ -f package.json ]; then
+            run_check dependencies npm ci --no-audit --no-fund
+            run_check typecheck npm run typecheck
+            run_check build npm run build
+          fi
+      - name: Clean temporary source and output
+        if: always()
+        shell: bash
+        run: rm -rf -- "$GITHUB_WORKSPACE/private-product" "$GITHUB_WORKSPACE/private-governance" "$RUNNER_TEMP/s01-gate.log"
