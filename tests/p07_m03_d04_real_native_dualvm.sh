@@ -162,7 +162,8 @@ clpctl site:add:static --domainName=beta.p07.example.com --siteUser=p07beta --si
 stage=CREATE_DATABASE
 clpctl db:add --domainName=alpha.p07.example.com --databaseName=p07alpha --databaseUserName=p07alphauser --databaseUserPassword='SyntheticOnly2026ABC!' > /root/p07-db-add.log 2>&1
 stage=INSERT_SYNTHETIC_MYSQL
-mariadb --user=p07alphauser --password='SyntheticOnly2026ABC!' p07alpha -e 'CREATE TABLE p07_marker (id INT PRIMARY KEY, marker VARCHAR(40)); INSERT INTO p07_marker VALUES(1,"SYNTHETIC_MIGRATE_42");'
+printf '%s\n' 'CREATE TABLE p07_marker (id INT PRIMARY KEY, marker VARCHAR(40));' "INSERT INTO p07_marker VALUES(1,'SYNTHETIC_MIGRATE_42');" > /root/p07-seed.sql
+clpctl db:import --databaseName=p07alpha --file=/root/p07-seed.sql >/root/p07-sql-seed.log 2>&1
 stage=WRITE_SYNTHETIC_FILES
 printf 'P07_ALPHA_STATIC_42\n' > /home/p07alpha/htdocs/alpha.p07.example.com/index.html
 install -d /home/p07alpha/htdocs/alpha.p07.example.com/public
@@ -173,7 +174,9 @@ mkdir -p /home/p07alpha/.vf-data
 printf 'P07_EXTERNAL_ASSET_42\n' > /home/p07alpha/.vf-data/proof.txt
 chown -R p07alpha:p07alpha /home/p07alpha/.vf-data /home/p07alpha/htdocs/alpha.p07.example.com
 stage=CHECK_MYSQL
-test "$(mariadb --user=p07alphauser --password='SyntheticOnly2026ABC!' -N p07alpha -e 'SELECT marker FROM p07_marker WHERE id=1')" = SYNTHETIC_MIGRATE_42
+rm -f /root/p07-check.sql
+clpctl db:export --databaseName=p07alpha --file=/root/p07-check.sql >/root/p07-db-export.log 2>&1
+grep -Fq SYNTHETIC_MIGRATE_42 /root/p07-check.sql
 stage=CHECK_SQLITE
 test "$(sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'SELECT value FROM marker WHERE id=1')" = SYNTHETIC_SQLITE_42
 stage=CHECK_HTTP
@@ -236,7 +239,9 @@ test "$(cat /home/p07alpha/htdocs/alpha.p07.example.com/public/index.php)" = '<?
 test "$(cat /home/p07beta/htdocs/beta.p07.example.com/index.html)" = P07_BETA_STATIC_23
 test "$(sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'SELECT value FROM marker WHERE id=1')" = SYNTHETIC_SQLITE_42
 stage=VERIFY_MYSQL
-test "$(mariadb --user=p07alphauser --password='SyntheticOnly2026ABC!' -N p07alpha -e 'SELECT marker FROM p07_marker WHERE id=1')" = SYNTHETIC_MIGRATE_42
+rm -f /root/p07-check.sql
+clpctl db:export --databaseName=p07alpha --file=/root/p07-check.sql >/root/p07-db-export.log 2>&1
+grep -Fq SYNTHETIC_MIGRATE_42 /root/p07-check.sql
 stage=VERIFY_EXTERNAL
 test "$(cat /home/p07alpha/.vf-data/proof.txt)" = P07_EXTERNAL_ASSET_42
 stage=VERIFY_HTTP
@@ -245,7 +250,9 @@ echo P07_M03_D04_TARGET_HTTP_FILES_SQL_SQLITE_PRIVATE=PASS
 TARGET
 ssh_vm "$OLD" 'bash -se' <<'VERIFY'
 set -Eeuo pipefail
-test "$(mariadb --user=p07alphauser --password='SyntheticOnly2026ABC!' -N p07alpha -e 'SELECT marker FROM p07_marker WHERE id=1')" = SYNTHETIC_MIGRATE_42
+rm -f /root/p07-check.sql
+clpctl db:export --databaseName=p07alpha --file=/root/p07-check.sql >/root/p07-db-export.log 2>&1
+grep -Fq SYNTHETIC_MIGRATE_42 /root/p07-check.sql
 test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: alpha.p07.example.com' http://127.0.0.1/)" = 200
 VERIFY
 echo P07_M03_D04_SOURCE_CONTINUES_OPERATING=PASS
