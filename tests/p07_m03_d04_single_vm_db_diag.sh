@@ -152,6 +152,17 @@ if test -f /home/clp/htdocs/app/data/db.sq3; then
     echo "P07_M03_D04_CP_REGISTERED_DB_SERVERS=$server_count"
   fi
 fi
+echo P07_M03_D04_CLOUDPANEL_INITIAL_BROWSER_PAGE=START
+if curl -kfsSL --connect-timeout 8 --max-time 45 --max-redirs 5 \
+  https://127.0.0.1:8443/ -o /root/p07-initial-page.html >/dev/null 2>&1; then
+  echo P07_M03_D04_CLOUDPANEL_INITIAL_BROWSER_PAGE=FETCHED
+else
+  echo P07_M03_D04_CLOUDPANEL_INITIAL_BROWSER_PAGE=HTTP_FAILED
+fi
+if test "$table_count" = 1; then
+  server_count="$(sqlite3 /home/clp/htdocs/app/data/db.sq3 "SELECT COUNT(*) FROM database_server;" 2>/dev/null || true)"
+  echo "P07_M03_D04_CP_DB_SERVERS_AFTER_FIRST_HTTPS_GET=$server_count"
+fi
 if clpctl user:list >/dev/null 2>&1; then
   echo P07_M03_D04_CP_ADMIN_INTERFACE=WORKING
 else
@@ -179,6 +190,17 @@ if clpctl user:add --userName=p07testadmin --email=p07testadmin@example.com \
   echo P07_M03_D04_CP_FIRST_ADMIN_CREATE=PASS
 else
   echo P07_M03_D04_CP_FIRST_ADMIN_CREATE=FAIL
+fi
+echo P07_M03_D04_CLOUDPANEL_ADMIN_WEB_PAGE=START
+if curl -kfsSL --connect-timeout 8 --max-time 45 --max-redirs 5 \
+  https://127.0.0.1:8443/ -o /root/p07-after-admin.html >/dev/null 2>&1; then
+  echo P07_M03_D04_CLOUDPANEL_ADMIN_WEB_PAGE=FETCHED
+else
+  echo P07_M03_D04_CLOUDPANEL_ADMIN_WEB_PAGE=HTTP_FAILED
+fi
+if test "$table_count" = 1; then
+  server_count="$(sqlite3 /home/clp/htdocs/app/data/db.sq3 "SELECT COUNT(*) FROM database_server;" 2>/dev/null || true)"
+  echo "P07_M03_D04_CP_DB_SERVERS_AFTER_ADMIN_AND_HTTPS=$server_count"
 fi
 echo P07_M03_D04_TEST_AFTER_ADMIN=START
 if clpctl db:add --domainName=diag.p07.example.com --databaseName=p07_diag_after \
