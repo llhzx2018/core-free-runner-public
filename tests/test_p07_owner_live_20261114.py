@@ -38,6 +38,26 @@ class P07OwnerLiveRegression(unittest.TestCase):
         self.assertNotIn('新服务器初始化      ${C_GRAY}系统更新/CloudPanel/数据库选择', text)
         self.assertIn('--check-m03)', text)
 
+    def test_write_confirmation_kept_for_disk_and_module_upgrades(self):
+        script = JOURNAL_SCRIPT.read_text()
+        toolbox = TOOLBOX.read_text()
+        self.assertIn("confirm_numeric '清理软件安装缓存，并把系统运行日志保留最近 14 天？'", script)
+        self.assertIn("P07_CLEANUP_CONFIRMED=1 clean_journal", script)
+        self.assertIn("确认升级 P07-M04 服务器维护与安全？[y/N]", toolbox)
+        self.assertIn("确认仅升级 P07-M03 网站与数据？[y/N]", toolbox)
+
+    def test_bad_numeric_input_still_reports_invalid_not_silent(self):
+        text = TOOLBOX.read_text()
+        self.assertIn('      "") continue ;;', text)
+        self.assertIn('无效选择，请输入 0-5。', text)
+        self.assertIn('read -r choice || return 0', text)
+
+    def test_no_color_non_tty_maintains_explicit_safety(self):
+        text = TOOLBOX.read_text()
+        self.assertIn('[[ -t 1 && -z "${NO_COLOR:-}" ]]', text)
+        self.assertIn("非交互模式不自动升级 P07-M04", text)
+        self.assertIn("需要本人在交互式 SSH 终端确认升级", text)
+
     def _fake_journal(self, lines: list[str], status: int = 0):
         self.assertTrue(shutil.which("sudo"), "registered Ubuntu runner needs sudo")
         with tempfile.TemporaryDirectory(prefix="p07-owner-journal-mock-") as folder:
