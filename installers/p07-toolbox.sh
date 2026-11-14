@@ -73,7 +73,7 @@ M04_RUNTIME="$M04_ROOT/current/vf-system-care.sh"
 # P07-M05 新服务器初始化 has its OWN runtime/build and no M03/M04 installer calls.
 # Exact published M05 artifact: no fallback to M03/M04 installers.
 # M05-only official build; no other module or Production writes.
-M05_BUILD_EXPECTED="0.1.0-m05-db-first-guard-ux3"
+M05_BUILD_EXPECTED="0.1.0-m05-db-first-guard-ux4"
 M05_UPGRADE_FROM="0.1.0-m05-candidate2"
 M05_UPGRADE_FROM2="0.1.0-m05-existing-safe1"
 M05_UPGRADE_FROM3="0.1.0-m05-clean-host-guard1"
@@ -83,12 +83,13 @@ M05_UPGRADE_FROM6="0.1.0-m05-provider-neutral-reinstall1"
 M05_UPGRADE_FROM7="0.1.0-m05-no-fake-reinstall1"
 M05_UPGRADE_FROM8="0.1.0-m05-compact-ux1"
 M05_UPGRADE_FROM9="0.1.0-m05-db-first-ux2"
+M05_UPGRADE_FROM10="0.1.0-m05-db-first-guard-ux3"
 M05_ROOT="/opt/vfops-modules/m05"
 M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"
 # M05 is published as an immutable reviewed public Release ZIP.
 # Never install M03/M04 in its place and verify SHA-256 before extraction.
-M05_BUNDLE_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-guard-ux3-20261114/P07-M05-0.1.0-m05-db-first-guard-ux3.zip"
-M05_BUNDLE_SHA256="a5d5ccb77aa3c9dd5120fa112fbb73c6701877f0c2200a9f4f9da79ebb1faf29"
+M05_BUNDLE_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-guard-ux4-20261114/P07-M05-0.1.0-m05-db-first-guard-ux4.zip"
+M05_BUNDLE_SHA256="1db4ca511e10f7a83c1787331e0b7f68f9ffc54aab94e3f0d3dd776ce64f146f"
 # Immutable private Owner Trial .run identity, never a public download source.
 M05_OFFLINE_TRIAL_SHA256="e42b6b3c59719f6ec189e4c62b7cfc54385aaa6e566c8f92ca5306246f022bbb"
 M05_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/35e3fbcb1e8c40042558f9f163e4215570074793/installers/p07-m05-atomic.py"
@@ -974,7 +975,7 @@ ensure_m05_current() {
     installed="$(readlink "$M05_ROOT/current")"
     case "$installed" in
       "releases/$M05_BUILD_EXPECTED") return 0 ;;
-      "releases/$M05_UPGRADE_FROM"|"releases/$M05_UPGRADE_FROM2"|"releases/$M05_UPGRADE_FROM3"|"releases/$M05_UPGRADE_FROM4"|"releases/$M05_UPGRADE_FROM5"|"releases/$M05_UPGRADE_FROM6"|"releases/$M05_UPGRADE_FROM7"|"releases/$M05_UPGRADE_FROM8"|"releases/$M05_UPGRADE_FROM9")
+      "releases/$M05_UPGRADE_FROM"|"releases/$M05_UPGRADE_FROM2"|"releases/$M05_UPGRADE_FROM3"|"releases/$M05_UPGRADE_FROM4"|"releases/$M05_UPGRADE_FROM5"|"releases/$M05_UPGRADE_FROM6"|"releases/$M05_UPGRADE_FROM7"|"releases/$M05_UPGRADE_FROM8"|"releases/$M05_UPGRADE_FROM9"|"releases/$M05_UPGRADE_FROM10")
         upgrade_from="${installed#releases/}"
         say "${C_CYAN}P07-M05 新服务器初始化：发现已验证的旧版 $upgrade_from。${C_RESET}"
         say "新版 $M05_BUILD_EXPECTED 优化中文菜单与状态提示；已有系统只做无损检查，干净新系统才主动选择数据库并安装。"
