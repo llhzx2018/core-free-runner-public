@@ -1,0 +1,141 @@
+# P07 UX4 public Toolbox distribution proof on disposable GitHub-hosted machine.
+# No Owner VPS, CloudPanel provisioning, migration, DNS or production writes.
+name: P07 UX4 M03 M05 official package and Toolbox real upgrade gate
+on:
+  pull_request:
+    branches: [main]
+    paths: ['installers/p07-toolbox.sh','installers/p07-m03-release136-atomic.sh','.github/workflows/p07-ux4-public-toolbox-final-gate.yml']
+  push:
+    branches: [main]
+    paths: ['installers/p07-toolbox.sh','installers/p07-m03-release136-atomic.sh','.github/workflows/p07-ux4-public-toolbox-final-gate.yml']
+permissions:
+  contents: read
+jobs:
+  released-artifact-to-real-toolbox:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NO_COLOR: '1'
+      P07_ALLOW_NONROOT: '1'
+      P07_NO_EXEC: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Precise official 5 assets and current module source identities
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          bash -n installers/p07-toolbox.sh installers/p07-m03-release136-atomic.sh
+          python3 -B scripts/check_p07_public_terminal_ux.py
+          python3 -B -m unittest discover -s tests -p 'test_p07_five_slot_route_isolation.py' -q
+          python3 -B -m unittest discover -s tests -p 'test_p07_module_target_upgrade_gate.py' -q
+          tag='p07-v0.1.0-five-modules-ux4-20261114'
+          d="$RUNNER_TEMP/p07-ux4-official"
+          mkdir -p "$d"
+          release_url="https://github.com/llhzx2018/core-free-runner-public/releases/download/$tag"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --max-time 120 "$release_url/SHA256SUMS" -o "$d/SHA256SUMS"
+          test "$(wc -l < "$d/SHA256SUMS")" = 5
+          while read -r sha name; do
+            case "$name" in
+              P07-M01-0.1.0-ux1.zip|P07-M02-2.1.1-ux1.sh|P07-M03-0.1.0-release136.zip|P07-M04-0.1.0-ux2.zip|P07-M05-0.1.0-m05-db-first-ux2.zip) ;;
+              *) echo "unexpected official artifact name" >&2; exit 13;;
+            esac
+            curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --max-time 120 "$release_url/$name" -o "$d/$name"
+          done < "$d/SHA256SUMS"
+          (cd "$d" && sha256sum -c SHA256SUMS)
+          grep -Fxq 'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release136"' installers/p07-toolbox.sh
+          grep -Fxq 'M03_BOOTSTRAP_BUILD="0.1.0-release135"' installers/p07-toolbox.sh
+          grep -Fxq 'VF_SERVER_OPS_MANIFEST_BLOB="59153685ef834114e01e0330c78ae174a042c1fa"' installers/p07-toolbox.sh
+          grep -Fxq 'M05_BUILD_EXPECTED="0.1.0-m05-db-first-ux2"' installers/p07-toolbox.sh
+          grep -Fxq 'M05_UPGRADE_FROM8="0.1.0-m05-compact-ux1"' installers/p07-toolbox.sh
+          grep -Fxq 'M05_BUNDLE_SHA256="4e7e95103ccf68724f16297444fd2c0b36391443fc85d076b6a0aa8731c2dd6c"' installers/p07-toolbox.sh
+          grep -Fxq 'VF_SERVER_OPS_INSTALLER_BLOB="bd6c2e5a911af10361bfaa2762c7f2c6084e7b95"' installers/p07-toolbox.sh
+          test "$(git hash-object installers/p07-m03-release136-atomic.sh)" = bd6c2e5a911af10361bfaa2762c7f2c6084e7b95
+          echo P07_UX4_RELEASED_FIVE_ASSET_REMOTE_SHA256_AND_TOOLBOX_PINS=PASS
+      - name: Real published M03 release135 to UX4 release136 using public updater and temporary runtime
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          t="$RUNNER_TEMP/p07-ux4-m03"
+          mkdir -p "$t/old" "$t/bin" "$t/data"
+          cp "$RUNNER_TEMP/p07-ux4-official/P07-M03-0.1.0-release136.zip" "$t/new-official.zip"
+          old='https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-v0.1.0-five-modules-ux3-20261113/P07-M03-0.1.0-release135.zip'
+          curl --proto '=https' --tlsv1.2 -fsSL --max-time 120 "$old" -o "$t/old.zip"
+          echo "2e5509bf7f2d36c5bc9f4ec9e2e05016e9e30f94cff546880e93e441af8af866  $t/old.zip" | sha256sum -c - >/dev/null
+          python3 - "$t/old.zip" "$t/old" <<'PY'
+          import pathlib,sys,zipfile
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              target=pathlib.Path(sys.argv[2])
+              for info in z.infolist():
+                  name=pathlib.PurePosixPath(info.filename)
+                  if info.is_dir() or name.is_absolute() or ".." in name.parts:
+                      raise AssertionError("unexpected previous archive entry")
+                  p=target.joinpath(*name.parts)
+                  p.parent.mkdir(parents=True,exist_ok=True)
+                  p.write_bytes(z.read(info))
+          PY
+          export P07_INSTALL_DIR="$t/current"
+          export P07_PREVIOUS_DIR="$t/previous"
+          export P07_BIN_LINK="$t/bin/vfops"
+          echo UNCHANGED_SITE_DATA > "$t/data/site"
+          echo UNCHANGED_DB_DATA > "$t/data/db"
+          P07_PUBLIC_ROOT="file://$t/old" bash "$t/old/installers/p07-final.sh" > "$t/old.log"
+          test "$(bash "$P07_INSTALL_DIR/bin/vfops-user" --build-id)" = 0.1.0-release135
+          bash installers/p07-m03-release136-atomic.sh install > "$t/new.log"
+          test "$(bash "$P07_INSTALL_DIR/bin/vfops-user" --build-id)" = 0.1.0-release136
+          test "$(cat "$P07_PREVIOUS_DIR/BUILD_ID")" = 0.1.0-release135
+          grep -Fq '查看网站和数据库' "$P07_INSTALL_DIR/bin/vfops-user"
+          grep -Fq '输入 n / p 翻页，0 返回' "$P07_INSTALL_DIR/bin/vfops-site-ui"
+          test "$(cat "$t/data/site")" = UNCHANGED_SITE_DATA
+          test "$(cat "$t/data/db")" = UNCHANGED_DB_DATA
+          echo P07_UX4_PUBLIC_M03_REAL_OFFICIAL_DOWNLOAD_AND_OLD_TO_NEW=PASS
+      - name: Real published M05 compact-ux1 to DB-first-ux2 using public atomic installer, rollback and four sibling markers
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          d="$RUNNER_TEMP/p07-ux4-official"
+          test ! -e /opt/vfops-modules/m05
+          for module in m01 m02 m03 m04; do
+            sudo -n mkdir -p "/opt/vfops-modules/$module"
+            echo 'P07-PUBLIC-TEST-OTHER-MODULE-UNCHANGED' | sudo -n tee "/opt/vfops-modules/$module/UNCHANGED" >/dev/null
+          done
+          old="$RUNNER_TEMP/p07-ux4-m05-old.zip"
+          curl --proto '=https' --tlsv1.2 -fsSL --max-time 120 \
+            'https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-v0.1.0-five-modules-ux3-20261113/P07-M05-0.1.0-m05-compact-ux1.zip' -o "$old"
+          echo "36e46e487ce90d01391639806e0dd659ba8881a5235bc5b89459f4da572a11e7  $old" | sha256sum -c - >/dev/null
+          sudo -n python3 -B installers/p07-m05-atomic.py install "$old" \
+             36e46e487ce90d01391639806e0dd659ba8881a5235bc5b89459f4da572a11e7
+          test "$(sudo -n readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-compact-ux1
+          sudo -n python3 -B installers/p07-m05-atomic.py install "$d/P07-M05-0.1.0-m05-db-first-ux2.zip" \
+             4e7e95103ccf68724f16297444fd2c0b36391443fc85d076b6a0aa8731c2dd6c
+          test "$(sudo -n readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-db-first-ux2
+          sudo -n bash /opt/vfops-modules/m05/current/bin/vfops-init-entry --version | grep -Fq db-first-ux2
+          if sudo -n python3 -B installers/p07-m05-atomic.py install "$old" 0000000000000000000000000000000000000000000000000000000000000000 >/dev/null 2>&1; then exit 61; fi
+          test "$(sudo -n readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-db-first-ux2
+          sudo -n python3 -B installers/p07-m05-atomic.py rollback 0.1.0-m05-compact-ux1 --confirm P07-M05:0.1.0-m05-compact-ux1
+          test "$(sudo -n readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-compact-ux1
+          sudo -n python3 -B installers/p07-m05-atomic.py install "$d/P07-M05-0.1.0-m05-db-first-ux2.zip" \
+             4e7e95103ccf68724f16297444fd2c0b36391443fc85d076b6a0aa8731c2dd6c
+          test "$(sudo -n readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-db-first-ux2
+          for module in m01 m02 m03 m04; do
+            test "$(sudo -n cat "/opt/vfops-modules/$module/UNCHANGED")" = 'P07-PUBLIC-TEST-OTHER-MODULE-UNCHANGED'
+          done
+          echo P07_UX4_PUBLIC_M05_REAL_OFFICIAL_INSTALL_UPGRADE_ROLLBACK=PASS
+          echo P07_UX4_FOUR_SIBLING_MODULES=UNTOUCHED
+          echo P07_UX4_PRODUCTION_MIGRATION_DNS=NOT_RUN
+      - name: Actual public Toolbox can show five Chinese choices with zero startup installer action
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          # The actual Owner CLI correctly refuses non-TTY input. Emulate a
+          # terminal instead of weakening the product's interactive guard.
+          command -v script >/dev/null
+          printf '0\n' | script -q -e -c 'env NO_COLOR=1 bash installers/p07-toolbox.sh' \
+            "$RUNNER_TEMP/p07-ux4-pty.log" > "$RUNNER_TEMP/p07-ux4-startup-menu.txt"
+          grep -Fq '功能：5 项' "$RUNNER_TEMP/p07-ux4-startup-menu.txt"
+          grep -Fq '新服务器初始化' "$RUNNER_TEMP/p07-ux4-startup-menu.txt"
+          grep -Fq '网站与数据' "$RUNNER_TEMP/p07-ux4-startup-menu.txt"
+          echo P07_UX4_PUBLIC_TOOLBOX_FIVE_MENU_AND_ZERO_STARTUP_WRITES=PASS
+          echo P07_UX4_REAL_OWNER_PRODUCTION=NOT_RUN

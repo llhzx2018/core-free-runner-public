@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # P07 V0.1.0 final public distribution readback marker.
 # 公共版本保持简短稳定；内部构建身份仅用于精确校验和工程追溯。
 VERSION="V0.1.0"
-BUILD_ID="0.1.0-five-modules-ux3-fieldfix1"
+BUILD_ID="0.1.0-five-modules-ux4-m03-m05-20261114"
 
 VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-ux1"
@@ -33,14 +33,14 @@ M02_ROOT="/opt/vfops-modules/m02"  # 独立 VPS 验机版本；不写入 M01/M03
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
-VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release135"
+VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release136"
 VF_SERVER_OPS_INSTALLER_REF="main"
-VF_SERVER_OPS_INSTALLER_BLOB="ede84039edc66fdbb5f218b6b505b9edd00bb3a7"
+VF_SERVER_OPS_INSTALLER_BLOB="bd6c2e5a911af10361bfaa2762c7f2c6084e7b95"
 # Exact stable P07-M03 runtime manifest; reject a self-edited manifest before execution.
-VF_SERVER_OPS_MANIFEST_BLOB="f57e114e0ef23f73a1ec12ba864d8f2e67a5bd30"
-VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07-m03-release135-repair.sh"
-M03_BOOTSTRAP_BUILD="0.1.0-release115"
-M03_BOOTSTRAP_MANIFEST_BLOB="4acbaca22aac0da681b34376e2cc86d876593181"
+VF_SERVER_OPS_MANIFEST_BLOB="59153685ef834114e01e0330c78ae174a042c1fa"
+VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07-m03-release136-atomic.sh"
+M03_BOOTSTRAP_BUILD="0.1.0-release135"
+M03_BOOTSTRAP_MANIFEST_BLOB="f57e114e0ef23f73a1ec12ba864d8f2e67a5bd30"
 M03_ROLLBACK_INSTALLER_REF="70836f5bba98e8d4ff32ccb6541b4ca1ffc80912"
 M03_ROLLBACK_INSTALLER_BLOB="9571833c4e8a1d737ee47a60e946a030d94c8157"
 M03_ROLLBACK_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${M03_ROLLBACK_INSTALLER_REF}/installers/p07-m03-restore-previous.sh"
@@ -68,7 +68,7 @@ M04_RUNTIME="$M04_ROOT/current/vf-system-care.sh"
 # P07-M05 新服务器初始化 has its OWN runtime/build and no M03/M04 installer calls.
 # Exact published M05 artifact: no fallback to M03/M04 installers.
 # M05-only official build; no other module or Production writes.
-M05_BUILD_EXPECTED="0.1.0-m05-compact-ux1"
+M05_BUILD_EXPECTED="0.1.0-m05-db-first-ux2"
 M05_UPGRADE_FROM="0.1.0-m05-candidate2"
 M05_UPGRADE_FROM2="0.1.0-m05-existing-safe1"
 M05_UPGRADE_FROM3="0.1.0-m05-clean-host-guard1"
@@ -76,12 +76,13 @@ M05_UPGRADE_FROM4="0.1.0-m05-pycache-safe1"
 M05_UPGRADE_FROM5="0.1.0-m05-cp-reinstall-plan1"
 M05_UPGRADE_FROM6="0.1.0-m05-provider-neutral-reinstall1"
 M05_UPGRADE_FROM7="0.1.0-m05-no-fake-reinstall1"
+M05_UPGRADE_FROM8="0.1.0-m05-compact-ux1"
 M05_ROOT="/opt/vfops-modules/m05"
 M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"
 # M05 is published as an immutable reviewed public Release ZIP.
 # Never install M03/M04 in its place and verify SHA-256 before extraction.
-M05_BUNDLE_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-v0.1.0-five-modules-ux3-20261113/P07-M05-0.1.0-m05-compact-ux1.zip"
-M05_BUNDLE_SHA256="36e46e487ce90d01391639806e0dd659ba8881a5235bc5b89459f4da572a11e7"
+M05_BUNDLE_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-v0.1.0-five-modules-ux4-20261114/P07-M05-0.1.0-m05-db-first-ux2.zip"
+M05_BUNDLE_SHA256="4e7e95103ccf68724f16297444fd2c0b36391443fc85d076b6a0aa8731c2dd6c"
 # Immutable private Owner Trial .run identity, never a public download source.
 M05_OFFLINE_TRIAL_SHA256="e42b6b3c59719f6ec189e4c62b7cfc54385aaa6e566c8f92ca5306246f022bbb"
 M05_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/35e3fbcb1e8c40042558f9f163e4215570074793/installers/p07-m05-atomic.py"
@@ -445,9 +446,8 @@ m03_verified_current() {
      ! -L "$root/.runtime-manifest.gitblob" ]] || return 1
   local installed
   installed="$(cat "$root/BUILD_ID")"
-  # This menu selects the pinned public stable M03, never an older trial
-  # or a different future build masquerading as release115.
-  # Current and the ONE verified old official release115 have separate immutable pins.
+  # Only the pinned public stable M03 and the immediately previous formally released
+  # release135 are eligible; older unproven variants are intentionally blocked.
   # A self-signed legacy manifest or an unknown historical trial is never upgraded.
   local trusted_manifest=''
   case "$installed" in
@@ -960,7 +960,7 @@ ensure_m05_current() {
     installed="$(readlink "$M05_ROOT/current")"
     case "$installed" in
       "releases/$M05_BUILD_EXPECTED") return 0 ;;
-      "releases/$M05_UPGRADE_FROM"|"releases/$M05_UPGRADE_FROM2"|"releases/$M05_UPGRADE_FROM3"|"releases/$M05_UPGRADE_FROM4"|"releases/$M05_UPGRADE_FROM5"|"releases/$M05_UPGRADE_FROM6"|"releases/$M05_UPGRADE_FROM7")
+      "releases/$M05_UPGRADE_FROM"|"releases/$M05_UPGRADE_FROM2"|"releases/$M05_UPGRADE_FROM3"|"releases/$M05_UPGRADE_FROM4"|"releases/$M05_UPGRADE_FROM5"|"releases/$M05_UPGRADE_FROM6"|"releases/$M05_UPGRADE_FROM7"|"releases/$M05_UPGRADE_FROM8")
         upgrade_from="${installed#releases/}"
         say "${C_CYAN}P07-M05 新服务器初始化：发现已验证的旧版 $upgrade_from。${C_RESET}"
         say "新版 $M05_BUILD_EXPECTED 优化中文菜单与状态提示；已有系统只做无损检查，干净新系统才主动选择数据库并安装。"
