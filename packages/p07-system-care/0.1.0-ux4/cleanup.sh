@@ -49,7 +49,7 @@ clean_journal() {
     fail '旧日志清理未成功；没有确认释放磁盘空间。'
     return 65
   fi
-  if grep -Eq 'freed ([1-9][0-9.]*|0[.][0-9]*[1-9][0-9]*)[KMGTP]?B' <<< "$report"; then
+  if grep -Eq 'freed ([1-9][0-9.]*|0[.][0-9]*[1-9][0-9]*)([KMGTP]B?|B)' <<< "$report"; then
     ok '旧归档日志已回收；正在使用的系统日志没有删除。'
   elif grep -Fq 'freed 0B' <<< "$report"; then
     ui_note '旧归档日志释放 0B：当前没有可回收的旧日志；活动日志仍保留。'
