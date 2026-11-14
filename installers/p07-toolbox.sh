@@ -1425,6 +1425,14 @@ case "${1:-}" in
   --install-m05-local) [[ "$#" == 4 ]] || exit 13; install_m05_local_candidate "$2" "$3" "$4" ;;
   --install-m05-offline) [[ "$#" == 3 ]] || exit 13; install_m05_offline_trial "$2" "$3" ;;
   --modules) modules_status_readonly ;;
+  --check-m03)
+    # Read-only exact-manifest proof; never executes unverified installed code.
+    if m03_verified_current; then
+      printf 'P07-M03 网站与数据：已验证 %s（未修改系统）\n' "$(cat /opt/vf-server-ops/BUILD_ID)"
+    else
+      printf 'P07-M03 网站与数据：现有程序身份或运行入口未通过验证；没有覆盖或升级。\n' >&2
+      exit 13
+    fi ;;
   --version|-V) printf '服务器工具箱 %s\n' "$VERSION" ;;
   --help|-h)
     cat <<EOF
