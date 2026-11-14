@@ -90,10 +90,11 @@ say() { printf '%s\\n' "$*"; }
 m03_verified_current() { [[ "$(cat "$P07_TEST_RUNTIME/BUILD_ID")" == '0.1.0-release115' ]]; }
 p07_git_blob_sha1() { git hash-object "$1"; }
 """ + source + """
-set +e
-ensure_server_ops_current
-rc=$?
-set -e
+if ensure_server_ops_current; then
+  rc=0
+else
+  rc=$?
+fi
 printf 'OWNER_M03_ENTRY_RESULT=%s\\n' "$rc"
 exit 0
 """, encoding="utf-8")
