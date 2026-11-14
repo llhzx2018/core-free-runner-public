@@ -135,3 +135,101 @@ jobs:
         run: |
           rm -rf -- "$RUNNER_TEMP/p07-hotfix"
           echo P07_PRIVATE_SOURCE_OR_OWNER_DATA_PUBLICATION=NONE
+
+  m04_journal_truth_release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Build exact independent M04 UX4 and verify all Git object hashes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(cat packages/p07-system-care/0.1.0-ux4/VERSION)" = 0.1.0-ux4
+          test "$(git hash-object packages/p07-system-care/0.1.0-ux4/MANIFEST.gitblob)" = 4a20bbe1f1c7622ee54a10761f52fe719130024a
+          test "$(git hash-object installers/p07-system-care-ux4-isolated.sh)" = b74b9d5fbe6d0fe2fe545d8cdbb1b5b762959617
+          grep -Fxq "PIN_REF='1c7579c66afedf4fe57ae94cb20d3195de42d051'" installers/p07-system-care-ux4-isolated.sh
+          git merge-base --is-ancestor 1c7579c66afedf4fe57ae94cb20d3195de42d051 HEAD
+          bash -n packages/p07-system-care/0.1.0-ux4/cleanup.sh installers/p07-system-care-ux4-isolated.sh
+          python3 -B -m unittest discover -s tests -p 'test_p07_owner_live_20261114.py' -q
+          mkdir -p "$RUNNER_TEMP/p07-owner-m04"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib,stat,zipfile
+          root=pathlib.Path("packages/p07-system-care/0.1.0-ux4")
+          out=pathlib.Path(os.environ["RUNNER_TEMP"])/"p07-owner-m04"
+          pairs=[]
+          for row in (root/"MANIFEST.gitblob").read_text().splitlines():
+              sha,name=row.split("  ",1)
+              file=root/name
+              assert file.is_file() and not file.is_symlink()
+              data=file.read_bytes()
+              assert hashlib.sha1(b"blob "+str(len(data)).encode()+b"\0"+data).hexdigest()==sha
+              pairs.append((name,file))
+          assert len(pairs)==24
+          assert {p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}=={n for n,_ in pairs}|{"MANIFEST.gitblob"}
+          pairs.append(("MANIFEST.gitblob",root/"MANIFEST.gitblob"))
+          def build(dest):
+              with zipfile.ZipFile(dest,"x",compression=zipfile.ZIP_DEFLATED,compresslevel=9) as zip:
+                  for name,file in sorted(pairs):
+                      info=zipfile.ZipInfo("p07-m04/"+name,(2026,1,1,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.external_attr=(stat.S_IFREG|0o644)<<16
+                      zip.writestr(info,file.read_bytes())
+              return hashlib.sha256(dest.read_bytes()).hexdigest()
+          archive="P07-M04-0.1.0-ux4.zip"
+          sha=build(out/archive)
+          assert build(out/("repeat-"+archive))==sha
+          (out/("repeat-"+archive)).unlink()
+          installer="P07-M04-ux4-installer.sh"
+          (out/installer).write_bytes(pathlib.Path("installers/p07-system-care-ux4-isolated.sh").read_bytes())
+          note={"module":"P07-M04 服务器维护与安全","version":"0.1.0-ux4",
+                "official_m04_zip_sha256":sha,"manifest_git_blob":"4a20bbe1f1c7622ee54a10761f52fe719130024a",
+                "source":"1c7579c66afedf4fe57ae94cb20d3195de42d051",
+                "production":"NOT_RUN","migration":"NOT_RUN","dns":"NOT_RUN"}
+          (out/"P07-M04-UX4-RELEASE.json").write_text(json.dumps(note,ensure_ascii=False,indent=2)+"\n")
+          names=[archive,installer,"P07-M04-UX4-RELEASE.json"]
+          (out/"SHA256SUMS").write_text("".join(hashlib.sha256((out/n).read_bytes()).hexdigest()+"  "+n+"\n" for n in names))
+          print("P07_M04_UX4_IMMUTABLE_SHA256="+sha)
+          print("P07_M04_JOURNAL_ZERO_POSITIVE_AND_FAILURE_MACHINE=PASS")
+          PY
+          (cd "$RUNNER_TEMP/p07-owner-m04" && sha256sum -c SHA256SUMS)
+      - name: Publish formal M04 journal truth only on authorized main merge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'P07 M03 M04 owner recovery Formal Release')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$GH_TOKEN" ]] || { echo RELEASE_CAPABILITY_MISSING; exit 78; }
+          repo='llhzx2018/core-free-runner-public'
+          tag='p07-m04-v0.1.0-ux4-journal-truth-20261114'
+          test "$(gh api "repos/$repo/git/ref/heads/main" --jq '.object.sha')" = "$GITHUB_SHA"
+          if gh release view "$tag" -R "$repo" >/dev/null 2>&1; then
+            test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq '.object.sha')" = "$GITHUB_SHA"
+            test "$(gh api "repos/$repo/releases/tags/$tag" --jq '.assets|length')" = 4
+          else
+            if gh api "repos/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then exit 81; fi
+            gh release create "$tag" -R "$repo" --target "$GITHUB_SHA" \
+              --title 'P07-M04 服务器维护与安全 · 日志释放 0B 如实反馈 UX4' \
+              --notes 'Owner 现场修复：M04 独立升级回滚与 M03 release115 真实终端升级机器 PASS；不更改本人 VPS、迁移、DNS。'
+            gh release upload "$tag" -R "$repo" \
+              "$RUNNER_TEMP/p07-owner-m04/P07-M04-0.1.0-ux4.zip" \
+              "$RUNNER_TEMP/p07-owner-m04/P07-M04-ux4-installer.sh" \
+              "$RUNNER_TEMP/p07-owner-m04/P07-M04-UX4-RELEASE.json" \
+              "$RUNNER_TEMP/p07-owner-m04/SHA256SUMS"
+          fi
+          dir="$(mktemp -d)"
+          trap 'rm -rf -- "$dir"' EXIT
+          gh release download "$tag" -R "$repo" --dir "$dir"
+          (cd "$dir" && sha256sum -c SHA256SUMS)
+          cmp "$dir/P07-M04-ux4-installer.sh" installers/p07-system-care-ux4-isolated.sh
+          echo P07_M04_OWNER_REAL_FIX_RELEASE_REMOTE_READBACK=PASS
+          echo P07_OWNER_VPS_MIGRATION_DNS=NOT_RUN
+      - name: Clean temporary packages
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- "$RUNNER_TEMP/p07-owner-m04"
+          echo P07_PRIVATE_ARTIFACT=NONE
