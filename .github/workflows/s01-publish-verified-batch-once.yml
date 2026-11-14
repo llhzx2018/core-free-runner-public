@@ -1,0 +1,173 @@
+name: Publish verified S01 Theme and Ops (temporary)
+on:
+  push:
+    branches: [test/s01-directory-parity-release-20261114]
+    paths: ['.github/workflows/s01-publish-verified-batch-once.yml']
+permissions:
+  contents: read
+concurrency:
+  group: s01-directory-parity-batch-20261114
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'llhzx2018/core-free-runner-public' && github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      PROOF_ID: '43605310599'
+      PROOF_HEAD: 3c51e6b0e633f88061172e319429bc92ce4ec530
+    steps:
+      - name: Verify exact independent proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PROOF_ID" |
+            jq -e --arg head "$PROOF_HEAD" '.head_sha == $head and .conclusion == "success" and .run_attempt == 1' >/dev/null
+      - name: Build exact private release assets and verify package contents
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          python3 - <<'PY'
+          import hashlib, json, os, re, subprocess, zipfile
+          from pathlib import Path, PurePosixPath
+
+          work = Path(os.environ["RUNNER_TEMP"]) / "s01-release"
+          work.mkdir(mode=0o700, exist_ok=True)
+          specs = [
+              ("theme", "1.35.228", "1.35.227", "d2ae0c24a6ab61b5d930f972da7349accc971707", "4489a5f0cc5a29299be6b574ccaee8a3147f296b", "vf-tools-theme", 480, "2ff53352465ba8ecc607819baf9455e5f29e4562dc5b94b67feab668bab8fb13"),
+              ("ops", "1.21.1118", "1.21.1117", "f89086c790d9556961c37fc9bc5888343b80632f", "853d0d7189e4a30afaffe5c6f82bd42cefa4d804", "vf-ops", 995, "4e3498c8002baf317d5aa1218be588811d4c7a9257c4128e15b66a1a0627dc5a"),
+          ]
+          digest = lambda x: hashlib.sha256(x).hexdigest()
+          def run(*argv):
+              return subprocess.run(argv, check=True, capture_output=True).stdout
+          records = []
+          for kind, version, previous, tested, merged, slug, count, fingerprint in specs:
+              repo = "llhzx2018/vf-tools-" + kind
+              root = work / kind
+              try:
+                  run("gh", "repo", "clone", repo, str(root), "--", "--no-checkout", "--quiet")
+                  def git(*args):
+                      return run("git", "-C", str(root), *args)
+                  assert git("rev-parse", "origin/main").decode().strip() == merged, "main-moved"
+                  assert git("rev-parse", tested + "^{tree}") == git("rev-parse", merged + "^{tree}"), "tree-mismatch"
+                  assert git("show", merged + ":VERSION").decode().strip() == version, "version-mismatch"
+                  changes = git("show", merged + ":CHANGELOG.md").decode().splitlines()[:12]
+                  assert any(version in line for line in changes), "changelog-missing"
+                  files = []
+                  entries = git("ls-tree", "-r", "-z", merged).split(b"\0")
+                  for entry in filter(None, entries):
+                      meta, name = entry.decode().split("\t", 1)
+                      mode, typ, oid = meta.split()
+                      if kind == "ops":
+                          keep = name.startswith(("assets/", "includes/", "languages/", "config/")) or name in ("vf-ops.php", "uninstall.php")
+                          relative = name
+                      else:
+                          keep = name.startswith("src/")
+                          relative = name[4:]
+                          if kind == "m3u8" and relative not in ("README.md",):
+                              keep = keep and (relative.startswith(("admin/", "config/", "includes/", "public/", "templates/", "tools/")) or relative in ("vf-tool-m3u8.php", "uninstall.php", "plugin-manifest.json", "tool-settings.schema.json"))
+                      if keep:
+                          assert typ == "blob" and mode in ("100644", "100755")
+                          assert ".." not in PurePosixPath(relative).parts
+                          files.append((slug + "/" + relative, mode, oid))
+                  assert len(files) == count, f"path-count-{len(files)}-expected-{count}"
+                  assert len({row[0] for row in files}) == count, "duplicate-path"
+                  asset = work / f"vf-tools-{kind}_V{version}.zip"
+                  hashes = []
+                  with zipfile.ZipFile(asset, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+                      for name, mode, oid in sorted(files):
+                          data = git("cat-file", "blob", oid)
+                          hashes.append(name + " " + digest(data) + "\n")
+                          item = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+                          item.compress_type = zipfile.ZIP_DEFLATED
+                          item.external_attr = int(mode, 8) << 16
+                          archive.writestr(item, data, compresslevel=9)
+                  assert digest("".join(hashes).encode()) == fingerprint, "tested-package-content-mismatch"
+                  with zipfile.ZipFile(asset) as archive:
+                      assert archive.testzip() is None
+                      header = "style.css" if kind == "theme" else slug + ".php"
+                      assert re.search(r"\bVersion:\s*" + re.escape(version) + r"\s*$", archive.read(slug + "/" + header).decode(), re.M)
+                  sha = digest(asset.read_bytes())
+                  data = dict(repo=repo, kind=kind, version=version, previous=previous, tested=tested, merged=merged, name=asset.name, bytes=asset.stat().st_size, sha=sha, count=count)
+                  records.append(data)
+                  print(f"{kind} VERIFIED {count} {data['bytes']} {sha}")
+              except AssertionError as err:
+                  raise SystemExit(f"{kind} build verification failed: {err}")
+              except Exception as err:
+                  raise SystemExit(f"{kind} build failed: {type(err).__name__}")
+          (work / "records.json").write_text(json.dumps(records), encoding="utf-8")
+          PY
+      - name: Publish private GitHub Releases and read back each asset
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN"
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "s01-release"
+          records = json.loads((root / "records.json").read_text())
+          descriptions = {
+              "theme": "修复静态目录页搜索、分类和分页，保留原网址。",
+              "ops": "保留 CSS 和 JavaScript 的语义；发现缺少必需页面时阻止候选包下载。",
+          }
+          def gh(*args, optional=False):
+              result = subprocess.run(["gh", *args], capture_output=True, text=True)
+              if result.returncode:
+                  if optional and "HTTP 404" in result.stderr:
+                      return None
+                  if optional and "release not found" in result.stderr.lower():
+                      return None
+                  raise RuntimeError("GitHub operation failed: " + " ".join(args[:2]))
+              return result.stdout
+          def api(path, optional=False):
+              result = gh("api", path, optional=optional)
+              return json.loads(result) if result is not None else None
+          def readback(row, dest):
+              dest.mkdir(exist_ok=True)
+              gh("release", "download", row["tag"], "-R", row["repo"], "-p", row["name"], "-D", str(dest))
+              data = (dest / row["name"]).read_bytes()
+              assert len(data) == row["bytes"] and hashlib.sha256(data).hexdigest() == row["sha"], "remote-asset-mismatch"
+
+          for row in records:
+              repo = row["repo"]
+              row["tag"] = "v" + row["version"]
+              assert api(f"repos/{repo}/git/ref/heads/main")["object"]["sha"] == row["merged"], "main-moved"
+              tag = api(f"repos/{repo}/git/ref/tags/{row['tag']}", optional=True)
+              if tag:
+                  assert tag["object"]["sha"] == row["merged"], "tag-collision"
+              existing = gh("release", "view", row["tag"], "-R", repo, "--json", "tagName,isDraft,isPrerelease", optional=True)
+              assert existing is None, "release-already-exists"
+          for row in records:
+              repo, tag, name = row["repo"], row["tag"], row["name"]
+              if api(f"repos/{repo}/git/ref/tags/{tag}", optional=True) is None:
+                  gh("api", "--method", "POST", f"repos/{repo}/git/refs", "-f", "ref=refs/tags/" + tag, "-f", "sha=" + row["merged"])
+              assert api(f"repos/{repo}/git/ref/tags/{tag}")["object"]["sha"] == row["merged"]
+              notes = root / (row["kind"] + "-notes.md")
+              notes.write_text(
+                  f'{descriptions[row["kind"]]}\n\n'
+                  f'- 来源提交 {row["merged"]}\n'
+                  f'- 安装包 {name}，{row["bytes"]} 字节，{row["count"]} 个运行文件\n'
+                  f'- SHA-256 `{row["sha"]}`\n'
+                  f'- 测试记录 https://github.com/llhzx2018/core-free-runner-public/actions/runs/43605310599\n'
+                  f'- 支持从 {row["previous"]} 升级。升级前备份文件及数据库，需要回退时用上一版本和同一时点备份。\n'
+                  '- WordPress 6.5+，PHP 8.2+。主机升级在 VF 在线更新中由站长操作。\n',
+                  encoding="utf-8",
+              )
+              gh("release", "create", tag, str(root / name), "-R", repo, "--draft", "--verify-tag", "--title", "VF Tools " + row["kind"] + " " + row["version"], "--notes-file", str(notes))
+              readback(row, root / ("draft-" + row["kind"]))
+          for row in records:
+              gh("release", "edit", row["tag"], "-R", row["repo"], "--draft=false", "--prerelease=false")
+              release = api(f"repos/{row['repo']}/releases/tags/{row['tag']}")
+              assert not release["draft"] and not release["prerelease"]
+              readback(row, root / ("formal-" + row["kind"]))
+              print(f"FORMAL_REMOTE_ASSET_PASS {row['kind']} {row['version']} {row['bytes']} {row['sha']} {row['count']} {release['published_at']}")
+          PY
+      - name: Remove temporary private source and assets
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/s01-release"
