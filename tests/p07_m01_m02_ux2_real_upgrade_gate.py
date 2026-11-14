@@ -152,7 +152,7 @@ def main() -> None:
                   "M01 old->new did not change only m01 pointer")
             check("原作者" in good1 or (m01_root / "current" / "vf-node.sh").is_file(),
                   "M01 UX2 UI not installed")
-            good2 = tty(script, b"2\ny\n0\n0\n")
+            good2 = tty(script, b"2\ny\n0\n\n0\n")
             check(os.readlink(m02_root / "current") == "releases/" + M02_NEW,
                   "M02 old->new did not change only m02 pointer")
             check("YABS" in good2 or (m02_root / "current" / "vps-audit.sh").is_file(),
@@ -161,7 +161,7 @@ def main() -> None:
                   "M02 installed bytes not exact candidate source")
             # Current target can be re-entered without swapping versions again.
             tty(script, b"1\n0\n0\n", 25)
-            tty(script, b"2\n0\n0\n", 25)
+            tty(script, b"2\n0\n\n0\n", 25)
             check(os.readlink(m01_root / "current") == "releases/" + M01_NEW, "M01 no-op changed target")
             check(os.readlink(m02_root / "current") == "releases/" + M02_NEW, "M02 no-op changed target")
 
