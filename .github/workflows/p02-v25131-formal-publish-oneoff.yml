@@ -1,0 +1,259 @@
+name: P02 v2.5.131 exact merged main formal publish gate
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review]
+    paths:
+      - '.github/workflows/p02-v25131-formal-publish-oneoff.yml'
+permissions:
+  contents: read
+jobs:
+  p02-131-package:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'release/p02-v25131-formal-publish-20261114' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout exact private P02 source (transient only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: f5dd7782e6fcae14a6ca04b8a263e1bee09f74e7
+          path: vf-library
+          persist-credentials: false
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+      - name: Checkout exact active public update channel (read only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-updates
+          ref: main
+          path: core-updates
+          persist-credentials: false
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      - name: Prepare bounded disposable PHP environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php-cli php8.3-cli php-sqlite3 php-zip php-mbstring php-xml composer sqlite3 unzip curl nginx php8.3-fpm >/dev/null
+          php -r 'exit(PHP_VERSION_ID >= 80300 && extension_loaded("pdo_sqlite") && extension_loaded("zip") ? 0 : 1);'
+          test "$(git -C vf-library rev-parse HEAD)" = "f5dd7782e6fcae14a6ca04b8a263e1bee09f74e7"
+          test "$(cat vf-library/VERSION)" = 2.5.131
+          echo P02_25131_RELEASE_EXACT_SOURCE=PASS
+      - name: Bind exact current source and public distribution source snapshot
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C vf-library rev-parse HEAD)" = "f5dd7782e6fcae14a6ca04b8a263e1bee09f74e7"
+          test "$(git -C core-updates hash-object projects/P02.json)" = "acf31bf006adf525507428bea5b4b4a025c9f13f"
+          python3 - <<'PY'
+          import json
+          data=json.load(open("core-updates/projects/P02.json"))
+          assert data["target_version"]=="2.5.130" and data["release_tag"]=="v2.5.130"
+          assert data["from_versions"]==["2.5.129"] and data["schema_to"]=="2401"
+          print("P02_25131_OLD_CHANNEL_EXACT_SOURCE=PASS")
+          PY
+      - name: Build locked Composer W2 private vendor in temporary filesystem only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          cd vf-library
+          test -f modern/laravel/composer.lock
+          composer --working-dir=modern/laravel install --no-dev --no-scripts --no-plugins --prefer-dist --no-interaction --no-progress --optimize-autoloader > "$RUNNER_TEMP/p02-composer.log" 2>&1 || { echo "P02_W2_LOCKED_VENDOR_INSTALL=FAIL"; exit 1; }
+          composer --working-dir=modern/laravel validate --strict >/dev/null
+          test -s modern/laravel/vendor/autoload.php
+          export P02_W2B_VENDOR_AUTOLOAD="$PWD/modern/laravel/vendor/autoload.php"
+          stage="/tmp/p02-v25131-private-assembled-${GITHUB_RUN_ID}-${RANDOM}-${RANDOM}"
+          test ! -e "$stage"
+          bash scripts/p02-w2-runtime-candidate-build.sh "$stage"
+          echo "P02_RELEASE_STAGE=$stage" >> "$GITHUB_ENV"
+          test -s "$stage/private/w2/releases/2.5.131/vendor/autoload.php"
+          echo P02_25131_LOCKED_OFFLINE_VENDOR=PASS
+      - name: Exact source denial tests and deterministic formal FULL and UPDATE reverse verification
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          cd vf-library
+          test "$(git rev-parse HEAD)" = "f5dd7782e6fcae14a6ca04b8a263e1bee09f74e7"
+          python3 -B -m unittest discover -s tests/unit -p test_p02_w2_formal_vendor.py -v
+          python3 -B -m unittest discover -s tests/unit -p test_p02_owner_v25131_source_scope.py -q
+          export VF_RELEASE_FROM_VERSIONS="2.5.130"
+          export VF_RELEASE_OWNER_DECISION=config/p02-release-source-decision-2.5.131.json
+          export VF_RELEASE_CHANNEL_JSON="../core-updates/projects/P02.json"
+          export VF_RELEASE_SOURCE_SHA="f5dd7782e6fcae14a6ca04b8a263e1bee09f74e7"
+          export VF_RELEASE_SOURCE_TREE="$(git show -s --format=%T HEAD)"
+          export VF_RELEASE_SOURCE_REF=main
+          export VF_RELEASE_W2_VENDOR_ROOT="$P02_RELEASE_STAGE/private/w2/releases/2.5.131"
+          log="$RUNNER_TEMP/p02-v25131-offline-final-gate.log"
+          if bash scripts/verify-release-artifacts.sh > "$log" 2>&1; then
+            grep -E 'P02_25131_FORMAL_W2_PRIVATE_VENDOR_DELIVERY=PASS|DETERMINISTIC_BUILD_PASS|ARTIFACT_IDENTITY_PRIVACY_PASS' "$log"
+            echo P02_25131_FORMAL_FINAL_ARTIFACT_MACHINE=PASS
+          else
+            python3 - "$log" <<'SAFE'
+          import re,sys
+          from pathlib import Path
+          lines=Path(sys.argv[1]).read_text(errors="replace").splitlines()
+          allow=re.compile(r'(^==|P02_|FAIL|ERROR|Traceback|AssertionError|Error|Source|SHA256SUMS|manifest|zip)',re.I)
+          sensitive=re.compile(r'(authorization|cookie|bearer|password|token|secret|api.?key|credential)',re.I)
+          matches=[re.sub(r'\x1b\[[0-9;]*m','',x)[:240] for x in lines if allow.search(x) and not sensitive.search(x)]
+          print("P02_25131_RELEASE_MACHINE_FAILURE_STAGE_BEGIN")
+          for line in matches[-30:]:print(line)
+          print("P02_25131_RELEASE_MACHINE_FAILURE_STAGE_END")
+          SAFE
+            echo P02_25131_FORMAL_FINAL_ARTIFACT_MACHINE=NOT_PROVEN
+            exit 1
+          fi
+      - name: Official 2.5.130 FULL to actual 2.5.131 formal UPDATE old-bridge and browser rollback gate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          cd vf-library
+          test "$(git rev-parse HEAD)" = "f5dd7782e6fcae14a6ca04b8a263e1bee09f74e7"
+          test -s build/release-preflight/VF_Library_V2.5.131_UPDATE.zip
+          test -s build/release-preflight/VF_Library_V2.5.131_FULL.zip
+          test -n "$GH_TOKEN"
+          export P02_W2B_VENDOR_AUTOLOAD="$PWD/modern/laravel/vendor/autoload.php"
+          export P02_REAL_FINAL_ASSETS="$PWD/build/release-preflight"
+          export P02_EXACT_SHA="f5dd7782e6fcae14a6ca04b8a263e1bee09f74e7"
+          python3 - <<'ADAPT'
+          from pathlib import Path
+          path=Path("scripts/p02-w2-legacy-oneclick-matrix.sh")
+          source=path.read_text()
+          guard='''[[ "$CI" == true && "$GITHUB_REPOSITORY" == llhzx2018/vf-library &&
+            "$GITHUB_REF" == refs/heads/feat/p02-w2d-inertia-material-page-20261113 &&
+            "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 2'''
+          replace='''[[ "$CI" == true && "$GITHUB_REPOSITORY" == llhzx2018/core-free-runner-public &&
+            "$(git rev-parse HEAD)" == "$P02_EXACT_SHA" ]] || exit 2'''
+          assert source.count(guard)==1
+          source=source.replace(guard,replace)
+          start=source.index('bash scripts/p02-w2-runtime-candidate-build.sh "$T/modern" >/dev/null')
+          end=source.index('VALIDATE_V1\n',start)+len('VALIDATE_V1\n')
+          build="""python3 - "$P02_REAL_FINAL_ASSETS" "$T" <<'REAL_FINAL'
+          import hashlib,io,json,pathlib,shutil,stat,sys,zipfile
+          assets,work=map(pathlib.Path,sys.argv[1:])
+          full=assets/'VF_Library_V2.5.131_FULL.zip'
+          upgrade=assets/'VF_Library_V2.5.131_UPDATE.zip'
+          lines=(assets/'SHA256SUMS.txt').read_text().splitlines()
+          for p in (full,upgrade):
+              digest=hashlib.sha256(p.read_bytes()).hexdigest()
+              assert f'{digest}  {p.name}' in lines
+          with zipfile.ZipFile(full) as f,zipfile.ZipFile(upgrade) as z:
+              manifest=json.loads(z.read('atomic-manifest.json'))
+              assert manifest['format']=='vf.library.atomic-package'
+              assert manifest['format_version']==1 and manifest['source_version']=='2.5.130'
+              assert manifest['target_version']=='2.5.131'
+              assert manifest['source_schema']==manifest['target_schema']==2401
+              assert not any(n.startswith('w2-sidecar/') for n in z.namelist())
+              wrapper=z.read('payload/app/w2-offline-vendor.php')
+              assert wrapper==f.read('app/w2-offline-vendor.php')
+              marker=b'__halt_compiler();\\n'
+              assert wrapper.startswith(b'<?php') and b'http_response_code(404);' in wrapper[:400]
+              with zipfile.ZipFile(io.BytesIO(wrapper[wrapper.index(marker)+len(marker):])) as inner:
+                  payload=json.loads(inner.read('w2-sidecar-manifest.json'))
+                  assert payload['target_version']=='2.5.131'
+                  for e in payload['files']:
+                      body=inner.read('w2-sidecar/2.5.131/'+e['path'])
+                      assert hashlib.sha256(body).hexdigest()==e['sha256'] and len(body)==e['bytes']
+              target=work/'payload'
+              target.mkdir(mode=0o700)
+              for info in z.infolist():
+                  if not info.filename.startswith('payload/'):continue
+                  name=info.filename[len('payload/'):]
+                  assert name and not name.startswith('/') and '..' not in pathlib.PurePosixPath(name).parts
+                  assert not info.is_dir() and ((info.external_attr>>16)&0o170000)!=stat.S_IFLNK
+                  p=target/name;p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(z.read(info))
+          assert (work/'payload/VERSION.txt').read_text().strip()=='2.5.131'
+          shutil.copyfile(upgrade,work/'atomic-v1.zip')
+          remote=dict(schema_version='1.0',project_id='P02',component_id='APP',enabled=True,
+                      current_version='2.5.130',target_version='2.5.131',update_type='ATOMIC',
+                      from_versions=['2.5.130'],schema_from='2401',schema_to='2401',
+                      repository='llhzx2018/vf-library',release_tag='NON_RELEASE_TEST_ONLY',
+                      asset_name='atomic-v1.zip',asset_bytes=upgrade.stat().st_size,
+                      asset_sha256=hashlib.sha256(upgrade.read_bytes()).hexdigest(),
+                      backup_required=True,rollback_supported=True,
+                      released_at='2026-11-14T00:00:00Z',notes='Exact formal artifact with local untrusted fake channel TEST ONLY')
+          (work/'atomic-v1.json').write_text(json.dumps(remote,sort_keys=True)+'\\n')
+          print('P02_25131_OFFICIAL_130_TO_FINAL_131_UPDATE_ASSET_BYTES=PASS')
+          REAL_FINAL
+          """
+          source=source[:start]+build+source[end:]
+          generated=Path('scripts/p02-w2-legacy-oneclick-real-formal-TEMP.sh')
+          assert not generated.exists()
+          generated.write_text(source)
+          generated.chmod(0o700)
+          ADAPT
+          log="$RUNNER_TEMP/p02-v25131-actual-final-upgrade.log"
+          if bash scripts/p02-w2-legacy-oneclick-real-formal-TEMP.sh > "$log" 2>&1; then
+            grep -E '^P02_25131_OFFICIAL_130_TO_FINAL_131_UPDATE_ASSET_BYTES=PASS|^P02_W2_ONECLICK_OLD_V1_FAULTS_DATA_ROLLBACK=PASS|^P02_W2_ONECLICK_DEFERRED_PRIVATE_VENDOR_RETRY_NO_EXTRA_OWNER_ACTION=PASS|^P02_W2_RECOVERY_BROWSER_HTML_AND_LOGIN_SURFACE=PASS' "$log"
+            echo P02_25131_FINAL_REAL_130_UPGRADE_ROLLBACK_BROWSER=PASS
+          else
+            python3 - "$log" <<'TAIL'
+          import re,sys
+          from pathlib import Path
+          lines=Path(sys.argv[1]).read_text(errors='replace').splitlines()
+          allow=re.compile(r'(P02_|FAIL|ERROR|Error|Traceback|AssertionError|Browser|playwright|chromium|Fatal)',re.I)
+          sensitive=re.compile(r'(authorization|cookie|bearer|password|token|secret|api.?key|credential)',re.I)
+          matches=[re.sub(r'\x1b\[[0-9;]*m','',x)[:240] for x in lines if allow.search(x) and not sensitive.search(x)]
+          print('P02_25131_FINAL_UPGRADE_FAILURE_STAGE_BEGIN')
+          for line in matches[-24:]: print(line)
+          print('P02_25131_FINAL_UPGRADE_FAILURE_STAGE_END')
+          TAIL
+            echo P02_25131_FINAL_REAL_130_UPGRADE_ROLLBACK_BROWSER=NOT_PROVEN
+            exit 1
+          fi
+      - name: Publish exact P02 v2.5.131 only after verified final FULL UPDATE and browser rollback
+        if: ${{ github.event.pull_request.draft == false }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test -n "$GH_TOKEN" || { echo P02_FORMAL_RELEASE_WRITE_TOKEN_MISSING; exit 78; }
+          repo=llhzx2018/vf-library
+          tag=v2.5.131
+          source=f5dd7782e6fcae14a6ca04b8a263e1bee09f74e7
+          dir="$PWD/vf-library/build/release-preflight"
+          test -d "$dir"
+          test "$(find "$dir" -maxdepth 1 -type f | wc -l)" -eq 8
+          (cd "$dir" && sha256sum -c SHA256SUMS.txt >/dev/null)
+          test "$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha)" = "$source" || { echo P02_FORMAL_MAIN_SOURCE_DRIFT; exit 78; }
+          test "$(gh api "repos/llhzx2018/core-updates/contents/projects/P02.json?ref=main" --jq .sha)" = "acf31bf006adf525507428bea5b4b4a025c9f13f" || { echo P02_FORMAL_CHANNEL_SOURCE_DRIFT; exit 78; }
+          if gh release view "$tag" -R "$repo" >/dev/null 2>&1; then echo P02_FORMAL_RELEASE_ALREADY_EXISTS_STOP; exit 81; fi
+          if gh api "repos/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then echo P02_FORMAL_TAG_ALREADY_EXISTS_STOP; exit 81; fi
+          gh release create "$tag" -R "$repo" --target "$source" --draft \
+            --title 'VF Library V2.5.131 · W1/W2 正式更新' \
+            --notes 'Owner 2026-11-14 授权正式发行。唯一验证直升来源为 V2.5.130 / Schema 2401；正式 FULL + UPDATE + ATOMIC + repair 的独立机器校验、真实 2.5.130 升级/备份/回滚/浏览器验证通过。原版 UpdateCore v1 的两阶段私有依赖安装仍为受控可恢复流程，不声称断电级跨阶段事务原子性。其它旧版不在直升范围；不得使用 FULL 覆盖已有私人资料。Release 不等于更新频道或 Production，正式站由 Owner 手工升级。'
+          gh release upload "$tag" -R "$repo" "$dir"/*
+          test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq '.object.sha')" = "$source"
+          test "$(gh api "repos/$repo/releases/tags/$tag" --jq '.draft')" = true
+          test "$(gh api "repos/$repo/releases/tags/$tag" --jq '.assets|length')" = 8
+          tmp="$(mktemp -d -p "$RUNNER_TEMP" p02-final-release-remote.XXXXXXXX)"
+          gh release download "$tag" -R "$repo" --dir "$tmp" >/dev/null
+          test "$(find "$tmp" -maxdepth 1 -type f | wc -l)" -eq 8
+          (cd "$tmp" && sha256sum -c SHA256SUMS.txt >/dev/null)
+          for local_asset in "$dir"/*; do cmp -s "$local_asset" "$tmp/$(basename "$local_asset")" || exit 82; done
+          echo P02_25131_DRAFT_RELEASE_REMOTE_BYTES_SHA256=PASS
+          gh release edit "$tag" -R "$repo" --draft=false
+          test "$(gh api "repos/$repo/releases/tags/$tag" --jq '.draft')" = false
+          test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq '.object.sha')" = "$source"
+          echo "P02_25131_UPDATE_BYTES=$(stat -c %s "$dir/VF_Library_V2.5.131_UPDATE.zip")"
+          echo "P02_25131_UPDATE_SHA256=$(sha256sum "$dir/VF_Library_V2.5.131_UPDATE.zip" | cut -d' ' -f1)"
+          echo P02_25131_FORMAL_GITHUB_RELEASE_REMOTE_READBACK=PASS
+          echo P02_25131_CHANNEL=NOT_CHANGED_IN_THIS_JOB
+          echo P02_25131_PRODUCTION=OWNER_MANUAL_NOT_TOUCHED
+          rm -rf -- "$tmp"
+      - name: Clean transient private checkout and package artifacts
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- vf-library core-updates
+          if [[ -n "${P02_RELEASE_STAGE:-}" && "$P02_RELEASE_STAGE" == /tmp/p02-v25131-private-assembled-* ]]; then rm -rf -- "$P02_RELEASE_STAGE"; fi
+          rm -f -- "$RUNNER_TEMP/p02-composer.log" "$RUNNER_TEMP/p02-v25131-offline-final-gate.log" "$RUNNER_TEMP/p02-v25131-actual-final-upgrade.log"
+          rm -f -- vf-library/scripts/p02-w2-legacy-oneclick-real-formal-TEMP.sh
