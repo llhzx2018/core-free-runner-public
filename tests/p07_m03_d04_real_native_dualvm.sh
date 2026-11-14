@@ -126,6 +126,19 @@ clpctl --version >/dev/null
 test -f /home/clp/htdocs/app/data/db.sq3
 INSTALL
   echo P07_M03_D04_OFFICIAL_CLOUDPANEL_MARIADB_11_8=PASS
+  ssh_vm "$ip" 'bash -se' <<'INITIALIZE'
+set -Eeuo pipefail
+clpctl user:add --userName=p07testadmin --email=p07testadmin@example.com --firstName=P07 --lastName=Fixture --password='SyntheticOnly2026ABC!' --role=admin --timezone=UTC --status=1 >/root/p07-first-admin.log 2>&1
+curl -kfsSL --max-time 45 https://127.0.0.1:8443/ -o /root/p07-first-page.html >/dev/null
+python3 - <<'PY'
+import sqlite3
+p='/home/clp/htdocs/app/data/db.sq3'
+with sqlite3.connect('file:'+p+'?mode=ro',uri=True) as con:
+ row=con.execute('SELECT COUNT(*), SUM(CASE WHEN is_active=1 THEN 1 ELSE 0 END) FROM database_server').fetchone()
+assert row and int(row[0] or 0)>0 and int(row[1] or 0)>0
+print('P07_M03_D04_CP_DATABASE_SERVER_INITIALIZED=PASS')
+PY
+INITIALIZE
 done
 ssh_vm "$OLD" 'bash -se' <<'SOURCE'
 set -Eeuo pipefail
