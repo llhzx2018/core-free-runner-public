@@ -1,0 +1,54 @@
+name: S01 exact package inventory
+on:
+  push:
+    branches: [test/s01-directory-parity-release-20261114]
+    paths: ['.github/workflows/s01-release-package-readback.yml']
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Compare official baseline to candidate package contents
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, subprocess, zipfile
+          from pathlib import Path
+          root = Path(os.environ["RUNNER_TEMP"]) / "s01-package-inventory"
+          root.mkdir(mode=0o700)
+          specs = [["theme","llhzx2018/vf-tools-theme","d2ae0c24a6ab61b5d930f972da7349accc971707","1.35.227","d171a51df27c10e185d9f390b9b8a0b1c150abca"],["ops","llhzx2018/vf-tools-ops","f89086c790d9556961c37fc9bc5888343b80632f","1.21.1117","fba40a1e9c73779015b907ab830ff571a76fee1e"]]
+          h = lambda b: hashlib.sha256(b).hexdigest()
+          def run(*args):
+              return subprocess.run(args, capture_output=True, check=True).stdout
+          for kind, repo, sha, previous, base in specs:
+              name = f"vf-tools-{kind}_V{previous}.zip"
+              run("gh","release","download","v"+previous,"-R",repo,"-p",name,"-D",str(root))
+              with zipfile.ZipFile(root / name) as z:
+                  old = {n:h(z.read(n)) for n in z.namelist() if not n.endswith('/')}
+              clone = root / kind
+              run("gh","repo","clone",repo,str(clone),"--","--no-checkout","--quiet")
+              def git(*args):
+                  return run("git","-C",str(clone),*args)
+              slug="vf-tools-theme" if kind=="theme" else "vf-ops"
+              def inventory(rev):
+                  files={}
+                  for entry in filter(None, git("ls-tree","-r","-z",rev).split(bytes([0]))):
+                      meta,path=entry.decode().split(chr(9),1)
+                      _,typ,oid=meta.split()
+                      keep = path.startswith("src/") if kind=="theme" else path.startswith(("assets/","includes/","languages/","config/")) or path in ("vf-ops.php","uninstall.php")
+                      if keep:
+                          assert typ=="blob"
+                          files[slug+"/"+(path[4:] if kind=="theme" else path)]=h(git("cat-file","blob",oid))
+                  return files
+              prior=inventory(base)
+              target=inventory(sha)
+              assert old==prior, "published previous asset differs from baseline source"
+              digest=h("".join(n+" "+target[n]+chr(10) for n in sorted(target)).encode())
+              print("PACKAGE_PROOF",kind,len(target),digest)
+          PY
+      - name: Clean temporary packages and sources
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/s01-package-inventory"
