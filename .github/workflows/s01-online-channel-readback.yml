@@ -1,0 +1,47 @@
+name: Verify active S01 update channel assets
+on:
+  push:
+    branches: [test/s01-directory-parity-release-20261114]
+    paths: ['.github/workflows/s01-online-channel-readback.yml']
+permissions:
+  contents: read
+jobs:
+  readback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+    steps:
+      - name: Read the active channel and download the exact assets
+        run: |
+          python3 - <<'PY'
+          import base64, hashlib, json, os, subprocess, zipfile
+          from pathlib import Path
+          root=Path(os.environ["RUNNER_TEMP"])/"s01-channel-readback"
+          root.mkdir(mode=0o700)
+          specs=[["S01-C01","1.35.228","1.35.227","1659de7bfdc560c90fdba192de3da56326223b3bed05698159aaf8d04e08ff8c"],["S01-C02","1.21.1118","1.21.1117","4dfcfa8e5896a9ce1ff9825f6ce7ff3dea382944bee7817cc3b5d962770c8d1e"]]
+          def gh(*args):
+              return subprocess.run(["gh",*args],capture_output=True,check=True).stdout
+          def api(path):
+              return json.loads(gh("api",path))
+          for id,version,from_version,sha in specs:
+              meta=api("repos/llhzx2018/core-updates/contents/projects/"+id+".json?ref=main")
+              m=json.loads(base64.b64decode(meta["content"]))
+              assert m["enabled"] and m["target_version"]==version and m["from_versions"]==[from_version]
+              assert m["asset_sha256"]==sha and m["release_tag"]=="v"+version
+              repo=m["repository"]
+              release=api("repos/"+repo+"/releases/tags/"+m["release_tag"])
+              assert not release["draft"] and not release["prerelease"]
+              matched=[x for x in release["assets"] if x["name"]==m["asset_name"]]
+              assert len(matched)==1 and matched[0]["size"]==m["asset_bytes"]
+              gh("release","download",m["release_tag"],"-R",repo,"-p",m["asset_name"],"-D",str(root))
+              pkg=root/m["asset_name"]
+              assert pkg.stat().st_size==m["asset_bytes"] and hashlib.sha256(pkg.read_bytes()).hexdigest()==sha
+              with zipfile.ZipFile(pkg) as z:
+                  assert z.testzip() is None
+                  assert sum(not i.is_dir() for i in z.infolist())==m["runtime_files"]
+              print("UPDATE_CHANNEL_PASS",id,version)
+          PY
+      - name: Remove temporary private assets
+        if: always()
+        run: rm -rf -- "$RUNNER_TEMP/s01-channel-readback"
