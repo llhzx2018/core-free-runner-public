@@ -136,25 +136,31 @@ report_source_fixture_error() {
   if test -f /root/p07-create.log; then
     tail -n 9 /root/p07-create.log | sed -E 's/(Password=)[^[:space:]]+/\1[REDACTED]/Ig' | cut -c 1-260
   fi
+  if test -f /root/p07-db-add.log; then
+    tail -n 12 /root/p07-db-add.log | sed -E 's/(Password=)[^[:space:]]+/\1[REDACTED]/Ig' | cut -c 1-260
+  fi
   exit "$rc"
 }
 trap report_source_fixture_error ERR
 stage=CREATE_ALPHA
-clpctl site:add:static --domainName=alpha.p07.example.com --siteUser=p07alpha --siteUserPassword=SyntheticOnly2026ABC > /root/p07-create.log 2>&1
+clpctl site:add:php --domainName=alpha.p07.example.com --phpVersion=8.4 --vhostTemplate=Generic --siteUser=p07alpha --siteUserPassword='SyntheticOnly2026ABC!' > /root/p07-create.log 2>&1
 stage=CREATE_BETA
 clpctl site:add:static --domainName=beta.p07.example.com --siteUser=p07beta --siteUserPassword=SyntheticOnly2026ABC >> /root/p07-create.log 2>&1
 stage=CREATE_DATABASE
-clpctl db:add --domainName=alpha.p07.example.com --databaseName=p07_alpha --databaseUserName=p07_alpha_user --databaseUserPassword=SyntheticOnly2026ABC >> /root/p07-create.log 2>&1
+clpctl db:add --domainName=alpha.p07.example.com --databaseName=p07_alpha --databaseUserName=p07_alpha_user --databaseUserPassword='SyntheticOnly2026ABC!' > /root/p07-db-add.log 2>&1
 stage=INSERT_SYNTHETIC_MYSQL
-mariadb p07_alpha -e 'CREATE TABLE p07_marker (id INT PRIMARY KEY, marker VARCHAR(40)); INSERT INTO p07_marker VALUES(1,"SYNTHETIC_MIGRATE_42");'
+mariadb --user=p07_alpha_user --password='SyntheticOnly2026ABC!' p07_alpha -e 'CREATE TABLE p07_marker (id INT PRIMARY KEY, marker VARCHAR(40)); INSERT INTO p07_marker VALUES(1,"SYNTHETIC_MIGRATE_42");'
 stage=WRITE_SYNTHETIC_FILES
 printf 'P07_ALPHA_STATIC_42\n' > /home/p07alpha/htdocs/alpha.p07.example.com/index.html
+install -d /home/p07alpha/htdocs/alpha.p07.example.com/public
+printf '<?php echo "P07_ALPHA_WEB_42"; ?>\n' > /home/p07alpha/htdocs/alpha.p07.example.com/public/index.php
 printf 'P07_BETA_STATIC_23\n' > /home/p07beta/htdocs/beta.p07.example.com/index.html
 sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'CREATE TABLE marker (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO marker VALUES(1,"SYNTHETIC_SQLITE_42");'
 mkdir -p /home/p07alpha/.vf-data
 printf 'P07_EXTERNAL_ASSET_42\n' > /home/p07alpha/.vf-data/proof.txt
+chown -R p07alpha:p07alpha /home/p07alpha/.vf-data /home/p07alpha/htdocs/alpha.p07.example.com
 stage=CHECK_MYSQL
-test "$(mariadb -N p07_alpha -e 'SELECT marker FROM p07_marker WHERE id=1')" = SYNTHETIC_MIGRATE_42
+test "$(mariadb --user=p07_alpha_user --password='SyntheticOnly2026ABC!' -N p07_alpha -e 'SELECT marker FROM p07_marker WHERE id=1')" = SYNTHETIC_MIGRATE_42
 stage=CHECK_SQLITE
 test "$(sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'SELECT value FROM marker WHERE id=1')" = SYNTHETIC_SQLITE_42
 stage=CHECK_HTTP
@@ -213,10 +219,11 @@ print('P07_M03_D04_REAL_TARGET_PREPARED=PASS')
 PY
 stage=VERIFY_FILES
 test "$(cat /home/p07alpha/htdocs/alpha.p07.example.com/index.html)" = P07_ALPHA_STATIC_42
+test "$(cat /home/p07alpha/htdocs/alpha.p07.example.com/public/index.php)" = '<?php echo "P07_ALPHA_WEB_42"; ?>'
 test "$(cat /home/p07beta/htdocs/beta.p07.example.com/index.html)" = P07_BETA_STATIC_23
 test "$(sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'SELECT value FROM marker WHERE id=1')" = SYNTHETIC_SQLITE_42
 stage=VERIFY_MYSQL
-test "$(mariadb -N p07_alpha -e 'SELECT marker FROM p07_marker WHERE id=1')" = SYNTHETIC_MIGRATE_42
+test "$(mariadb --user=p07_alpha_user --password='SyntheticOnly2026ABC!' -N p07_alpha -e 'SELECT marker FROM p07_marker WHERE id=1')" = SYNTHETIC_MIGRATE_42
 stage=VERIFY_EXTERNAL
 test "$(cat /home/p07alpha/.vf-data/proof.txt)" = P07_EXTERNAL_ASSET_42
 stage=VERIFY_HTTP
@@ -225,7 +232,7 @@ echo P07_M03_D04_TARGET_HTTP_FILES_SQL_SQLITE_PRIVATE=PASS
 TARGET
 ssh_vm "$OLD" 'bash -se' <<'VERIFY'
 set -Eeuo pipefail
-test "$(mariadb -N p07_alpha -e 'SELECT marker FROM p07_marker WHERE id=1')" = SYNTHETIC_MIGRATE_42
+test "$(mariadb --user=p07_alpha_user --password='SyntheticOnly2026ABC!' -N p07_alpha -e 'SELECT marker FROM p07_marker WHERE id=1')" = SYNTHETIC_MIGRATE_42
 test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: alpha.p07.example.com' http://127.0.0.1/)" = 200
 VERIFY
 echo P07_M03_D04_SOURCE_CONTINUES_OPERATING=PASS
