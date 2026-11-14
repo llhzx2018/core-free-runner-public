@@ -88,9 +88,18 @@ def main() -> None:
     spec.loader.exec_module(mod)
     toolbox = mod.generate(ref)
     orig = (ROOT / "installers/p07-toolbox.sh").read_text(encoding="utf-8")
-    check("M05_BUILD_EXPECTED=" in toolbox and
-          toolbox.split("VF_SERVER_OPS_PUBLIC=", 1)[1] == orig.split("VF_SERVER_OPS_PUBLIC=", 1)[1],
-          "M03/M04/M05 source changed in candidate")
+    # M01/M02 functions appear after top module identities; compare the untouched
+    # M03/M04/M05 runtime implementation, plus their pinned source identities.
+    check(toolbox.split("local_server_ops_version() {", 1)[1] ==
+          orig.split("local_server_ops_version() {", 1)[1],
+          "M03/M04/M05 runtime implementation changed in candidate")
+    for prefix in ("VF_SERVER_OPS_PUBLIC=", "VF_SERVER_OPS_BUILD_EXPECTED=",
+                   "VF_SERVER_OPS_INSTALLER_BLOB=", "M04_INSTALLER_BLOB=",
+                   "M05_BUILD_EXPECTED=", "M05_BUNDLE_SHA256="):
+        new_line = next((line for line in toolbox.splitlines() if line.startswith(prefix)), None)
+        old_line = next((line for line in orig.splitlines() if line.startswith(prefix)), None)
+        check(new_line is not None and new_line == old_line,
+              f"M03/M04/M05 official pin drift: {prefix}")
     m01_src = ROOT / "packages/p07-network-node/0.1.0-ux2"
     check(sha(m01_src / "MANIFEST.sha256") == M01_NEW_MANIFEST_SHA, "UX2 M01 manifest source mismatch")
     check(sha(ROOT / "experiments/p07-vps-audit-v21-ux2.sh") == M02_NEW_SHA, "UX2 M02 source mismatch")
