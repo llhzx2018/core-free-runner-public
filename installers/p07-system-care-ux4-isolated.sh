@@ -6,8 +6,8 @@ set -Eeuo pipefail
 MODULE_ID='P07-M04'
 MODULE_VERSION='0.1.0-ux4'
 MODULE_NAME='服务器维护与安全'
-PIN_REF='62f499b3ed818ec6d294a849af44fe586d372f2c'
-MANIFEST_BLOB='0c723252785bdd422de3cc80700f75a0023b552f'
+PIN_REF='1c7579c66afedf4fe57ae94cb20d3195de42d051'
+MANIFEST_BLOB='4a20bbe1f1c7622ee54a10761f52fe719130024a'
 UI_BLOB='bb5882befd5e15962df39ca1388629b45b5d33fc'
 SOURCE_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${PIN_REF}/packages/p07-system-care/${MODULE_VERSION}"
 MODULE_ROOT='/opt/vfops-modules/m04'
