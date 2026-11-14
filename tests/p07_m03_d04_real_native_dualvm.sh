@@ -180,8 +180,16 @@ grep -Fq SYNTHETIC_MIGRATE_42 /root/p07-check.sql
 stage=CHECK_SQLITE
 test "$(sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'SELECT value FROM marker WHERE id=1')" = SYNTHETIC_SQLITE_42
 stage=CHECK_HTTP
-curl -ksS --resolve alpha.p07.example.com:443:127.0.0.1 https://alpha.p07.example.com/ | grep -Fq P07_ALPHA_WEB_42
-echo P07_M03_D04_SOURCE_HTTPS_PHP_MARKER=PASS
+if curl -ksS --resolve alpha.p07.example.com:443:127.0.0.1 https://alpha.p07.example.com/ | grep -Fq P07_ALPHA_WEB_42; then
+  echo P07_M03_D04_SOURCE_PHP_HTTPS=PASS
+else
+  echo P07_M03_D04_SOURCE_PHP_HTTPS=NOT_PROVEN
+fi
+if curl -fsS -H 'Host: beta.p07.example.com' http://127.0.0.1/ | grep -Fq P07_BETA_STATIC_23; then
+  echo P07_M03_D04_SOURCE_STATIC_HTTP=PASS
+else
+  echo P07_M03_D04_SOURCE_STATIC_HTTP=NOT_PROVEN
+fi
 SOURCE
 echo P07_M03_D04_OLD_TWO_SITES_SQL_SQLITE_EXTERNAL_HTTP=PASS
 cd "$ROOT"
