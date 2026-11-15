@@ -87,11 +87,16 @@ from pathlib import Path
 import sys
 p = Path(sys.argv[1])
 data = p.read_bytes()
-banner = b'/*M!999999\\- enable the sandbox mode */\n'
-if data.startswith(b'/*M!999999') and not data.startswith(banner):
-    raise SystemExit('P07_D05_UNKNOWN_MARIA_BANNER=BLOCKED')
-if data.startswith(banner):
-    p.write_bytes(data[len(banner):])
+first, delim, rest = data.partition(b'\n')
+fixed = (
+    b'/*M!999999\\- enable the sandbox mode */',
+    b'/*M!999999\\\\- enable the sandbox mode */',
+)
+if first.startswith(b'/*M!999999'):
+    if first.rstrip(b'\r') not in fixed or not delim:
+        # Synthetic fixture only; fixed class without showing arbitrary SQL.
+        raise SystemExit('P07_D05_UNKNOWN_MARIA_BANNER=BLOCKED')
+    p.write_bytes(rest)
 PY
 if grep -Eiq '^(CREATE USER|GRANT |REVOKE |SET GLOBAL |SET @@GLOBAL|DROP DATABASE|SHUTDOWN|RESET MASTER)' \
   "$work/maria_to_mysql.sql"; then
