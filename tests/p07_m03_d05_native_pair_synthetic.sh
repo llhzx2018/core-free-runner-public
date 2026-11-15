@@ -88,13 +88,11 @@ import sys
 p = Path(sys.argv[1])
 data = p.read_bytes()
 first, delim, rest = data.partition(b'\n')
-fixed = (
-    b'/*M!999999\\- enable the sandbox mode */',
-    b'/*M!999999\\\\- enable the sandbox mode */',
-)
+import re
+# MariaDB CLI-only sandbox banner: tolerate a bounded escape and optional
+# semicolon/CR, but refuse any unknown versioned SQL/control grammar.
 if first.startswith(b'/*M!999999'):
-    if first.rstrip(b'\r') not in fixed or not delim:
-        # Synthetic fixture only; fixed class without showing arbitrary SQL.
+    if not re.fullmatch(rb'/\*M!999999\\*- enable the sandbox mode \*/;?\r?', first) or not delim:
         raise SystemExit('P07_D05_UNKNOWN_MARIA_BANNER=BLOCKED')
     p.write_bytes(rest)
 PY
