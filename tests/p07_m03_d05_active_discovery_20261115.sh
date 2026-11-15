@@ -238,10 +238,6 @@ CONTROL_PLANE_DISCOVERY
 # Bounded second gate: official authenticated Admin form only on synthetic CP VM.
 scp -q -i "$KEY" -o StrictHostKeyChecking=accept-new \
   -o UserKnownHostsFile="$WORK/known_hosts" \
-  "$ROOT/tests/p07_m03_d05_official_active_ui_20261115.py" \
-  root@"$OLD":/root/p07_d05_official_active_ui.py
-scp -q -i "$KEY" -o StrictHostKeyChecking=accept-new \
-  -o UserKnownHostsFile="$WORK/known_hosts" \
   "$ROOT/.p07-private-d05active/lib/db_engine_conversion_cloudpanel_active.py" \
   root@"$OLD":/root/db_engine_conversion_cloudpanel_active.py
 
@@ -305,8 +301,15 @@ assert not r["active_switch_proven"]
 assert not r["writes_performed"]
 print('P07_D05_ACTIVE_PRODUCT_READONLY_CP_SCHEMA=PASS')
 PY
-stage=OFFICIAL_AUTHENTICATED_UI
-export P07_ALLOW_SYNTHETIC_D05=1
-python3 /root/p07_d05_official_active_ui.py
-echo P07_D05_ACTIVE_OFFICIAL_UI_LAB=PASS
+stage=BROWSER_READY
+echo P07_D05_ACTIVE_BROWSER_FIXTURE_READY=PASS
 CP_UI_LAB
+stage=REAL_BROWSER_UI
+python3 -m venv "$WORK/playwrightvenv"
+"$WORK/playwrightvenv/bin/pip" install -q playwright==1.55.0
+"$WORK/playwrightvenv/bin/python" -m playwright install chromium >/dev/null
+P07_D05_SSH_KEY="$KEY" P07_ALLOW_SYNTHETIC_D05=1 \
+ P07_D05_SOURCE_ENGINE="$P07_D05_SOURCE_ENGINE" \
+ timeout --signal=TERM --kill-after=10s 220s \
+ "$WORK/playwrightvenv/bin/python" "$ROOT/tests/p07_m03_d05_cp_browser_lab_20261115.py"
+echo P07_D05_ACTIVE_OFFICIAL_BROWSER_TEST=PASS
