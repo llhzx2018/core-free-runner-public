@@ -92,7 +92,7 @@ import re
 # MariaDB CLI-only sandbox banner: tolerate a bounded escape and optional
 # semicolon/CR, but refuse any unknown versioned SQL/control grammar.
 if first.startswith(b'/*M!999999'):
-    if not re.fullmatch(rb'/\*M!999999\\*- enable the sandbox mode \*/;?\r?', first) or not delim:
+    if not re.fullmatch(rb'/\*M!999999\\*- enable the sandbox mode \*/;?', first.rstrip(b' \t\r')) or not delim:
         print('P07_D05_SYNTHETIC_BANNER_FIRST_LINE_HEX=' + first[:100].hex())
         raise SystemExit('P07_D05_UNKNOWN_MARIA_BANNER=BLOCKED')
     p.write_bytes(rest)
