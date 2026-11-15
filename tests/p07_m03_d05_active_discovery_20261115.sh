@@ -30,7 +30,7 @@ ssh_vm() {
   ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
     -o UserKnownHostsFile="$WORK/known_hosts" -o ConnectTimeout=9 root@"$ip" "$@"
 }
-test "$(git -C "$ROOT/.p07-private-d05active" rev-parse HEAD)" = 0eac0ba1aa1c72a8d4f3282c9f14cdcba64b1625
+test "$(git -C "$ROOT/.p07-private-d05active" rev-parse HEAD)" = ee48366a31dfe9a08dd75cf563cbada4b288432f
 test -c /dev/kvm && sudo test -w /dev/kvm
 test -c /dev/net/tun || { echo P07_D05_ACTIVE_TUN_UNAVAILABLE; exit 61; }
 sudo apt-get update -qq >/dev/null
