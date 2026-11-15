@@ -275,9 +275,9 @@ for role in ("source", "target"):
                         continue
                     line = line.split("*/", 1)[1].strip()
                     in_comment = False
-                if not line or line.startswith(("--", "#")) or line == r"/*M!999999\\- enable the sandbox mode */":
+                if not line or line.startswith(("--", "#")) or line == r"/*M!999999\- enable the sandbox mode */":
                     continue
-                while line.startswith("/*") and not re.match(r"^/\\*(?:!|M!)", line, re.I):
+                while line.startswith("/*") and not re.match(r"^/\*(?:!|M!)", line, re.I):
                     if "*/" not in line:
                         in_comment = True
                         line = ""
@@ -288,16 +288,16 @@ for role in ("source", "target"):
                 match = verify._SQL_VERSIONED_HEAD_RE.fullmatch(line)
                 if match:
                     line = match.group(1).strip()
-                elif re.match(r"^/\\*(?:!|M!)[0-9]{5,6}\\s+CREATE\\s+TRIGGER\\b", line, re.I):
+                elif re.match(r"^/\*(?:!|M!)[0-9]{5,6}\s+CREATE\s+TRIGGER\b", line, re.I):
                     continue
-                elif re.match(r"^/\\*(?:!|M!)", line, re.I):
+                elif re.match(r"^/\*(?:!|M!)", line, re.I):
                     blocker = "UNRECOGNIZED_VERSIONED_STATEMENT"
                     break
                 if verify._SQL_SIDE_EFFECT_HEAD_RE.match(line):
-                    blocker = ("GLOBAL_SETTING" if re.match(r"^SET\\s+", line, re.I)
+                    blocker = ("GLOBAL_SETTING" if re.match(r"^SET\s+", line, re.I)
                                else "PRIVILEGED_OR_MUTATING_COMMAND")
                     break
-                if (re.match(r"^(?:SET|SELECT|INSERT|REPLACE|UPDATE|DELETE|CREATE|ALTER|DROP|GRANT|REVOKE)\\b", line, re.I)
+                if (re.match(r"^(?:SET|SELECT|INSERT|REPLACE|UPDATE|DELETE|CREATE|ALTER|DROP|GRANT|REVOKE)\b", line, re.I)
                         and verify._sql_line_stacks_commands(line)):
                     blocker = "MULTIPLE_SQL_COMMANDS"
                     break
