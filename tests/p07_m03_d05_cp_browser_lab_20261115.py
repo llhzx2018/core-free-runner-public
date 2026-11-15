@@ -105,6 +105,68 @@ def input_fill(page,terms,value):
     return False
 
 
+
+def synthetic_management_smoke():
+    """Only synthetic DB, isolated CloudPanel. Output fixed status codes."""
+    if not SSH_KEY.startswith("/") or not os.path.isfile(SSH_KEY):
+        raise Block("SYNTHETIC_SSH_KEY_NOT_PROVEN")
+    script=r"""
+set -Eeuo pipefail
+clpctl site:add:php --domainName=alpha.p07.example.com \
+ --phpVersion=8.4 --vhostTemplate=Generic \
+ --siteUser=p07alpha --siteUserPassword='SyntheticOnly2026ABC!' \
+ >/root/p07-d05-cp-site.log 2>&1 || {
+   echo P07_D05_CP_CLI_SITE_CREATE_NOT_PROVEN; exit 51;
+ }
+echo P07_D05_CP_CLI_SITE_CREATE=PASS
+clpctl db:add --domainName=alpha.p07.example.com \
+ --databaseName=p07alpha --databaseUserName=p07alphauser \
+ --databaseUserPassword='SyntheticOnly2026ABC!' \
+ >/root/p07-d05-cp-db-add.log 2>&1 || {
+   echo P07_D05_CP_CLI_DB_ADD_NOT_PROVEN; exit 52;
+ }
+echo P07_D05_CP_CLI_DB_ADD=PASS
+pw='P07_Synthetic_D05_Root_Only!'
+if test "$P07_D05_SOURCE_ENGINE" = MYSQL_8.4; then cli=mariadb; else cli=mysql; fi
+docker exec -e "MYSQL_PWD=$pw" p07-d05-active-target "$cli" \
+ -uroot -N -B -e "SHOW DATABASES LIKE 'p07alpha'" | grep -Fxq p07alpha || {
+   echo P07_D05_CP_CLI_WRONG_DB_SERVER; exit 53;
+ }
+docker exec -e "MYSQL_PWD=$pw" p07-d05-active-target "$cli" \
+ -uroot p07alpha -e \
+ "CREATE TABLE p07_cp_marker (id INT PRIMARY KEY, marker VARCHAR(40)); INSERT INTO p07_cp_marker VALUES (1,'SYNTHETIC_CP_ACTIVE_42')" >/root/p07-d05-cp-seed.log 2>&1 || exit 54
+echo P07_D05_CP_CLI_DB_PLACEMENT=PASS
+clpctl db:export --databaseName=p07alpha --file=/root/p07-d05-target-export.sql \
+ >/root/p07-d05-cp-db-export.log 2>&1 || {
+   echo P07_D05_CP_CLI_EXPORT_NOT_PROVEN; exit 55;
+ }
+grep -Fq SYNTHETIC_CP_ACTIVE_42 /root/p07-d05-target-export.sql || exit 56
+echo P07_D05_CP_CLI_TARGET_EXPORT=PASS
+clpctl db:backup --databases=p07alpha --retentionPeriod=7 \
+ >/root/p07-d05-cp-db-backup.log 2>&1 || {
+   echo P07_D05_CP_CLI_BACKUP_NOT_PROVEN; exit 57;
+ }
+test -d /home/p07alpha/backups || exit 58
+find /home/p07alpha/backups -type f -size +0c -print -quit | grep -q . || exit 59
+echo P07_D05_CP_CLI_TARGET_BACKUP=PASS
+"""
+    p=subprocess.run([
+        "ssh","-i",SSH_KEY,"-o","BatchMode=yes",
+        "-o","StrictHostKeyChecking=accept-new",
+        "-o","UserKnownHostsFile=/dev/null",
+        "-o","ConnectTimeout=8","root@"+EXPECTED_SSH,
+        "P07_D05_SOURCE_ENGINE="+os.environ["P07_D05_SOURCE_ENGINE"]+" bash -se",
+    ],input=script,capture_output=True,text=True,timeout=240,check=False)
+    for line in p.stdout.splitlines():
+        if re.fullmatch(r"P07_D05_CP_CLI_[A-Z0-9_]+=PASS",line):
+            print(line,flush=True)
+    if p.returncode!=0:
+        for line in p.stdout.splitlines():
+            if re.fullmatch(r"P07_D05_CP_CLI_[A-Z0-9_]+_NOT_PROVEN",line):
+                mark("CRUD_BLOCKED_REASON",line)
+        raise Block("CLOUDPANEL_ACTIVE_DB_CRUD_OR_BACKUP_NOT_PROVEN")
+    mark("OFFICIAL_ACTIVE_DATABASE_CRUD_BACKUP")
+
 def browser_active():
     if (os.environ.get("P07_ALLOW_SYNTHETIC_D05")!="1"
             or os.environ.get("P07_D05_SOURCE_ENGINE") not in ("MARIADB_11.8","MYSQL_8.4")):
@@ -172,6 +234,11 @@ def browser_active():
             if not any(port==TARGET_PORT and active==1 for port,active in active_state()):
                 raise Block("OFFICIAL_SET_ACTIVE_DID_NOT_SWITCH")
             mark("OFFICIAL_SET_ACTIVE_METADATA")
+            smoke_failure=None
+            try:
+                synthetic_management_smoke()
+            except Block as exc:
+                smoke_failure=exc
             # Restore via the *same official row UI*, never SQLite editing.
             try:
                 page.reload(wait_until="domcontentloaded")
@@ -195,8 +262,9 @@ def browser_active():
                 raise
             # This phase does not claim site/CP CRUD/backup; those remain
             # separately unproven until real fixture and privilege testing.
-            mark("CP_DATABASE_CRUD","NOT_TESTED")
-            mark("CP_DATABASE_BACKUP","NOT_TESTED")
+            if smoke_failure is not None:
+                raise smoke_failure
+            mark("CP_DATABASE_CRUD_BACKUP","PROVEN_IN_SYNTHETIC_LAB")
             return 0
         finally:
             ctx.close()
