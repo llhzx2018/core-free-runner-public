@@ -203,9 +203,11 @@ rsync -aq -e "ssh -i $KEY -o StrictHostKeyChecking=accept-new -o UserKnownHostsF
   "$ROOT/.p07-private-exact/VERSION" "$ROOT/.p07-private-exact/BUILD_ID" \
   root@"$NEW":/opt/vf-server-ops/
 echo P07_M03_D04_EXACT_SOURCE_PR348_STAGED=PASS
+ssh_vm "$NEW" 'echo P07_M03_D04_TARGET_SSH_SESSION=PASS; test -x /opt/vf-server-ops/bin/vfops; /opt/vf-server-ops/bin/vfops --version'
 ssh_vm "$NEW" 'bash -se' <<'TARGET'
 set -Eeuo pipefail
 stage=INITIAL
+echo P07_M03_D04_TARGET_SCRIPT_STARTED=YES
 report_target_error() {
   rc=$?
   echo "P07_M03_D04_TARGET_FAILED_AT=$stage RC=$rc"
@@ -216,6 +218,7 @@ report_target_error() {
 trap report_target_error ERR
 CMD=/opt/vf-server-ops/bin/vfops
 stage=PLAN
+echo P07_M03_D04_TARGET_PLAN_STARTED=YES
 "$CMD" server-migrate plan --source-ip 172.29.71.11 --identity-file /root/.ssh/p07_test_key \
   --confirm-source-helper-staging ALLOW_SOURCE_HELPER_STAGING >/root/p07-plan.json 2>/root/p07-plan.err
 python3 - <<'PY'
@@ -231,6 +234,7 @@ assert p['existing_target_overwrite_allowed'] is False
 print('P07_M03_D04_REAL_ALL_SITES_PLAN=PASS')
 PY
 stage=PREPARE
+echo P07_M03_D04_TARGET_PREPARE_STARTED=YES
 "$CMD" server-migrate prepare --source-ip 172.29.71.11 --identity-file /root/.ssh/p07_test_key \
   --confirm PREPARE_PULL_MIGRATION >/root/p07-prepare.json 2>/root/p07-prepare.err
 python3 - <<'PY'
