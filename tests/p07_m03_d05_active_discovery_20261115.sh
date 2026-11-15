@@ -233,3 +233,87 @@ for path in ('/login','/admin/login'):
 PY
 echo P07_D05_ACTIVE_REAL_CLOUDPANEL_CONTROL_PLANE_DISCOVERY=PASS
 CONTROL_PLANE_DISCOVERY
+
+
+# Bounded second gate: official authenticated Admin form only on synthetic CP VM.
+scp -q -i "$KEY" -o StrictHostKeyChecking=accept-new \
+  -o UserKnownHostsFile="$WORK/known_hosts" \
+  "$ROOT/tests/p07_m03_d05_official_active_ui_20261115.py" \
+  root@"$OLD":/root/p07_d05_official_active_ui.py
+scp -q -i "$KEY" -o StrictHostKeyChecking=accept-new \
+  -o UserKnownHostsFile="$WORK/known_hosts" \
+  "$ROOT/.p07-private-d05active/lib/db_engine_conversion_cloudpanel_active.py" \
+  root@"$OLD":/root/db_engine_conversion_cloudpanel_active.py
+
+ssh_vm "$OLD" "P07_D05_SOURCE_ENGINE=$P07_D05_SOURCE_ENGINE bash -se" <<'CP_UI_LAB'
+set -Eeuo pipefail
+stage=PREPARE
+error() { rc=$?; echo "P07_D05_ACTIVE_UI_FAILED_AT=$stage RC=$rc"; exit "$rc"; }
+trap error ERR
+printf 'P07_D05_EPHEMERAL_CLOUDPANEL_VM_ONLY\n' >/root/.p07-d05-synthetic-qemu
+chmod 0600 /root/.p07-d05-synthetic-qemu
+stage=SOURCE_CP_SITE
+clpctl site:add:php --domainName=alpha.p07.example.com \
+ --phpVersion=8.4 --vhostTemplate=Generic --siteUser=p07alpha \
+ --siteUserPassword='SyntheticOnly2026ABC!' \
+ >/root/p07-d05-admin-site-add.log 2>&1
+clpctl db:add --domainName=alpha.p07.example.com \
+ --databaseName=p07_original_owned --databaseUserName=p07old \
+ --databaseUserPassword='SyntheticOnly2026ABC!' \
+ >/root/p07-d05-admin-db-add.log 2>&1
+echo P07_D05_ACTIVE_SOURCE_SITE_AND_DB=PASS
+stage=TARGET_ENGINE_PROVISION
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq >/root/p07-d05-target-apt.log 2>&1
+apt-get install -y -qq docker.io >/root/p07-d05-target-docker.log 2>&1
+systemctl start docker
+docker info >/dev/null
+if test "$P07_D05_SOURCE_ENGINE" = MYSQL_8.4; then
+  target_image=mariadb:11.8
+  target_cli=mariadb
+  target_pw_var=MARIADB_ROOT_PASSWORD
+  target_ver='11.8.'
+else
+  target_image=mysql:8.4
+  target_cli=mysql
+  target_pw_var=MYSQL_ROOT_PASSWORD
+  target_ver='8.4.'
+fi
+pw='P07_Synthetic_D05_Root_Only!'
+docker run -d --name p07-d05-active-target \
+  --label 'org.kewaro.p07.d05.active=synthetic' \
+  -p 127.0.0.1:13307:3306 \
+  -e "$target_pw_var=$pw" "$target_image" \
+  >/root/p07-d05-target-container.id
+ready=0
+for n in $(seq 1 90); do
+ if docker exec -e "MYSQL_PWD=$pw" p07-d05-active-target \
+    "$target_cli" -uroot -e 'SELECT 1' >/dev/null 2>&1; then
+    ready=1; break
+ fi
+ sleep 2
+done
+test "$ready" -eq 1
+docker exec -e "MYSQL_PWD=$pw" p07-d05-active-target "$target_cli" \
+  -uroot --batch --skip-column-names -e 'SELECT @@version' | grep -Fq "$target_ver"
+docker exec -e "MYSQL_PWD=$pw" p07-d05-active-target "$target_cli" \
+ -uroot -e \
+ "CREATE USER 'p07d05admin'@'%' IDENTIFIED BY 'P07_Synthetic_D05_Control_Only!'; GRANT ALL PRIVILEGES ON *.* TO 'p07d05admin'@'%' WITH GRANT OPTION;"
+echo P07_D05_ACTIVE_ISOLATED_TARGET_ENGINE=PASS
+stage=READ_ONLY_METADATA_GUARD
+python3 - <<'PY'
+import sys
+sys.path.insert(0,'/root')
+from db_engine_conversion_cloudpanel_active import inspect_cloudpanel_active
+r=inspect_cloudpanel_active(target_port=13307)
+assert r["server_count"]==1
+assert not r["target_server_port_registered"]
+assert not r["active_switch_proven"]
+assert not r["writes_performed"]
+print('P07_D05_ACTIVE_PRODUCT_READONLY_CP_SCHEMA=PASS')
+PY
+stage=OFFICIAL_AUTHENTICATED_UI
+export P07_ALLOW_SYNTHETIC_D05=1
+python3 /root/p07_d05_official_active_ui.py
+echo P07_D05_ACTIVE_OFFICIAL_UI_LAB=PASS
+CP_UI_LAB
