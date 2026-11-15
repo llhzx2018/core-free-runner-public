@@ -26,7 +26,7 @@ ssh_vm() {
   ssh -i "$KEY" -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
     -o UserKnownHostsFile="$WORK/known_hosts" -o ConnectTimeout=9 root@"$ip" "$@"
 }
-test "$(git -C "$ROOT/.p07-private-exact" rev-parse HEAD)" = d0b7f9b0ac89aba1ae630128cd32878c5844bb6d
+test "$(git -C "$ROOT/.p07-private-exact" rev-parse HEAD)" = 3db87eee8e82552a882ec86b9a7b07aba2d8ab02
 test -c /dev/kvm && sudo test -w /dev/kvm
 test -c /dev/net/tun || { echo P07_M03_D04_TUN_UNAVAILABLE; exit 61; }
 sudo apt-get update -qq >/dev/null
@@ -221,6 +221,18 @@ else
 fi
 SOURCE
 echo P07_M03_D04_OLD_TWO_SITES_SQL_SQLITE_EXTERNAL_HTTP=PASS
+
+# Report only synthetic VM engine/server identity; no credentials or SQL.
+ssh_vm "$OLD" 'bash -se' <<'SOURCE_ENGINE_IDENTITY'
+set -Eeuo pipefail
+printf 'P07_D04_SOURCE_MYSQL_BINARY_VERSION='
+mysqld --version | tr -cd '[:alnum:] ._+()-' | cut -c 1-180
+printf '\nP07_D04_SOURCE_SYSTEMD='
+systemctl show mysql.service --property=ActiveState,MainPID --no-pager | tr '\n' ' ' | cut -c 1-150
+printf '\nP07_D04_SOURCE_SOCKET_EXISTING='
+if test -S /run/mysqld/mysqld.sock; then echo YES; else echo NO; fi
+SOURCE_ENGINE_IDENTITY
+
 cd "$ROOT"
 ssh_vm "$NEW" 'install -d -m 700 /root/.ssh; mkdir -p /opt/vf-server-ops'
 scp -q -i "$KEY" -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$WORK/known_hosts" \
