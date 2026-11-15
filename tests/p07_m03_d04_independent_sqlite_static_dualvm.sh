@@ -237,7 +237,24 @@ P07_SQLITE_APP
 chown -R p07gamma:p07gamma /home/p07gamma/htdocs/gamma.p07.example.com
 stage=CHECK_GAMMA_SQLITE
 test "$(sqlite3 /home/p07gamma/htdocs/gamma.p07.example.com/test.sqlite 'SELECT value FROM marker WHERE id=1')" = SYNTHETIC_GAMMA_SQLITE_77
-curl -ksS --resolve gamma.p07.example.com:443:127.0.0.1 https://gamma.p07.example.com/ | grep -Fq P07_GAMMA_SQLITE_APP_SYNTHETIC_GAMMA_SQLITE_77
+# A third disposable CloudPanel vhost was created AFTER alpha/beta. Assert
+# its own vhost and reload Nginx before SNI/HTTPS; a default site responding
+# does NOT prove the gamma PHP+SQLite application is reachable.
+stage=CHECK_GAMMA_VHOST
+test -f /etc/nginx/sites-enabled/gamma.p07.example.com.conf
+nginx -t >/dev/null 2>&1
+systemctl reload nginx
+stage=CHECK_GAMMA_HTTPS
+gamma_healthy=0
+for attempt in 1 2 3 4 5; do
+  if curl -kfsS --connect-timeout 5 --max-time 12     --resolve gamma.p07.example.com:443:127.0.0.1     https://gamma.p07.example.com/ 2>/dev/null | grep -Fq P07_GAMMA_SQLITE_APP_SYNTHETIC_GAMMA_SQLITE_77; then
+    gamma_healthy=1
+    break
+  fi
+  sleep 2
+done
+test "$gamma_healthy" = 1
+echo P07_M03_D04_SOURCE_GAMMA_HTTPS_AND_SQLITE=PASS
 
 SOURCE
 echo P07_M03_D04_SQLITE_AND_STATIC_SOURCE_READY=PASS
