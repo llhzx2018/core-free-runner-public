@@ -173,6 +173,17 @@ printf 'P07_BETA_STATIC_23\n' > /home/p07beta/htdocs/beta.p07.example.com/index.
 sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'CREATE TABLE marker (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO marker VALUES(1,"SYNTHETIC_SQLITE_42");'
 mkdir -p /home/p07alpha/.vf-data
 printf 'P07_EXTERNAL_ASSET_42\n' > /home/p07alpha/.vf-data/proof.txt
+# Synthetic PHP application DB mapping; required for protected target credential rewrite.
+cat > /home/p07alpha/htdocs/alpha.p07.example.com/.env <<'P07_ENV'
+APP_NAME=P07Synthetic
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=p07alpha
+DB_USERNAME=p07alphauser
+DB_PASSWORD='SyntheticOnly2026ABC!'
+P07_ENV
+chmod 600 /home/p07alpha/htdocs/alpha.p07.example.com/.env
 chown -R p07alpha:p07alpha /home/p07alpha/.vf-data /home/p07alpha/htdocs/alpha.p07.example.com
 stage=CHECK_MYSQL
 rm -f /root/p07-check.sql
@@ -252,6 +263,7 @@ test "$(cat /home/p07alpha/htdocs/alpha.p07.example.com/index.php)" = '<?php ech
 test "$(cat /home/p07beta/htdocs/beta.p07.example.com/index.html)" = P07_BETA_STATIC_23
 test "$(sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'SELECT value FROM marker WHERE id=1')" = SYNTHETIC_SQLITE_42
 stage=VERIFY_MYSQL
+test -s /home/p07alpha/htdocs/alpha.p07.example.com/.env
 rm -f /root/p07-check.sql
 clpctl db:export --databaseName=p07alpha --file=/root/p07-check.sql >/root/p07-db-export.log 2>&1
 grep -Fq SYNTHETIC_MIGRATE_42 /root/p07-check.sql
