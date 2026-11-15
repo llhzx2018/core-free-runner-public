@@ -2,7 +2,7 @@
 # P07-M03-D04 服务器迁移: isolated Debian13 x2; synthetic business data only.
 set -Eeuo pipefail
 case "$P07_D05_SOURCE_ENGINE" in
-  MYSQL_8.4|MARIADB_11_8) ;;
+  MYSQL_8.4|MARIADB_11.8) ;;
   *) echo P07_D05_SOURCE_ENGINE_UNSUPPORTED; exit 77 ;;
 esac
 umask 077
