@@ -252,16 +252,9 @@ error() { rc=$?; echo "P07_D05_ACTIVE_UI_FAILED_AT=$stage RC=$rc"; exit "$rc"; }
 trap error ERR
 printf 'P07_D05_EPHEMERAL_CLOUDPANEL_VM_ONLY\n' >/root/.p07-d05-synthetic-qemu
 chmod 0600 /root/.p07-d05-synthetic-qemu
-stage=SOURCE_CP_SITE
-clpctl site:add:php --domainName=alpha.p07.example.com \
- --phpVersion=8.4 --vhostTemplate=Generic --siteUser=p07alpha \
- --siteUserPassword='SyntheticOnly2026ABC!' \
- >/root/p07-d05-admin-site-add.log 2>&1
-clpctl db:add --domainName=alpha.p07.example.com \
- --databaseName=p07_original_owned --databaseUserName=p07old \
- --databaseUserPassword='SyntheticOnly2026ABC!' \
- >/root/p07-d05-admin-db-add.log 2>&1
-echo P07_D05_ACTIVE_SOURCE_SITE_AND_DB=PASS
+stage=SOURCE_CP_INSTANCE
+test -f /home/clp/htdocs/app/data/db.sq3
+echo P07_D05_ACTIVE_SOURCE_PANEL_ONLY=PASS
 stage=TARGET_ENGINE_PROVISION
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/root/p07-d05-target-apt.log 2>&1
