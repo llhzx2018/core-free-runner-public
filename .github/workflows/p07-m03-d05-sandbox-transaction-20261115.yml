@@ -1,0 +1,118 @@
+name: P07 D05 isolated recoverable native conversion stage
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-m03-d05-sandbox-transaction-20261115.yml'
+permissions:
+  contents: read
+jobs:
+  isolated-conversion:
+    if: github.event.action == 'opened' || github.event.action == 'synchronize'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 24
+    steps:
+      - name: Checkout public runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Transient exact P07 private source checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: d3c600303de4203d20ed22db5608f7c953c8b0a1
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: .p07-private-d05-transaction
+      - name: Exact-source transaction tests, D05 module isolation and terminal UX
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONNOUSERSITE: '1'
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C .p07-private-d05-transaction rev-parse HEAD)" = d3c600303de4203d20ed22db5608f7c953c8b0a1
+          cd .p07-private-d05-transaction
+          export PYTHONPATH="$PWD/lib"
+          python3 -B -m unittest discover -s tests -p test_p07_m03_d05_sandbox_transaction.py -v
+          python3 -B scripts/check_p07_modules.py --module P07-M03-D05 \
+            --pr-title 'P07-M03-D05 数据库引擎转换：独立事务、恢复与故障注入' \
+            --changed-file lib/db_engine_conversion_sandbox.py \
+            --changed-file bin/vfops-db-convert-sandbox.py \
+            --affected P07-M03-D05 --shared-reason 'D05独立开发者合成事务'
+          python3 -B scripts/check_p07_terminal_ux.py \
+            --module P07-M03-D05 \
+            --changed-file bin/vfops-db-convert-sandbox.py \
+            --evidence-file docs/ux-reviews/p07-m03-d05-sandbox-v1.json
+          echo P07_D05_TRANSACTION_SOURCE_TESTS=PASS
+      - name: Four native engine directions and three failure-injection rollback cases
+        shell: bash
+        env:
+          P07_ALLOW_SYNTHETIC_D05: '1'
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONNOUSERSITE: '1'
+        run: |
+          set -Eeuo pipefail
+          cd .p07-private-d05-transaction
+          mkdir -p .synthetic-results
+          run_ok() {
+            local src="$1" dst="$2" label="$3"
+            timeout --signal=TERM --kill-after=10s 240s \
+              python3 -B bin/vfops-db-convert-sandbox.py \
+              --synthetic-only --source "$src" --target "$dst" \
+              >".synthetic-results/result.json"
+            python3 - "$src" "$dst" <<'PY'
+          import json,sys
+          from pathlib import Path
+          r=json.loads(Path(".synthetic-results/result.json").read_text())
+          assert r["status"]=="SYNTHETIC_PARITY_VERIFIED", r["status"]
+          assert r["cleanup"]=="PASS", r["cleanup"]
+          for proof in ("SOURCE_SNAPSHOT_RESTORE_PROVEN", "ROW_JSON_BLOB_PARITY_VERIFIED", "SINGLE_SYNTHETIC_TABLE_COVERAGE_VERIFIED"):
+              assert proof in r["events"], proof
+          assert not r["business_conversion_enabled"]
+          assert not r["cloudpanel_active_switch"]
+          assert not r["owner_vps_touched"]
+          assert not r["production_touched"]
+          assert r["source"]==sys.argv[1] and r["target"]==sys.argv[2]
+          PY
+            echo "P07_D05_NATIVE_SUCCESS_${label}=PASS"
+          }
+          run_fault() {
+            local src="$1" dst="$2" fault="$3" label="$4" rc=0
+            timeout --signal=TERM --kill-after=10s 240s \
+              python3 -B bin/vfops-db-convert-sandbox.py \
+              --synthetic-only --source "$src" --target "$dst" --fault "$fault" \
+              >".synthetic-results/result.json" || rc=$?
+            test "$rc" -eq 2
+            python3 - "$src" "$dst" "$fault" <<'PY'
+          import json,sys
+          from pathlib import Path
+          r=json.loads(Path(".synthetic-results/result.json").read_text())
+          assert r["cleanup"]=="PASS", r["cleanup"]
+          assert r["status"]=="FAIL_CLOSED_D05_INJECTED_"+sys.argv[3].upper().replace("-","_"), r["status"]
+          assert r["source"]==sys.argv[1] and r["target"]==sys.argv[2]
+          assert not r["business_conversion_enabled"]
+          assert not r["cloudpanel_active_switch"]
+          assert not r["owner_vps_touched"]
+          assert not r["production_touched"]
+          PY
+            echo "P07_D05_NATIVE_ROLLBACK_${label}=PASS"
+          }
+          run_ok MYSQL_8.4 MARIADB_11.8 COMMUNITY_TO_MARIA
+          run_ok MARIADB_11.8 MYSQL_8.4 MARIA_TO_COMMUNITY
+          run_ok MYSQL_8.4_PERCONA MARIADB_11.8 PERCONA_TO_MARIA
+          run_ok MARIADB_11.8 MYSQL_8.4_PERCONA MARIA_TO_PERCONA
+          run_fault MYSQL_8.4 MARIADB_11.8 after-backup AFTER_BACKUP
+          run_fault MARIADB_11.8 MYSQL_8.4_PERCONA after-target-create AFTER_TARGET_CREATE
+          run_fault MYSQL_8.4_PERCONA MARIADB_11.8 after-import AFTER_IMPORT
+          echo P07_D05_NATIVE_CONVERSION_AND_RECOVERY_PHASE=PASS
+      - name: Always destroy synthetic fixture resources and private product checkout
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          docker ps -aq --filter 'label=org.kewaro.p07.d05.synthetic' | xargs -r docker rm -f >/dev/null 2>&1
+          rm -rf -- .p07-private-d05-transaction
+          test ! -e .p07-private-d05-transaction
+          echo P07_D05_ISOLATED_SOURCE_AND_FIXTURE_CLEAN=PASS
