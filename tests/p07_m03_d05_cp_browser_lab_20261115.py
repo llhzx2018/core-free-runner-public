@@ -123,6 +123,21 @@ clpctl db:add --domainName=alpha.p07.example.com \
  --databaseName=p07alpha --databaseUserName=p07alphauser \
  --databaseUserPassword='SyntheticOnly2026ABC!' \
  >/root/p07-d05-cp-db-add.log 2>&1 || {
+   python3 - <<'PY'
+from pathlib import Path
+import re
+msg=Path('/root/p07-d05-cp-db-add.log').read_text(errors='replace')[:6000].lower()
+classes=[
+ ('AUTHENTICATION',r'access denied|authentication|login failed|password'),
+ ('ENGINE_VERSION',r'unsupported|not supported|version|mysql 8[.]4|percona'),
+ ('CONNECTION',r'connection refused|can.t connect|timed out|2002|2003'),
+ ('PRIVILEGE',r'permission denied|privilege|1044|1045'),
+ ('DDL_INCOMPATIBLE',r'collation|syntax|unknown option|1064'),
+ ('SCHEMA_CONFLICT',r'already exists|duplicate|1007'),
+]
+found=next((name for name,pat in classes if re.search(pat,msg)), 'UNCLASSIFIED')
+print('P07_D05_CP_CLI_DB_ADD_DIAG='+found)
+PY
    echo P07_D05_CP_CLI_DB_ADD_NOT_PROVEN; exit 52;
  }
 echo P07_D05_CP_CLI_DB_ADD=PASS
@@ -142,8 +157,23 @@ clpctl db:export --databaseName=p07alpha --file=/root/p07-d05-target-export.sql 
  }
 grep -Fq SYNTHETIC_CP_ACTIVE_42 /root/p07-d05-target-export.sql || exit 56
 echo P07_D05_CP_CLI_TARGET_EXPORT=PASS
-clpctl db:backup --databases=p07alpha --retentionPeriod=7 \
+# CloudPanel v2 official scheduled backup runs as the 'clp' service user
+# and uses --retentionPeriod=7 (not the obsolete v1 --databases selector).
+runuser -u clp -- /usr/bin/clpctl db:backup --retentionPeriod=7 \
  >/root/p07-d05-cp-db-backup.log 2>&1 || {
+   python3 - <<'PY'
+from pathlib import Path
+import re
+msg=Path('/root/p07-d05-cp-db-backup.log').read_text(errors='replace')[:6000].lower()
+classes=[
+ ('CLI_ARGUMENT',r'unrecognized option|option .* does not exist|unknown option|no such option'),
+ ('ACCOUNT',r'only.*(root|clp)|must.*user|not allowed|permission denied'),
+ ('DB_CONNECTION',r'access denied|can.t connect|connection|mysql|mariadb|percona'),
+ ('BACKUP_PATH',r'backup|directory|mkdir|path|write'),
+]
+found=next((name for name,pat in classes if re.search(pat,msg)), 'UNCLASSIFIED')
+print('P07_D05_CP_CLI_BACKUP_DIAG='+found)
+PY
    echo P07_D05_CP_CLI_BACKUP_NOT_PROVEN; exit 57;
  }
 test -d /home/p07alpha/backups || exit 58
@@ -158,7 +188,7 @@ echo P07_D05_CP_CLI_TARGET_BACKUP=PASS
         "P07_D05_SOURCE_ENGINE="+os.environ["P07_D05_SOURCE_ENGINE"]+" bash -se",
     ],input=script,capture_output=True,text=True,timeout=240,check=False)
     for line in p.stdout.splitlines():
-        if re.fullmatch(r"P07_D05_CP_CLI_[A-Z0-9_]+=PASS",line):
+        if re.fullmatch(r"P07_D05_CP_CLI_[A-Z0-9_]+=(?:PASS|AUTHENTICATION|ENGINE_VERSION|CONNECTION|PRIVILEGE|DDL_INCOMPATIBLE|SCHEMA_CONFLICT|UNCLASSIFIED|CLI_ARGUMENT|ACCOUNT|DB_CONNECTION|BACKUP_PATH)",line):
             print(line,flush=True)
     if p.returncode!=0:
         for line in p.stdout.splitlines():
