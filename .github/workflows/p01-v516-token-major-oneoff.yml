@@ -1,0 +1,99 @@
+name: P01 v516 official asset read token redirect safety
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  github-token-safe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 38
+    env:
+      TARGET_VERSION: 2.47.516
+      TARGET_SHA: 72fa193030fe77a1d1a48f01eddfeb1c18136d77
+    steps:
+      - name: Public-safe ephemeral lane check
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Validate lane source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_HEAD_REF" = "test/p01-247516-github-token-major-20261115"
+          python3 scripts/ephemeral_lane_spec.py validate --spec scripts/ephemeral/p01-v516-token-major.json > "$RUNNER_TEMP/p01-tkn-spec.txt"
+          python3 scripts/ephemeral_lane_spec.py audit-rendered --spec scripts/ephemeral/p01-v516-token-major.json --input .github/workflows/p01-v516-token-major-oneoff.yml > "$RUNNER_TEMP/p01-tkn-audit.txt"
+          grep -F '"status": "PASS"' "$RUNNER_TEMP/p01-tkn-audit.txt" > /dev/null
+      - name: Private candidate checkout (transient)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+      - name: Published old source checkout (transient)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ddd9d5dd0325772e2741d7a9e498b043e964c310
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: official-old
+      - name: Source and PHP 8.3 syntax + old upgrade gap
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(cat candidate/VERSION)" = "$TARGET_VERSION"
+          test "$(git -C official-old rev-parse HEAD)" = "ddd9d5dd0325772e2741d7a9e498b043e964c310"
+          grep -F 'VfAtomicPackage::run($this->root)' official-old/src/app/UpdateManager.php > /dev/null
+          ! grep -Eq 'MajorTrustedOwnerReleaseGate|P01-MAJOR.json' official-old/src/app/UpdateManager.php
+          echo P01_OFFICIAL_515_UPDATER_ATOMIC_ONLY=PASS
+          sudo apt-get update -qq >"$RUNNER_TEMP/p01-tkn-apt.txt" 2>&1
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-cli php8.3-zip php8.3-curl php8.3-sqlite3 php8.3-mbstring php8.3-xml composer >>"$RUNNER_TEMP/p01-tkn-apt.txt" 2>&1
+          for f in candidate/src/app/CoreUpdates/GitHubClient.php candidate/tests/compatibility/laravel/http/p01_major_github_asset_redirect.php candidate/tests/compatibility/laravel/http/p01_major_real_v515_github_asset.php; do php8.3 -l "$f" >/dev/null; done
+          echo P01_MAJOR_SAFE_CLIENT_PHP83_SYNTAX=PASS
+      - name: GitHub API and redirect policy negatives
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php8.3 candidate/tests/compatibility/laravel/http/p01_major_github_asset_redirect.php > "$RUNNER_TEMP/p01-tkn-neg.txt" 2>&1 || {
+            grep -Eo '(P01_MAJOR_[A-Z0-9_]{5,90}|Fatal error|TypeError|Parse error)' "$RUNNER_TEMP/p01-tkn-neg.txt" | sort -u | head -n 15 || true
+            exit 1
+          }
+          grep -Fx P01_MAJOR_GITHUB_TOKEN_NEVER_FOLLOWS_AUTO_REDIRECT=PASS "$RUNNER_TEMP/p01-tkn-neg.txt"
+          grep -Fx P01_MAJOR_OFFICIAL_API_URL_SCOPE_AND_CDN_NEGATIVES=PASS "$RUNNER_TEMP/p01-tkn-neg.txt"
+      - name: Actual official v515 FULL asset from GitHub with private read token
+        shell: bash
+        env:
+          P01_OFFICIAL_515_ASSET_READONLY_TEST: 'YES'
+          P01_TEST_READ_ONLY_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          php8.3 candidate/tests/compatibility/laravel/http/p01_major_real_v515_github_asset.php > "$RUNNER_TEMP/p01-tkn-live.txt" 2>&1 || {
+            grep -Eo '(P01_REAL_[A-Z0-9_]{5,90}|MAJOR_ASSET_[A-Z0-9_]{5,90}|Fatal error|TypeError)' "$RUNNER_TEMP/p01-tkn-live.txt" | sort -u | head -n 15 || true
+            exit 1
+          }
+          grep -Fx P01_REAL_515_GITHUB_ASSET_AUTHENTICATED_BYTE_HASH=PASS "$RUNNER_TEMP/p01-tkn-live.txt"
+          echo P01_MAJOR_OLD_REAL_GITHUB_ASSET_AUTH_AND_SHA=PASS
+      - name: Exact source self-contained Laravel FULL and MAJOR consumer
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          PYTHONDONTWRITEBYTECODE=1 python3 -B tests/architecture/test_p01_shared_helpers_manifest.py >"$RUNNER_TEMP/p01-tkn-helpers.txt" 2>&1
+          python3 scripts/build_p01_next_clean_full.py build --source-sha "$TARGET_SHA" --output "$RUNNER_TEMP/p01-tkn-clean.zip" --composer composer >"$RUNNER_TEMP/p01-tkn-build.txt" 2>&1 || { grep -Eo '(BuildError|Error:|ERROR)' "$RUNNER_TEMP/p01-tkn-build.txt" | head -n 8 || true; exit 1; }
+          python3 scripts/build_p01_next_clean_full.py verify --zip "$RUNNER_TEMP/p01-tkn-clean.zip" >>"$RUNNER_TEMP/p01-tkn-build.txt" 2>&1
+          python3 scripts/build_p01_next_cloudpanel_full.py build --source-zip "$RUNNER_TEMP/p01-tkn-clean.zip" --output "$RUNNER_TEMP/p01-tkn-cloudpanel.zip" >>"$RUNNER_TEMP/p01-tkn-build.txt" 2>&1
+          python3 scripts/build_p01_next_cloudpanel_full.py verify --zip "$RUNNER_TEMP/p01-tkn-cloudpanel.zip" >>"$RUNNER_TEMP/p01-tkn-build.txt" 2>&1
+          P01_MAJOR_REAL_FULL_ISOLATED_TEST=YES php8.3 tests/compatibility/laravel/run_major_signed_real_full_contract.php --developer-full "$RUNNER_TEMP/p01-tkn-cloudpanel.zip" >"$RUNNER_TEMP/p01-tkn-major.txt" 2>&1 || { grep -Eo '(MAJOR_[A-Z0-9_]{5,100}|TypeError)' "$RUNNER_TEMP/p01-tkn-major.txt" | sort -u | head -n 10 || true; exit 1; }
+          grep -Fx P01_MAJOR_REAL_CLOUDPANEL_FULL_SYNTHETIC_SIGNED_CONSUMER=PASS "$RUNNER_TEMP/p01-tkn-major.txt"
+          echo P01_MAJOR_TOKEN_SAFE_CLIENT_REAL_FULL_AND_NESTED_MIGRATION_BUNDLE=PASS
+      - name: Cleanup of all private material and local packages
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- candidate official-old
+          rm -f -- "$RUNNER_TEMP"/p01-tkn-*.txt "$RUNNER_TEMP"/p01-tkn-*.zip
+          echo P01_PRIVATE_SOURCE_AND_ASSET_PERSISTED=NO
