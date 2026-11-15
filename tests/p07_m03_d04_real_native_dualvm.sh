@@ -242,6 +242,75 @@ report_target_error() {
   echo "P07_M03_D04_TARGET_FAILED_AT=$stage RC=$rc"
   if test -f /root/p07-plan.err; then tail -n 12 /root/p07-plan.err | cut -c 1-260; fi
   if test -f /root/p07-prepare.err; then tail -n 12 /root/p07-prepare.err | cut -c 1-260; fi
+  if test "$stage" = PREPARE && test "$rc" -eq 13; then
+    # The disposable VM contains synthetic SQL ONLY. The report prints
+    # a fixed vocabulary; neither SQL, identifiers, file paths nor hashes
+    # from private data may enter the public workflow log.
+    PYTHONPATH=/opt/vf-server-ops/lib python3 - <<'P07_SQL_DIAGNOSTIC' || true
+import gzip
+import re
+from pathlib import Path
+import verify
+
+root = Path("/var/lib/vf-server-ops/server-migrations")
+for role in ("source", "target"):
+    files = sorted(root.glob("pull-*/mysql/prepare/*-" + role + ".sql.gz"))
+    print("P07_M03_D04_RETAINED_" + role.upper() + "_SQL=" + ("YES" if len(files) == 1 else "UNAVAILABLE"))
+    if len(files) != 1 or not files[0].is_file() or files[0].is_symlink():
+        continue
+    path = files[0]
+    try:
+        known = verify._cross_engine_known_dynamic_guard_lines(path)
+        blocker = "UNCLASSIFIED"
+        with gzip.open(path, "rt", encoding="utf-8", errors="strict") as stream:
+            in_comment = False
+            for n, raw in enumerate(stream, 1):
+                if n in known:
+                    continue
+                line = raw.strip()
+                if not line:
+                    continue
+                if in_comment:
+                    if "*/" not in line:
+                        continue
+                    line = line.split("*/", 1)[1].strip()
+                    in_comment = False
+                if not line or line.startswith(("--", "#")) or line == r"/*M!999999\\- enable the sandbox mode */":
+                    continue
+                while line.startswith("/*") and not re.match(r"^/\\*(?:!|M!)", line, re.I):
+                    if "*/" not in line:
+                        in_comment = True
+                        line = ""
+                        break
+                    line = line.split("*/", 1)[1].strip()
+                if not line:
+                    continue
+                match = verify._SQL_VERSIONED_HEAD_RE.fullmatch(line)
+                if match:
+                    line = match.group(1).strip()
+                elif re.match(r"^/\\*(?:!|M!)[0-9]{5,6}\\s+CREATE\\s+TRIGGER\\b", line, re.I):
+                    continue
+                elif re.match(r"^/\\*(?:!|M!)", line, re.I):
+                    blocker = "UNRECOGNIZED_VERSIONED_STATEMENT"
+                    break
+                if verify._SQL_SIDE_EFFECT_HEAD_RE.match(line):
+                    blocker = ("GLOBAL_SETTING" if re.match(r"^SET\\s+", line, re.I)
+                               else "PRIVILEGED_OR_MUTATING_COMMAND")
+                    break
+                if (re.match(r"^(?:SET|SELECT|INSERT|REPLACE|UPDATE|DELETE|CREATE|ALTER|DROP|GRANT|REVOKE)\\b", line, re.I)
+                        and verify._sql_line_stacks_commands(line)):
+                    blocker = "MULTIPLE_SQL_COMMANDS"
+                    break
+            else:
+                if in_comment:
+                    blocker = "UNTERMINATED_COMMENT"
+        print("P07_M03_D04_" + role.upper() + "_SQL_GUARD_CLASS=" + blocker)
+        print("P07_M03_D04_" + role.upper() + "_SQL_GUARD_REJECT=" +
+              ("YES" if verify.sql_unproven_side_effects(path) else "NO"))
+    except (OSError, EOFError, UnicodeError, verify.RestoreVerifyError):
+        print("P07_M03_D04_" + role.upper() + "_SQL_GUARD_CLASS=READ_FAILURE")
+P07_SQL_DIAGNOSTIC
+  fi
   exit "$rc"
 }
 trap report_target_error ERR
