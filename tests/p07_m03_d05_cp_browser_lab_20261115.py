@@ -96,7 +96,7 @@ def input_fill(page,terms,value):
             f'input[id*="{term}" i]',
         ):
             try:
-                loc=page.locator(selector).locator("visible=true")
+                loc=page.locator(selector + ":visible")
                 if loc.count()==1:
                     loc.fill(value,timeout=4500)
                     return True
