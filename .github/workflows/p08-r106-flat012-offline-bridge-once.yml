@@ -80,7 +80,13 @@ jobs:
         run: |
           set -Eeuo pipefail
           set +x
-          cd p08-private
+          # Canonical GOV gate requires a CLEAN exact Git checkout, while
+          # the packaged runtime necessarily has built vendor/Vite outputs.
+          # Git archive proves the runtime was assembled from this HEAD.
+          build="$RUNNER_TEMP/p08-r106-build-tree"
+          mkdir -m 0700 "$build"
+          git -C p08-private archive HEAD | tar -x -C "$build"
+          cd "$build"
           if ! composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader --no-progress > "$RUNNER_TEMP/p08-r106-composer.log" 2>&1; then
             echo R106_LOCKED_COMPOSER=FAIL; exit 1
           fi
@@ -90,13 +96,28 @@ jobs:
           if ! npm run build > "$RUNNER_TEMP/p08-r106-node.log" 2>&1; then
             echo R106_BRIDGE_VITE=FAIL; exit 1
           fi
-          cd ..
+          cd "$GITHUB_WORKSPACE"
           mkdir -m 0700 "$RUNNER_TEMP/p08-r106-updater-bridge-v012"
-          if ! python3 p08-private/scripts/build_full.py \
-              --source p08-private \
-              --output "$RUNNER_TEMP/p08-r106-bridge-full.zip" \
-              --version 0.1.2 --source-sha b78ffe6746e5a99ad87321a6aeda9f022fb96448 \
-              --governance-root gov-current > "$RUNNER_TEMP/p08-r106-build.log" 2>&1; then
+          # Run the real Public Authority resolve + delivery gate against the
+          # exact clean source; only the locked-built archival runtime has
+          # Composer/Vite-generated outputs. Both use the same source commit.
+          if ! python3 - <<'PY' > "$RUNNER_TEMP/p08-r106-build.log" 2>&1
+          import json, os, sys
+          from pathlib import Path
+          sys.path.insert(0,str(Path('p08-private/scripts').resolve()))
+          from build_full import write_full,verify_canonical_full_contract
+          source=Path('p08-private').resolve()
+          built=Path(os.environ['RUNNER_TEMP'])/'p08-r106-build-tree'
+          output=Path(os.environ['RUNNER_TEMP'])/'p08-r106-bridge-full.zip'
+          governance=Path('gov-current').resolve()
+          sha='b78ffe6746e5a99ad87321a6aeda9f022fb96448'
+          verify_canonical_full_contract(source,output,sha,governance,'resolve')
+          result=write_full(built,output,'0.1.2',sha)
+          verify_canonical_full_contract(source,output,sha,governance,'delivery')
+          print('R106_DEV_LOCKED_FULL_ZIP_BYTES='+str(result['bytes']))
+          print('R106_DEV_LOCKED_FULL_MANIFEST_SHA256='+str(result['sha256']))
+          PY
+          then
             echo R106_BRIDGE_GOV_FULL_PACKAGE_GATE=FAIL
             python3 - <<'PY'
           import json, os, re
@@ -171,6 +192,6 @@ jobs:
         shell: bash
         run: |
           set +e
-          rm -rf -- p08-private gov-current "$RUNNER_TEMP"/p08-r106-official-012-site-* "$RUNNER_TEMP"/p08-r106-updater-bridge-v012
+          rm -rf -- p08-private gov-current "$RUNNER_TEMP"/p08-r106-official-012-site-* "$RUNNER_TEMP"/p08-r106-updater-bridge-v012 "$RUNNER_TEMP"/p08-r106-build-tree
           rm -f -- "$RUNNER_TEMP"/p08-r106-*.zip "$RUNNER_TEMP"/p08-r106-*.log
           echo R106_PRIVATE_SOURCE_BRIDGE_ZIP_TEST_OWNER_CLEANED=YES
