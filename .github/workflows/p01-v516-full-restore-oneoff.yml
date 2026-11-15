@@ -1,0 +1,200 @@
+name: P01 v516 real bridge old-data complete restore
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  bridge-atomic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BRIDGE_SHA: bdc1e068e4cabec2e9129d750b8f6ba159c74fd5
+      SOURCE_TAG: v2.47.515
+      BRIDGE_VERSION: 2.47.516
+      TARGET_VERSION: 2.47.517
+      TARGET_SHA: 635655095d7e993c4daa7c41bc973ee39c02dcb7
+    steps:
+      - name: Checkout registered public-safe Runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Validate ephemeral lane contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_HEAD_REF" = "test/p01-247516-full-restore-20261115"
+          python3 scripts/ephemeral_lane_spec.py validate --spec scripts/ephemeral/p01-v516-full-restore.json >"$RUNNER_TEMP/p01-bridge-lane.txt"
+          python3 scripts/ephemeral_lane_spec.py audit-rendered --spec scripts/ephemeral/p01-v516-full-restore.json --input .github/workflows/p01-v516-full-restore-oneoff.yml >>"$RUNNER_TEMP/p01-bridge-lane.txt"
+          grep -F '"status": "PASS"' "$RUNNER_TEMP/p01-bridge-lane.txt" >/dev/null
+          echo P01_PHP_BRIDGE_SAFE_ONEOFF_LANE=PASS
+      - name: Checkout bridge from exact immutable SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.BRIDGE_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: bridge-src
+      - name: PHP extensions and exact source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C bridge-src rev-parse HEAD)" = "$BRIDGE_SHA"
+          test "$(cat bridge-src/VERSION)" = "$BRIDGE_VERSION"
+          test "$(cat bridge-src/src/VERSION.txt)" = "$BRIDGE_VERSION"
+          test "$(grep -Foc "define('VF_VERSION', '2.47.516');" bridge-src/src/app/bootstrap.php)" = 1
+          sudo apt-get update -qq > "$RUNNER_TEMP/p01-bridge-apt.txt" 2>&1
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-cli php8.3-curl php8.3-zip php8.3-mbstring php8.3-sqlite3 php8.3-gd php8.3-xml unzip curl >> "$RUNNER_TEMP/p01-bridge-apt.txt" 2>&1
+          php8.3 -l bridge-src/src/app/LegacyMajorMigrationReadiness.php >/dev/null
+          php8.3 -l bridge-src/src/app/LegacyMajorOwnerHandoff.php >/dev/null
+          php8.3 -l bridge-src/src/api.php >/dev/null
+          php8.3 -l bridge-src/src/app/UpdateManager.php >/dev/null
+          php8.3 -l bridge-src/src/app/CoreUpdates/GitHubClient.php >/dev/null
+          PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile bridge-src/scripts/build_p01_247516_legacy_atomic.py
+          echo P01_BRIDGE_EXACT_SOURCE_AND_PHP83_SYNTAX=PASS
+      - name: Download official immutable v515 FULL and UPDATE assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          BASE="$RUNNER_TEMP/p01-bridge-base"
+          mkdir -p "$BASE/full" "$BASE/repair"
+          gh release download v2.47.515 -R llhzx2018/vf-start -D "$BASE" -p 'VF-Start-V2.47.515-FULL.zip' -p 'VF_Start_V2.47.515_UPDATE.zip' >"$RUNNER_TEMP/p01-bridge-download.txt" 2>&1
+          test "$(sha256sum "$BASE/VF-Start-V2.47.515-FULL.zip" | cut -d' ' -f1)" = 5ee0c031dda82c53353929dc4519b0cc1b647b2af82a1bcd8a27a03ab7866778
+          test "$(sha256sum "$BASE/VF_Start_V2.47.515_UPDATE.zip" | cut -d' ' -f1)" = 3a5e6528e8ef1204ef1fc4f6d4568aad0634dced649200f5744df5cb9c082556
+          unzip -q "$BASE/VF-Start-V2.47.515-FULL.zip" -d "$BASE/full"
+          unzip -q "$BASE/VF_Start_V2.47.515_UPDATE.zip" -d "$BASE/repair"
+          test -f "$BASE/repair/repair-v2.47.515.php"
+          echo P01_BRIDGE_REAL_OLD_RELEASE_FULL_UPDATE_SHA=PASS
+      - name: Build bounded bridge FULL and journal capable Atomic ZIP
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE="$RUNNER_TEMP/p01-bridge-base"
+          PYTHONDONTWRITEBYTECODE=1 python3 -B bridge-src/scripts/build_p01_247516_legacy_atomic.py --candidate bridge-src/src --baseline-full-dir "$BASE/full" --baseline-repair "$BASE/repair/repair-v2.47.515.php" --runner-atomic-engine scripts/p01-build-release-v2.py --target-sha "$BRIDGE_SHA" --output-dir "$RUNNER_TEMP/p01-bridge-out" >"$RUNNER_TEMP/p01-bridge-build.txt" 2>&1 || {
+            grep -Eo '(P01_247516_BRIDGE_[A-Z0-9_]{4,96}|BridgeError|Traceback|RuntimeError)' "$RUNNER_TEMP/p01-bridge-build.txt" | sort -u | head -n 12 || true
+            exit 1
+          }
+          test -f "$RUNNER_TEMP/p01-bridge-out/VF_Start_V2.47.516_UPDATE-DEV-ONLY.zip"
+          test -f "$RUNNER_TEMP/p01-bridge-out/VF-Start-V2.47.516-FULL-DEV-ONLY.zip"
+          test "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['status'])" "$RUNNER_TEMP/p01-bridge-out/bridge-candidate-receipt.json")" = DEVELOPER_ISOLATED_ONLY
+          echo P01_BRIDGE_516_DEVELOPER_ATOMIC_FULL_ARTIFACTS=PASS
+      - name: Real old v515 install then v516 Atomic success and interrupted rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export BASE="$RUNNER_TEMP/p01-bridge-base" OUT="$RUNNER_TEMP/p01-bridge-out" WORK="$RUNNER_TEMP/p01-bridge-work"
+          mkdir -p "$WORK"/{upgrade,rollback,repair}
+          unzip -q "$OUT/VF_Start_V2.47.516_UPDATE-DEV-ONLY.zip" -d "$WORK/repair"
+          REPAIR="$WORK/repair/repair-v2.47.516.php"
+          test "$(unzip -Z1 "$OUT/VF_Start_V2.47.516_UPDATE-DEV-ONLY.zip")" = repair-v2.47.516.php
+          php8.3 -l "$REPAIR" >/dev/null
+          php8.3 "$REPAIR" --self-test >"$RUNNER_TEMP/p01-bridge-selftest.txt"
+          grep -Fq '"ok":true' "$RUNNER_TEMP/p01-bridge-selftest.txt"
+          test -z "$(unzip -Z1 "$OUT/VF-Start-V2.47.516-FULL-DEV-ONLY.zip" | grep -Ei '(^|/)(\.runtime\.php|.*\.sqlite3?$|.*\.db$|private/|backups?/|sessions?/|tokens?/|staging/)' || true)"
+          cp -a "$BASE/full/." "$WORK/upgrade/"
+          cp -a "$BASE/full/." "$WORK/rollback/"
+          install_old() {
+            local dir="$1" port="$2"
+            (cd "$dir" && php8.3 -S 127.0.0.1:"$port" -t . > "$RUNNER_TEMP/p01-bridge-http-$port.txt" 2>&1 & echo $! > "$RUNNER_TEMP/p01-bridge-http-$port.pid")
+            local cookie="$RUNNER_TEMP/p01-bridge-cookie-$port.txt"
+            local ready=0
+            for i in $(seq 1 35); do
+              if curl -fsS -c "$cookie" -b "$cookie" "http://127.0.0.1:$port/setup.php" > "$RUNNER_TEMP/p01-bridge-page-$port.html" 2>/dev/null; then ready=1;break;fi
+              sleep 1
+            done
+            test "$ready" -eq 1
+            local csrf
+            csrf="$(python3 - "$RUNNER_TEMP/p01-bridge-page-$port.html" <<'PY'
+          import re,sys
+          m=re.search(r'name="setup_csrf"\s+value="([^"]+)"',open(sys.argv[1],encoding="utf-8").read())
+          assert m, "missing old setup csrf"
+          print(m.group(1))
+          PY
+          )"
+            curl -fsS -c "$cookie" -b "$cookie" -X POST "http://127.0.0.1:$port/setup.php" --data-urlencode "setup_csrf=$csrf" --data-urlencode "site_title=Bridge Test" --data-urlencode "admin_password=BridgePassword-2026!" --data-urlencode "admin_password_confirm=BridgePassword-2026!" > "$RUNNER_TEMP/p01-bridge-setup-$port.html"
+            (cd "$dir" && php8.3 cli/verify.php) | grep -Fx VERIFY_PASS=YES
+            kill "$(cat "$RUNNER_TEMP/p01-bridge-http-$port.pid")" || true
+          }
+          install_old "$WORK/upgrade" 19416
+          install_old "$WORK/rollback" 19417
+          cp "$REPAIR" "$WORK/upgrade/repair-v2.47.516.php"
+          php8.3 "$WORK/upgrade/repair-v2.47.516.php" --verify-source="$WORK/upgrade" > "$RUNNER_TEMP/p01-bridge-verify-source.txt"
+          grep -Fq '"ok":true' "$RUNNER_TEMP/p01-bridge-verify-source.txt"
+          php8.3 "$WORK/upgrade/repair-v2.47.516.php" --run="$WORK/upgrade" > "$RUNNER_TEMP/p01-bridge-success.txt"
+          grep -Fq '"ok":true' "$RUNNER_TEMP/p01-bridge-success.txt"
+          test "$(cat "$WORK/upgrade/VERSION.txt")" = 2.47.516
+          (cd "$WORK/upgrade" && php8.3 cli/verify.php) | grep -Fx VERIFY_PASS=YES
+          php8.3 -r 'require $argv[1]."/app/bootstrap.php"; $m=new VfUpdateManager(vf_db()); $x=$m->status(); if(($x["major_migration"]["from_version"]??"")!=="2.47.516"||($x["major_migration"]["to_version"]??"")!=="2.47.517"||($x["major_migration"]["can_execute"]??true)!==false) exit(33); echo "P01_BRIDGE_MAJOR_STATUS_NOT_EXECUTABLE=PASS\n";' "$WORK/upgrade"
+          echo P01_BRIDGE_OLD_515_TO_516_REAL_ATOMIC_INSTALL=PASS
+          cp "$REPAIR" "$WORK/rollback/repair-v2.47.516.php"
+          set +e
+          VF_ATOMIC_TEST_FAIL_AFTER_APPLY=1 php8.3 "$WORK/rollback/repair-v2.47.516.php" --run="$WORK/rollback" >"$RUNNER_TEMP/p01-bridge-failure.txt" 2>&1
+          code=$?
+          set -e
+          test "$code" -ne 0
+          test "$(cat "$WORK/rollback/VERSION.txt")" = 2.47.515
+          (cd "$WORK/rollback" && php8.3 cli/verify.php) | grep -Fx VERIFY_PASS=YES
+          echo P01_BRIDGE_FAILURE_INJECTION_ROLLBACK=PASS
+      - name: Checkout exact product restore verifier with transient private token
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 635655095d7e993c4daa7c41bc973ee39c02dcb7
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+      - name: Real installed v516 complete Owner SQLite media and unknown plugin restore
+        shell: bash
+        env:
+          P01_D69_SYNTHETIC_ONLY: 'YES'
+          P01_D69_OLD_SITE_STOPPED: 'YES'
+          P01_D70_ISOLATED_MIGRATION: 'YES'
+          P01_D71_REAL_NGINX_DISPOSABLE: 'YES'
+          P01_D69_PHP_516_BRIDGE_ISOLATED: 'YES'
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(cat candidate/VERSION)" = "2.47.517"
+          for f in candidate/src/app/next/runtime/SyntheticLegacyFullSiteArchive.php candidate/src/app/next/runtime/LegacyMajorOfflineRestore.php candidate/tests/compatibility/laravel/run_p01_major_v516_bridge_complete_restore.php; do php8.3 -l "$f" >/dev/null; done
+          ROOT="$(mktemp -d /tmp/p01-d65-official-XXXXXXXXXXXX)"
+          test "$(realpath "$ROOT")" = "$ROOT"
+          test "$(stat -c %a "$ROOT")" = "700"
+          printf '%s\n' "$ROOT" >"$RUNNER_TEMP/p01-v516-restore-source-root.txt"
+          mkdir -m 0700 "$ROOT/official"
+          cp -a "$RUNNER_TEMP/p01-bridge-work/upgrade/." "$ROOT/official/"
+          SITE="$ROOT/official"
+          test "$(cat "$SITE/VERSION.txt")" = 2.47.516
+          test -f "$SITE/app/.runtime.php"
+          mapfile -t roots < <(find "$SITE" -maxdepth 1 -type d -name '.vfnav-data-*' -print)
+          test "${#roots[@]}" -eq 1
+          PRIVATE="${roots[0]}"
+          install -d -m 0700 "$PRIVATE/media" "$PRIVATE/plugins"
+          printf owner-private-media-v516 >"$PRIVATE/media/p01-v516-owner-media-sentinel.txt"
+          printf owner-private-extension-v516 >"$PRIVATE/plugins/p01-v516-unknown-extension.txt"
+          chmod 0600 "$PRIVATE/media/p01-v516-owner-media-sentinel.txt" "$PRIVATE/plugins/p01-v516-unknown-extension.txt"
+          php8.3 -r 'require $argv[1]."/app/bootstrap.php";$r=new VfRepository(vf_db());$c=$r->createCategory(["name"=>"Restore Fixture","description"=>"","icon"=>"","is_private"=>1,"sort_order"=>0]);$link=$r->saveLink(null,["surface"=>"start","category_id"=>$c,"title"=>"Bridge 516 Restore Sentinel","url"=>"https://example.com/restore-check","description"=>"","tags"=>["restore"],"is_private"=>1,"is_pending"=>0]);if(!is_array($link)||!isset($link["id"]))exit(19);echo "P01_BRIDGE_516_PRIVATE_SQLITE_ROWS=PASS\n";' "$SITE"
+          if ! php8.3 candidate/tests/compatibility/laravel/run_p01_major_v516_bridge_complete_restore.php "$SITE" >"$RUNNER_TEMP/p01-v516-restore-check.txt" 2>&1; then
+            grep -Eo '(P01_V516_BRIDGE_RESTORE_[A-Z0-9_]{4,85}|D69_[A-Z0-9_]{4,85}|D85_[A-Z0-9_]{4,85}|Fatal error|TypeError)' "$RUNNER_TEMP/p01-v516-restore-check.txt" | sort -u | head -n 15 || true
+            exit 1
+          fi
+          grep -Fx P01_REAL_INSTALLED_PHP_BRIDGE_516_FULL_TREE_ARCHIVE=PASS "$RUNNER_TEMP/p01-v516-restore-check.txt"
+          grep -Fx P01_PHP_BRIDGE_516_SQLITE_OWNER_CONFIG_MEDIA_BYTE_EXACT_RESTORED=PASS "$RUNNER_TEMP/p01-v516-restore-check.txt"
+          grep -Fx P01_PHP_BRIDGE_516_INTERRUPTED_RESTORE_TAMPER_REPLAY_DENIED=PASS "$RUNNER_TEMP/p01-v516-restore-check.txt"
+          echo P01_516_REAL_PRIVATE_OWNER_MEDIA_SQLITE_PLUGINS_RESTORED=PASS
+      - name: Cleanup all private source and FULL/UPDATE and old-site SQLite
+        if: always()
+        shell: bash
+        run: |
+          for path in "$RUNNER_TEMP"/p01-bridge-http-*.pid; do
+            [ ! -f "$path" ] || kill "$(cat "$path")" 2>/dev/null || true
+          done
+          if [ -f "$RUNNER_TEMP/p01-v516-restore-source-root.txt" ]; then
+            sourceRoot="$(cat "$RUNNER_TEMP/p01-v516-restore-source-root.txt")"
+            if [[ "$sourceRoot" =~ ^/tmp/p01-d65-official-[A-Za-z0-9_]{12}$ ]] && [ -d "$sourceRoot" ] && [ ! -L "$sourceRoot" ]; then rm -rf -- "$sourceRoot"; fi
+          fi
+          rm -rf -- candidate bridge-src "$RUNNER_TEMP/p01-bridge-base" "$RUNNER_TEMP/p01-bridge-out" "$RUNNER_TEMP/p01-bridge-work"
+          rm -f -- "$RUNNER_TEMP"/p01-v516-restore-*.txt "$RUNNER_TEMP"/p01-bridge-*.txt "$RUNNER_TEMP"/p01-bridge-*.html "$RUNNER_TEMP"/p01-bridge-*.pid
+          echo P01_BRIDGE_PRIVATE_SOURCE_AND_DATA_PERSISTENCE=NONE
