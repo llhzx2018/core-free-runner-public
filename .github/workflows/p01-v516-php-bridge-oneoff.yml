@@ -7,7 +7,9 @@ permissions:
 jobs:
   bridge-atomic:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
+    env:
+      LARAVEL_SHA: 0fafc12ca165981b37a7daebc1bece2a5c53c44f
     env:
       BRIDGE_SHA: bdc1e068e4cabec2e9129d750b8f6ba159c74fd5
       SOURCE_TAG: v2.47.515
@@ -45,7 +47,7 @@ jobs:
           test "$(cat bridge-src/src/VERSION.txt)" = "$BRIDGE_VERSION"
           test "$(grep -Foc "define('VF_VERSION', '2.47.516');" bridge-src/src/app/bootstrap.php)" = 1
           sudo apt-get update -qq > "$RUNNER_TEMP/p01-bridge-apt.txt" 2>&1
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-cli php8.3-curl php8.3-zip php8.3-mbstring php8.3-sqlite3 php8.3-gd php8.3-xml unzip curl >> "$RUNNER_TEMP/p01-bridge-apt.txt" 2>&1
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-cli php8.3-curl php8.3-zip php8.3-mbstring php8.3-sqlite3 php8.3-gd php8.3-xml composer unzip curl >> "$RUNNER_TEMP/p01-bridge-apt.txt" 2>&1
           php8.3 -l bridge-src/src/app/LegacyMajorMigrationReadiness.php >/dev/null
           php8.3 -l bridge-src/src/app/LegacyMajorOwnerHandoff.php >/dev/null
           php8.3 -l bridge-src/src/api.php >/dev/null
@@ -138,6 +140,67 @@ jobs:
           test "$(cat "$WORK/rollback/VERSION.txt")" = 2.47.515
           (cd "$WORK/rollback" && php8.3 cli/verify.php) | grep -Fx VERIFY_PASS=YES
           echo P01_BRIDGE_FAILURE_INJECTION_ROLLBACK=PASS
+      - name: Checkout exact current Laravel v517 candidate (ephemeral)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ${{ env.LARAVEL_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate-laravel
+      - name: Three-way version identity and v517 PHP major gate native tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate-laravel rev-parse HEAD)" = "$LARAVEL_SHA"
+          test "$(cat candidate-laravel/VERSION)" = 2.47.517
+          test "$(cat candidate-laravel/src/VERSION.txt)" = 2.47.517
+          for rel in src/app/next/runtime/MajorUnsignedReleaseStage.php src/app/next/runtime/MajorSignedReleasePreflight.php src/app/next/runtime/MajorGitHubSha256Preflight.php src/app/next/runtime/MajorTrustedOwnerReleaseGate.php src/app/next/runtime/MajorInnerFullIntegrity.php src/app/next/runtime/MajorOfflineReleaseSigner.php tests/compatibility/laravel/run_major_signed_real_full_contract.php tests/compatibility/laravel/http/p01_major_official_origin_gate.php; do
+            php8.3 -l "candidate-laravel/$rel" >/dev/null
+          done
+          PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile candidate-laravel/scripts/build_p01_next_major_migration_candidate.py
+          PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile candidate-laravel/scripts/build_p01_next_official_update_candidate.py
+          php8.3 candidate-laravel/tests/compatibility/laravel/http/p01_major_github_asset_redirect.php >"$RUNNER_TEMP/p01-bridge-517-redirect.txt" 2>&1
+          grep -Fx P01_MAJOR_GITHUB_TOKEN_NEVER_FOLLOWS_AUTO_REDIRECT=PASS "$RUNNER_TEMP/p01-bridge-517-redirect.txt"
+          php8.3 candidate-laravel/tests/compatibility/laravel/http/p01_major_official_origin_gate.php >"$RUNNER_TEMP/p01-bridge-517-origin.txt" 2>&1 || {
+            grep -Eo '(P01_MAJOR_[A-Z0-9_]{4,80}|MAJOR_[A-Z0-9_]{4,80}|Fatal error|TypeError)' "$RUNNER_TEMP/p01-bridge-517-origin.txt" | sort -u | head -n 12 || true
+            exit 1
+          }
+          echo P01_LARAVEL_517_EXACT_BRIDGE_BOUNDARY_PHP83=PASS
+      - name: Build genuine v517 CloudPanel Laravel FULL and v516-to-v517 developer MAJOR archive
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate-laravel
+          PYTHONDONTWRITEBYTECODE=1 python3 -B tests/architecture/test_p01_shared_helpers_manifest.py >"$RUNNER_TEMP/p01-bridge-517-helpers.txt" 2>&1
+          python3 scripts/build_p01_next_clean_full.py build --source-sha "$LARAVEL_SHA" --output "$RUNNER_TEMP/p01-bridge-517-clean.zip" --composer composer >"$RUNNER_TEMP/p01-bridge-517-build.txt" 2>&1 || {
+            grep -Eo '(BuildError|Error:|ERROR|AssertionError)' "$RUNNER_TEMP/p01-bridge-517-build.txt" | sort -u | head -n 10 || true
+            exit 1
+          }
+          python3 scripts/build_p01_next_clean_full.py verify --zip "$RUNNER_TEMP/p01-bridge-517-clean.zip" >>"$RUNNER_TEMP/p01-bridge-517-build.txt" 2>&1
+          python3 scripts/build_p01_next_cloudpanel_full.py build --source-zip "$RUNNER_TEMP/p01-bridge-517-clean.zip" --output "$RUNNER_TEMP/p01-bridge-517-cloudpanel.zip" >>"$RUNNER_TEMP/p01-bridge-517-build.txt" 2>&1
+          python3 scripts/build_p01_next_cloudpanel_full.py verify --zip "$RUNNER_TEMP/p01-bridge-517-cloudpanel.zip" >>"$RUNNER_TEMP/p01-bridge-517-build.txt" 2>&1
+          echo P01_LARAVEL_517_COMPLETE_REAL_CLOUDPANEL_FULL_BUILD=PASS
+          python3 scripts/build_p01_next_major_migration_candidate.py build --bridge-v516-full "$RUNNER_TEMP/p01-bridge-out/VF-Start-V2.47.516-FULL-DEV-ONLY.zip" --laravel-v517-full "$RUNNER_TEMP/p01-bridge-517-cloudpanel.zip" --output "$RUNNER_TEMP/VF_Start_V2.47.516_to_V2.47.517_MAJOR_DEV_ONLY.zip" >"$RUNNER_TEMP/p01-bridge-517-major-build.txt" 2>&1 || {
+            grep -Eo '(BuildError|Error:|ERROR|Traceback)' "$RUNNER_TEMP/p01-bridge-517-major-build.txt" | sort -u | head -n 12 || true
+            exit 1
+          }
+          python3 scripts/build_p01_next_major_migration_candidate.py verify --zip "$RUNNER_TEMP/VF_Start_V2.47.516_to_V2.47.517_MAJOR_DEV_ONLY.zip" >>"$RUNNER_TEMP/p01-bridge-517-major-build.txt" 2>&1
+          echo P01_REAL_BRIDGE_516_TO_LARAVEL_517_DEV_MAJOR_ENVELOPE=PASS
+      - name: Real paired FULL programs consumed by v517 MAJOR ZIP and synthetic GitHub channel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate-laravel
+          if ! P01_MAJOR_REAL_FULL_ISOLATED_TEST=YES php8.3 tests/compatibility/laravel/run_major_signed_real_full_contract.php --developer-full "$RUNNER_TEMP/p01-bridge-517-cloudpanel.zip" --bridge-full "$RUNNER_TEMP/p01-bridge-out/VF-Start-V2.47.516-FULL-DEV-ONLY.zip" >"$RUNNER_TEMP/p01-bridge-517-channel.txt" 2>&1; then
+            grep -Eo '(MAJOR_[A-Z0-9_]{5,100}|P01_MAJOR_[A-Z0-9_]{5,100}|Fatal error|TypeError)' "$RUNNER_TEMP/p01-bridge-517-channel.txt" | sort -u | head -n 15 || true
+            exit 1
+          fi
+          grep -Fx P01_MAJOR_BRIDGE_V516_TO_LARAVEL_V517_REAL_BUNDLES=PASS "$RUNNER_TEMP/p01-bridge-517-channel.txt"
+          grep -Fx P01_MAJOR_GITHUB_RELEASE_SHA256_NEGATIVE_MATRIX=PASS "$RUNNER_TEMP/p01-bridge-517-channel.txt"
+          grep -Fx P01_MAJOR_REAL_CLOUDPANEL_FULL_SYNTHETIC_SIGNED_CONSUMER=PASS "$RUNNER_TEMP/p01-bridge-517-channel.txt"
+          grep -Fx P01_MAJOR_REAL_GITHUB_PUBLISHED_ASSET_AND_OWNER_APPLY=NOT_PROVEN "$RUNNER_TEMP/p01-bridge-517-channel.txt"
+          echo P01_TWO_PHASE_515_516_517_REAL_BUILDS_AND_SYNTHETIC_MAJOR=PASS
       - name: Cleanup all private source and FULL/UPDATE and old-site SQLite
         if: always()
         shell: bash
@@ -145,6 +208,6 @@ jobs:
           for path in "$RUNNER_TEMP"/p01-bridge-http-*.pid; do
             [ ! -f "$path" ] || kill "$(cat "$path")" 2>/dev/null || true
           done
-          rm -rf -- bridge-src "$RUNNER_TEMP/p01-bridge-base" "$RUNNER_TEMP/p01-bridge-out" "$RUNNER_TEMP/p01-bridge-work"
-          rm -f -- "$RUNNER_TEMP"/p01-bridge-*.txt "$RUNNER_TEMP"/p01-bridge-*.html "$RUNNER_TEMP"/p01-bridge-*.pid
+          rm -rf -- bridge-src candidate-laravel "$RUNNER_TEMP/p01-bridge-base" "$RUNNER_TEMP/p01-bridge-out" "$RUNNER_TEMP/p01-bridge-work"
+          rm -f -- "$RUNNER_TEMP"/p01-bridge-*.txt "$RUNNER_TEMP"/p01-bridge-*.html "$RUNNER_TEMP"/p01-bridge-*.pid "$RUNNER_TEMP"/p01-bridge-*.zip "$RUNNER_TEMP"/VF_Start_V2.47.516_to_V2.47.517_MAJOR_DEV_ONLY.zip
           echo P01_BRIDGE_PRIVATE_SOURCE_AND_DATA_PERSISTENCE=NONE
