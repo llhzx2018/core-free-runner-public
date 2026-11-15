@@ -168,6 +168,7 @@ stage=WRITE_SYNTHETIC_FILES
 printf 'P07_ALPHA_STATIC_42\n' > /home/p07alpha/htdocs/alpha.p07.example.com/index.html
 install -d /home/p07alpha/htdocs/alpha.p07.example.com/public
 printf '<?php echo "P07_ALPHA_WEB_42"; ?>\n' > /home/p07alpha/htdocs/alpha.p07.example.com/public/index.php
+printf '<?php echo "P07_ALPHA_WEB_42"; ?>\n' > /home/p07alpha/htdocs/alpha.p07.example.com/index.php
 printf 'P07_BETA_STATIC_23\n' > /home/p07beta/htdocs/beta.p07.example.com/index.html
 sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'CREATE TABLE marker (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO marker VALUES(1,"SYNTHETIC_SQLITE_42");'
 mkdir -p /home/p07alpha/.vf-data
@@ -185,7 +186,7 @@ if curl -ksS --resolve alpha.p07.example.com:443:127.0.0.1 https://alpha.p07.exa
 else
   echo P07_M03_D04_SOURCE_PHP_HTTPS=NOT_PROVEN
 fi
-if curl -fsS -H 'Host: beta.p07.example.com' http://127.0.0.1/ | grep -Fq P07_BETA_STATIC_23; then
+if curl -ksS --resolve beta.p07.example.com:443:127.0.0.1 https://beta.p07.example.com/ | grep -Fq P07_BETA_STATIC_23; then
   echo P07_M03_D04_SOURCE_STATIC_HTTP=PASS
 else
   echo P07_M03_D04_SOURCE_STATIC_HTTP=NOT_PROVEN
@@ -220,7 +221,7 @@ CMD=/opt/vf-server-ops/bin/vfops
 stage=PLAN
 echo P07_M03_D04_TARGET_PLAN_STARTED=YES
 "$CMD" server-migrate plan --source-ip 172.29.71.11 --identity-file /root/.ssh/p07_test_key \
-  --confirm-source-helper-staging ALLOW_SOURCE_HELPER_STAGING >/root/p07-plan.json 2>/root/p07-plan.err
+  --confirm-source-helper-staging ALLOW_SOURCE_HELPER_STAGING </dev/null >/root/p07-plan.json 2>/root/p07-plan.err
 python3 - <<'PY'
 import json
 p=json.load(open('/root/p07-plan.json'))
@@ -236,7 +237,7 @@ PY
 stage=PREPARE
 echo P07_M03_D04_TARGET_PREPARE_STARTED=YES
 "$CMD" server-migrate prepare --source-ip 172.29.71.11 --identity-file /root/.ssh/p07_test_key \
-  --confirm PREPARE_PULL_MIGRATION >/root/p07-prepare.json 2>/root/p07-prepare.err
+  --confirm PREPARE_PULL_MIGRATION </dev/null >/root/p07-prepare.json 2>/root/p07-prepare.err
 python3 - <<'PY'
 import json
 p=json.load(open('/root/p07-prepare.json'))
@@ -247,6 +248,7 @@ PY
 stage=VERIFY_FILES
 test "$(cat /home/p07alpha/htdocs/alpha.p07.example.com/index.html)" = P07_ALPHA_STATIC_42
 test "$(cat /home/p07alpha/htdocs/alpha.p07.example.com/public/index.php)" = '<?php echo "P07_ALPHA_WEB_42"; ?>'
+test "$(cat /home/p07alpha/htdocs/alpha.p07.example.com/index.php)" = '<?php echo "P07_ALPHA_WEB_42"; ?>'
 test "$(cat /home/p07beta/htdocs/beta.p07.example.com/index.html)" = P07_BETA_STATIC_23
 test "$(sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'SELECT value FROM marker WHERE id=1')" = SYNTHETIC_SQLITE_42
 stage=VERIFY_MYSQL
