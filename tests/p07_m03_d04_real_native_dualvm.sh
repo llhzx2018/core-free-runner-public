@@ -114,18 +114,35 @@ for ip in "$OLD" "$NEW"; do
   echo P07_M03_D04_NATIVE_DEBIAN13_SSH=PASS
 done
 for ip in "$OLD" "$NEW"; do
-  ssh_vm "$ip" 'bash -se' <<'INSTALL'
+  if test "$ip" = "$OLD"; then
+    selected_engine=MYSQL_8.4
+    engine_role=SOURCE_MYSQL_8_4
+  else
+    selected_engine=MARIADB_11.8
+    engine_role=TARGET_MARIADB_11_8
+  fi
+  ssh_vm "$ip" "P07_DB_ENGINE=$selected_engine bash -se" <<'INSTALL'
 set -Eeuo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/root/p07-apt.log 2>&1
 apt-get install -y -qq curl wget sudo rsync sqlite3 cron python3 >>/root/p07-apt.log 2>&1
 curl -fsSL --connect-timeout 20 --max-time 120 https://installer.cloudpanel.io/ce/v2/install.sh -o /root/p07-installer.sh
 echo '8146dbe0a488e7088b04071b0c34d59aa0ab1fe9dcec382d395fd155c9e6c476  /root/p07-installer.sh' | sha256sum -c >/dev/null
-timeout --signal=TERM --kill-after=20s 1200s env DB_ENGINE=MARIADB_11.8 bash /root/p07-installer.sh >/root/p07-cloudpanel.log 2>&1
+timeout --signal=TERM --kill-after=20s 1200s env DB_ENGINE="$P07_DB_ENGINE" bash /root/p07-installer.sh >/root/p07-cloudpanel.log 2>&1
 clpctl --version >/dev/null
 test -f /home/clp/htdocs/app/data/db.sq3
+if test "$P07_DB_ENGINE" = MYSQL_8.4; then
+  systemctl is-active --quiet mysql
+  mysqld --version | grep -Eq '8[.]4[.]'
+elif test "$P07_DB_ENGINE" = MARIADB_11.8; then
+  systemctl is-active --quiet mariadb
+  mariadbd --version | grep -Eq '11[.]8[.]'
+else
+  echo P07_M03_D04_UNSUPPORTED_FIXTURE_ENGINE >&2
+  exit 79
+fi
 INSTALL
-  echo P07_M03_D04_OFFICIAL_CLOUDPANEL_MARIADB_11_8=PASS
+  echo "P07_M03_D04_${engine_role}=PASS"
   ssh_vm "$ip" 'bash -se' <<'INITIALIZE'
 set -Eeuo pipefail
 clpctl user:add --userName=p07testadmin --email=p07testadmin@example.com --firstName=P07 --lastName=Fixture --password='SyntheticOnly2026ABC!' --role=admin --timezone=UTC --status=1 >/root/p07-first-admin.log 2>&1
