@@ -1,0 +1,140 @@
+name: VF naming gate seven-repository proof (temporary)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/vf-naming-seven-proof.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  naming-source-gate:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      startsWith(github.head_ref, 'maintenance/source-naming-7repos-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - id: 'P01'
+            repo: 'llhzx2018/vf-start'
+            head: '78c0dc87e23f9c0c1557bc51536bdbe57d700d10'
+            base: 'defaf3db8bd94adc9909e1783ec2134e03b44410'
+          - id: 'P02'
+            repo: 'llhzx2018/vf-library'
+            head: 'a9c506d6f2111d2c95af9815e9895f9d6166860c'
+            base: 'f5dd7782e6fcae14a6ca04b8a263e1bee09f74e7'
+          - id: 'P07'
+            repo: 'llhzx2018/vf-server-ops'
+            head: 'de6904480352decd83199b0336ece2bae21a1b79'
+            base: '905599e8ca6ac6fd766856c35301328388b3eb81'
+          - id: 'P08'
+            repo: 'llhzx2018/vf-adops'
+            head: '0dc6e554adf42a21b0864ad1460b3bdf0d166d7a'
+            base: '7f7218abfa13ba232d1afd13f10df29da29dd21a'
+          - id: 'S01-C01'
+            repo: 'llhzx2018/vf-tools-theme'
+            head: '243a5e654546dbc1f3aa588f856d6c815a5177ed'
+            base: '4489a5f0cc5a29299be6b574ccaee8a3147f296b'
+          - id: 'S01-C02'
+            repo: 'llhzx2018/vf-tools-ops'
+            head: '25156e24e6bbdb4e245a98d6eaede79f7bec6283'
+            base: '853d0d7189e4a30afaffe5c6f82bd42cefa4d804'
+          - id: 'S01-C03'
+            repo: 'llhzx2018/vf-tools-m3u8'
+            head: 'e2e43ee808e8fa8694b49d9bc5e656101c6ac9dd'
+            base: 'e3d643991ea260a79ec632f0ec04466477184f56'
+    steps:
+      - name: Prepare Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.11'
+      - name: Checkout exact private product candidate (temporary)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ matrix.repo }}
+          ref: ${{ matrix.head }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: product-src
+      - name: Checkout exact canonical governance source (temporary)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: 4bac826de506bc2c857cb42cfd9645e70227273b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: gov-src
+      - name: Run project negative fixtures and actual git architecture gate
+        shell: bash
+        env:
+          GOV_EXPECTED: '4bac826de506bc2c857cb42cfd9645e70227273b'
+          TARGET_SHA: ${{ matrix.head }}
+          BASE_SHA: ${{ matrix.base }}
+          PROJECT_ID: ${{ matrix.id }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C product-src rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C gov-src rev-parse HEAD)" = "$GOV_EXPECTED"
+          echo "VF_NAMING_PROOF_SOURCE=$PROJECT_ID:${TARGET_SHA:0:12}"
+          if python3 -B -m unittest discover -s product-src/.github/checks -p test_architecture_gate.py -v > "$RUNNER_TEMP/naming-tests.log" 2>&1; then
+            grep -E '^Ran [0-9]+ tests|^OK$' "$RUNNER_TEMP/naming-tests.log" || true
+            echo 'VF_NAMING_NEGATIVE_FIXTURES=PASS'
+          else
+            echo 'VF_NAMING_NEGATIVE_FIXTURES=FAIL'
+            exit 1
+          fi
+          if python3 -B product-src/.github/checks/architecture_gate.py \
+            --manifest product-src/.github/checks/code_architecture.json \
+            --gov-root gov-src --git-root product-src \
+            --base-sha "$BASE_SHA" --head-sha "$TARGET_SHA" > "$RUNNER_TEMP/naming-git.log" 2>&1; then
+            echo 'VF_NAMING_ACTUAL_GIT_GATE=PASS'
+          else
+            echo 'VF_NAMING_ACTUAL_GIT_GATE=FAIL'
+            exit 1
+          fi
+      - name: Verify bad new source names are actually rejected by GOV checker
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          python3 -B - <<'PY'
+          import importlib.util, json
+          from pathlib import Path
+          f = Path('gov-src/governance/agent/code_architecture_lint.py')
+          spec = importlib.util.spec_from_file_location('vf_arch', f)
+          mod = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(mod)
+          config = json.loads(Path('product-src/.github/checks/code_architecture.json').read_text())
+          manifest = config['gov_manifest']
+          mod.validate_manifest(manifest)
+          roots = [root for layer in manifest['layers'] for root in layer['roots']]
+          for root in roots:
+              path_ok = root + 'CampaignTable.vue'
+              report = mod.validate_files(manifest, [(path_ok, None, '<template />')])
+              assert report['new_file_naming_checked'] == 1
+              path_bad = root + 'bad_name.vue'
+              try:
+                  mod.validate_files(manifest, [(path_bad, None, '<template />')])
+              except mod.ArchitectureError as err:
+                  assert str(err).startswith('NAMING_CONVENTION_VIOLATION:')
+              else:
+                  raise AssertionError('BAD_NAME_NOT_BLOCKED')
+          print('VF_NAMING_ACTUAL_NEGATIVE=PASS')
+          print('VF_NAMING_ROOTS_CHECKED=' + str(len(roots)))
+          PY
+      - name: Remove private source, temp artifacts and logs
+        if: always()
+        shell: bash
+        run: |
+          rm -rf product-src gov-src
+          rm -f "$RUNNER_TEMP/naming-tests.log" "$RUNNER_TEMP/naming-git.log"
