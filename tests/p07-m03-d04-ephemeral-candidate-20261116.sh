@@ -67,11 +67,13 @@ items=list(root.rglob("*"))
 assert len(items)<10000
 for item in items:
     rel=item.relative_to(root)
-    assert item.is_file() and not item.is_symlink(), "unexpected nonregular candidate payload"
+    assert not item.is_symlink(), "unexpected candidate symlink"
+    assert item.is_file() or item.is_dir(), "unexpected nonregular candidate payload"
     parts=[p.lower() for p in rel.parts]
     assert not any(p in {".ssh",".git",".github","__pycache__","private","backups"} for p in parts)
     assert not any(p in {"id_rsa","id_ed25519",".env","credentials.json","secret.json","token"} or p.endswith((".pem",".key",".sqlite",".sql",".gz",".zip",".tar")) for p in parts)
-    assert item.stat().st_size < 6*1024*1024
+    if item.is_file():
+        assert item.stat().st_size < 6*1024*1024
 print("P07_D04_PRIVATE_CANDIDATE_TRACKED_RUNTIME_SANITIZE=PASS")
 PY
 export PYTHONPYCACHEPREFIX="$WORK/pycache"
