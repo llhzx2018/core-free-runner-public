@@ -1,0 +1,156 @@
+name: P08 PR55 HTTPS FPM own-UID worker wake (ephemeral)
+on:
+  pull_request:
+    paths: [.github/workflows/p08-pr55-https-fpm-temp.yml]
+permissions:
+  contents: read
+jobs:
+  rootless-https:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Exact P08 PR55 private source in temporary workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: d76ed240d89ef5a76ff5a069a2ef3a6db156e35b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: p08-source
+          persist-credentials: false
+      - name: Install isolated PHP 8.4 FPM and Nginx
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+          extensions: posix
+      - name: Obtain local disposable FPM HTTPS server dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq >/dev/null
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.4-fpm nginx openssl >/dev/null
+          command -v php-fpm8.4
+          command -v nginx
+      - name: HTTPS real PHP-FPM uid and sanitized env POST wakes isolated CLI nonblocking
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          test "$(git -C p08-source rev-parse HEAD)" = "d76ed240d89ef5a76ff5a069a2ef3a6db156e35b"
+          export SITE="$RUNNER_TEMP/p08-pr55-web-site" WORK="$RUNNER_TEMP/p08-pr55-http-process"
+          mkdir -p "$SITE" "$WORK"
+          fpm_pid=; nginx_pid=
+          cleanup() {
+            if [[ -n "$nginx_pid" ]]; then kill "$nginx_pid" 2>/dev/null || true; fi
+            if [[ -n "$fpm_pid" ]]; then kill "$fpm_pid" 2>/dev/null || true; fi
+            rm -rf -- "$SITE" "$WORK" "$GITHUB_WORKSPACE/p08-source"
+          }
+          trap cleanup EXIT
+          python3 - <<'PY'
+          import os, pathlib, shutil, json, textwrap
+          site=pathlib.Path(os.environ["SITE"])
+          work=pathlib.Path(os.environ["WORK"])
+          sha="b"*40
+          release=site/"releases"/sha
+          (release/"src/Upgrade").mkdir(parents=True,mode=0o700)
+          (site/"public").mkdir()
+          priv=site/"storage/app/private/adops"
+          (priv/"upgrade").mkdir(parents=True,mode=0o700)
+          (priv/"maintenance").mkdir()
+          (site/"current").symlink_to("releases/"+sha)
+          shutil.copy2("p08-source/src/Upgrade/OwnerSiteWorkerDispatcher.php",release/"src/Upgrade/OwnerSiteWorkerDispatcher.php")
+          (priv/"upgrade"/"owner-preparation.json").write_text(json.dumps({"type":"P08_OWNER_UPDATE_PREPARATION_V1","status":"PENDING","preparation_id":"a"*32}))
+          (release/"src/Upgrade/owner-upgrade-worker.php").write_text('''<?php
+          if (PHP_SAPI !== "cli") exit(11);
+          $site=$argv[1];
+          $p=$site."/storage/app/private/adops/upgrade/owner-preparation.json";
+          $j=json_decode(file_get_contents($p),true);
+          if (($j["status"]??"")!=="PENDING") exit(12);
+          $j["status"]="RUNNING"; file_put_contents($p,json_encode($j));
+          usleep(850000);
+          file_put_contents($site."/worker.finished","CLI_ONLY:".posix_geteuid()."\\n");
+          $j["status"]="PREPARED"; file_put_contents($p,json_encode($j));
+          ''')
+          (site/"public/click.php").write_text('''<?php
+          declare(strict_types=1);
+          require_once __DIR__ . "/../current/src/Upgrade/OwnerSiteWorkerDispatcher.php";
+          use VF\\AdOps\\Upgrade\\OwnerSiteWorkerDispatcher;
+          header("Content-Type: application/json");
+          header("Cache-Control: no-store");
+          if ($_SERVER["REQUEST_METHOD"] !== "POST") {http_response_code(405); echo "{}";exit;}
+          if (!isset($_POST["_token"]) || !hash_equals("fixture-csrf-not-real",$_POST["_token"])) {http_response_code(403);echo "{}";exit;}
+          $result=(new OwnerSiteWorkerDispatcher())->wake(dirname(__DIR__),"prepare");
+          http_response_code($result==="STARTED"?202:409);
+          echo json_encode(["dispatch"=>$result,"uid"=>posix_geteuid(),"path"=>getenv("PATH")?: "CLEARED"]);
+          ''')
+          (work/"fpm.conf").write_text(f"""[global]
+          pid = {work}/fpm.pid
+          error_log = {work}/fpm-errors.log
+          daemonize = no
+          [fixture]
+          listen = 127.0.0.1:19488
+          user = {os.environ["USER"]}
+          group = {os.environ.get("RUNNER_GROUP","docker")}
+          pm = static
+          pm.max_children = 2
+          clear_env = yes
+          """)
+          (work/"nginx.conf").write_text(f"""pid {work}/nginx.pid;
+          events {{ worker_connections 128; }}
+          http {{
+           access_log off;
+           error_log {work}/nginx-errors.log;
+           server {{
+            listen 127.0.0.1:18488 ssl;
+            server_name 127.0.0.1;
+            root {site}/public;
+            ssl_certificate {work}/server.crt;
+            ssl_certificate_key {work}/server.key;
+            location = /click.php {{
+             include /etc/nginx/fastcgi_params;
+             fastcgi_param SCRIPT_FILENAME {site}/public/click.php;
+             fastcgi_param HTTPS on;
+             fastcgi_pass 127.0.0.1:19488;
+            }}
+           }}
+          }}
+          """)
+          PY
+          openssl req -x509 -nodes -newkey rsa:2048 -keyout "$WORK/server.key" -out "$WORK/server.crt" -days 1 -subj '/CN=127.0.0.1' >/dev/null 2>&1
+          php-fpm8.4 --fpm-config "$WORK/fpm.conf" --test
+          php-fpm8.4 --fpm-config "$WORK/fpm.conf" --nodaemonize > "$WORK/fpm-console.log" 2>&1 &
+          fpm_pid=$!
+          nginx -t -c "$WORK/nginx.conf" -p "$WORK"
+          nginx -c "$WORK/nginx.conf" -p "$WORK" -g 'daemon off;' > "$WORK/nginx-console.log" 2>&1 &
+          nginx_pid=$!
+          for _ in $(seq 1 80); do
+            if curl --silent --insecure --max-time 1 https://127.0.0.1:18488/click.php > "$WORK/get.json"; then break; fi
+            sleep 0.1
+          done
+          code=$(curl --silent --insecure -o "$WORK/denied.json" -w '%{http_code}' --max-time 5 -d '_token=wrong' https://127.0.0.1:18488/click.php)
+          test "$code" = 403
+          test ! -e "$SITE/worker.finished"
+          started=$(date +%s%3N)
+          code=$(curl --silent --insecure -o "$WORK/accepted.json" -w '%{http_code}' --max-time 6 -d '_token=fixture-csrf-not-real' https://127.0.0.1:18488/click.php)
+          elapsed=$(( $(date +%s%3N) - started ))
+          test "$code" = 202
+          test "$elapsed" -lt 760
+          python3 - <<'PY'
+          import json,os,pathlib
+          got=json.loads((pathlib.Path(os.environ["WORK"])/"accepted.json").read_text())
+          assert got["dispatch"]=="STARTED",got
+          assert got["path"]=="CLEARED",got
+          assert got["uid"]==os.geteuid(),got
+          PY
+          for _ in $(seq 1 70); do [[ -s "$SITE/worker.finished" ]] && break; sleep 0.05; done
+          test -s "$SITE/worker.finished"
+          test "$(cat "$SITE/worker.finished")" = "CLI_ONLY:$(id -u)"
+          code=$(curl --silent --insecure -o "$WORK/replay.json" -w '%{http_code}' --max-time 5 -d '_token=fixture-csrf-not-real' https://127.0.0.1:18488/click.php)
+          test "$code" = 409
+          echo P08_PR55_PHPFPM_HTTPS_OWNER_UID_BACKGROUND_WAKE=PASS
+          echo P08_PR55_PHPFPM_CLEAR_ENV_PATH_CLI_BACKUP=PASS
+          echo P08_PR55_WEB_HTTP_NONBLOCKING_NO_IMPLICIT_GET_OR_REPLAY=PASS
+          echo P08_PR55_REAL_LARAVEL_SESSION_AND_FUTURE_ATOMIC=NOT_PROVEN
+      - name: Purge private source after all outcomes
+        if: always()
+        run: rm -rf -- "$GITHUB_WORKSPACE/p08-source" "$RUNNER_TEMP/p08-pr55-web-site" "$RUNNER_TEMP/p08-pr55-http-process"
