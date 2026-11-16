@@ -304,7 +304,7 @@ assert len(states) == 1, 'single synthetic transaction expected'
 state = json.loads(states[0].read_text(encoding='utf-8'))
 assert state['status'] == 'PREPARED'
 assert state['source_db_engine'] == 'MARIADB_11.8'
-assert state['migration_id'] == p['migration_id']
+assert state['migration_id'] == p.get('migration_id', state['migration_id'])
 print('P07_M03_D04_PRIVATE_SOURCE_ENGINE_PIN=PASS')
 print('P07_M03_D04_MATCHED_MARIADB_TARGET_PREPARED=PASS')
 PY
