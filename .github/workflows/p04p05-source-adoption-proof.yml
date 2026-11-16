@@ -1,0 +1,116 @@
+name: P04 P05 source governance adoption exact proof (temporary)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p04p05-source-adoption-proof.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  exact-source-proof:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      startsWith(github.head_ref, 'maintenance/p04p05-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - id: 'P04'
+            repo: 'llhzx2018/vf-infra'
+            target: '783a008fe0b4bb3e697cb496d0cdc207f3087d77'
+            base: 'c71bed4a0fc29731841e27f05bc56c9e10f18a48'
+          - id: 'P05'
+            repo: 'llhzx2018/vf-seo'
+            target: 'd74b166b5f5e6030dc653e9f836dcef1ea059e34'
+            base: 'dc161c254f7b4040a37a7a749720e5133802db43'
+    steps:
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - name: Checkout target exact private candidate transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ matrix.repo }}
+          ref: ${{ matrix.target }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: product-src
+      - name: Checkout canonical GOV-DOC exact source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: 4bac826de506bc2c857cb42cfd9645e70227273b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: gov-src
+      - name: Verify repository identity, 15 negative tests and real source Git diff
+        shell: bash
+        env:
+          EXACT_SHA: ${{ matrix.target }}
+          BASE_SHA: ${{ matrix.base }}
+          TARGET_ID: ${{ matrix.id }}
+          GOV_SHA: 4bac826de506bc2c857cb42cfd9645e70227273b
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C product-src rev-parse HEAD)" = "$EXACT_SHA"
+          test "$(git -C gov-src rev-parse HEAD)" = "$GOV_SHA"
+          echo "PRODUCT_SOURCE=$TARGET_ID:${EXACT_SHA:0:12}"
+          if python3 -B -m unittest discover -s product-src/.github/checks -p test_architecture_gate.py -v > "$RUNNER_TEMP/product-arch-tests.log" 2>&1; then
+            grep -E '^Ran [0-9]+ tests|^OK$' "$RUNNER_TEMP/product-arch-tests.log" || true
+            echo 'PROJECT_NEGATIVE_FIXTURES=PASS'
+          else
+            echo 'PROJECT_NEGATIVE_FIXTURES=FAIL'
+            exit 1
+          fi
+          if python3 -B product-src/.github/checks/architecture_gate.py \
+            --manifest product-src/.github/checks/code_architecture.json \
+            --gov-root gov-src --git-root product-src \
+            --base-sha "$BASE_SHA" --head-sha "$EXACT_SHA" > "$RUNNER_TEMP/product-arch-diff.log" 2>&1; then
+            echo 'ACTUAL_GIT_ARCHITECTURE=PASS'
+          else
+            echo 'ACTUAL_GIT_ARCHITECTURE=FAIL'
+            exit 1
+          fi
+          python3 -B - <<'PY'
+          import json, importlib.util
+          from pathlib import Path
+          spec=importlib.util.spec_from_file_location('canonical','gov-src/governance/agent/code_architecture_lint.py')
+          gov=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(gov)
+          manifest=json.loads(Path('product-src/.github/checks/code_architecture.json').read_text())['gov_manifest']
+          names=[root for layer in manifest['layers'] for root in layer['roots']]
+          rules={r['root'] for r in manifest['naming']['rules']}
+          assert set(names)==rules and len(names)==len(rules)
+          gov.validate_manifest(manifest)
+          for root in names:
+              good=root+'CampaignService.php'
+              bad=root+'bad name.php'
+              out=gov.validate_files(manifest,[(good,None,'<?php class CampaignService {}')])
+              assert out['new_file_naming_checked']==1
+              try:
+                  gov.validate_files(manifest,[(bad,None,'<?php class Broken {}')])
+              except gov.ArchitectureError as exc:
+                  assert 'NAMING_CONVENTION_VIOLATION' in str(exc),str(exc)
+              else:
+                  raise AssertionError('INVALID_NAME_WAS_ALLOWED')
+          assert Path('product-src/.github/workflows/ci.yml').read_text().count('architecture_gate.py --manifest')==1
+          print('SYNTHETIC_BAD_NAME_BLOCKED=PASS')
+          print('OWNED_ROOTS_CHECKED='+str(len(names)))
+          PY
+      - name: Verify cleanup even on failure
+        if: always()
+        shell: bash
+        run: |
+          rm -rf product-src gov-src
+          rm -f "$RUNNER_TEMP/product-arch-tests.log" "$RUNNER_TEMP/product-arch-diff.log"
