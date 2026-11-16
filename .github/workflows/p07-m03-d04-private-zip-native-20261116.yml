@@ -1,0 +1,106 @@
+name: P07 D04 private ZIP exact-source native verification
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-m03-d04-private-zip-native-20261116.yml'
+permissions:
+  contents: read
+jobs:
+  verify-private-trial-zip:
+    if: github.event.action == 'opened' || github.event.action == 'synchronize'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - name: Checkout ephemeral public test scope
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Transient checkout exact private candidate commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 47924d269dbe36d7b146615a81798daac8d3d210
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: .p07-private-zip
+      - name: Validate saved ZIP, every entry, immutable source and CLI
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONNOUSERSITE: '1'
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C .p07-private-zip rev-parse HEAD)" = "47924d269dbe36d7b146615a81798daac8d3d210"
+          ITEM=".p07-private-zip/owner-trials/p07-m03-d04-20261116/vfops-p07-m03-d04-trial-54c4b4fb.zip"
+          test -f "$ITEM"
+          (
+            cd ".p07-private-zip/owner-trials/p07-m03-d04-20261116"
+            sha256sum -c vfops-p07-m03-d04-trial-54c4b4fb.zip.sha256
+          )
+          unzip -t "$ITEM" >/dev/null
+          python3 -B - <<'PY'
+          import hashlib, json, pathlib, subprocess, zipfile
+          root=pathlib.Path(".p07-private-zip")
+          archive=root/"owner-trials/p07-m03-d04-20261116/vfops-p07-m03-d04-trial-54c4b4fb.zip"
+          exact="54c4b4fbd89fe4c7035e599d90b69add3257e77a"
+          sha="36e5509ef3e770c9acc5eb1151e7b9fbbb7e63ad2c407316623ebc8f8b49bbe5"
+          assert hashlib.sha256(archive.read_bytes()).hexdigest()==sha
+          check=json.loads((archive.parent/"candidate-proof.json").read_text())
+          assert check["product_source_sha"]==exact
+          assert check["sha256"]==sha
+          assert check["bytes"]==archive.stat().st_size==2258756
+          assert not check["production"] and not check["formal_release"]
+          with zipfile.ZipFile(archive) as z:
+              names=z.namelist()
+              assert len(names)==len(set(names))==143
+              assert z.testzip() is None
+              assert not any(p.startswith("/") or ".." in pathlib.PurePosixPath(p).parts for p in names)
+              listing=subprocess.check_output(
+                  ["git","-C",str(root),"ls-tree","-rz","--name-only",exact,
+                   "--","bin","lib","scripts","components","VERSION","BUILD_ID"]
+              ).split(b"\0")
+              paths=sorted(p.decode("utf-8") for p in listing if p)
+              assert len(paths)==141, len(paths)
+              assert set(names)==set("vfops/"+p for p in paths)|{
+                  "vfops/TRIAL_CANDIDATE.json","vfops/OWNER_TRIAL_README.txt"}
+              for p in paths:
+                  item=z.getinfo("vfops/"+p)
+                  if p=="BUILD_ID":
+                      expected=b"0.1.0-d04-trial-54c4b4fb\n"
+                  else:
+                      expected=subprocess.check_output(["git","-C",str(root),"show",exact+":"+p])
+                  assert z.read(item)==expected, p
+                  mode=(item.external_attr>>16)&0o777
+                  assert mode in (0o644,0o755), p
+              header=json.loads(z.read("vfops/TRIAL_CANDIDATE.json"))
+              assert header["source_commit"]==exact and header["candidate_build_id"]=="0.1.0-d04-trial-54c4b4fb"
+              assert header["formal_release"] is False and header["production_approved"] is False
+              assert header["migration_cutover_authorized"] is False
+          print("P07_D04_PRIVATE_ZIP_NATIVE_UNZIP_CRC=PASS")
+          print("P07_D04_PRIVATE_ZIP_141_GIT_EXACT_BYTES=PASS")
+          print("P07_D04_PRIVATE_ZIP_SHA256_SAVED_ASSET=PASS")
+          PY
+          TMP="$(mktemp -d)"
+          trap 'rm -rf -- "$TMP"' EXIT
+          unzip -qq "$ITEM" -d "$TMP"
+          test "$(cat "$TMP/vfops/BUILD_ID")" = "0.1.0-d04-trial-54c4b4fb"
+          export PYTHONPATH="$TMP/vfops/lib"
+          python3 -B -m compileall -q "$TMP/vfops/lib"
+          bash -n "$TMP/vfops/bin/vfops"
+          bash -n "$TMP/vfops/bin/vfops-migrate-ui"
+          "$TMP/vfops/bin/vfops" --version | grep -Fqx "VF Server Ops 0.1.0"
+          "$TMP/vfops/bin/vfops" --help | grep -Fq "server-migrate plan"
+          python3 -B "$TMP/vfops/lib/server_migration_pull.py" --help | grep -Fq "_stage-prepared-static-online"
+          echo P07_D04_PRIVATE_ZIP_ROOTLESS_CLI_SMOKE=PASS
+          echo P07_D04_PRIVATE_ZIP_REAL_CLOUDPANEL_INSTALL=NOT_RUN
+          echo P07_D04_PRIVATE_ZIP_OWNER_VPS_DNS_PRODUCTION=UNCHANGED
+      - name: Always delete private repository data and candidate ZIP
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- .p07-private-zip
+          test ! -e .p07-private-zip
+          echo P07_D04_PRIVATE_ZIP_PUBLIC_RUNNER_WORKSPACE_CLEAN=PASS
