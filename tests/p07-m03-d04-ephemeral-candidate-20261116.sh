@@ -121,10 +121,11 @@ CANDIDATE_FILE="vfops-p07-m03-d04-trial-54c4b4fb.tar.gz"
 tar -C "$WORK/stage" --sort=name --mtime="@0" --numeric-owner \
   --owner=0 --group=0 --format=gnu -czf "$OUT/$CANDIDATE_FILE" vfops
 test -s "$OUT/$CANDIDATE_FILE"
-tar -tzf "$OUT/$CANDIDATE_FILE" | grep -Fxq "vfops/TRIAL_CANDIDATE.json"
-tar -tzf "$OUT/$CANDIDATE_FILE" | grep -Fxq "vfops/bin/vfops"
-tar -tzf "$OUT/$CANDIDATE_FILE" | grep -Fxq "vfops/lib/server_migration_pull.py"
-tar -tzf "$OUT/$CANDIDATE_FILE" | grep -Fxq "vfops/lib/migration_prepared_static_snapshot.py"
+tar -tzf "$OUT/$CANDIDATE_FILE" > "$WORK/ephemeral-archive-list"
+grep -Fxq "vfops/TRIAL_CANDIDATE.json" "$WORK/ephemeral-archive-list"
+grep -Fxq "vfops/bin/vfops" "$WORK/ephemeral-archive-list"
+grep -Fxq "vfops/lib/server_migration_pull.py" "$WORK/ephemeral-archive-list"
+grep -Fxq "vfops/lib/migration_prepared_static_snapshot.py" "$WORK/ephemeral-archive-list"
 (
  cd "$OUT"
  sha256sum "$CANDIDATE_FILE" > "$CANDIDATE_FILE.sha256"
