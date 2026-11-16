@@ -1,0 +1,138 @@
+name: P07 M03 D04 combined SSH site and native matched SQL restore
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p07-m03-d04-combined-native-site-20261116.yml']
+permissions:
+  contents: read
+jobs:
+  combined-real-ssh-native-sql-local-http:
+    if: github.event.action == 'opened' || github.event.action == 'synchronize'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 24
+    steps:
+      - name: Public temporary workflow checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Private P07 exact SHA transient checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: c824a0d0fee0301c656e8ab228e10ae68e459f0f
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: .p07-private
+      - name: GOV-DOC current architecture contract transient checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .gov-doc
+      - name: Set up isolated SSH Linux source, source and target channels
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C .p07-private rev-parse HEAD)" = "c824a0d0fee0301c656e8ab228e10ae68e459f0f"
+          command -v rsync >/dev/null || (sudo apt-get -qq update && sudo apt-get install -qq -y rsync)
+          docker run -d --rm --name p07-d04-ssh-source -p 127.0.0.1:22287:22 ubuntu:24.04 sleep infinity >/dev/null
+          docker exec p07-d04-ssh-source bash -lc 'set -eu; export DEBIAN_FRONTEND=noninteractive; apt-get -qq update >/dev/null; apt-get -qq install -y openssh-server rsync python3 >/dev/null; install -d -m 0700 /root/.ssh /run/sshd; usermod -p "$(openssl passwd -6 -salt p07test SYNTHETIC_ci_nonlogin)" root; printf "\nPermitRootLogin yes\nPasswordAuthentication no\nPubkeyAuthentication yes\nUsePAM no\n" > /etc/ssh/sshd_config.d/p07-ci-ephemeral.conf; ssh-keygen -A >/dev/null'
+          mkdir -p "$RUNNER_TEMP/p07-combined-ssh-keys"
+          chmod 0700 "$RUNNER_TEMP/p07-combined-ssh-keys"
+          ssh-keygen -q -t ed25519 -N '' -f "$RUNNER_TEMP/p07-combined-ssh-keys/key" >/dev/null
+          docker cp "$RUNNER_TEMP/p07-combined-ssh-keys/key.pub" p07-d04-ssh-source:/root/.ssh/authorized_keys
+          docker exec p07-d04-ssh-source chown root:root /root/.ssh/authorized_keys
+          docker exec p07-d04-ssh-source chmod 0600 /root/.ssh/authorized_keys
+          docker exec p07-d04-ssh-source /usr/sbin/sshd
+          ssh-keyscan -T 10 -p 22287 127.0.0.1 > "$RUNNER_TEMP/p07-combined-ssh-keys/known_hosts" 2>/dev/null
+          test -s "$RUNNER_TEMP/p07-combined-ssh-keys/known_hosts"
+          ssh -p 22287 -i "$RUNNER_TEMP/p07-combined-ssh-keys/key" -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$RUNNER_TEMP/p07-combined-ssh-keys/known_hosts" root@127.0.0.1 'test -x /usr/bin/rsync && test -x /usr/bin/python3'
+          sudo install -d -o "$(id -u)" -g "$(id -g)" -m 0700 /home/p07native /home/p07native/htdocs /home/p07native/htdocs/native.example.invalid
+          echo "P07_D04_SSH_PRIVATE_KEY=$RUNNER_TEMP/p07-combined-ssh-keys/key" >> "$GITHUB_ENV"
+          echo P07_D04_ISOLATED_SOURCE_SSH=READY
+      - name: Test integrated same-engine MySQL Community 8.4 site files plus SQL plus HTTP
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONNOUSERSITE: '1'
+          P07_D04_COMBINED_CI: '1'
+          P07_NATIVE_DB_ENGINE: 'MYSQL_8.4'
+          P07_NATIVE_DB_CONTAINER: 'p07-d04-joined-mysql84'
+        run: |
+          set -Eeuo pipefail
+          for role in source target; do
+            docker run -d --rm --name "p07-d04-joined-mysql84-$role" -e MYSQL_ROOT_PASSWORD=SYNTHETIC_ci_root_2026 mysql:8.4 >/dev/null
+            for i in $(seq 1 75); do
+              if docker exec -e MYSQL_PWD=SYNTHETIC_ci_root_2026 "p07-d04-joined-mysql84-$role" mysqladmin --protocol=tcp -h127.0.0.1 -uroot ping >/dev/null 2>&1; then break; fi
+              sleep 2
+            done
+            docker exec -e MYSQL_PWD=SYNTHETIC_ci_root_2026 "p07-d04-joined-mysql84-$role" mysql --no-defaults --protocol=tcp -h127.0.0.1 -uroot -N -e 'SELECT VERSION();' | grep -E '^8[.]4[.]'
+          done
+          cd .p07-private
+          export PYTHONPATH="$PWD/lib:$PWD/scripts"
+          python3 -B -m unittest discover -s tests -p test_p07_m03_d04_same_engine_site_integration.py -v
+          echo P07_D04_MYSQL_84_REAL_SSH_PLUS_DB_PLUS_HTTP=PASS
+      - name: Test integrated same-engine MariaDB 11.8 site files plus SQL plus HTTP
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONNOUSERSITE: '1'
+          P07_D04_COMBINED_CI: '1'
+          P07_NATIVE_DB_ENGINE: 'MARIADB_11.8'
+          P07_NATIVE_DB_CONTAINER: 'p07-d04-joined-mariadb118'
+        run: |
+          set -Eeuo pipefail
+          docker rm -f p07-d04-joined-mysql84-source p07-d04-joined-mysql84-target >/dev/null 2>&1
+          for role in source target; do
+            docker run -d --rm --name "p07-d04-joined-mariadb118-$role" -e MARIADB_ROOT_PASSWORD=SYNTHETIC_ci_root_2026 mariadb:11.8 >/dev/null
+            for i in $(seq 1 75); do
+              if docker exec -e MYSQL_PWD=SYNTHETIC_ci_root_2026 "p07-d04-joined-mariadb118-$role" mariadb-admin --protocol=tcp -h127.0.0.1 -uroot ping >/dev/null 2>&1; then break; fi
+              sleep 2
+            done
+            docker exec -e MYSQL_PWD=SYNTHETIC_ci_root_2026 "p07-d04-joined-mariadb118-$role" mariadb --no-defaults --protocol=tcp -h127.0.0.1 -uroot -N -e 'SELECT VERSION();' | grep -E '^11[.]8[.]'
+          done
+          cd .p07-private
+          export PYTHONPATH="$PWD/lib:$PWD/scripts"
+          python3 -B -m unittest discover -s tests -p test_p07_m03_d04_same_engine_site_integration.py -v
+          echo P07_D04_MARIADB_118_REAL_SSH_PLUS_DB_PLUS_HTTP=PASS
+      - name: Existing native recovery, CLI source, safety and GOV architecture gates
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -Eeuo pipefail
+          PRIVATE="$PWD/.p07-private"
+          GOV="$PWD/.gov-doc"
+          cd "$PRIVATE"
+          export PYTHONPATH="$PRIVATE/lib:$PRIVATE/scripts"
+          python3 -B -m unittest discover -s tests -p test_p07_m03_d04_cli_parser_entrypoints.py -q
+          python3 -B -m unittest discover -s tests -p test_p07_m03_d04_final_sync_guard.py -q
+          python3 -B .github/checks/test_architecture_gate.py -q
+          python3 -B scripts/check_p07_modules.py
+          python3 -B scripts/check_p07_terminal_ux.py
+          python3 -B .github/checks/architecture_gate.py --manifest "$PRIVATE/.github/checks/code_architecture.json" --gov-root "$GOV" --git-root "$PRIVATE" --base-sha 905599e8ca6ac6fd766856c35301328388b3eb81 --head-sha c824a0d0fee0301c656e8ab228e10ae68e459f0f
+          echo P07_D04_COMBINED_GOV_CODE_NAMING_AND_SAFETY=PASS
+          echo P07_D04_CLOUDPANEL_TWO_REAL_VPS=NOT_RUN
+          echo P07_D04_MATCHED_ENGINE_ONLY=YES
+          echo P07_D04_CROSS_ENGINE_D05=NOT_RUN
+          echo P07_D04_CROSS_ASSET_SINGLE_INSTANT=NOT_PROVEN
+          echo P07_D04_DNS_PRODUCTION=UNCHANGED
+      - name: Always remove synthetic engines, SSH identities and private checkout
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          for engine in mysql84 mariadb118; do
+            for role in source target; do
+              docker rm -f "p07-d04-joined-$engine-$role" >/dev/null 2>&1
+            done
+          done
+          docker rm -f p07-d04-ssh-source >/dev/null 2>&1
+          rm -rf -- .p07-private .gov-doc "$RUNNER_TEMP/p07-combined-ssh-keys"
+          test ! -e .p07-private
+          test ! -e .gov-doc
+          test ! -e "$RUNNER_TEMP/p07-combined-ssh-keys"
+          echo P07_D04_COMBINED_SOURCE_SQL_AND_SECRET_CLEANUP=PASS
