@@ -239,7 +239,8 @@ CONTROL_PLANE_DISCOVERY
 # This all happens on the new VM made by this workflow, NEVER on an Owner VPS.
 ssh_vm "$OLD" 'bash -se' <<'SOURCE_APP'
 set -Eeuo pipefail
-test -f /root/.p07-d05-synthetic-qemu
+printf 'P07_D05_EPHEMERAL_CLOUDPANEL_VM_ONLY\\n' >/root/.p07-d05-synthetic-qemu
+chmod 0600 /root/.p07-d05-synthetic-qemu
 test "$(cat /root/.p07-d05-synthetic-qemu)" = P07_D05_EPHEMERAL_CLOUDPANEL_VM_ONLY
 clpctl site:add:php --domainName=alpha.p07.example.com --phpVersion=8.4 \
  --vhostTemplate=Generic --siteUser=p07alpha \
