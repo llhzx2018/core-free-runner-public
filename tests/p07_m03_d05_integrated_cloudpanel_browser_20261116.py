@@ -181,7 +181,8 @@ test -d /home/p07alpha/backups || exit 58
 find /home/p07alpha/backups -type f -size +0c -print -quit | grep -q . || exit 59
 echo P07_D05_CP_CLI_TARGET_BACKUP=PASS
 
-python3 - <<'PY'
+# Explicit opt-in must be delivered to the isolated guest, never inherited.
+P07_ALLOW_SYNTHETIC_D05=1 python3 - <<'PY'
 import sys
 sys.path.insert(0, '/root')
 from db_engine_conversion_site_sandbox import (
