@@ -184,13 +184,24 @@ echo P07_D05_CP_CLI_TARGET_BACKUP=PASS
 python3 - <<'PY'
 import sys
 sys.path.insert(0, '/root')
-from db_engine_conversion_site_sandbox import inspect_cloudpanel_fixture_site
-fail=inspect_cloudpanel_fixture_site(inject="after-target-probe",distinct_target=True)
+from db_engine_conversion_site_sandbox import (
+    inspect_cloudpanel_fixture_site, SyntheticSiteSwitchBlocked
+)
+try:
+ fail=inspect_cloudpanel_fixture_site(inject="after-target-probe",distinct_target=True)
+except SyntheticSiteSwitchBlocked as exc:
+ print("P07_D05_INTEGRATED_APP_BLOCK="+str(exc))
+ raise SystemExit(71)
+
 assert fail["status"]=="FAIL_CLOSED_D05_SITE_INJECTED_AFTER_CONFIG", fail["status"]
 assert fail["site_config_restored_byte_exact"]
 assert fail["source_site_still_serving"]
 print("P07_D05_INTEGRATED_SYNTHETIC_CONFIG_FAULT_AND_SOURCE_RESTORED=PASS")
-ok=inspect_cloudpanel_fixture_site(distinct_target=True)
+try:
+ ok=inspect_cloudpanel_fixture_site(distinct_target=True)
+except SyntheticSiteSwitchBlocked as exc:
+ print("P07_D05_INTEGRATED_APP_BLOCK="+str(exc))
+ raise SystemExit(72)
 assert ok["status"]=="SYNTHETIC_APP_SWITCH_READ_WRITE_PROVEN",ok["status"]
 assert ok["distinct_synthetic_target_database_and_user"]
 assert ok["target_app_read_write_proven"]
@@ -212,7 +223,7 @@ echo P07_D05_INTEGRATED_CP_TARGET_APP_WRITE_READBACK=PASS
     for line in p.stdout.splitlines():
         if re.fullmatch(r"P07_D05_CP_CLI_[A-Z0-9_]+=(?:PASS|AUTHENTICATION|ENGINE_VERSION|CONNECTION|PRIVILEGE|DDL_INCOMPATIBLE|SCHEMA_CONFLICT|UNCLASSIFIED|CLI_ARGUMENT|ACCOUNT|DB_CONNECTION|BACKUP_PATH)",line):
             print(line,flush=True)
-        if re.fullmatch(r"P07_D05_INTEGRATED_[A-Z0-9_]+=PASS",line):
+        if re.fullmatch(r"P07_D05_INTEGRATED_[A-Z0-9_]+=(?:PASS|[A-Z0-9_]+)",line):
             print(line,flush=True)
     if p.returncode!=0:
         for line in p.stdout.splitlines():
