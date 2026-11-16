@@ -296,7 +296,16 @@ import json
 p=json.load(open('/root/p07-prepare.json'))
 assert p['status']=='PREPARED'
 assert p['site_count']==2
-assert p.get('source_db_engine')=='MARIADB_11.8'
+# The public CLI summary is intentionally bounded. Check the private
+# migration-owned status record instead of requiring it to print engine identity.
+from pathlib import Path
+states = list(Path('/var/lib/vf-server-ops/server-migrations').glob('pull-*/state.json'))
+assert len(states) == 1, 'single synthetic transaction expected'
+state = json.loads(states[0].read_text(encoding='utf-8'))
+assert state['status'] == 'PREPARED'
+assert state['source_db_engine'] == 'MARIADB_11.8'
+assert state['migration_id'] == p['migration_id']
+print('P07_M03_D04_PRIVATE_SOURCE_ENGINE_PIN=PASS')
 print('P07_M03_D04_MATCHED_MARIADB_TARGET_PREPARED=PASS')
 PY
 stage=VERIFY_FILES
