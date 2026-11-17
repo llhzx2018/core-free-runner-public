@@ -152,10 +152,19 @@ jobs:
           repo="llhzx2018/vf-server-ops"
           root="$RUNNER_TEMP/p07-private-trial"
           test "$(gh api "repos/$repo/git/ref/heads/p07-m03-d04-source-sqlite-coverage-20261114" --jq .object.sha)" = "$PRODUCT_SHA"
-          if gh release view "$PRIVATE_TAG" --repo "$repo" >/dev/null 2>&1; then
-            echo "P07_TRIAL_TAG_ALREADY_EXISTS_REFUSE_OVERWRITE"; exit 77
-          fi
-          cat > "$root/README_RELEASE.txt" <<EOF
+          # Safe resume: a verified draft with this exact tag may exist
+          # after an interrupted machine run. Never overwrite a public release.
+          entry="$(gh api "repos/$repo/releases?per_page=100" | jq -c --arg tag "$PRIVATE_TAG" '.[]|select(.tag_name==$tag)')"
+          if [[ -n "$entry" ]]; then
+            test "$(jq -r .draft <<< "$entry")" = true || { echo P07_RC5_EXISTING_TAG_NOT_DRAFT_REFUSE; exit 77; }
+            test "$(jq -r .target_commitish <<< "$entry")" = "$PRODUCT_SHA" || { echo P07_RC5_EXISTING_DRAFT_SOURCE_MISMATCH; exit 77; }
+            test "$(jq -r .prerelease <<< "$entry")" = true
+            echo P07_RC5_RESUMING_IDENTICAL_DRAFT=YES
+          else
+            if gh release view "$PRIVATE_TAG" --repo "$repo" >/dev/null 2>&1; then
+              echo P07_RC5_PUBLISHED_TAG_REFUSE_OVERWRITE; exit 77
+            fi
+            cat > "$root/README_RELEASE.txt" <<EOF
           P07-M03 网站与数据 / D04 服务器迁移：release137 rc5 仅供隔离试用。
           当前唯一有效产品源码 SHA：$PRODUCT_SHA。
           新增：单站 PREPARED 状态下在线二次私有快照，不覆盖现有目标。
@@ -170,12 +179,19 @@ jobs:
           不可安装在已有业务 CP2、旧 VPS、生产环境；不可自动切换 DNS。
           不可作为正式 M03 更新版本；M01/M02/M04/M05 不变。
           EOF
-          gh release create "$PRIVATE_TAG" "$root/$TRIAL_ZIP" "$root/SHA256SUMS" \
-             --repo "$repo" --target "$PRODUCT_SHA" --draft --prerelease \
-             --title "P07 M03-D04 release137 rc5 (OWNER TRIAL ONLY)" \
-             --notes-file "$root/README_RELEASE.txt"
-          entry="$(gh api "repos/$repo/releases" --jq '.[]|select(.tag_name==env.PRIVATE_TAG)')"
-          test -n "$entry"
+            gh release create "$PRIVATE_TAG" "$root/$TRIAL_ZIP" "$root/SHA256SUMS" \
+               --repo "$repo" --target "$PRODUCT_SHA" --draft --prerelease \
+               --title "P07 M03-D04 release137 rc5 (OWNER TRIAL ONLY)" \
+               --notes-file "$root/README_RELEASE.txt"
+          fi
+          # GitHub may expose a new draft as an untagged URL until promotion.
+          # Use tag_name from the release API, not an eventual tag ref or jq env.
+          for attempt in 1 2 3; do
+            entry="$(gh api "repos/$repo/releases?per_page=100" | jq -c --arg tag "$PRIVATE_TAG" '.[]|select(.tag_name==$tag)')"
+            [[ -n "$entry" ]] && break
+            sleep 2
+          done
+          test -n "$entry" || { echo P07_RC5_RELEASE_DRAFT_LOOKUP_FAILED; exit 78; }
           test "$(jq -r .draft <<< "$entry")" = true
           test "$(jq -r .prerelease <<< "$entry")" = true
           test "$(jq -r .target_commitish <<< "$entry")" = "$PRODUCT_SHA"
