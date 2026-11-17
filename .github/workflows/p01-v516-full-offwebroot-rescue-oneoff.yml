@@ -163,6 +163,119 @@ jobs:
           python3 -c 'import json,sys;r=json.load(open(sys.argv[1]));assert r.get("ok") is True and r.get("available") is False and r.get("can_execute") is False' "$RUNNER_TEMP/p01-bridge-stage-available.json"
           test -z "$(find "$SITE" -maxdepth 3 -name p01-major-owner-intent.json -o -name p01-major-package-stage.json)"
           echo P01_V516_REAL_OWNER_HTTP_UNPUBLISHED_NO_INTENT_GUEST_DENIED=PASS
+      - name: Native nginx PHP-FPM and installed v516 CLI lock identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          SITE="$RUNNER_TEMP/p01-bridge-work/upgrade"
+          BASE="$RUNNER_TEMP/p01-fpm-inode"
+          test "$(cat "$SITE/VERSION.txt")" = 2.47.516
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-fpm nginx >"$RUNNER_TEMP/p01-fpm-install.txt" 2>&1
+          mkdir -m 0700 -p "$BASE" "$BASE/other-temp"
+          who="$(id -un)"; group="$(id -gn)"
+          cat >"$BASE/probe.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          $site=(string)getenv('P01_PROBE_SITE');
+          if(!is_file($site.'/VERSION.txt')||
+              trim((string)file_get_contents($site.'/VERSION.txt'))!=='2.47.516') {
+              http_response_code(503);exit('SITE_INVALID');
+          }
+          define('VF_ROOT',$site);define('VF_VERSION','2.47.516');
+          require_once $site.'/app/Platform/Barrier.php';
+          header('Cache-Control: no-store');
+          try {echo VfMaintenanceBarrier::globalLockIdentity();}
+          catch(Throwable $e){http_response_code(409);echo 'LOCK_UNAVAILABLE';}
+          PHP
+          cat >"$BASE/php-fpm.conf" <<CONF
+          [global]
+          pid = $BASE/fpm.pid
+          error_log = $BASE/fpm.log
+          daemonize = yes
+          [same]
+          user = $who
+          group = $group
+          listen = 127.0.0.1:19428
+          pm = static
+          pm.max_children = 2
+          env[P01_PROBE_SITE] = $SITE
+          [other]
+          user = $who
+          group = $group
+          listen = 127.0.0.1:19430
+          pm = static
+          pm.max_children = 2
+          env[P01_PROBE_SITE] = $SITE
+          php_admin_value[sys_temp_dir] = $BASE/other-temp
+          CONF
+          cat >"$BASE/nginx.conf" <<CONF
+          user $who;
+          worker_processes 1;
+          pid $BASE/nginx.pid;
+          error_log $BASE/nginx.log warn;
+          events { worker_connections 64; }
+          http {
+            access_log off;
+            server {
+              listen 127.0.0.1:19429;
+              location = /same {
+                include /etc/nginx/fastcgi_params;
+                fastcgi_param SCRIPT_FILENAME $BASE/probe.php;
+                fastcgi_pass 127.0.0.1:19428;
+              }
+              location = /different {
+                include /etc/nginx/fastcgi_params;
+                fastcgi_param SCRIPT_FILENAME $BASE/probe.php;
+                fastcgi_pass 127.0.0.1:19430;
+              }
+              location / { return 404; }
+            }
+          }
+          CONF
+          cleanup() {
+            if test -f "$BASE/nginx.pid"; then
+              sudo nginx -c "$BASE/nginx.conf" -s quit >/dev/null 2>&1 || true
+            fi
+            if test -f "$BASE/fpm.pid"; then
+              sudo kill "$(cat "$BASE/fpm.pid")" >/dev/null 2>&1 || true
+            fi
+            rm -rf -- "$BASE"
+          }
+          trap cleanup EXIT
+          sudo /usr/sbin/php-fpm8.3 -t -y "$BASE/php-fpm.conf" >/dev/null
+          sudo nginx -t -c "$BASE/nginx.conf" >/dev/null
+          sudo /usr/sbin/php-fpm8.3 -D -y "$BASE/php-fpm.conf"
+          sudo nginx -c "$BASE/nginx.conf"
+          ready=0
+          for i in $(seq 1 25); do
+            if curl --noproxy '*' -fsS http://127.0.0.1:19429/same >"$BASE/same" 2>/dev/null; then ready=1;break;fi
+            sleep 1
+          done
+          test "$ready" -eq 1
+          cli="$(php8.3 -r 'define("VF_ROOT",$argv[1]);define("VF_VERSION","2.47.516");require $argv[1]."/app/Platform/Barrier.php";echo VfMaintenanceBarrier::globalLockIdentity();' "$SITE")"
+          same="$(cat "$BASE/same")"
+          other="$(curl --noproxy '*' -fsS http://127.0.0.1:19429/different)"
+          [[ "$cli" =~ ^[a-f0-9]{64}$ ]]
+          [[ "$other" =~ ^[a-f0-9]{64}$ ]]
+          test "$same" = "$cli"
+          test "$other" != "$cli"
+          echo P01_V516_NGINX_FPM_CLI_SAME_INODE=PASS
+          echo P01_V516_FPM_DIFFERENT_TEMP_INODE_DETECTED=PASS
+          php8.3 -r 'define("VF_ROOT",$argv[1]);define("VF_VERSION","2.47.516");require $argv[1]."/app/Platform/Barrier.php";$l=VfMaintenanceBarrier::globalExclusive(true);file_put_contents($argv[2],"held");sleep(6);$l->release();' "$SITE" "$BASE/held" >"$BASE/ex.log" 2>&1 &
+          ex_pid=$!
+          held=0
+          for i in $(seq 1 25); do
+            if test -f "$BASE/held"; then held=1;break;fi
+            sleep 0.2
+          done
+          test "$held" -eq 1
+          code="$(curl --noproxy '*' -sS -o "$BASE/blocked" -w '%{http_code}' http://127.0.0.1:19429/same)"
+          test "$code" = 409
+          test "$(cat "$BASE/blocked")" = LOCK_UNAVAILABLE
+          wait "$ex_pid"
+          test "$(curl --noproxy '*' -fsS http://127.0.0.1:19429/same)" = "$cli"
+          echo P01_V516_NGINX_FPM_CLI_EXCLUSIVE_BLOCK_RECOVER=PASS
+          echo P01_V516_CLOUDPANEL_PRODUCTION_UNTOUCHED=PASS
       - name: Real installed Owner stage CLI and unpublished major fail closed
         shell: bash
         run: |
