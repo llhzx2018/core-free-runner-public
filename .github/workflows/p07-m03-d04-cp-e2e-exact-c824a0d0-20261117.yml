@@ -1,4 +1,4 @@
-name: P07 M03 D04 exact-source dual CloudPanel isolated E2E
+name: P07 M03 D04 RC137 two CloudPanel VM single-and-whole acceptance
 on:
   pull_request:
     branches: [main]
@@ -8,7 +8,11 @@ permissions:
   contents: read
 jobs:
   dual-cloudpanel-mariadb-exact-source:
-    if: github.event.action == 'opened' || github.event.action == 'synchronize'
+    if: github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'synchronize'
+    strategy:
+      fail-fast: false
+      matrix:
+        scope: [WHOLE_VPS, ONE_SITE]
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     steps:
@@ -20,36 +24,87 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-server-ops
-          ref: c824a0d0fee0301c656e8ab228e10ae68e459f0f
+          ref: deecb4b621957f847fa68224508d83d024d282b1
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           fetch-depth: 1
           persist-credentials: false
           path: .p07-private-exact
-      - name: Reuse previously proven dual-VM fixture with exact current product SHA
+      - name: Reuse original dual-QEMU CloudPanel test with exact RC137 bundled runtime
         shell: bash
         env:
           PYTHONDONTWRITEBYTECODE: '1'
           PYTHONNOUSERSITE: '1'
+          SCOPE: ${{ matrix.scope }}
         run: |
           set -Eeuo pipefail
           old=80e70ba47a1f0a8dc399e0381aeb29a66a7e6c4e
-          new=c824a0d0fee0301c656e8ab228e10ae68e459f0f
+          new=deecb4b621957f847fa68224508d83d024d282b1
           test "$(git -C .p07-private-exact rev-parse HEAD)" = "$new"
+          export P07_RC137_CANDIDATE="$RUNNER_TEMP/p07-rc137-candidate-$SCOPE"
+          python3 -B .p07-private-exact/scripts/p07_candidate_bundle.py \
+            --product-root .p07-private-exact --public-root . \
+            --output "$P07_RC137_CANDIDATE" \
+            --product-sha deecb4b621957f847fa68224508d83d024d282b1 \
+            --build 0.1.0-release137-rc1 --care 0.1.0-rc85
+          test "$(cat "$P07_RC137_CANDIDATE/dist/p07/0.1.0/overlay/BUILD_ID")" = "0.1.0-release137-rc1"
+          grep -q '  lib/migration_target_inventory_guard.py' "$P07_RC137_CANDIDATE/dist/p07/0.1.0/overlay/RUNTIME.gitblob"
           fixture="$RUNNER_TEMP/p07-d04-dual-cloudpanel-verified-harness.sh"
           curl --retry 2 --connect-timeout 20 --max-time 120 -fsSL \
             https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/83a8fbf80760040a4f97a1299207625704680c49/tests/p07_m03_d04_mariadb_e2e_20261116.sh \
             -o "$fixture"
-          python3 - "$fixture" "$old" "$new" <<'PY'
+          python3 - "$fixture" "$old" "$new" "$SCOPE" <<'PY'
           from pathlib import Path
           import sys
-          p=Path(sys.argv[1]); source=p.read_text(encoding='utf-8')
-          assert source.count(sys.argv[2]) == 1, 'unexpected fixture source identity'
-          assert 'sudo qemu-system-x86_64' in source and 'clpctl db:import' in source
-          p.write_text(source.replace(sys.argv[2],sys.argv[3]),encoding='utf-8')
-          print('P07_D04_PRIOR_HARNESS_REUSED_EXACT_SOURCE=PASS')
+          f=Path(sys.argv[1]);old,new,scope=sys.argv[2:]
+          assert scope in {"WHOLE_VPS","ONE_SITE"}
+          script=f.read_text(encoding="utf-8")
+          assert script.count(old)==1
+          assert "sudo qemu-system-x86_64" in script and "clpctl db:import" in script
+          script=script.replace(old,new)
+          runtime='"$ROOT/.p07-private-exact/bin" "$ROOT/.p07-private-exact/lib"'
+          replacement='"$P07_RC137_CANDIDATE/dist/p07/0.1.0/overlay/bin" "$P07_RC137_CANDIDATE/dist/p07/0.1.0/overlay/lib"'
+          assert script.count(runtime)==1
+          script=script.replace(runtime,replacement)
+          original_build='"$ROOT/.p07-private-exact/BUILD_ID"'
+          bundled_build='"$P07_RC137_CANDIDATE/dist/p07/0.1.0/overlay/BUILD_ID"'
+          assert script.count(original_build)==1
+          script=script.replace(original_build,bundled_build)
+          marker='ssh_vm "$NEW" \'echo P07_M03_D04_TARGET_SSH_SESSION=PASS;'
+          assert script.count(marker)==1
+          check=('ssh_vm "$NEW" \'test "$(cat /opt/vf-server-ops/BUILD_ID)" = '
+                 '"0.1.0-release137-rc1"\'\n'
+                 'echo P07_D04_CANDIDATE_RC137_ACTUAL_TARGET_BYTES=PASS\n')
+          script=script.replace(marker,check+marker)
+          if scope=="ONE_SITE":
+              plan="  --confirm-source-helper-staging ALLOW_SOURCE_HELPER_STAGING </dev/null >/root/p07-plan.json 2>/root/p07-plan.err"
+              prepare="  --confirm PREPARE_PULL_MIGRATION </dev/null >/root/p07-prepare.json 2>/root/p07-prepare.err"
+              assert script.count(plan)==1 and script.count(prepare)==1
+              script=script.replace(plan,"  --site alpha.p07.example.com "+plan.lstrip())
+              script=script.replace(prepare,"  --site alpha.p07.example.com "+prepare.lstrip())
+              assert script.count("assert p['site_count']==2")==2
+              script=script.replace("assert p['site_count']==2","assert p['site_count']==1")
+              assert script.count("assert p['source_scope_kind']=='ALL_SOURCE_SITES'")==1
+              script=script.replace("assert p['source_scope_kind']=='ALL_SOURCE_SITES'",
+                                    "assert p['source_scope_kind']=='SELECTED_SITES'")
+              beta_file='test "$(cat /home/p07beta/htdocs/beta.p07.example.com/index.html)" = P07_BETA_STATIC_23'
+              assert script.count(beta_file)==1
+              script=script.replace(beta_file,'test ! -e /home/p07beta/htdocs/beta.p07.example.com/index.html')
+              beta_web='curl -ksS --resolve beta.p07.example.com:443:127.0.0.1 https://beta.p07.example.com/ | grep -Fq P07_BETA_STATIC_23'
+              before,sep,after=script.partition("stage=VERIFY_HTTP")
+              assert sep and after.count(beta_web)==1 and before.count(beta_web)==1
+              after=after.replace(beta_web,'test ! -e /home/p07beta/htdocs/beta.p07.example.com/index.html')
+              script=before+sep+after
+              assert script.count("P07_M03_D04_MATCHED_MARIADB_ALL_SITES_PLAN=PASS")==1
+              script=script.replace("P07_M03_D04_MATCHED_MARIADB_ALL_SITES_PLAN=PASS",
+                                    "P07_M03_D04_MATCHED_MARIADB_ONE_SITE_PLAN=PASS")
+          else:
+              assert script.count("assert p['site_count']==2")==2
+          f.write_text(script,encoding="utf-8")
+          print("P07_D04_CLOUDPANEL_EXACT_TRIAL_SCOPE="+scope)
           PY
           bash -n "$fixture"
           timeout --signal=TERM --kill-after=60s 3100s bash "$fixture"
+          echo "P07_D04_RC137_TWO_CLOUDPANEL_$(echo "$SCOPE")=PASS"
       - name: Always remove private checkout and ephemeral fixture
         if: always()
         shell: bash
@@ -57,5 +112,6 @@ jobs:
           set +e
           rm -rf -- .p07-private-exact
           rm -f -- "$RUNNER_TEMP/p07-d04-dual-cloudpanel-verified-harness.sh"
+          rm -rf -- "$RUNNER_TEMP/p07-rc137-candidate-WHOLE_VPS" "$RUNNER_TEMP/p07-rc137-candidate-ONE_SITE"
           test ! -e .p07-private-exact
           echo P07_D04_PRIVATE_WORKSPACE_CLEAN=PASS
