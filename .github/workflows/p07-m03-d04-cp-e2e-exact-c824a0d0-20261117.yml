@@ -24,7 +24,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-server-ops
-          ref: 6d1df9e0b10c26c625c0d7a5b841d341c43af072
+          ref: ba2f3175feaaf92e8a10b76712aa5665e59f6eac
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           fetch-depth: 1
           persist-credentials: false
@@ -35,7 +35,7 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
           set -Eeuo pipefail
-          test "$(git -C .p07-private-exact rev-parse HEAD)" = "6d1df9e0b10c26c625c0d7a5b841d341c43af072"
+          test "$(git -C .p07-private-exact rev-parse HEAD)" = "ba2f3175feaaf92e8a10b76712aa5665e59f6eac"
           python3 -B .p07-private-exact/tests/test_p07_m03_d04_target_inventory_guard.py
           ( cd .p07-private-exact && python3 -B scripts/check_p07_modules.py )
           echo P07_D04_TARGET_INVENTORY_UNIT_AND_MODULES=PASS
@@ -48,13 +48,13 @@ jobs:
         run: |
           set -Eeuo pipefail
           old=80e70ba47a1f0a8dc399e0381aeb29a66a7e6c4e
-          new=6d1df9e0b10c26c625c0d7a5b841d341c43af072
+          new=ba2f3175feaaf92e8a10b76712aa5665e59f6eac
           test "$(git -C .p07-private-exact rev-parse HEAD)" = "$new"
           export P07_RC137_CANDIDATE="$RUNNER_TEMP/p07-rc137-candidate-$SCOPE"
           python3 -B .p07-private-exact/scripts/p07_candidate_bundle.py \
             --product-root .p07-private-exact --public-root . \
             --output "$P07_RC137_CANDIDATE" \
-            --product-sha 6d1df9e0b10c26c625c0d7a5b841d341c43af072 \
+            --product-sha ba2f3175feaaf92e8a10b76712aa5665e59f6eac \
             --build 0.1.0-release137 --care 0.1.0-rc85 --m03-only
           test "$(cat "$P07_RC137_CANDIDATE/dist/p07/0.1.0/overlay/BUILD_ID")" = "0.1.0-release137"
           grep -q '  lib/migration_target_inventory_guard.py' "$P07_RC137_CANDIDATE/dist/p07/0.1.0/overlay/RUNTIME.gitblob"
@@ -226,12 +226,47 @@ jobs:
               assert len(found)==1,(domain,found)
               assert found[0].read_text().strip()==name
           alpha=group/('site-'+hashlib.sha256(b'alpha.p07.example.com').hexdigest()[:16])
-          dumps=list(alpha.glob('prepared-mysql-refresh/*/*'))
-          assert dumps, 'MySQL private snapshot missing'
+          dumps=list(alpha.glob('prepared-mysql-refresh/*/snapshot.sql.gz'))
+          assert len(dumps)==1, 'MySQL private snapshot missing'
+          import gzip
+          with gzip.open(dumps[0], 'rb') as gz:
+              content=gz.read(4*1024*1024)
+          assert b'SYNTHETIC_WARM_MYSQL_73' in content, 'new source SQL row missing from private dump'
+          print('P07_REAL_DUAL_CP_NEW_SQL_ROW_IN_PRIVATE_MYSQL_DUMP=PASS')
           assert not pathlib.Path('/home/p07alpha/htdocs/alpha.p07.example.com/warm-update.txt').exists()
           assert not pathlib.Path('/home/p07beta/htdocs/beta.p07.example.com/warm-update.txt').exists()
           print('P07_REAL_DUAL_CP_WHOLE_PRIVATE_WARM_FILES_DB_RECEIPT=PASS')
           STAGE
+          # Complete local-only rehash and SQLite/MySQL/file receipt verification.
+          "$CMD" server-migrate prepared-whole-online-verify --migration-id "$mid" </dev/null >/root/p07-private-verify.json 2>/root/p07-private-verify.err
+          python3 - <<'VERIFY'
+          import json
+          p=json.load(open('/root/p07-private-verify.json'))
+          assert p['status']=='PRIVATE_WHOLE_VPS_HASH_INTEGRITY_VERIFIED_NOT_RESTORED',p
+          assert p['site_count']==p['verified_site_count']==2
+          for key in ('source_contacted','writes_performed','target_site_overwritten',
+                      'target_database_modified','source_frozen','dns_changed',
+                      'cutover_allowed','restore_tested','cross_asset_point_in_time_coherent'):
+              assert p[key] is False,key
+          print('P07_REAL_DUAL_CP_WHOLE_PRIVATE_REHASH_WITHOUT_RESTORE=PASS')
+          VERIFY
+          # Corrupt ONLY the disposable VM private snapshot; no owner site and
+          # no business DB are touched. Recheck must refuse without target apply.
+          python3 - <<'CORRUPT'
+          import hashlib
+          from pathlib import Path
+          base=next(Path('/var/lib/vf-server-ops/server-migrations').glob('pull-*/state.json')).parent
+          key=hashlib.sha256(b'beta.p07.example.com').hexdigest()[:16]
+          files=list((base/'prepared-whole-vps-online'/('site-'+key)).glob(
+              'prepared-static-refresh/*/payload/warm-update.txt'))
+          assert len(files)==1
+          files[0].write_text('SYNTHETIC_TAMPER_ONLY')
+          CORRUPT
+          if "$CMD" server-migrate prepared-whole-online-verify --migration-id "$mid" >/root/p07-private-corrupt-verify.json 2>/root/p07-private-corrupt-verify.err; then
+            echo P07_UNSAFE_CORRUPTED_SNAPSHOT_ACCEPTED >&2
+            exit 17
+          fi
+          echo P07_REAL_DUAL_CP_TAMPERED_PRIVATE_COPY_REFUSED=PASS
           # A second batch must fail before writing a new private generation.
           if "$CMD" server-migrate prepared-whole-online-refresh --migration-id "$mid" --confirm "STAGE_WHOLE_VPS_ONLINE:$mid" >/root/p07-warm-repeat.json 2>/root/p07-warm-repeat.err; then
             echo P07_UNSAFE_REPLAY_ACCEPTED >&2
