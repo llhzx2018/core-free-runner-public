@@ -149,6 +149,121 @@ jobs:
           bash "$stage/installers/p07.sh" > "$sandbox/second.out"
           test "$(cat "$sandbox/previous/BUILD_ID")" = "0.1.0-release136"
           echo P07_M03_PREVIOUS_ROLLBACK_SNAPSHOT_RETAINED=PASS
+      - name: Seal reproducible M03-only owner trial ZIP in ephemeral private checkout
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stage="$RUNNER_TEMP/p07-m03-rc137/package"
+          export P07_OWNER_TRIAL_STAGE="$stage"
+          python3 - <<'PY'
+          import hashlib,json,os,stat,zipfile
+          from pathlib import Path
+          root=Path(os.environ["P07_OWNER_TRIAL_STAGE"])
+          out=root.parent/"private-release"
+          out.mkdir(mode=0o700)
+          att=json.loads((root/"candidate_attestation.json").read_text("utf-8"))
+          assert att["status"]=="CANDIDATE_ONLY_NOT_PUBLISHED"
+          assert att["product_source_sha"]=="deecb4b621957f847fa68224508d83d024d282b1"
+          assert att["product_build"]=="0.1.0-release137-rc1"
+          assert att["independent_module_only"] and not att["other_modules_changed"]
+          overlay=root/"dist/p07/0.1.0/overlay"
+          manifest=overlay/"RUNTIME.gitblob"
+          files=[
+              ("candidate/candidate_attestation.json",root/"candidate_attestation.json"),
+              ("candidate/installers/p07-final.sh",root/"installers/p07-final.sh"),
+              ("candidate/installers/p07.sh",root/"installers/p07.sh"),
+              ("candidate/dist/p07/0.1.0/overlay/RUNTIME.gitblob",manifest),
+              ("candidate/dist/p07/0.1.0-rc2/P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz",
+               root/"dist/p07/0.1.0-rc2/P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"),
+          ]
+          present=set()
+          for row in manifest.read_text(encoding="utf-8").splitlines():
+              digest,name=row.split("  ",1)
+              data=(overlay/name).read_bytes()
+              blob=hashlib.sha1(b"blob "+str(len(data)).encode()+b"\x00"+data).hexdigest()
+              assert blob==digest,"M03_RUNTIME_BLOB_INVALID"
+              present.add(name)
+              files.append(("candidate/dist/p07/0.1.0/overlay/"+name,overlay/name))
+          assert {"bin/vfops-migrate-ui","lib/server_migration_pull.py",
+                  "lib/migration_target_inventory_guard.py"}<=present
+          instructions=(
+              "P07 M03-D04 release137-rc1 OWNER TRIAL ONLY\n"
+              "This is a private isolated development candidate, NOT FORMAL RELEASE.\n"
+              "Product source: deecb4b621957f847fa68224508d83d024d282b1\n"
+              "Published M03 release136 remains official and unaffected.\n"
+              "Do not install or run on existing owner CP2, production VPS or DNS.\n"
+              "Requires a separate owner-authorized, UNUSED test target.\n"
+              "Do not replay legacy original 18-site migration task or failed prepare.\n"
+              "No production migration, cross-engine conversion, site cutover or DNS proven.\n"
+              "Other P07 modules M01/M02/M04/M05 unchanged.\n"
+          ).encode("utf-8")
+          files.append(("candidate/OWNER_TRIAL_SCOPE.txt",instructions))
+          artifact=out/"P07-M03-D04-0.1.0-release137-rc1-OWNER-TRIAL.zip"
+          def bundle(path):
+              with zipfile.ZipFile(path,"x",compression=zipfile.ZIP_DEFLATED,
+                                   compresslevel=9,allowZip64=False) as z:
+                  for name,source in sorted(files):
+                      item=source if isinstance(source,bytes) else source.read_bytes()
+                      assert not name.startswith("/") and ".." not in Path(name).parts
+                      mode=0o755 if name.endswith(".sh") else 0o644
+                      info=zipfile.ZipInfo(name,(2026,1,1,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.external_attr=(stat.S_IFREG|mode)<<16
+                      z.writestr(info,item)
+          bundle(artifact)
+          check=out/"rebuild.zip"
+          bundle(check)
+          digest=hashlib.sha256(artifact.read_bytes()).hexdigest()
+          assert hashlib.sha256(check.read_bytes()).hexdigest()==digest
+          check.unlink()
+          with zipfile.ZipFile(artifact) as z:
+              assert len(z.namelist())==len(files)==len(set(z.namelist()))
+              for name,source in files:
+                  assert z.read(name)==(source if isinstance(source,bytes) else source.read_bytes())
+          (out/"SHA256SUMS").write_text(digest+"  "+artifact.name+"\n",encoding="ascii")
+          print("P07_M03_D04_PRIVATE_RELEASE_ZIP_SHA256="+digest)
+          print("P07_M03_D04_PRIVATE_RELEASE_ENTRIES="+str(len(files)))
+          print("P07_M03_D04_PRIVATE_RELEASE_NO_PUBLIC_ARTIFACT=PASS")
+          PY
+      - name: Create PRIVATE draft prerelease, upload and independently verify candidate asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN" || { echo "P07_TRIAL_RELEASE_WRITE_CAPABILITY_NOT_AVAILABLE"; exit 78; }
+          repo="llhzx2018/vf-server-ops"
+          tag="p07-m03-d04-v0.1.0-release137-rc1-owner-trial"
+          target="deecb4b621957f847fa68224508d83d024d282b1"
+          dir="$RUNNER_TEMP/p07-m03-rc137/private-release"
+          name="P07-M03-D04-0.1.0-release137-rc1-OWNER-TRIAL.zip"
+          test "$(gh api "repos/$repo/git/ref/heads/p07-m03-d04-source-sqlite-coverage-20261114" --jq .object.sha)" = "$target"
+          if gh api "repos/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then
+            echo "P07_TRIAL_TAG_ALREADY_EXISTS_REFUSE_OVERWRITE"
+            exit 77
+          fi
+          gh release create "$tag" -R "$repo" \
+            --target "$target" --draft --prerelease \
+            --title "P07 M03 D04 release137 RC1 · Isolated OWNER TRIAL · NOT FOR PRODUCTION" \
+            --notes "Owner trial candidate only, source $target. M03 one-site and whole-VPS migration entrypoints from PR #348; production real migration NOT proven. The official public toolbox M03 release136 remains unchanged. Do not run on occupied CP2, source VPS or any production site. D05 independent database conversion is NOT included. This candidate does not authorize formal release, cutover or DNS changes." \
+            "$dir/$name" "$dir/SHA256SUMS"
+          info="$(gh api "repos/$repo/releases/tags/$tag")"
+          test "$(jq -r .draft <<< "$info")" = true
+          test "$(jq -r .prerelease <<< "$info")" = true
+          test "$(jq -r '.assets|length' <<< "$info")" = 2
+          test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha)" = "$target"
+          mkdir -p "$dir/readback"
+          gh release download "$tag" -R "$repo" --dir "$dir/readback" --pattern "$name"
+          (cd "$dir/readback" && sha256sum -c "../SHA256SUMS")
+          test "$(sha256sum "$dir/$name" | cut -d ' ' -f1)" = \
+               "$(sha256sum "$dir/readback/$name" | cut -d ' ' -f1)"
+          gh release edit "$tag" -R "$repo" --draft=false --prerelease
+          test "$(gh api "repos/$repo/releases/tags/$tag" --jq .draft)" = false
+          test "$(gh api "repos/$repo/releases/tags/$tag" --jq .prerelease)" = true
+          printf 'P07_M03_D04_PRIVATE_OWNER_TRIAL_PUBLISHED_VERIFIED=PASS\n'
+          printf 'P07_M03_D04_PRIVATE_OWNER_TRIAL_TAG=%s\n' "$tag"
+          printf 'P07_M03_D04_PRIVATE_OWNER_TRIAL_FORMAL_RELEASE=NO\n'
+          printf 'P07_M03_D04_PRIVATE_OWNER_TRIAL_PRODUCTION_CHANGED=NO\n'
       - name: Always clean private material and staged RC candidate
         if: always()
         shell: bash
