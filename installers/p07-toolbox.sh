@@ -27,8 +27,8 @@ P07_M04_ZIP_SHA256="2ff45c263f930e258a3c323b6c009e0973531d3f90a2e432a66aed704c9b
 P07_M04_META_SHA256="370385aab38b4b8f4c069e40ed59fa8d5c6454d65c7982925d0fb123404eb0d7"
 M01_ROOT="/opt/vfops-modules/m01"
 M01_RUNTIME="$M01_ROOT/current/vf-node.sh"
-M01_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/b0fb4c253958de46c4fc207f8872af9b78b77ab0/installers/p07-vf-node-independent-ux2-candidate.sh"
-M01_INSTALLER_BLOB="0919751da9038b6db51a88c7052195becc152e32"
+M01_INSTALLER_URL="$P07_THREE_INSTALLER_URL"
+M01_INSTALLER_BLOB="$P07_THREE_INSTALLER_GIT_BLOB"
 M01_MANIFEST_SHA256="33a6b63f19ba3a40332a405200df320696bb7fd37e2395cac8d2513475e46934"
 # Historical official source identity stays pinned after a future M01 release.
 M01_BOOTSTRAP_BUILD="0.1.0-rc13"
@@ -43,7 +43,7 @@ M01_TARGET_MANIFEST_SHA256="$M01_MANIFEST_SHA256"
 VPS_AUDIT_PUBLIC="V2.1.1"
 VPS_AUDIT_EXPECTED="V2.1.1"
 VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux3"
-VPS_AUDIT_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m01-m02-v0.1.0-original-ux2-20261114/P07-M02-2.1.1-ux2.sh"
+VPS_AUDIT_URL="$P07_THREE_ASSET_BASE/$P07_M02_ZIP"
 VPS_AUDIT_SHA256="88da5b8219fb7e04d606eb3de998d872747cb05153bdd93c7351b46f957164b4"
 VPS_AUDIT_PREVIOUS_BUILD="2.1.1-ux2"
 VPS_AUDIT_LEGACY1_BUILD="2.1.1-ux1"
@@ -57,9 +57,9 @@ VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
 VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release140"
 VF_SERVER_OPS_INSTALLER_REF="main"
-VF_SERVER_OPS_INSTALLER_BLOB="c878028fd788b4b42158b527a5ed2806af999376"
+VF_SERVER_OPS_INSTALLER_BLOB="dfa22a6563ce361e3c783a802c7eb6617b6267f7"
 # Exact stable P07-M03 runtime manifest; reject a self-edited manifest before execution.
-VF_SERVER_OPS_MANIFEST_BLOB="efdfff0b4348b334bbbc2da26d40280338fc7868"
+VF_SERVER_OPS_MANIFEST_BLOB="239bd543e4f64449ca498c1d67ccb7471abbee66"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07-m03-release140-atomic.sh"
 M03_PREVIOUS_BUILD="0.1.0-release139"
 M03_LEGACY138_BUILD="0.1.0-release138"
@@ -83,8 +83,8 @@ SYSTEM_CARE_EXPECTED="0.1.0-rc82"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
 # P07-M04 服务器维护与安全 independent UX3 repaired menu; verified legacy UX2 accepted.
 M04_BUILD_EXPECTED="0.1.0-ux5"
-M04_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care-ux4-isolated.sh"
-M04_INSTALLER_BLOB="b74b9d5fbe6d0fe2fe545d8cdbb1b5b762959617"
+M04_INSTALLER_URL="$P07_THREE_INSTALLER_URL"
+M04_INSTALLER_BLOB="$P07_THREE_INSTALLER_GIT_BLOB"
 M04_UI_BLOB="941015d647929b69449d047cff7c78724915d3f4"
 M04_BOOTSTRAP_BUILD="0.1.0-rc83"
 M04_BOOTSTRAP_UI_BLOB="f140f1158351f9dce2e9f9159611af57047424b1"
@@ -182,6 +182,7 @@ m01_verified_current() {
   case "$installed" in
     "$M01_BOOTSTRAP_BUILD") expected_manifest="$M01_BOOTSTRAP_MANIFEST_SHA256" ;;
     "$M01_PREVIOUS_BUILD") expected_manifest="$M01_PREVIOUS_MANIFEST_SHA256" ;;
+    "$M01_LEGACY1_BUILD") expected_manifest="$M01_LEGACY1_MANIFEST_SHA256" ;;
     "$VF_NODE_EXPECTED") expected_manifest="$M01_TARGET_MANIFEST_SHA256" ;;
     *) return 1 ;;
   esac
@@ -287,6 +288,7 @@ m02_verified_current() {
   case "$installed" in
     "$VPS_AUDIT_BOOTSTRAP_BUILD") required_sha="$VPS_AUDIT_BOOTSTRAP_SHA256" ;;
     "$VPS_AUDIT_PREVIOUS_BUILD") required_sha="$VPS_AUDIT_PREVIOUS_SHA256" ;;
+    "$VPS_AUDIT_LEGACY1_BUILD") required_sha="$VPS_AUDIT_LEGACY1_SHA256" ;;
     "$VPS_AUDIT_BUILD_EXPECTED") required_sha="$VPS_AUDIT_SHA256" ;;
     *) return 1 ;;
   esac
@@ -515,6 +517,7 @@ m03_verified_current() {
   case "$installed" in
     "$VF_SERVER_OPS_BUILD_EXPECTED") trusted_manifest="$VF_SERVER_OPS_MANIFEST_BLOB" ;;
     "$M03_PREVIOUS_BUILD") trusted_manifest="$M03_PREVIOUS_MANIFEST_BLOB" ;;
+    "$M03_LEGACY138_BUILD") trusted_manifest="$M03_LEGACY138_MANIFEST_BLOB" ;;
     "$M03_LEGACY137_BUILD") trusted_manifest="$M03_LEGACY137_MANIFEST_BLOB" ;;
     "$M03_BOOTSTRAP_BUILD") trusted_manifest="$M03_BOOTSTRAP_MANIFEST_BLOB" ;;
     "$M03_LEGACY135_BUILD") trusted_manifest="$M03_LEGACY135_MANIFEST_BLOB" ;;
@@ -551,7 +554,7 @@ ensure_server_ops_current() {
   if m03_verified_current; then
     prior="$(cat /opt/vf-server-ops/BUILD_ID)"
     if [[ "$prior" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]]; then return 0; fi
-    [[ "$prior" == "$M03_PREVIOUS_BUILD" || "$prior" == "$M03_LEGACY137_BUILD" || "$prior" == "$M03_BOOTSTRAP_BUILD" || "$prior" == "$M03_LEGACY135_BUILD" || "$prior" == "$M03_LEGACY115_BUILD" ]] || return 13
+    [[ "$prior" == "$M03_PREVIOUS_BUILD" || "$prior" == "$M03_LEGACY138_BUILD" || "$prior" == "$M03_LEGACY137_BUILD" || "$prior" == "$M03_BOOTSTRAP_BUILD" || "$prior" == "$M03_LEGACY135_BUILD" || "$prior" == "$M03_LEGACY115_BUILD" ]] || return 13
     say "P07-M03 网站与数据：已核验旧正式版 $prior，新版本 $VF_SERVER_OPS_BUILD_EXPECTED。"
     say '仅升级本模块程序；保留上一个正式运行时用于回滚，不操作网站、数据库或 DNS。'
     if [[ ! -t 0 || ! -t 1 ]]; then
@@ -1034,6 +1037,12 @@ ensure_m05_current() {
     installed="$(readlink "$M05_ROOT/current")"
     case "$installed" in
       "releases/$M05_BUILD_EXPECTED") return 0 ;;
+      "releases/$M05_PREVIOUS_OFFICIAL_BUILD")
+        say "P07-M05 新服务器初始化：发现官方旧版 $M05_PREVIOUS_OFFICIAL_BUILD，目标为 $M05_BUILD_EXPECTED。"
+        if [[ ! -t 0 || ! -t 1 ]]; then say "请在交互式 SSH 中确认升级。"; return 7; fi
+        printf "确认仅升级 P07-M05 新服务器初始化？[y/N]："
+        read -r upgrade_response || upgrade_response=""
+        [[ "$upgrade_response" =~ ^[Yy]$ ]] || return 7 ;;
       "releases/$M05_UPGRADE_FROM"|"releases/$M05_UPGRADE_FROM2"|"releases/$M05_UPGRADE_FROM3"|"releases/$M05_UPGRADE_FROM4"|"releases/$M05_UPGRADE_FROM5"|"releases/$M05_UPGRADE_FROM6"|"releases/$M05_UPGRADE_FROM7"|"releases/$M05_UPGRADE_FROM8"|"releases/$M05_UPGRADE_FROM9"|"releases/$M05_UPGRADE_FROM10"|"releases/$M05_UPGRADE_FROM11"|"releases/$M05_UPGRADE_FROM12")
         upgrade_from="${installed#releases/}"
         say "${C_CYAN}P07-M05 新服务器初始化：发现已验证的旧版 $upgrade_from。${C_RESET}"
@@ -1290,6 +1299,9 @@ m04_verified_current() {
     "$M04_PREVIOUS_BUILD")
       expected_ui="$M04_PREVIOUS_UI_BLOB"
       expected_manifest="$M04_PREVIOUS_MANIFEST_BLOB" ;;
+    "$M04_LEGACY3_BUILD")
+      expected_ui="$M04_LEGACY3_UI_BLOB"
+      expected_manifest="$M04_LEGACY3_MANIFEST_BLOB" ;;
     "$M04_LEGACY2_BUILD")
       expected_ui="$M04_LEGACY2_UI_BLOB"
       expected_manifest="$M04_LEGACY2_MANIFEST_BLOB" ;;
