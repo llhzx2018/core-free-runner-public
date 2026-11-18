@@ -12,6 +12,9 @@ VF_NODE_EXPECTED="0.1.0-ux3"
 # but is NEVER executed by this independently upgradable Toolbox route.
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
 P07_FIVE_UX_RELEASE="p07-all-ux-v0.1.0-20261118"
+P07_THREE_ROUTE_REF="a567882ec19520464daee8e48ca95312088e525d"
+P07_THREE_ROUTE_BLOB="9c920dbc59642c14bb09ba730b94b2cce6bed66e"
+P07_THREE_ROUTE_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${P07_THREE_ROUTE_REF}/installers/p07-three-ux-owner-route.py"
 P07_THREE_INSTALLER_REF="cadbe0b84b9d39a70df7f6863ef6967449f90886"
 P07_THREE_INSTALLER_GIT_BLOB="9fc4ecfab8bca665ccde238f0e40631657205f82"
 P07_THREE_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${P07_THREE_INSTALLER_REF}/installers/p07-three-ux-atomic.py"
@@ -204,54 +207,7 @@ m01_verified_current() {
 }
 
 ensure_m01_current() {
-  local upgrade_from='' answer=''
-  if m01_verified_current; then
-    upgrade_from="$(readlink "$M01_ROOT/current")"
-    if [[ "$upgrade_from" == "releases/$VF_NODE_EXPECTED" ]]; then return 0; fi
-    say "P07-M01 网络代理节点（V2Ray）：发现已验证旧版 ${upgrade_from#releases/}；目标版本 $VF_NODE_EXPECTED。"
-    say "仅升级本模块管理文件；不安装、停止或更换 V2Ray 节点。"
-    if [[ ! -t 0 || ! -t 1 ]]; then
-      say '非交互模式不自动升级 P07-M01；当前模块及其他四模块保持原样。'
-      return 7
-    fi
-    printf '确认升级 P07-M01 网络代理节点管理器？[y/N]：'
-    read -r answer || answer=''
-    [[ "$answer" =~ ^[Yy]$ ]] || { say '已取消，本次没有升级。'; return 7; }
-  elif [[ -e "$M01_ROOT/current" || -L "$M01_ROOT/current" ]]; then
-    say "${C_RED}P07-M01 网络代理节点（V2Ray）：已安装模块身份异常；拒绝用旧版回退或覆盖，请从本模块更新器修复。${C_RESET}" >&2
-    return 13
-  fi
-  if [[ "$(id -u)" != "0" ]]; then
-    say "${C_RED}P07-M01 网络代理节点（V2Ray）：独立管理器首次安装/升级需要 root。${C_RESET}" >&2
-    return 3
-  fi
-  for tool in curl sha1sum sha256sum mktemp; do
-    command -v "$tool" >/dev/null 2>&1 || {
-      say "${C_RED}P07-M01 网络代理节点（V2Ray）：缺少 $tool，其他模块保持不变。${C_RESET}" >&2
-      return 3
-    }
-  done
-  local tmp actual rc
-  tmp="$(mktemp -t p07-m01-module-installer.XXXXXXXX)" || return 13
-  chmod 0600 "$tmp"
-  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-time 60 "$M01_INSTALLER_URL" -o "$tmp"; then
-    rm -f "$tmp"
-    return 4
-  fi
-  actual="$(p07_git_blob_sha1 "$tmp" 2>/dev/null || true)"
-  if [[ "$actual" != "$M01_INSTALLER_BLOB" ]]; then
-    rm -f "$tmp"
-    say "${C_RED}P07-M01 网络代理节点（V2Ray）：管理器安装文件身份不匹配。${C_RESET}" >&2
-    return 6
-  fi
-  set +e
-  bash "$tmp" install
-  rc=$?
-  set -e
-  rm -f "$tmp"
-  [[ "$rc" == 0 ]] || return "$rc"
-  m01_verified_current || return 13
-  [[ "$(readlink "$M01_ROOT/current")" == "releases/$VF_NODE_EXPECTED" ]] || return 13
+  p07_three_ux_route P07-M01
 }
 
 run_network_node() {
@@ -308,106 +264,7 @@ m02_verified_current() {
 }
 
 ensure_m02_current() {
-  local upgrade_from='' answer=''
-  if m02_verified_current; then
-    upgrade_from="$(readlink "$M02_ROOT/current")"
-    if [[ "$upgrade_from" == "releases/$VPS_AUDIT_BUILD_EXPECTED" ]]; then return 0; fi
-    say "P07-M02 服务器性能检测（VPS 验机）：发现已验证旧版 ${upgrade_from#releases/}；目标版本 $VPS_AUDIT_BUILD_EXPECTED。"
-    say "只更新本模块检测脚本；此时不运行 fio、网络或磁盘测速。"
-    if [[ ! -t 0 || ! -t 1 ]]; then
-      say '非交互模式不自动升级 P07-M02；当前模块及其他四模块保持原样。'
-      return 7
-    fi
-    printf '确认升级 P07-M02 服务器性能检测？[y/N]：'
-    read -r answer || answer=''
-    [[ "$answer" =~ ^[Yy]$ ]] || { say '已取消，本次没有升级。'; return 7; }
-  elif [[ -e "$M02_ROOT/current" || -L "$M02_ROOT/current" ]]; then
-    say "${C_RED}P07-M02 服务器性能检测（VPS 验机）：现有版本或文件校验异常；拒绝自动回退。${C_RESET}" >&2
-    return 13
-  fi
-  if [[ "$(id -u)" != "0" ]]; then
-    say "${C_RED}P07-M02 服务器性能检测：独立模块首次安装或升级需要 root；未修改其他模块。${C_RESET}" >&2
-    return 3
-  fi
-  for cmd in curl flock sha256sum mktemp; do
-    command -v "$cmd" >/dev/null 2>&1 || {
-      say "${C_RED}P07-M02 服务器性能检测：缺少命令 $cmd；没有安装其他模块。${C_RESET}" >&2
-      return 3
-    }
-  done
-  [[ ! -L /opt/vfops-modules && ! -L "$M02_ROOT" ]] || return 13
-  mkdir -p "$M02_ROOT/releases" || return 13
-  local fd current dest tmp stage link version build actual
-  exec {fd}>"$M02_ROOT/.install.lock" || return 13
-  flock -x "$fd" || return 13
-  if m02_verified_current && [[ "$(readlink "$M02_ROOT/current")" == "releases/$VPS_AUDIT_BUILD_EXPECTED" ]]; then return 0; fi
-  if [[ -n "$upgrade_from" ]]; then
-    m02_verified_current && [[ "$(readlink "$M02_ROOT/current")" == "$upgrade_from" ]] || return 13
-  elif [[ -e "$M02_ROOT/current" || -L "$M02_ROOT/current" ]]; then
-    return 13
-  fi
-  current="$M02_ROOT/current"
-  dest="$M02_ROOT/releases/$VPS_AUDIT_BUILD_EXPECTED"
-  if [[ -e "$current" || -L "$current" ]]; then
-    [[ -L "$current" ]] || return 13
-    [[ "$(readlink "$current")" =~ ^releases/[A-Za-z0-9._-]+$ ]] || return 13
-  fi
-  # Existing immutable release with wrong bytes must never be overwritten
-  # or 'repaired' by a different module's installer.
-  if [[ -e "$dest" || -L "$dest" ]]; then
-    # A verified UX2 tree may already exist after an Owner-initiated rollback.
-    # Never overwrite an unknown tree, and never trust a self-signed manifest.
-    if [[ -d "$dest" && ! -L "$dest" &&
-          -f "$dest/vps-audit.sh" && ! -L "$dest/vps-audit.sh" &&
-          -f "$dest/MANIFEST.sha256" && ! -L "$dest/MANIFEST.sha256" &&
-          "$(find "$dest" -mindepth 1 -maxdepth 1 | wc -l)" -eq 2 &&
-          "$(sha256_file "$dest/vps-audit.sh" 2>/dev/null || true)" == "$VPS_AUDIT_SHA256" &&
-          "$(cat "$dest/MANIFEST.sha256")" == "$VPS_AUDIT_SHA256  vps-audit.sh" &&
-          "$(NO_COLOR=1 bash "$dest/vps-audit.sh" --build-id 2>/dev/null || true)" == "$VPS_AUDIT_BUILD_EXPECTED" &&
-          "$(NO_COLOR=1 bash "$dest/vps-audit.sh" --version 2>/dev/null | awk '{print $NF}' || true)" == "$VPS_AUDIT_EXPECTED" ]]; then
-      link="$M02_ROOT/.current-reapply-$"
-      [[ ! -e "$link" && ! -L "$link" ]] || return 13
-      ln -s "releases/$VPS_AUDIT_BUILD_EXPECTED" "$link" || return 13
-      mv -Tf -- "$link" "$current" || { rm -f -- "$link"; return 13; }
-      m02_verified_current || return 13
-      say "${C_GREEN}P07-M02 服务器性能检测：已切回校验通过的正式新版；其他模块未操作。${C_RESET}"
-      return 0
-    fi
-    say "${C_RED}P07-M02 服务器性能检测：已有候选身份未通过校验，已保护原文件。${C_RESET}" >&2
-    return 13
-  fi
-  tmp="$(mktemp -t p07-m02-download.XXXXXXXX)" || return 13
-  chmod 0600 "$tmp"
-  if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 90 "$VPS_AUDIT_URL" -o "$tmp"; then
-    rm -f "$tmp"; return 4
-  fi
-  actual="$(sha256_file "$tmp" 2>/dev/null || true)"
-  if [[ "$actual" != "$VPS_AUDIT_SHA256" ]]; then
-    rm -f "$tmp"; return 6
-  fi
-  version="$(NO_COLOR=1 bash "$tmp" --version 2>/dev/null | awk '{print $NF}' || true)"
-  build="$(NO_COLOR=1 bash "$tmp" --build-id 2>/dev/null || true)"
-  if [[ "$version" != "$VPS_AUDIT_EXPECTED" || "$build" != "$VPS_AUDIT_BUILD_EXPECTED" ]]; then
-    rm -f "$tmp"; return 7
-  fi
-  stage="$M02_ROOT/releases/.stage-$$"
-  link="$M02_ROOT/.current-$$"
-  [[ ! -e "$stage" && ! -L "$stage" && ! -e "$link" && ! -L "$link" ]] || { rm -f "$tmp"; return 13; }
-  mkdir -m 0755 "$stage" || { rm -f "$tmp"; return 13; }
-  if ! install -m 0755 -- "$tmp" "$stage/vps-audit.sh"; then
-    rm -f "$tmp"; rm -rf -- "$stage"; return 13
-  fi
-  printf '%s  vps-audit.sh\n' "$actual" > "$stage/MANIFEST.sha256" || { rm -f "$tmp"; rm -rf -- "$stage"; return 13; }
-  chmod 0644 "$stage/MANIFEST.sha256"
-  rm -f "$tmp"
-  if ! mv -T -- "$stage" "$dest"; then rm -rf -- "$stage"; return 13; fi
-  ln -s "releases/$VPS_AUDIT_BUILD_EXPECTED" "$link" || return 13
-  mv -Tf -- "$link" "$current" || return 13
-  if ! m02_verified_current; then
-    say "${C_RED}P07-M02 服务器性能检测：本模块原子升级后回读失败。${C_RESET}" >&2
-    return 13
-  fi
-  say "${C_GREEN}P07-M02 服务器性能检测：独立版本已就绪。${C_RESET}"
+  p07_three_ux_route P07-M02
 }
 
 rollback_m02_current() {
@@ -1334,59 +1191,44 @@ m04_verified_current() {
 }
 
 ensure_m04_current() {
-  local upgrade_from='' answer=''
-  if m04_verified_current; then
-    upgrade_from="$(readlink "$M04_ROOT/current")"
-    if [[ "$upgrade_from" == "releases/$M04_BUILD_EXPECTED" ]]; then return 0; fi
-    say "P07-M04 服务器维护与安全：发现已验证旧版 ${upgrade_from#releases/}；目标版本 $M04_BUILD_EXPECTED。"
-    say "只更新本模块程序，不运行系统升级、清理或服务器重启。"
-    if [[ ! -t 0 || ! -t 1 ]]; then
-      say '非交互模式不自动升级 P07-M04；当前模块及其他四模块保持原样。'
-      return 7
-    fi
-    printf '确认升级 P07-M04 服务器维护与安全？[y/N]：'
-    read -r answer || answer=''
-    [[ "$answer" =~ ^[Yy]$ ]] || { say '已取消，本次没有升级。'; return 7; }
-  elif [[ -e "$M04_ROOT/current" || -L "$M04_ROOT/current" ]]; then
-    say "${C_RED}P07-M04 服务器维护与安全：现有版本文件验收失败，拒绝退回旧版。${C_RESET}" >&2
-    return 13
-  fi
-  if [[ "$(id -u)" != "0" ]]; then
-    say "${C_RED}P07-M04 服务器维护与安全：首次独立安装需要 root。${C_RESET}" >&2
-    return 3
-  fi
-  for cmd in curl sha1sum mktemp; do
-    command -v "$cmd" >/dev/null 2>&1 || {
-      say "${C_RED}P07-M04 服务器维护与安全：缺少 $cmd，没有升级任何模块。${C_RESET}" >&2
-      return 3
-    }
-  done
-  local tmp actual rc
-  tmp="$(mktemp -t p07-m04-installer.XXXXXXXX)" || return 13
-  chmod 0600 "$tmp"
-  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-time 60 "$M04_INSTALLER_URL" -o "$tmp"; then
-    rm -f "$tmp"; return 4
-  fi
-  actual="$(p07_git_blob_sha1 "$tmp" 2>/dev/null || true)"
-  if [[ "$actual" != "$M04_INSTALLER_BLOB" ]]; then
-    rm -f "$tmp"
-    say "${C_RED}P07-M04 服务器维护与安全：独立安装器文件校验失败。${C_RESET}" >&2
-    return 6
-  fi
-  set +e
-  bash "$tmp" install
-  rc=$?
-  set -e
-  rm -f "$tmp"
-  [[ "$rc" -eq 0 ]] || return "$rc"
-  m04_verified_current || return 13
-  [[ "$(readlink "$M04_ROOT/current")" == "releases/$M04_BUILD_EXPECTED" ]] || return 13
+  p07_three_ux_route P07-M04
 }
 
 run_system_care() {
   screen_clear
   ensure_m04_current || return $?
   bash "$M04_RUNTIME" menu
+}
+
+# Independent official UX route for M01/M02/M04. Download verified immutable
+# Python gate only after Owner chooses that module, never during menu startup.
+# This uses the same publicly tested SHA-pinned atomic installer for all three.
+p07_three_ux_route() {
+  local module="$1" script="" digest="" rc=0
+  case "$module" in P07-M01|P07-M02|P07-M04) ;; *) return 13 ;; esac
+  for cmd in curl sha1sum python3 mktemp; do
+    command -v "$cmd" >/dev/null 2>&1 || { say "$module：缺少 $cmd，未执行操作。" >&2; return 3; }
+  done
+  script="$(mktemp -t p07-three-ux-owner-route.XXXXXXXX)" || return 13
+  chmod 0600 "$script"
+  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+      --location --max-time 60 "$P07_THREE_ROUTE_URL" -o "$script"; then
+    rm -f "$script"
+    say "$module：官方升级入口无法下载；原模块保持不变。" >&2
+    return 4
+  fi
+  digest="$(p07_git_blob_sha1 "$script" 2>/dev/null || true)"
+  if [[ "$digest" != "$P07_THREE_ROUTE_BLOB" ]]; then
+    rm -f "$script"
+    say "$module：官方升级入口身份不符，已停止。" >&2
+    return 6
+  fi
+  set +e
+  python3 -B "$script" "$module"
+  rc=$?
+  set -e
+  rm -f "$script"
+  return "$rc"
 }
 
 # Read-only reporting only. No module installers/CLI are executed and no
