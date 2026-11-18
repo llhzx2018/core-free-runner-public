@@ -51,7 +51,9 @@ def tty(script: Path, selection: bytes, timeout: float = 135) -> str:
     os.close(child)
     output = bytearray()
     try:
-        os.write(fd, selection)
+        # UX2 PTY canned input needs safe trailing main-menu exits after
+        # explicit Enter-to-return. Extra zeroes cannot authorize writes.
+        os.write(fd, selection + b"\n0\n0\n")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             ready, _, _ = select.select([fd], [], [], 0.25)
