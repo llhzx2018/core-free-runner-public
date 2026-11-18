@@ -84,6 +84,7 @@ set -Eeuo pipefail
 C_RED=''; C_RESET=''
 VF_SERVER_OPS_BUILD_EXPECTED='0.1.0-release135'
 M03_BOOTSTRAP_BUILD='0.1.0-release115'
+M03_PREVIOUS_BUILD='0.1.0-release136'
 VF_SERVER_OPS_INSTALLER_BLOB='ede84039edc66fdbb5f218b6b505b9edd00bb3a7'
 VF_SERVER_OPS_INSTALLER='https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-m03-release135-repair.sh'
 say() { printf '%s\\n' "$*"; }
