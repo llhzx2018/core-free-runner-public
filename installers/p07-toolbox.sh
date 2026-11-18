@@ -4,7 +4,7 @@ set -Eeuo pipefail
 # P07 V0.1.0 final public distribution readback marker.
 # 公共版本保持简短稳定；内部构建身份仅用于精确校验和工程追溯。
 VERSION="V0.1.0"
-BUILD_ID="0.1.0-m03-release138-noncutover-20261118"
+BUILD_ID="0.1.0-m03-release139-noncutover-20261118"
 
 VF_NODE_PUBLIC="V0.1.0"
 VF_NODE_EXPECTED="0.1.0-ux2"
@@ -37,14 +37,16 @@ M02_ROOT="/opt/vfops-modules/m02"  # 独立 VPS 验机版本；不写入 M01/M03
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
-VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release138"
+VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release139"
 VF_SERVER_OPS_INSTALLER_REF="main"
-VF_SERVER_OPS_INSTALLER_BLOB="15055317489b9f74acf6f8fd246c6c45823be411"
+VF_SERVER_OPS_INSTALLER_BLOB="c878028fd788b4b42158b527a5ed2806af999376"
 # Exact stable P07-M03 runtime manifest; reject a self-edited manifest before execution.
-VF_SERVER_OPS_MANIFEST_BLOB="2c6ccd51b7e73d3d9db1ec6d37beaa6ce1cdff73"
-VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07-m03-release138-atomic.sh"
-M03_PREVIOUS_BUILD="0.1.0-release137"
-M03_PREVIOUS_MANIFEST_BLOB="fc94d7c573a0437517726de22c4ac6ff33e582e7"
+VF_SERVER_OPS_MANIFEST_BLOB="efdfff0b4348b334bbbc2da26d40280338fc7868"
+VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07-m03-release139-atomic.sh"
+M03_PREVIOUS_BUILD="0.1.0-release138"
+M03_PREVIOUS_MANIFEST_BLOB="2c6ccd51b7e73d3d9db1ec6d37beaa6ce1cdff73"
+M03_LEGACY137_BUILD="0.1.0-release137"
+M03_LEGACY137_MANIFEST_BLOB="fc94d7c573a0437517726de22c4ac6ff33e582e7"
 M03_BOOTSTRAP_BUILD="0.1.0-release136"
 M03_BOOTSTRAP_MANIFEST_BLOB="59153685ef834114e01e0330c78ae174a042c1fa"
 M03_LEGACY135_BUILD="0.1.0-release135"
@@ -483,12 +485,13 @@ m03_verified_current() {
      ! -L "$root/.runtime-manifest.gitblob" ]] || return 1
   local installed
   installed="$(cat "$root/BUILD_ID")"
-  # Accept exact, previously distributed M03 release115, release135, release136, release137 and release138.
+  # Accept exact, previously distributed M03 release115, release135, release136, release137, release138 and release139.
   # All file Git blobs must match the pinned manifest; unknown builds fail closed.
   local trusted_manifest=''
   case "$installed" in
     "$VF_SERVER_OPS_BUILD_EXPECTED") trusted_manifest="$VF_SERVER_OPS_MANIFEST_BLOB" ;;
     "$M03_PREVIOUS_BUILD") trusted_manifest="$M03_PREVIOUS_MANIFEST_BLOB" ;;
+    "$M03_LEGACY137_BUILD") trusted_manifest="$M03_LEGACY137_MANIFEST_BLOB" ;;
     "$M03_BOOTSTRAP_BUILD") trusted_manifest="$M03_BOOTSTRAP_MANIFEST_BLOB" ;;
     "$M03_LEGACY135_BUILD") trusted_manifest="$M03_LEGACY135_MANIFEST_BLOB" ;;
     "$M03_LEGACY115_BUILD") trusted_manifest="$M03_LEGACY115_MANIFEST_BLOB" ;;
@@ -524,7 +527,7 @@ ensure_server_ops_current() {
   if m03_verified_current; then
     prior="$(cat /opt/vf-server-ops/BUILD_ID)"
     if [[ "$prior" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]]; then return 0; fi
-    [[ "$prior" == "$M03_PREVIOUS_BUILD" || "$prior" == "$M03_BOOTSTRAP_BUILD" || "$prior" == "$M03_LEGACY135_BUILD" || "$prior" == "$M03_LEGACY115_BUILD" ]] || return 13
+    [[ "$prior" == "$M03_PREVIOUS_BUILD" || "$prior" == "$M03_LEGACY137_BUILD" || "$prior" == "$M03_BOOTSTRAP_BUILD" || "$prior" == "$M03_LEGACY135_BUILD" || "$prior" == "$M03_LEGACY115_BUILD" ]] || return 13
     say "P07-M03 网站与数据：已核验旧正式版 $prior，新版本 $VF_SERVER_OPS_BUILD_EXPECTED。"
     say '仅升级本模块程序；保留上一个正式运行时用于回滚，不操作网站、数据库或 DNS。'
     if [[ ! -t 0 || ! -t 1 ]]; then
