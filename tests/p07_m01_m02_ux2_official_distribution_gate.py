@@ -106,7 +106,18 @@ def main() -> None:
     orig = subprocess.check_output(
         ["git", "-C", str(ROOT), "show", ref + ":installers/p07-toolbox.sh"],
         text=True, timeout=10)
-    toolbox = (ROOT / "installers/p07-toolbox.sh").read_text(encoding="utf-8")
+    # UX2 is immutable historical evidence. Use the exact last distributed
+    # UX2 Toolbox, not the proposed UX3 current head, for its real UX1->UX2
+    # installation and rollback regression. Current UX3 is verified by the
+    # separate current-branch Owner Route and formal five-module machine gates.
+    historical_ref = "cadbe0b84b9d39a70df7f6863ef6967449f90886"
+    toolbox = subprocess.check_output(
+        ["git", "-C", str(ROOT), "show", historical_ref + ":installers/p07-toolbox.sh"],
+        text=True, timeout=15)
+    check(hashlib.sha1(b"blob " + str(len(toolbox.encode())).encode() + b"\\0" +
+                       toolbox.encode()).hexdigest()
+          == "702ac995a08e01379b126a97253dae66e588094a",
+          "historical UX2 Toolbox source drift")
     expected = mod.generate(ref, source=orig)
     official_url = "https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m01-m02-v0.1.0-original-ux2-20261114/P07-M02-2.1.1-ux2.sh"
     expected = expected.replace(
@@ -124,7 +135,7 @@ def main() -> None:
     # much older M01/M02 candidate. Compare untouched modules to the actual
     # PR base, while the separate release137 workflow proves every M03 pin.
     prev_sha = subprocess.check_output(
-        ["git", "-C", str(ROOT), "rev-parse", "HEAD^1"], text=True, timeout=10
+        ["git", "-C", str(ROOT), "rev-parse", historical_ref + "^1"], text=True, timeout=10
     ).strip()
     previous = subprocess.check_output(
         ["git", "-C", str(ROOT), "show",
