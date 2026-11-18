@@ -228,6 +228,55 @@ sha256_file() {
   fi
 }
 
+# M02 UX3 uses a complete, SHA-verified module manifest (not the ZIP's
+# checksum as a raw vps-audit.sh digest). All bytes are checked before
+# executing even --version from the installed archive.
+m02_verified_new_release() {
+  local root="$1"
+  [[ -d "$root" && -f "$root/MODULE_MANIFEST.json" &&
+     ! -L "$root/MODULE_MANIFEST.json" &&
+     -f "$root/VERSION" && ! -L "$root/VERSION" &&
+     -f "$root/vps-audit.sh" && ! -L "$root/vps-audit.sh" ]] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -B - "$root" "$P07_M02_META_SHA256" "$VPS_AUDIT_BUILD_EXPECTED" <<'PY'
+import hashlib,json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+expected_meta=sys.argv[2]
+expected_build=sys.argv[3]
+try:
+    record=root/"MODULE_MANIFEST.json"
+    raw=record.read_bytes()
+    if hashlib.sha256(raw).hexdigest()!=expected_meta:
+        raise ValueError("untrusted manifest")
+    meta=json.loads(raw)
+    if (meta.get("schema")!="vf.p07.ux.module-bundle.v1" or
+        meta.get("module_id")!="P07-M02" or
+        meta.get("module_build_id")!=expected_build or
+        meta.get("entrypoint")!="vps-audit.sh" or
+        meta.get("installation_isolation")!="P07-M02_ONLY"):
+        raise ValueError("module identity")
+    files=meta.get("files")
+    if not isinstance(files,dict) or set(files)!={"vps-audit.sh","VERSION"}:
+        raise ValueError("unexpected module members")
+    found=set()
+    for member in root.rglob("*"):
+        if member.is_symlink() or not member.is_file():
+            raise ValueError("link, special node or directory")
+        found.add(member.relative_to(root).as_posix())
+    if found!={"MODULE_MANIFEST.json","vps-audit.sh","VERSION"}:
+        raise ValueError("undeclared runtime file")
+    for name,digest in files.items():
+        if not isinstance(digest,str) or len(digest)!=64:
+            raise ValueError("bad digest")
+        if hashlib.sha256((root/name).read_bytes()).hexdigest()!=digest:
+            raise ValueError("runtime tamper")
+    if (root/"VERSION").read_text().strip()!=expected_build:
+        raise ValueError("wrong version")
+except (OSError,ValueError,TypeError,KeyError,UnicodeError):
+    raise SystemExit(13)
+PY
+}
+
 m02_verified_current() {
   local current="$M02_ROOT/current" script="$M02_ROOT/current/vps-audit.sh"
   local installed='' link actual version build
@@ -236,6 +285,13 @@ m02_verified_current() {
   [[ "$link" =~ ^releases/([A-Za-z0-9._-]+)$ ]] || return 1
   installed="${BASH_REMATCH[1]}"
   [[ -f "$script" && ! -L "$script" ]] || return 1
+  if [[ "$installed" == "$VPS_AUDIT_BUILD_EXPECTED" ]]; then
+    m02_verified_new_release "$current" || return 1
+    version="$(NO_COLOR=1 bash "$script" --version 2>/dev/null | awk '{print $NF}' || true)"
+    build="$(NO_COLOR=1 bash "$script" --build-id 2>/dev/null || true)"
+    [[ "$version" == "$VPS_AUDIT_EXPECTED" && "$build" == "$installed" ]]
+    return
+  fi
   actual="$(sha256_file "$script" 2>/dev/null || true)"
   [[ "$actual" =~ ^[a-f0-9]{64}$ ]] || return 1
   # Keep the existing official no-manifest install valid after a later update.
@@ -245,7 +301,6 @@ m02_verified_current() {
     "$VPS_AUDIT_BOOTSTRAP_BUILD") required_sha="$VPS_AUDIT_BOOTSTRAP_SHA256" ;;
     "$VPS_AUDIT_PREVIOUS_BUILD") required_sha="$VPS_AUDIT_PREVIOUS_SHA256" ;;
     "$VPS_AUDIT_LEGACY1_BUILD") required_sha="$VPS_AUDIT_LEGACY1_SHA256" ;;
-    "$VPS_AUDIT_BUILD_EXPECTED") required_sha="$VPS_AUDIT_SHA256" ;;
     *) return 1 ;;
   esac
   [[ "$actual" == "$required_sha" ]] || return 1
@@ -290,23 +345,26 @@ rollback_m02_current() {
   [[ "$old" =~ ^releases/[A-Za-z0-9._-]+$ &&
      -d "$M02_ROOT/$old" && ! -L "$M02_ROOT/$old" ]] || return 13
   target="$M02_ROOT/releases/$build"
-  [[ -d "$target" && ! -L "$target" &&
-     -f "$target/MANIFEST.sha256" && ! -L "$target/MANIFEST.sha256" &&
-     -f "$target/vps-audit.sh" && ! -L "$target/vps-audit.sh" ]] || return 13
-  local manifest_line line_count
-  manifest_line="$(cat "$target/MANIFEST.sha256")" || return 13
-  line_count="$(wc -l < "$target/MANIFEST.sha256")" || return 13
-  [[ "$line_count" == 1 ]] || return 13
-  actual="$(sha256_file "$target/vps-audit.sh" 2>/dev/null || true)"
-  [[ "$actual" =~ ^[a-f0-9]{64}$ &&
-     "$manifest_line" == "$actual  vps-audit.sh" ]] || return 13
+  [[ -d "$target" && ! -L "$target" ]] || return 13
+  if [[ "$build" == "$VPS_AUDIT_BUILD_EXPECTED" ]]; then
+    m02_verified_new_release "$target" || return 13
+  else
+    [[ -f "$target/MANIFEST.sha256" && ! -L "$target/MANIFEST.sha256" &&
+       -f "$target/vps-audit.sh" && ! -L "$target/vps-audit.sh" ]] || return 13
+    local manifest_line line_count
+    manifest_line="$(cat "$target/MANIFEST.sha256")" || return 13
+    line_count="$(wc -l < "$target/MANIFEST.sha256")" || return 13
+    [[ "$line_count" == 1 ]] || return 13
+    actual="$(sha256_file "$target/vps-audit.sh" 2>/dev/null || true)"
+    [[ "$actual" =~ ^[a-f0-9]{64}$ &&
+       "$manifest_line" == "$actual  vps-audit.sh" ]] || return 13
+  fi
   version="$(NO_COLOR=1 bash "$target/vps-audit.sh" --version 2>/dev/null | awk '{print $NF}' || true)"
   reported="$(NO_COLOR=1 bash "$target/vps-audit.sh" --build-id 2>/dev/null || true)"
   [[ "$version" =~ ^V[0-9]+\.[0-9]+\.[0-9]+$ &&
      "$reported" == "$build" ]] || return 13
   if [[ "$build" == "$VPS_AUDIT_BUILD_EXPECTED" ]]; then
-    [[ "$actual" == "$VPS_AUDIT_SHA256" &&
-       "$version" == "$VPS_AUDIT_EXPECTED" ]] || return 13
+    [[ "$version" == "$VPS_AUDIT_EXPECTED" ]] || return 13
   fi
   if [[ "$old" != "releases/$build" ]]; then
     link="$M02_ROOT/.current-rollback-$$"
@@ -997,7 +1055,7 @@ p07_owned_helper() {
      "$verb" == rollback &&
      "$(id -u)" == 0 ]] || return 13
   case "$module:$kind" in
-    P07-M01:bash|P07-M04:bash|P07-M05:python3) ;;
+    P07-M01:bash|P07-M04:bash|P07-M01:python3|P07-M04:python3|P07-M05:python3) ;;
     *) return 13 ;;
   esac
   for cmd in curl sha1sum mktemp; do command -v "$cmd" >/dev/null 2>&1 || return 3; done
@@ -1016,7 +1074,11 @@ p07_owned_helper() {
   fi
   set +e
   if [[ "$kind" == python3 ]]; then
-    python3 -B "$tmp" rollback "$build" --confirm "$confirm"
+    if [[ "$module" == P07-M05 ]]; then
+      python3 -B "$tmp" rollback "$build" --confirm "$confirm"
+    else
+      python3 -B "$tmp" "$module" rollback "$build" --confirm "$confirm"
+    fi
   else
     bash "$tmp" rollback "$build" "$confirm"
   fi
@@ -1328,7 +1390,7 @@ case "${1:-}" in
     if [[ "$2" == "$M01_BOOTSTRAP_BUILD" ]]; then
       p07_owned_helper P07-M01 "https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/adf4d8cc0db69255fb4a6aff58857561a0652bf6/installers/p07-vf-node-independent-rc13.sh" "8313adef7dd235b645fc815a7bded933fc289f82" bash rollback "$2" "$3"
     else
-      p07_owned_helper P07-M01 "$M01_INSTALLER_URL" "$M01_INSTALLER_BLOB" bash rollback "$2" "$3"
+      p07_owned_helper P07-M01 "$M01_INSTALLER_URL" "$M01_INSTALLER_BLOB" python3 rollback "$2" "$3"
     fi ;;
 
   --rollback-m02) [[ "$#" == 3 ]] || exit 13; rollback_m02_current "$2" "$3" ;;
@@ -1338,7 +1400,7 @@ case "${1:-}" in
     if [[ "$2" == "$M04_BOOTSTRAP_BUILD" ]]; then
       p07_owned_helper P07-M04 "https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/75c7336b8467114f8bc3396dc06144e48275a39a/installers/p07-system-care-rc83-isolated.sh" "d39cef5d0915a99753d688f10fb1dbe74c0dac98" bash rollback "$2" "$3"
     else
-      p07_owned_helper P07-M04 "$M04_INSTALLER_URL" "$M04_INSTALLER_BLOB" bash rollback "$2" "$3"
+      p07_owned_helper P07-M04 "$M04_INSTALLER_URL" "$M04_INSTALLER_BLOB" python3 rollback "$2" "$3"
     fi ;;
 
   --rollback-m05) [[ "$#" == 3 ]] || exit 13; p07_owned_helper P07-M05 "$M05_INSTALLER_URL" "$M05_INSTALLER_BLOB" python3 rollback "$2" "$3" ;;
