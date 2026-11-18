@@ -6,6 +6,14 @@ VERSION='UNKNOWN'
 IFS= read -r VERSION < "$SCRIPT_DIR/VERSION" 2>/dev/null || VERSION='UNKNOWN'
 source "$SCRIPT_DIR/lib/common.sh"
 
+# Candidate-specific presentation override. Do not alter the published UX4
+# common.sh or its shared write-confirmation functions.
+screen_clear() {
+  if [[ -t 0 && -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != dumb ]]; then
+    printf '\033[H\033[2J'
+  fi
+}
+
 
 
 
