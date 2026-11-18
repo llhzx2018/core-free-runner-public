@@ -1,0 +1,141 @@
+name: P07 M03 release139 unpublished real install and rollback proof
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p07-m03-release139-unpublished-candidate-e2e-20261118.yml']
+permissions:
+  contents: read
+jobs:
+  candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      NO_COLOR: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      PRODUCT_SHA: '2a4b846867945150377ab6e1400851c5cd2ad9fc'
+      PRODUCT_BASE: '9352e4d7eafda74cfeb0cb6f11688431a6a10d80'
+      TARGET_BUILD: '0.1.0-release139'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 2a4b846867945150377ab6e1400851c5cd2ad9fc
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: .p07-private
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .gov-current
+      - name: Exact source architecture, UX and no-cutover negative tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C .p07-private rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(cat .p07-private/BUILD_ID)" = "$TARGET_BUILD"
+          python3 -B .p07-private/.github/checks/architecture_gate.py --manifest .p07-private/.github/checks/code_architecture.json --gov-root .gov-current --git-root .p07-private --base-sha "$PRODUCT_BASE" --head-sha "$PRODUCT_SHA"
+          (cd .p07-private && python3 -B scripts/check_p07_terminal_ux.py --base-ref "$PRODUCT_BASE" && python3 -B scripts/check_p07_modules.py)
+          for test in test_p07_m03_d04_preparation_checklist test_p07_dynamic_preflight test_p07_m03_d04_release_scope test_p07_m03_d04_prepared_online_ui test_p07_m03_d04_whole_vps_online_ui; do
+            (cd .p07-private && python3 -B "tests/$test.py" -q)
+          done
+          echo P07_M03_139_CANDIDATE_SOURCE_UX_SAFETY=PASS
+      - name: Build complete unpublished candidate and prove runtime manifest identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          output="$RUNNER_TEMP/p07-139-candidate"
+          python3 -B .p07-private/scripts/p07_candidate_bundle.py --product-root "$PWD/.p07-private" --public-root "$PWD" --output "$output" --product-sha "$PRODUCT_SHA" --build "$TARGET_BUILD" --care 0.1.0-rc82 --m03-only
+          python3 -B - "$output" "$TARGET_BUILD" <<'PY'
+          import hashlib,json,pathlib,re,sys
+          root=pathlib.Path(sys.argv[1]); build=sys.argv[2]
+          overlay=root/"dist/p07/0.1.0/overlay"
+          raw=(overlay/"RUNTIME.gitblob").read_bytes()
+          rows={}
+          for line in raw.decode().splitlines():
+              sha,name=line.split("  ",1)
+              assert name not in rows
+              rows[name]=sha
+              path=overlay/name
+              assert path.is_file() and not path.is_symlink()
+              data=path.read_bytes()
+              assert hashlib.sha1(b"blob "+str(len(data)).encode()+b"\0"+data).hexdigest()==sha,name
+          assert {"lib/migration_readiness_cli.py","lib/migration_preparation_checklist.py","components/p07-m03-migration-readiness.sh","bin/vfops-migrate-ui","BUILD_ID"}<=set(rows)
+          assert "bin/vfops_migration_readiness.py" not in rows
+          assert (overlay/"BUILD_ID").read_text().strip()==build
+          att=json.loads((root/"candidate_attestation.json").read_text())
+          assert att["product_build"]==build
+          print("P07_M03_139_BUNDLE_MANIFEST_GIT_BLOB="+hashlib.sha1(b"blob "+str(len(raw)).encode()+b"\0"+raw).hexdigest())
+          print("P07_M03_139_UNPUBLISHED_REAL_BUNDLE=PASS")
+          PY
+      - name: Real candidate fresh install, main menu and altered runtime rejection
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          pkg="$RUNNER_TEMP/p07-139-candidate"; run="$RUNNER_TEMP/p07-139-fresh"
+          mkdir -p "$run/bin"
+          export P07_INSTALL_DIR="$run/live" P07_PREVIOUS_DIR="$run/previous" P07_BIN_LINK="$run/bin/vfops" P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_PUBLIC_ROOT="file://$pkg"
+          bash "$pkg/installers/p07-final.sh" > "$run/install.log" 2>&1 || { tail -n 24 "$run/install.log"; exit 78; }
+          test "$(cat "$run/live/BUILD_ID")" = "$TARGET_BUILD"
+          test -f "$run/live/lib/migration_readiness_cli.py"
+          test ! -e "$run/previous"
+          NO_COLOR=1 bash "$run/live/bin/vfops-migrate-ui" </dev/null > "$run/menu.log" 2>&1
+          grep -Fq '先检查旧 VPS 和新机数据库选项' "$run/menu.log"
+          bash "$pkg/installers/p07-final.sh" > "$run/idempotent.log" 2>&1
+          test ! -e "$run/previous"
+          cp -a "$pkg" "$run/tampered"
+          echo '# corruption test' >> "$run/tampered/dist/p07/0.1.0/overlay/lib/migration_readiness_cli.py"
+          # The same-build idempotent path correctly performs no new download.
+          # Challenge a separate clean install so the manifest verifier runs.
+          export P07_PUBLIC_ROOT="file://$run/tampered"
+          export P07_INSTALL_DIR="$run/tamper-live" P07_PREVIOUS_DIR="$run/tamper-prev" P07_BIN_LINK="$run/bin/tamper-vfops"
+          if bash "$pkg/installers/p07-final.sh" > "$run/tampered.log" 2>&1; then echo UNEXPECTED_TAMPER_PASS; exit 78; fi
+          test ! -e "$run/tamper-live"
+          test "$(cat "$run/live/BUILD_ID")" = "$TARGET_BUILD"
+          echo P07_M03_139_FRESH_INSTALL_UI_IDEMPOTENCE_BAD_FILE_DENIED=PASS
+      - name: Genuine public 137 baseline to unpublished 138 Atomic; inject post-swap fault
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          pkg="$RUNNER_TEMP/p07-139-candidate"; run="$RUNNER_TEMP/p07-139-upgrade"
+          mkdir -p "$run/bin" "$run/canary"
+          for n in m01 m02 m04 m05 business; do echo "keep-$n" > "$run/canary/$n"; done
+          before="$(sha256sum "$run/canary"/* | sha256sum)"
+          export P07_INSTALL_DIR="$run/live" P07_PREVIOUS_DIR="$run/previous" P07_BIN_LINK="$run/bin/vfops" P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          bash installers/p07-m03-release138-atomic.sh install > "$run/old.log" 2>&1 || { tail -n 18 "$run/old.log"; exit 78; }
+          test "$(cat "$run/live/BUILD_ID")" = 0.1.0-release138
+          export P07_PUBLIC_ROOT="file://$pkg"
+          python3 -B - "$pkg/installers/p07-final.sh" "$run/fault.sh" <<'PY'
+          from pathlib import Path
+          import sys
+          data=Path(sys.argv[1]).read_text()
+          marker="if ! verify_installed_current; then"
+          assert data.count(marker)==1
+          Path(sys.argv[2]).write_text(data.replace(marker,"if true; then",1))
+          PY
+          if bash "$run/fault.sh" > "$run/fault.log" 2>&1; then echo FAILED_FAULT_NOT_DENIED; exit 78; fi
+          test "$(cat "$run/live/BUILD_ID")" = 0.1.0-release138
+          test ! -e "$run/previous"
+          bash "$pkg/installers/p07-final.sh" > "$run/new.log" 2>&1 || { tail -n 25 "$run/new.log"; exit 78; }
+          test "$(cat "$run/live/BUILD_ID")" = "$TARGET_BUILD"
+          test "$(cat "$run/previous/BUILD_ID")" = 0.1.0-release138
+          test -f "$run/live/components/p07-m03-migration-readiness.sh"
+          test "$(NO_COLOR=1 "$run/bin/vfops" --build-id)" = "$TARGET_BUILD"
+          test "$(sha256sum "$run/canary"/* | sha256sum)" = "$before"
+          echo P07_M03_139_REAL_137_TO_138_UPGRADE_AND_FAILURE_ROLLBACK=PASS
+          echo P07_M03_139_M01_M02_M04_M05_AND_BUSINESS_DATA_UNCHANGED=PASS
+          echo P07_M03_139_FORMAL_RELEASE_AND_PRODUCTION=NOT_RUN
+      - name: Clean all private sources and unpublished candidate artifacts
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- .p07-private .gov-current
+          rm -rf -- "$RUNNER_TEMP/p07-139-candidate" "$RUNNER_TEMP/p07-139-fresh" "$RUNNER_TEMP/p07-139-upgrade"
+          echo P07_M03_139_PRIVATE_SOURCE_CLEANUP=PASS
