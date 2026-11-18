@@ -18,8 +18,10 @@ class P07OriginalVersionsUX2Distribution(unittest.TestCase):
         for marker in ("网络代理节点", "服务器性能检测", "网站与数据",
                        "服务器维护与安全", "新服务器初始化", "0."):
             self.assertIn(marker,self.source)
-        self.assertIn('VF_NODE_EXPECTED="0.1.0-ux2"',self.source)
-        self.assertIn('VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux2"',self.source)
+        self.assertIn('VF_NODE_EXPECTED="0.1.0-ux3"',self.source)
+        self.assertIn('VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux3"',self.source)
+        self.assertIn('M01_PREVIOUS_BUILD="0.1.0-ux2"',self.source)
+        self.assertIn('VPS_AUDIT_PREVIOUS_BUILD="2.1.1-ux2"',self.source)
 
     def test_readonly(self)->None:
         m1=(ROOT/"packages/p07-network-node/0.1.0-ux2/vf-node.sh").read_text()
@@ -30,30 +32,34 @@ class P07OriginalVersionsUX2Distribution(unittest.TestCase):
         self.assertIn("show_yabs_original_version",m2)
 
     def test_write_confirmation(self)->None:
-        self.assertIn("确认升级 P07-M01 网络代理节点管理器？[y/N]",self.source)
-        self.assertIn("确认升级 P07-M02 服务器性能检测？[y/N]",self.source)
-        self.assertIn('[[ "$answer" =~ ^[Yy]$ ]]',self.source)
-        self.assertIn('m01_verified_current || return 13',self.source)
+        route=(ROOT/'installers/p07-three-ux-owner-route.py').read_text()
+        self.assertIn('确认仅升级本模块？[y/N]',route)
+        self.assertIn('if answer.lower()!="y":blocked',route)
+        self.assertIn('p07_three_ux_route P07-M01',self.source)
+        self.assertIn('p07_three_ux_route P07-M02',self.source)
 
     def test_cancel_eof_invalid(self)->None:
-        self.assertIn("read -r answer || answer=''",self.source)
-        self.assertIn("非交互模式不自动升级 P07-M01",self.source)
-        self.assertIn("非交互模式不自动升级 P07-M02",self.source)
-        self.assertIn('*) say "${C_YELLOW}⚠ 无效选择，请输入 0-5。',self.source)
+        route=(ROOT/'installers/p07-three-ux-owner-route.py').read_text()
+        self.assertIn('except EOFError:',route)
+        self.assertIn('if not sys.stdin.isatty() or not sys.stdout.isatty():',route)
+        self.assertIn('if answer.lower()!="y":blocked',route)
+        self.assertIn('无效选择，请输入 0-5。',self.source)
 
     def test_success(self)->None:
-        self.assertIn('M01_PREVIOUS_BUILD="0.1.0-ux1"',self.source)
-        self.assertIn('VPS_AUDIT_PREVIOUS_BUILD="2.1.1-ux1"',self.source)
-        self.assertIn("P07-M02 服务器性能检测：已切回校验通过的正式新版",self.source)
+        self.assertIn('M01_PREVIOUS_BUILD="0.1.0-ux2"',self.source)
+        self.assertIn('VPS_AUDIT_PREVIOUS_BUILD="2.1.1-ux2"',self.source)
+        self.assertIn('P07_THREE_ROUTE_BLOB=',self.source)
+        self.assertIn('p07_three_ux_route P07-M02',self.source)
         self.assertIn("--rollback-m01",self.source)
         self.assertIn("--rollback-m02",self.source)
 
     def test_failure_block(self)->None:
-        self.assertIn('if [[ "$actual" != "$VPS_AUDIT_SHA256" ]]',self.source)
-        self.assertIn('if [[ "$actual" != "$M01_INSTALLER_BLOB" ]]',self.source)
-        self.assertIn('已安装模块身份异常；拒绝用旧版回退或覆盖',self.source)
-        self.assertIn('现有版本或文件校验异常；拒绝自动回退',self.source)
-        self.assertIn("已有候选身份未通过校验，已保护原文件",self.source)
+        route=(ROOT/'installers/p07-three-ux-owner-route.py').read_text()
+        self.assertIn('if actual!=expected:blocked',route)
+        self.assertIn('installer.verify_saved(',route)
+        self.assertIn('verified_new(home,module,conf)',route)
+        self.assertIn('新版安装目录异常',route)
+        self.assertIn('P07_THREE_ROUTE_BLOB=',self.source)
 
     def test_no_color_non_tty(self)->None:
         p=subprocess.run(["bash",str(TOOLBOX),"--help"],capture_output=True,text=True,
