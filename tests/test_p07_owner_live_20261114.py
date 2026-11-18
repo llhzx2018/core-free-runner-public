@@ -26,8 +26,9 @@ class P07OwnerLiveRegression(unittest.TestCase):
         self.assertIn('M03_LEGACY115_BUILD="0.1.0-release115"', content)
         self.assertIn('M03_LEGACY115_MANIFEST_BLOB="4acbaca22aac0da681b34376e2cc86d876593181"', content)
         self.assertIn('M03_LEGACY135_BUILD="0.1.0-release135"', content)
-        self.assertIn('VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release139"', content)
-        self.assertIn('M03_PREVIOUS_BUILD="0.1.0-release138"', content)
+        self.assertIn('VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release140"', content)
+        self.assertIn('M03_PREVIOUS_BUILD="0.1.0-release139"', content)
+        self.assertIn('M03_LEGACY138_BUILD="0.1.0-release138"', content)
         self.assertIn('m03_verified_current || return 13', content)
         self.assertIn('    *) return 1 ;;', content)
         self.assertIn('逐文件核验的正式旧版才可升级', content)
@@ -44,7 +45,9 @@ class P07OwnerLiveRegression(unittest.TestCase):
         toolbox = TOOLBOX.read_text()
         self.assertIn("confirm_numeric '清理软件安装缓存，并把系统运行日志保留最近 14 天？'", script)
         self.assertIn("P07_CLEANUP_CONFIRMED=1 clean_journal", script)
-        self.assertIn("确认升级 P07-M04 服务器维护与安全？[y/N]", toolbox)
+        route=(ROOT/'installers/p07-three-ux-owner-route.py').read_text()
+        self.assertIn('p07_three_ux_route P07-M04',toolbox)
+        self.assertIn('确认仅升级本模块？[y/N]',route)
         self.assertIn("确认仅升级 P07-M03 网站与数据？[y/N]", toolbox)
 
     def test_bad_numeric_input_still_reports_invalid_not_silent(self):
@@ -56,7 +59,9 @@ class P07OwnerLiveRegression(unittest.TestCase):
     def test_no_color_non_tty_maintains_explicit_safety(self):
         text = TOOLBOX.read_text()
         self.assertIn('[[ -t 1 && -z "${NO_COLOR:-}" ]]', text)
-        self.assertIn("非交互模式不自动升级 P07-M04", text)
+        self.assertIn('p07_three_ux_route P07-M04',text)
+        route=(ROOT/'installers/p07-three-ux-owner-route.py').read_text()
+        self.assertIn('升级需要在交互式 SSH 中由本人确认',route)
         self.assertIn("需要本人在交互式 SSH 终端确认升级", text)
 
     def _fake_journal(self, lines: list[str], status: int = 0):
