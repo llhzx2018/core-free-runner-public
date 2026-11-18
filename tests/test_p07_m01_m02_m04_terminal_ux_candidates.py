@@ -158,7 +158,7 @@ class CandidateSandbox(unittest.TestCase):
         code = self.m02.read_text()
         self.assertIn("完整性校验失败，已停止", code)
         self.assertIn("return 5", code)
-        self.assertIn("退出", code)
+        self.assertIn("返回工具箱", code)
 
     def test_m02_no_color_non_tty(self):
         for arg in ("--help", "--build-id", "--version"):
