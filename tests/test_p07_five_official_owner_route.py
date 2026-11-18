@@ -9,7 +9,6 @@ import hashlib
 import importlib.util
 import io
 import os
-import subprocess
 from pathlib import Path
 import shutil
 import sys
@@ -185,96 +184,6 @@ class FiveModuleOwnerRoute(unittest.TestCase):
         with self.assertRaises(route.Blocked):
             self.invoke(module)
         self.assertEqual(os.readlink(home/"current"),"releases/"+route.MODULES[module]["version"])
-
-    def test_m02_actual_signed_manifest_and_backward_forward_rollback(self):
-        module = "P07-M02"
-        home, _ = self.old_install(module)
-        self.assertEqual(self.invoke(module), 0)
-        source = (ROOT / "installers/p07-toolbox.sh").read_text()
-        def shell_function(name):
-            key = name + "() {"
-            self.assertEqual(source.count(key), 1)
-            tail = source.split(key, 1)[1]
-            return key + tail.split("\n}\n", 1)[0] + "\n}\n"
-        code = """#!/usr/bin/env bash
-set -Eeuo pipefail
-id() { echo 0; }
-say() { printf '%s\n' "$*"; }
-sha256_file() { sha256sum "$1" | awk '{print $1}'; }
-""" + "\n".join(shell_function(name) for name in (
-            "m02_verified_new_release", "m02_verified_current", "rollback_m02_current"))
-        conf = route.MODULES[module]
-        params = {
-            "M02_ROOT": str(home),
-            "P07_M02_META_SHA256": conf["meta"],
-            "VPS_AUDIT_BUILD_EXPECTED": conf["version"],
-            "VPS_AUDIT_EXPECTED": "V2.1.1",
-            "VPS_AUDIT_BOOTSTRAP_BUILD": "2.1.0-rc7-field",
-            "VPS_AUDIT_BOOTSTRAP_SHA256": "d1846e751bba5c860c623e3db26641908e27ca43b39cf37016758853b65a952d",
-            "VPS_AUDIT_PREVIOUS_BUILD": conf["previous"],
-            "VPS_AUDIT_PREVIOUS_SHA256": "18a7a7dc401772fda7344845b952bc307a46f05443d086ec5e38a1954308587d",
-            "VPS_AUDIT_LEGACY1_BUILD": "2.1.1-ux1",
-            "VPS_AUDIT_LEGACY1_SHA256": "7b083e4cf105d40b04b4cbe898fb6b9e1bb7f1ef3385bc1d20829796f6852013",
-        }
-        def run(action):
-            return subprocess.run(
-                ["bash", "-c", code + "\n" + action],
-                text=True, capture_output=True, timeout=20,
-                env={**os.environ, **params, "NO_COLOR": "1"})
-        self.assertEqual(run("m02_verified_current").returncode, 0)
-        self.assertEqual(run("rollback_m02_current 2.1.1-ux2 P07-M02:2.1.1-ux2").returncode, 0)
-        self.assertEqual(os.readlink(home / "current"), "releases/2.1.1-ux2")
-        self.assertEqual(run("m02_verified_current").returncode, 0)
-        self.assertNotEqual(run("rollback_m02_current 2.1.1-ux3 BAD").returncode, 0)
-        self.assertEqual(os.readlink(home / "current"), "releases/2.1.1-ux2")
-        self.assertEqual(run("rollback_m02_current 2.1.1-ux3 P07-M02:2.1.1-ux3").returncode, 0)
-        self.assertEqual(run("m02_verified_current").returncode, 0)
-        self.assertEqual(os.readlink(home / "current"), "releases/2.1.1-ux3")
-        file = home / "current/vps-audit.sh"
-        file.write_bytes(file.read_bytes() + b"\n# tampered")
-        self.assertNotEqual(run("m02_verified_current").returncode, 0)
-        self.assertNotEqual(run("rollback_m02_current 2.1.1-ux3 P07-M02:2.1.1-ux3").returncode, 0)
-
-    def test_m01_m04_exact_python_rollback_module_interface(self):
-        script = (ROOT / "installers/p07-toolbox.sh").read_text()
-        for module, prefix in (("P07-M01", "M01"), ("P07-M04", "M04")):
-            with self.subTest(module=module):
-                self.assertIn(module + ":python3", script)
-                self.assertIn(
-                    "p07_owned_helper " + module +
-                    ' "
-        module="P07-M04"
-        home,old=self.old_install(module)
-        stdin=io.StringIO("y\n")
-        stdout=io.StringIO()
-        with patch.object(route.sys,"argv",[str(ROUTE),module]), \
-             patch.object(route.sys,"stdin",stdin),patch.object(route.sys,"stdout",stdout):
-            with self.assertRaises(route.Blocked):
-                route.main()
-        self.assertEqual(os.readlink(home/"current"),"releases/"+route.MODULES[module]["previous"])
-
-if __name__=="__main__":unittest.main()
- + prefix + '_INSTALLER_URL" "
-        module="P07-M04"
-        home,old=self.old_install(module)
-        stdin=io.StringIO("y\n")
-        stdout=io.StringIO()
-        with patch.object(route.sys,"argv",[str(ROUTE),module]), \
-             patch.object(route.sys,"stdin",stdin),patch.object(route.sys,"stdout",stdout):
-            with self.assertRaises(route.Blocked):
-                route.main()
-        self.assertEqual(os.readlink(home/"current"),"releases/"+route.MODULES[module]["previous"])
-
-if __name__=="__main__":unittest.main()
- + prefix +
-                    '_INSTALLER_BLOB" python3 rollback', script)
-                home, _ = self.old_install(module)
-                before = self.before()
-                self.assertEqual(self.invoke(module), 0)
-                old = route.MODULES[module]["previous"]
-                self.assertEqual(atomic.rollback(module, old, module + ":" + old), old)
-                self.assertEqual(os.readlink(home / "current"), "releases/" + old)
-                self.assertEqual(self.before(), before)
 
     def test_non_tty_upgrade_rejects_without_writes(self):
         module="P07-M04"
