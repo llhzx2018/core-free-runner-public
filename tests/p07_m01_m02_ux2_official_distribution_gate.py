@@ -101,20 +101,42 @@ def main() -> None:
         start = x.index("  if [[ -e \"$dest\" || -L \"$dest\" ]]; then", x.index("ensure_m02_current() {"))
         end = x.index("  tmp=\"$(mktemp",start)
         return x[:start] + "<M02_VERIFIED_CACHED_REAPPLY_BLOCK>\n" + x[end:]
-    check(normalized(expected) == normalized(toolbox),
-          "Current public Toolbox has unreviewed changes outside official M02 cached reapply")
-    # M01/M02 functions appear after top module identities; compare the untouched
-    # M03/M04/M05 runtime implementation, plus their pinned source identities.
-    check(toolbox.split("local_server_ops_version() {", 1)[1] ==
-          orig.split("local_server_ops_version() {", 1)[1],
-          "M03/M04/M05 runtime implementation changed in candidate")
-    for prefix in ("VF_SERVER_OPS_PUBLIC=", "VF_SERVER_OPS_BUILD_EXPECTED=",
-                   "VF_SERVER_OPS_INSTALLER_BLOB=", "M04_INSTALLER_BLOB=",
-                   "M05_BUILD_EXPECTED=", "M05_BUNDLE_SHA256="):
-        new_line = next((line for line in toolbox.splitlines() if line.startswith(prefix)), None)
-        old_line = next((line for line in orig.splitlines() if line.startswith(prefix)), None)
-        check(new_line is not None and new_line == old_line,
-              f"M03/M04/M05 official pin drift: {prefix}")
+    # This historical UX2 test still verifies the actual signed UX2 assets
+    # and their PTY upgrade/rollback. M03 has since had an independently
+    # approved 136->137 promotion; do not require its identity to equal the
+    # much older M01/M02 candidate. Compare untouched modules to the actual
+    # PR base, while the separate release137 workflow proves every M03 pin.
+    prev_sha = subprocess.check_output(
+        ["git", "-C", str(ROOT), "rev-parse", "HEAD^1"], text=True, timeout=10
+    ).strip()
+    previous = subprocess.check_output(
+        ["git", "-C", str(ROOT), "show",
+         prev_sha + ":installers/p07-toolbox.sh"], text=True, timeout=10)
+    def shell_func(source: str, name: str) -> str:
+        marker = name + "() {"
+        check(source.count(marker) == 1, f"invalid function count: {name}")
+        return source.split(marker, 1)[1].split("\n}\n", 1)[0]
+    for name in (
+        "m01_verified_current", "ensure_m01_current", "run_network_node",
+        "m02_verified_current", "ensure_m02_current", "rollback_m02_current",
+        "run_vps_audit", "m05_verified_current", "ensure_m05_current",
+        "run_server_init", "run_system_care"
+    ):
+        check(shell_func(toolbox, name) == shell_func(previous, name),
+              f"unapproved M01/M02/M04/M05 implementation drift: {name}")
+    for prefix in ("M01_", "VF_NODE_", "M02_", "VPS_AUDIT_",
+                   "M04_", "SYSTEM_CARE_", "M05_"):
+        def own(source: str) -> list[str]:
+            return [line for line in source.splitlines()
+                    if line.startswith(prefix)]
+        check(own(toolbox) == own(previous),
+              f"unapproved M01/M02/M04/M05 pin drift: {prefix}")
+    for pin in (
+        'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release137"',
+        'M03_PREVIOUS_BUILD="0.1.0-release136"',
+        'M03_PREVIOUS_MANIFEST_BLOB="59153685ef834114e01e0330c78ae174a042c1fa"',
+    ):
+        check(pin in toolbox, f"approved M03 release137 pin absent: {pin}")
     m01_src = ROOT / "packages/p07-network-node/0.1.0-ux2"
     check(sha(m01_src / "MANIFEST.sha256") == M01_NEW_MANIFEST_SHA, "UX2 M01 manifest source mismatch")
     check(sha(ROOT / "experiments/p07-vps-audit-v21-ux2.sh") == M02_NEW_SHA, "UX2 M02 source mismatch")
