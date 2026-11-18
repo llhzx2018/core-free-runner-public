@@ -49,6 +49,11 @@ class P07RollbackCurrent(unittest.TestCase):
             functions="\n".join(function(source,x) for x in (
                 "m02_verified_new_release","m02_verified_current",
                 "rollback_m02_current"))
+            # Only the hardcoded /opt ownership guard is redirected to our
+            # disposable module root; the real rollback logic remains exact.
+            functions=functions.replace(
+                " -d /opt/vfops-modules && ! -L /opt/vfops-modules",
+                " -d "+str(root)+" && ! -L "+str(root))
             preamble="""#!/usr/bin/env bash
 set -Eeuo pipefail
 id() { echo 0; }
