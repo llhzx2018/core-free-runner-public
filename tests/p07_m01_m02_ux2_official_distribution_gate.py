@@ -134,11 +134,11 @@ def main() -> None:
         check(own(toolbox) == own(previous),
               f"unapproved M01/M02/M04/M05 pin drift: {prefix}")
     for pin in (
-        'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release138"',
-        'M03_PREVIOUS_BUILD="0.1.0-release137"',
+        'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release139"',
+        'M03_PREVIOUS_BUILD="0.1.0-release138"',
         'M03_PREVIOUS_MANIFEST_BLOB="fc94d7c573a0437517726de22c4ac6ff33e582e7"',
     ):
-        check(pin in toolbox, f"approved M03 current release138 pin absent: {pin}")
+        check(pin in toolbox, f"approved M03 current release139 pin absent: {pin}")
     m01_src = ROOT / "packages/p07-network-node/0.1.0-ux2"
     check(sha(m01_src / "MANIFEST.sha256") == M01_NEW_MANIFEST_SHA, "UX2 M01 manifest source mismatch")
     check(sha(ROOT / "experiments/p07-vps-audit-v21-ux2.sh") == M02_NEW_SHA, "UX2 M02 source mismatch")
