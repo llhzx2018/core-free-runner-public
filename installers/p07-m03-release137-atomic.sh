@@ -87,7 +87,7 @@ for row in manifest.read_text().splitlines():
     names.add(rel)
     if blob(manifest.parent/rel)!=expected: raise ValueError("runtime file")
 if len(names)+3!=len(items): raise ValueError("extra asset")
-if (manifest.parent/"BUILD_ID").read_text().strip()!="0.1.0-release136": raise ValueError("build")
+if (manifest.parent/"BUILD_ID").read_text().strip()!="0.1.0-release137": raise ValueError("build")
 PY
 bash -n "$tmp/files/installers/p07-final.sh" || deny INSTALLER_REJECTED
 msg 'P07-M03 网站与数据：正式包已验证，开始仅升级本模块程序。'
