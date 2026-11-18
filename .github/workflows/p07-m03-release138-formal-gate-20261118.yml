@@ -160,58 +160,91 @@ jobs:
           echo P07_M03_138_REAL_FINAL_ZIP_FRESH_INSTALL=PASS
           echo P07_M03_138_REAL_RELEASE137_TO_138_ATOMIC_AND_POST_SWAP_ROLLBACK=PASS
           echo P07_M03_138_REAL_TAMPER_FAIL_CLOSED_AND_FOUR_MODULES_UNCHANGED=PASS
-      - name: Two official draft releases; remote SHA256; publish only after all hard gates
+      - name: Resume exact drafts by release ID, safely upload mirror, then publish and re-download bytes
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
         run: |
           set -Eeuo pipefail
           [[ -n "$GH_TOKEN" ]] || { echo P07_RELEASE_WRITE_CAPABILITY_MISSING; exit 78; }
-          gh api repos/llhzx2018/vf-server-ops --jq '.full_name' | grep -Fxq llhzx2018/vf-server-ops
-          gh api repos/llhzx2018/core-free-runner-public --jq '.full_name' | grep -Fxq llhzx2018/core-free-runner-public
-          for repo in llhzx2018/vf-server-ops llhzx2018/core-free-runner-public; do
-            if gh api "repos/$repo/git/ref/tags/$TAG" >/dev/null 2>&1 || gh api "repos/$repo/releases/tags/$TAG" >/dev/null 2>&1; then echo OFFICIAL_TAG_ALREADY_EXISTS_STOP; exit 78; fi
-          done
           out="$RUNNER_TEMP/p07-138-formal"
-          cat > "$out/notes.md" <<EOF
-          # P07-M03 网站与数据 / D04 服务器迁移 · release138 非切换正式版
-          发行日期：2026-11-18。源码：$PRODUCT_SHA。
-          新功能：迁移前先检测旧 VPS 的系统、CloudPanel、实际数据库引擎和网站/数据库/SQLite/外部资源清单；再查看新服务器初始化及目标冲突，按 CloudPanel 官方支持组合推荐匹配数据库（用户自行选择）。
-          可用范围：严格同引擎已验的迁入、在线预同步、私有备用快照；不支持 D05 不同引擎转换和最终停写/切换；不修改 DNS、已占用目标、旧 VPS 业务。
-          安装：公共服务器工具箱唯一入口，官方 ZIP 含完整运行时及受控 Atomic 文件更新材料；非 Web/PHP 站点安装包，不包含业务备份或数据库。
-          旧版升级：实际 release137→release138 原子升级验证；不在支持范围内的旧版/现有冲突目标拒绝覆盖。
-          回滚：安装过程中失败自动恢复前版软件文件；不等于业务数据库回滚。升级后留存 release137 恢复目录。
-          SHA-256：见 SHA256SUMS；下载后核验整个 ZIP 字节和嵌入逐文件 Git blob 清单。
-          已知限制：数据库不同引擎返回 D04_DIFFERENT_DB_ENGINE_USE_D05_CONVERSION，不能直接在现有异构 CP2 完成整 VPS 迁移。
-          Production：没有升级，仍由 Owner 手工处理；真实迁移/DNS 为独立批准操作。
-          EOF
-          gh release create "$TAG" -R llhzx2018/vf-server-ops --target "$PRODUCT_SHA" --draft --title "P07-M03 网站与数据 / D04 服务器迁移 release138" --notes-file "$out/notes.md"
-          gh release create "$TAG" -R llhzx2018/core-free-runner-public --target "$PUBLIC_SHA" --draft --title "P07-M03 网站与数据 release138 官方 ZIP" --notes-file "$out/notes.md"
-          for repo in llhzx2018/vf-server-ops llhzx2018/core-free-runner-public; do
-            gh release upload "$TAG" -R "$repo" "$out/$ZIPNAME" "$out/SHA256SUMS"
-            test "$(gh api "repos/$repo/releases/tags/$TAG" --jq '.draft')" = true
+          zipsha="$(sha256sum "$out/$ZIPNAME" | cut -d' ' -f1)"
+          test "$zipsha" = b5caa00317b1939ee83a9f6a3666807295cda1677e5fbc5ccb883f879e3fa318
+          test "$(cat "$out/runtime_sha")" = 2c6ccd51b7e73d3d9db1ec6d37beaa6ce1cdff73
+          test "$(cat "$out/installer_sha")" = 74ea352e7592d348cd8b772b1d1684db1dccd9fb
+          product_id=449500724
+          public_id=449500735
+          product=llhzx2018/vf-server-ops
+          public=llhzx2018/core-free-runner-public
+          for repo in "$product" "$public"; do
+            id="$public_id"
+            target="$PUBLIC_SHA"
+            if [[ "$repo" == "$product" ]]; then id="$product_id"; target="$PRODUCT_SHA"; fi
+            release="$(gh api "repos/$repo/releases/$id")"
+            test "$(jq -r .id <<< "$release")" = "$id"
+            test "$(jq -r .tag_name <<< "$release")" = "$TAG"
+            test "$(jq -r .target_commitish <<< "$release")" = "$target"
+            test "$(jq -r .prerelease <<< "$release")" = false
+            test "$(jq -r .draft <<< "$release")" = true
+            echo "P07_138_EXACT_DRAFT_ID_AND_SOURCE_VERIFIED=$(basename "$repo")"
+          done
+          # The product draft already contains two frozen assets. Never upload over
+          # an existing digest or replace a published release under the same tag.
+          for item in "$ZIPNAME" SHA256SUMS; do
+            expected="sha256:$(sha256sum "$out/$item" | cut -d' ' -f1)"
+            present="$(gh api "repos/$product/releases/$product_id" --jq '.assets[]|select(.name=="'"$item"'")|.digest')"
+            test "$present" = "$expected"
+            present_pub="$(gh api "repos/$public/releases/$public_id" --jq '.assets[]|select(.name=="'"$item"'")|.digest')"
+            if [[ -z "$present_pub" ]]; then
+              # The GitHub release-by-tag API intentionally does not resolve
+              # unpublished draft IDs; use the documented draft asset upload host.
+              mime='text/plain'
+              if [[ "$item" == "$ZIPNAME" ]]; then mime='application/zip'; fi
+              curl --proto '=https' --tlsv1.2 -fsSL --retry 1 \
+                -X POST -H "Authorization: Bearer $GH_TOKEN" \
+                -H 'Accept: application/vnd.github+json' \
+                -H 'X-GitHub-Api-Version: 2022-11-28' \
+                -H "Content-Type: $mime" --data-binary @"$out/$item" \
+                "https://uploads.github.com/repos/$public/releases/$public_id/assets?name=$item" \
+                -o "$out/upload-$(basename "$item").json"
+              test "$(jq -r .name "$out/upload-$(basename "$item").json")" = "$item"
+              test "$(jq -r .digest "$out/upload-$(basename "$item").json")" = "$expected"
+            else
+              test "$present_pub" = "$expected"
+            fi
+          done
+          for repo in "$product" "$public"; do
+            id="$public_id"; [[ "$repo" == "$product" ]] && id="$product_id"
+            release="$(gh api "repos/$repo/releases/$id")"
+            test "$(jq -r .draft <<< "$release")" = true
+            test "$(jq -r '.assets|length' <<< "$release")" = 2
+            for name in "$ZIPNAME" SHA256SUMS; do
+              expected="sha256:$(sha256sum "$out/$name" | cut -d' ' -f1)"
+              test "$(jq -r --arg n "$name" '.assets[]|select(.name==$n)|.digest' <<< "$release")" = "$expected"
+              test "$(jq -r --arg n "$name" '.assets[]|select(.name==$n)|.state' <<< "$release")" = uploaded
+            done
+            echo "P07_M03_RELEASE138_REMOTE_DRAFT_ASSET_DIGEST_VERIFIED=$(basename "$repo")"
+          done
+          # Only after both exact drafts and BOTH remote asset digests exist:
+          gh api --method PATCH "repos/$product/releases/$product_id" -F draft=false >/dev/null
+          gh api --method PATCH "repos/$public/releases/$public_id" -F draft=false >/dev/null
+          for repo in "$product" "$public"; do
+            id="$public_id"; [[ "$repo" == "$product" ]] && id="$product_id"
+            test "$(gh api "repos/$repo/releases/$id" --jq .draft)" = false
             test "$(gh api "repos/$repo/releases/tags/$TAG" --jq '.assets|length')" = 2
-            target="$out/remote-$(basename "$repo")"
-            mkdir -m 0700 -p "$target"
-            gh release download "$TAG" -R "$repo" --dir "$target"
-            (cd "$target" && sha256sum -c SHA256SUMS)
-            test "$(sha256sum "$target/$ZIPNAME" | cut -d' ' -f1)" = "$(sha256sum "$out/$ZIPNAME" | cut -d' ' -f1)"
-            expected="sha256:$(sha256sum "$out/$ZIPNAME" | cut -d' ' -f1)"
-            test "$(gh api "repos/$repo/releases/tags/$TAG" --jq '.assets[]|select(.name=="P07-M03-0.1.0-release138.zip")|.digest')" = "$expected"
-            echo P07_M03_138_DRAFT_REMOTE_BYTES_AND_DIGEST_VERIFIED
+            tmp="$out/download-$(basename "$repo")"
+            mkdir -m 0700 -p "$tmp"
+            gh release download "$TAG" -R "$repo" --dir "$tmp"
+            (cd "$tmp" && sha256sum -c SHA256SUMS)
+            test "$(sha256sum "$tmp/$ZIPNAME" | cut -d' ' -f1)" = "$zipsha"
+            echo "P07_M03_RELEASE138_FORMAL_REMOTE_BYTE_READBACK_PASS=$(basename "$repo")"
           done
-          gh release edit "$TAG" -R llhzx2018/vf-server-ops --draft=false
-          gh release edit "$TAG" -R llhzx2018/core-free-runner-public --draft=false
-          for repo in llhzx2018/vf-server-ops llhzx2018/core-free-runner-public; do
-            test "$(gh api "repos/$repo/releases/tags/$TAG" --jq '.draft')" = false
-            test "$(gh api "repos/$repo/releases/tags/$TAG" --jq '.prerelease')" = false
-          done
-          echo "P07_M03_138_OFFICIAL_ZIP_SHA256=$(sha256sum "$out/$ZIPNAME" | cut -d' ' -f1)"
+          echo "P07_M03_138_OFFICIAL_ZIP_SHA256=$zipsha"
           echo "P07_M03_138_OFFICIAL_RUNTIME_GIT_BLOB=$(cat "$out/runtime_sha")"
           echo "P07_M03_138_OFFICIAL_INSTALLER_GIT_BLOB=$(cat "$out/installer_sha")"
-          gh api "repos/llhzx2018/core-free-runner-public/releases/tags/$TAG" --jq '.assets[]|select(.name=="P07-M03-0.1.0-release138.zip")|.id' | xargs -I{} echo "P07_M03_138_OFFICIAL_PUBLIC_ZIP_ASSET_ID={}"
-          echo P07_M03_138_PRODUCT_AND_PUBLIC_RELEASE_REMOTE_VERIFIED=PASS
-          echo P07_M03_138_PRODUCTION_DNS_REAL_MIGRATION=NOT_TOUCHED
+          gh api "repos/$public/releases/$public_id" --jq '.assets[]|select(.name=="P07-M03-0.1.0-release138.zip")|.id' | xargs -I{} echo "P07_M03_138_OFFICIAL_PUBLIC_ZIP_ASSET_ID={}"
+          echo P07_M03_RELEASE138_TWO_REPOSITORY_OFFICIAL_ASSETS=PASS
+          echo P07_M03_RELEASE138_PRODUCTION_DNS_REAL_MIGRATION=NOT_TOUCHED
       - name: Always remove temporary private source and candidate bytes
         if: always()
         shell: bash
