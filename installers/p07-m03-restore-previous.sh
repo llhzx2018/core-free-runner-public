@@ -27,7 +27,7 @@ if not 50<=len(lines)<=240:
     raise SystemExit(13)
 seen=set()
 for line in lines:
-    entry=re.fullmatch(r'([0-9a-f]{40})  ((?:bin|lib)/[A-Za-z0-9_./-]+|BUILD_ID)',line)
+    entry=re.fullmatch(r'([0-9a-f]{40})  ((?:bin|lib|components)/[A-Za-z0-9_./-]+|BUILD_ID)',line)
     if entry is None:
         raise SystemExit(13)
     sha,name=entry.groups()
