@@ -963,7 +963,7 @@ ensure_m05_current() {
       "releases/$M05_UPGRADE_FROM"|"releases/$M05_UPGRADE_FROM2"|"releases/$M05_UPGRADE_FROM3"|"releases/$M05_UPGRADE_FROM4"|"releases/$M05_UPGRADE_FROM5"|"releases/$M05_UPGRADE_FROM6"|"releases/$M05_UPGRADE_FROM7"|"releases/$M05_UPGRADE_FROM8"|"releases/$M05_UPGRADE_FROM9"|"releases/$M05_UPGRADE_FROM10"|"releases/$M05_UPGRADE_FROM11"|"releases/$M05_UPGRADE_FROM12"|"releases/$M05_UPGRADE_FROM13"|"releases/$M05_UPGRADE_FROM14")
         upgrade_from="${installed#releases/}"
         say "${C_CYAN}P07-M05 新服务器初始化：发现已验证的旧版 $upgrade_from。${C_RESET}"
-        say "新版 $M05_BUILD_EXPECTED 修复旧工具箱备份误判；已有系统只做无损检查，干净新系统才选择数据库并安装。"
+        say "新版 $M05_BUILD_EXPECTED 优化中文菜单与状态提示；已有系统只做无损检查，干净新系统才主动选择数据库并安装。"
         say "仅更新 M05 自己的程序文件；保留旧版本，可回滚。不执行系统更新、Swap 补齐或 CloudPanel 安装。"
         if [[ ! -t 0 || ! -t 1 ]]; then
           say "${C_YELLOW}升级需要本人在交互式终端确认；本次不变更。${C_RESET}"
