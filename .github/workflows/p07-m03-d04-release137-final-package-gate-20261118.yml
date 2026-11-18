@@ -1,0 +1,135 @@
+name: P07 M03 D04 release137 final non-cutover package gate
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p07-m03-d04-release137-final-package-gate-20261118.yml']
+permissions:
+  contents: read
+jobs:
+  final-asset:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NO_COLOR: '1'
+      P07_SOURCE_SHA: '84fcbc7109aa76bd9b9b0868017ca11567efe3dc'
+      P07_BUILD: '0.1.0-release137'
+    steps:
+      - name: Public current distribution root
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Transient exact private product source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 84fcbc7109aa76bd9b9b0868017ca11567efe3dc
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .p07-private
+      - name: Exact-source scope tests and deterministic formal ZIP
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C .p07-private rev-parse HEAD)" = "$P07_SOURCE_SHA"
+          python3 -B .p07-private/tests/test_p07_m03_d04_release_scope.py
+          python3 -B .p07-private/tests/test_p07_m03_d04_target_inventory_guard.py
+          (cd .p07-private && python3 -B scripts/check_p07_modules.py)
+          (cd .p07-private && python3 -B scripts/check_p07_terminal_ux.py)
+          stage="$RUNNER_TEMP/p07-r137-final"
+          mkdir -p "$stage"
+          python3 -B .p07-private/scripts/p07_candidate_bundle.py \
+            --product-root .p07-private --public-root . --output "$stage/stage" \
+            --product-sha "$P07_SOURCE_SHA" --build "$P07_BUILD" --care 0.1.0-rc85 --m03-only
+          python3 -B - <<'PY'
+          from pathlib import Path,PurePosixPath
+          import hashlib,json,os,stat,zipfile
+          root=Path(os.environ['RUNNER_TEMP'])/'p07-r137-final'
+          stage=root/'stage'
+          obj=json.loads((stage/'candidate_attestation.json').read_text())
+          assert obj['product_source_sha']==os.environ['P07_SOURCE_SHA']
+          assert obj['product_build']==os.environ['P07_BUILD']
+          assert obj['independent_module_only'] and not obj['other_modules_changed']
+          base='dist/p07/0.1.0/overlay/'
+          overlay=stage/base
+          manifest=overlay/'RUNTIME.gitblob'
+          installer=stage/'installers/p07-final.sh'
+          script=installer.read_text()
+          assert '(?:bin|lib|components)/[A-Za-z0-9_./-]+|BUILD_ID' in script
+          def blob(data):
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          assert blob(manifest.read_bytes())==obj['runtime_manifest_blob']
+          assert blob(installer.read_bytes())==obj['final_installer_blob']
+          files=[('installers/p07-final.sh',installer),
+                 (base+'RUNTIME.gitblob',manifest),
+                 ('dist/p07/0.1.0-rc2/P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz',
+                   stage/'dist/p07/0.1.0-rc2/P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz')]
+          names=set()
+          for line in manifest.read_text().splitlines():
+              digest,name=line.split('  ',1)
+              assert name not in names and not name.startswith('/')
+              names.add(name)
+              assert blob((overlay/name).read_bytes())==digest,name
+              files.append((base+name,overlay/name))
+          assert {'components/p07-m03-online-menu.sh','lib/migration_release_scope.py',
+                  'lib/server_migration_pull.py','bin/vfops-migrate-ui'}<=names
+          assert len(names)+3==len(files)==len(set(name for name,_ in files))
+          zipname='P07-M03-0.1.0-release137.zip'
+          def emit(dest):
+              with zipfile.ZipFile(dest,'x',compression=zipfile.ZIP_DEFLATED,compresslevel=9,allowZip64=False) as z:
+                  for name,path in sorted(files):
+                      data=path.read_bytes()
+                      info=zipfile.ZipInfo(name,(2026,1,1,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.external_attr=(stat.S_IFREG|0o644)<<16
+                      z.writestr(info,data)
+          emit(root/zipname)
+          emit(root/'repeat.zip')
+          zipsha=hashlib.sha256((root/zipname).read_bytes()).hexdigest()
+          assert hashlib.sha256((root/'repeat.zip').read_bytes()).hexdigest()==zipsha
+          with zipfile.ZipFile(root/zipname) as z:
+              assert len(z.infolist())==len(files)
+              assert all(z.read(name)==path.read_bytes() for name,path in files)
+          (root/'SHA256SUMS').write_text(zipsha+'  '+zipname+'\n',encoding='ascii')
+          print('P07_R137_FINAL_PACKAGE_SOURCE_SHA='+obj['product_source_sha'])
+          print('P07_R137_FINAL_PACKAGE_ZIP_SHA256='+zipsha)
+          print('P07_R137_FINAL_PACKAGE_RUNTIME_BLOB='+obj['runtime_manifest_blob'])
+          print('P07_R137_FINAL_PACKAGE_INSTALLER_BLOB='+obj['final_installer_blob'])
+          print('P07_R137_FINAL_PACKAGE_FILE_COUNT='+str(len(files)))
+          print('P07_R137_FINAL_NONCUTOVER_ZIP_AND_FUTURE_UPGRADE_GUARD=PASS')
+          PY
+          (cd "$stage"; sha256sum -c SHA256SUMS)
+      - name: Clean-install exact runtime and future upgrade identity check
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stage="$RUNNER_TEMP/p07-r137-final/stage"
+          scratch="$RUNNER_TEMP/p07-r137-final/smoke"
+          mkdir -p "$scratch/bin"
+          export P07_INSTALL_DIR="$scratch/live"
+          export P07_PREVIOUS_DIR="$scratch/previous"
+          export P07_BIN_LINK="$scratch/bin/vfops"
+          export P07_PUBLIC_ROOT="file://$stage"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          bash "$stage/installers/p07-final.sh" > "$scratch/install.log" 2>&1
+          test "$(NO_COLOR=1 "$scratch/bin/vfops" --build-id)" = 0.1.0-release137
+          test -f "$scratch/live/components/p07-m03-online-menu.sh"
+          grep -q 'components/p07-m03-online-menu.sh' "$scratch/live/.runtime-manifest.gitblob"
+          bash "$stage/installers/p07-final.sh" > "$scratch/idempotent.log" 2>&1
+          test ! -e "$scratch/previous"
+          # The NEXT version must accept the installed r137 component manifest.
+          bash -c 'source <(head -n 105 "$1"); verify_existing_module_before_upgrade' bash "$stage/installers/p07-final.sh"
+          cp "$scratch/live/.runtime-manifest.gitblob" "$scratch/manifest-backup"
+          printf 'bad  ../escape\n' >> "$scratch/live/.runtime-manifest.gitblob"
+          if bash -c 'source <(head -n 105 "$1"); verify_existing_module_before_upgrade' bash "$stage/installers/p07-final.sh"; then
+             echo P07_R137_CORRUPTED_PREVIOUS_MANIFEST_WRONGLY_ACCEPTED; exit 78
+          fi
+          cp "$scratch/manifest-backup" "$scratch/live/.runtime-manifest.gitblob"
+          test "$(NO_COLOR=1 "$scratch/bin/vfops" --build-id)" = 0.1.0-release137
+          echo P07_R137_REAL_CLEAN_INSTALL_IDEMPOTENCE_NEXT_VERSION_GUARD=PASS
+      - name: Always remove private source and synthetic archives
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- .p07-private "$RUNNER_TEMP/p07-r137-final"
+          echo P07_R137_PRIVATE_SOURCE_AND_ARCHIVE_SANITIZED=PASS
