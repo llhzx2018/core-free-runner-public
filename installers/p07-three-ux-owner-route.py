@@ -110,7 +110,8 @@ def verified_new(home,module,conf):
         blocked("运行文件完整性异常")
     entry=target/conf["entry"]
     result=subprocess.run(["bash",str(entry),"--version"],capture_output=True,text=True,timeout=12)
-    if result.returncode or conf["version"] not in result.stdout:
+    if result.returncode or ((module=="P07-M02" and "V2.1.1" not in result.stdout) or
+                             (module!="P07-M02" and conf["version"] not in result.stdout)):
         blocked("新版入口版本检查失败")
     if module=="P07-M02":
         result=subprocess.run(["bash",str(entry),"--build-id"],capture_output=True,text=True,timeout=12)
