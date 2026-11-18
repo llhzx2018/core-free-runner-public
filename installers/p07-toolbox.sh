@@ -118,7 +118,7 @@ fi
 
 say() { printf '%b\n' "$*"; }
 pause_menu() { [[ -t 0 ]] || return 0; printf '\n按 Enter 返回主菜单...'; read -r _ || true; }
-screen_clear() { if [[ -t 0 || -t 1 ]]; then printf '\033[2J\033[H'; fi; }
+screen_clear() { if [[ -t 0 && -t 1 && -z "${NO_COLOR:-}" ]]; then printf '\033[2J\033[H'; fi; }
 
 show_header() {
   screen_clear
@@ -130,16 +130,16 @@ show_header() {
 
 show_menu() {
   show_header
-  say "${C_GREEN}功能：5 项${C_RESET}"
+  say "${C_BOLD}功能：5 项${C_RESET}"
   say
-  say "  ${C_GREEN}1.${C_RESET} 网络代理节点        ${C_GRAY}V2Ray代理${C_RESET}"
-  say "  ${C_GREEN}2.${C_RESET} 服务器性能检测      ${C_GRAY}VPS验机${C_RESET}"
-  say "  ${C_GREEN}3.${C_RESET} 网站与数据          ${C_GRAY}网站/数据库/备份${C_RESET}"
-  say "  ${C_GREEN}4.${C_RESET} 服务器维护与安全    ${C_GRAY}更新/清理/安全${C_RESET}"
-  say "  ${C_GREEN}5.${C_RESET} 新服务器初始化      ${C_GRAY}空机安装/现有环境检查${C_RESET}"
+  say "  ${C_CYAN}1.${C_RESET} 网络代理节点        ${C_GRAY}V2Ray代理${C_RESET}"
+  say "  ${C_CYAN}2.${C_RESET} 服务器性能检测      ${C_GRAY}VPS验机${C_RESET}"
+  say "  ${C_CYAN}3.${C_RESET} 网站与数据          ${C_GRAY}网站/数据库/备份${C_RESET}"
+  say "  ${C_CYAN}4.${C_RESET} 服务器维护与安全    ${C_GRAY}更新/清理/安全${C_RESET}"
+  say "  ${C_CYAN}5.${C_RESET} 新服务器初始化      ${C_GRAY}空机安装/现有环境检查${C_RESET}"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
-  say "${C_GRAY}版本信息进入对应功能后查看；主菜单只保留常用操作。${C_RESET}"
+  say "${C_GRAY}选择模块后再操作；打开菜单本身不修改服务器。${C_RESET}"
 }
 
 m01_verified_current() {
@@ -1389,6 +1389,11 @@ modules_status_readonly() {
   done
 }
 
+show_module_issue() {
+  local module="${1:-当前模块}"
+  say "${C_YELLOW}未完成 · ${module} 操作已返回。${C_RESET}"
+  say "${C_GRAY}请查看上方原因；不自动重试或执行其他模块。${C_RESET}"
+}
 main_menu() {
   local choice rc
   while true; do
@@ -1401,14 +1406,14 @@ main_menu() {
         run_network_node
         rc=$?
         set -e
-        [[ $rc -eq 0 ]] || { say "${C_YELLOW}⚠ 网络节点模块返回退出码 ${rc}。${C_RESET}"; pause_menu; }
+        [[ $rc -eq 0 ]] || { show_module_issue '网络代理节点'; pause_menu; }
         ;;
       2)
         set +e
         run_vps_audit
         rc=$?
         set -e
-        [[ $rc -eq 0 ]] || say "${C_YELLOW}本次检测未完整结束（机器繁忙、超时或证据不足）；请稍后再试，没有修改服务器配置。${C_RESET}"
+        [[ $rc -eq 0 ]] || show_module_issue '服务器性能检测'
         pause_menu
         ;;
       3)
@@ -1416,21 +1421,21 @@ main_menu() {
         run_server_ops
         rc=$?
         set -e
-        [[ $rc -eq 0 ]] || { say "${C_YELLOW}⚠ 网站与数据模块返回退出码 ${rc}。${C_RESET}"; pause_menu; }
+        [[ $rc -eq 0 ]] || { show_module_issue '网站与数据'; pause_menu; }
         ;;
       4)
         set +e
         run_system_care
         rc=$?
         set -e
-        [[ $rc -eq 0 ]] || { say "${C_YELLOW}⚠ 系统维护模块返回退出码 ${rc}。${C_RESET}"; pause_menu; }
+        [[ $rc -eq 0 ]] || { show_module_issue '服务器维护与安全'; pause_menu; }
         ;;
       5)
         set +e
         run_server_init
         rc=$?
         set -e
-        [[ $rc -eq 0 ]] || { say "${C_YELLOW}⚠ 初始化服务器模块返回退出码 ${rc}。${C_RESET}"; pause_menu; }
+        [[ $rc -eq 0 ]] || { show_module_issue '新服务器初始化'; pause_menu; }
         ;;
       0) return 0 ;;
       "") continue ;; # Extra Enter after a returned sub-menu is not a bad choice.
