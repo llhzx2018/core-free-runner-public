@@ -4,47 +4,70 @@ set -Eeuo pipefail
 # P07 V0.1.0 final public distribution readback marker.
 # 公共版本保持简短稳定；内部构建身份仅用于精确校验和工程追溯。
 VERSION="V0.1.0"
-BUILD_ID="0.1.0-m03-release139-noncutover-20261118"
+BUILD_ID="0.1.0-five-module-ux-20261118"
 
 VF_NODE_PUBLIC="V0.1.0"
-VF_NODE_EXPECTED="0.1.0-ux2"
+VF_NODE_EXPECTED="0.1.0-ux3"
 # Legacy M01 installer URL is retained for text/older regression compatibility,
 # but is NEVER executed by this independently upgradable Toolbox route.
 VF_NODE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/vf-node.sh"
+P07_FIVE_UX_RELEASE="p07-all-ux-v0.1.0-20261118"
+P07_THREE_ROUTE_REF="146ecd4a4f8e949d67fb3f8f3efa458df00a8ce5"
+P07_THREE_ROUTE_BLOB="d22f69fe439283d72a5175f058be36e8e2a7d3b1"
+P07_THREE_ROUTE_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${P07_THREE_ROUTE_REF}/installers/p07-three-ux-owner-route.py"
+P07_THREE_INSTALLER_REF="cadbe0b84b9d39a70df7f6863ef6967449f90886"
+P07_THREE_INSTALLER_GIT_BLOB="9fc4ecfab8bca665ccde238f0e40631657205f82"
+P07_THREE_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${P07_THREE_INSTALLER_REF}/installers/p07-three-ux-atomic.py"
+P07_THREE_ASSET_BASE="https://github.com/llhzx2018/core-free-runner-public/releases/download/${P07_FIVE_UX_RELEASE}"
+P07_M01_ZIP="P07-M01-0.1.0-ux3.zip"
+P07_M01_ZIP_SHA256="13e79e7c7a4f1170c74da24e783804c3c2bda06fe6c46b768497694e826b3ed7"
+P07_M01_META_SHA256="b52b2d17095bc9e84567319a71fa19a8822bd6bb696bac3dfccd85d80923d6ab"
+P07_M02_ZIP="P07-M02-2.1.1-ux3.zip"
+P07_M02_ZIP_SHA256="88da5b8219fb7e04d606eb3de998d872747cb05153bdd93c7351b46f957164b4"
+P07_M02_META_SHA256="0c4d646c59b7aa1e8ad23ac37e1c2139b4f29692b446926e5728d94ca079387a"
+P07_M04_ZIP="P07-M04-0.1.0-ux5.zip"
+P07_M04_ZIP_SHA256="2ff45c263f930e258a3c323b6c009e0973531d3f90a2e432a66aed704c9baa7d"
+P07_M04_META_SHA256="370385aab38b4b8f4c069e40ed59fa8d5c6454d65c7982925d0fb123404eb0d7"
 M01_ROOT="/opt/vfops-modules/m01"
 M01_RUNTIME="$M01_ROOT/current/vf-node.sh"
-M01_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/b0fb4c253958de46c4fc207f8872af9b78b77ab0/installers/p07-vf-node-independent-ux2-candidate.sh"
-M01_INSTALLER_BLOB="0919751da9038b6db51a88c7052195becc152e32"
-M01_MANIFEST_SHA256="1f66f642769848e5be0c9a25ccb58a60e97e40fe2eb58a088233a5c129f1cb90"
+M01_INSTALLER_URL="$P07_THREE_INSTALLER_URL"
+M01_INSTALLER_BLOB="$P07_THREE_INSTALLER_GIT_BLOB"
+M01_MANIFEST_SHA256="33a6b63f19ba3a40332a405200df320696bb7fd37e2395cac8d2513475e46934"
 # Historical official source identity stays pinned after a future M01 release.
 M01_BOOTSTRAP_BUILD="0.1.0-rc13"
 M01_BOOTSTRAP_MANIFEST_SHA256="1ca3dc95a5cc6e5aa35c9b7ead415d3b6ea6c6eb9e8307a76310d146ab53c47f"
-M01_PREVIOUS_BUILD="0.1.0-ux1"
-M01_PREVIOUS_MANIFEST_SHA256="56c93541c7fa8386b12769573bd69413a51e3da9f5f4e277a4649e61bbc6cd3d"
+M01_PREVIOUS_BUILD="0.1.0-ux2"
+M01_LEGACY1_BUILD="0.1.0-ux1"
+M01_LEGACY1_MANIFEST_SHA256="56c93541c7fa8386b12769573bd69413a51e3da9f5f4e277a4649e61bbc6cd3d"
+M01_PREVIOUS_MANIFEST_SHA256="1f66f642769848e5be0c9a25ccb58a60e97e40fe2eb58a088233a5c129f1cb90"
 M01_TARGET_MANIFEST_SHA256="$M01_MANIFEST_SHA256"
 
 
 VPS_AUDIT_PUBLIC="V2.1.1"
 VPS_AUDIT_EXPECTED="V2.1.1"
-VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux2"
-VPS_AUDIT_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m01-m02-v0.1.0-original-ux2-20261114/P07-M02-2.1.1-ux2.sh"
-VPS_AUDIT_SHA256="18a7a7dc401772fda7344845b952bc307a46f05443d086ec5e38a1954308587d"
-VPS_AUDIT_PREVIOUS_BUILD="2.1.1-ux1"
-VPS_AUDIT_PREVIOUS_SHA256="7b083e4cf105d40b04b4cbe898fb6b9e1bb7f1ef3385bc1d20829796f6852013"
+VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux3"
+VPS_AUDIT_URL="$P07_THREE_ASSET_BASE/$P07_M02_ZIP"
+VPS_AUDIT_SHA256="88da5b8219fb7e04d606eb3de998d872747cb05153bdd93c7351b46f957164b4"
+VPS_AUDIT_PREVIOUS_BUILD="2.1.1-ux2"
+VPS_AUDIT_LEGACY1_BUILD="2.1.1-ux1"
+VPS_AUDIT_LEGACY1_SHA256="7b083e4cf105d40b04b4cbe898fb6b9e1bb7f1ef3385bc1d20829796f6852013"
+VPS_AUDIT_PREVIOUS_SHA256="18a7a7dc401772fda7344845b952bc307a46f05443d086ec5e38a1954308587d"
 VPS_AUDIT_BOOTSTRAP_BUILD="2.1.0-rc7-field"
 VPS_AUDIT_BOOTSTRAP_SHA256="d1846e751bba5c860c623e3db26641908e27ca43b39cf37016758853b65a952d"
 M02_ROOT="/opt/vfops-modules/m02"  # 独立 VPS 验机版本；不写入 M01/M03/M04/M05
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
-VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release139"
+VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release140"
 VF_SERVER_OPS_INSTALLER_REF="main"
-VF_SERVER_OPS_INSTALLER_BLOB="c878028fd788b4b42158b527a5ed2806af999376"
+VF_SERVER_OPS_INSTALLER_BLOB="dfa22a6563ce361e3c783a802c7eb6617b6267f7"
 # Exact stable P07-M03 runtime manifest; reject a self-edited manifest before execution.
-VF_SERVER_OPS_MANIFEST_BLOB="efdfff0b4348b334bbbc2da26d40280338fc7868"
-VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07-m03-release139-atomic.sh"
-M03_PREVIOUS_BUILD="0.1.0-release138"
-M03_PREVIOUS_MANIFEST_BLOB="2c6ccd51b7e73d3d9db1ec6d37beaa6ce1cdff73"
+VF_SERVER_OPS_MANIFEST_BLOB="239bd543e4f64449ca498c1d67ccb7471abbee66"
+VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07-m03-release140-atomic.sh"
+M03_PREVIOUS_BUILD="0.1.0-release139"
+M03_LEGACY138_BUILD="0.1.0-release138"
+M03_LEGACY138_MANIFEST_BLOB="2c6ccd51b7e73d3d9db1ec6d37beaa6ce1cdff73"
+M03_PREVIOUS_MANIFEST_BLOB="efdfff0b4348b334bbbc2da26d40280338fc7868"
 M03_LEGACY137_BUILD="0.1.0-release137"
 M03_LEGACY137_MANIFEST_BLOB="fc94d7c573a0437517726de22c4ac6ff33e582e7"
 M03_BOOTSTRAP_BUILD="0.1.0-release136"
@@ -62,17 +85,20 @@ SYSTEM_CARE_PUBLIC="V0.1.0"
 SYSTEM_CARE_EXPECTED="0.1.0-rc82"
 SYSTEM_CARE_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care.sh"
 # P07-M04 服务器维护与安全 independent UX3 repaired menu; verified legacy UX2 accepted.
-M04_BUILD_EXPECTED="0.1.0-ux4"
-M04_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-system-care-ux4-isolated.sh"
-M04_INSTALLER_BLOB="b74b9d5fbe6d0fe2fe545d8cdbb1b5b762959617"
-M04_UI_BLOB="bb5882befd5e15962df39ca1388629b45b5d33fc"
+M04_BUILD_EXPECTED="0.1.0-ux5"
+M04_INSTALLER_URL="$P07_THREE_INSTALLER_URL"
+M04_INSTALLER_BLOB="$P07_THREE_INSTALLER_GIT_BLOB"
+M04_UI_BLOB="941015d647929b69449d047cff7c78724915d3f4"
 M04_BOOTSTRAP_BUILD="0.1.0-rc83"
 M04_BOOTSTRAP_UI_BLOB="f140f1158351f9dce2e9f9159611af57047424b1"
 M04_BOOTSTRAP_MANIFEST_BLOB="f82c9e42297c45a54ec6dc2fc4d705cad316dfce"
-M04_TARGET_MANIFEST_BLOB="4a20bbe1f1c7622ee54a10761f52fe719130024a"
-M04_PREVIOUS_BUILD="0.1.0-ux3"
+M04_TARGET_MANIFEST_BLOB="4976e9d75acf8a258a1294e36f88f44ca0fa6519"
+M04_PREVIOUS_BUILD="0.1.0-ux4"
+M04_LEGACY3_BUILD="0.1.0-ux3"
+M04_LEGACY3_MANIFEST_BLOB="f597bb586dd29059210befea0e09d93d2d87cb41"
+M04_LEGACY3_UI_BLOB="bb5882befd5e15962df39ca1388629b45b5d33fc"
 M04_PREVIOUS_UI_BLOB="bb5882befd5e15962df39ca1388629b45b5d33fc"
-M04_PREVIOUS_MANIFEST_BLOB="f597bb586dd29059210befea0e09d93d2d87cb41"
+M04_PREVIOUS_MANIFEST_BLOB="4a20bbe1f1c7622ee54a10761f52fe719130024a"
 M04_LEGACY2_BUILD="0.1.0-ux2"
 M04_LEGACY2_UI_BLOB="bb5882befd5e15962df39ca1388629b45b5d33fc"
 M04_LEGACY2_MANIFEST_BLOB="965aa666b796c8502967a84ccb060695425538e6"
@@ -83,7 +109,8 @@ M04_RUNTIME="$M04_ROOT/current/vf-system-care.sh"
 # P07-M05 新服务器初始化 has its OWN runtime/build and no M03/M04 installer calls.
 # Exact published M05 artifact: no fallback to M03/M04 installers.
 # M05-only official build; no other module or Production writes.
-M05_BUILD_EXPECTED="0.1.0-m05-official-db-choice-ux6"
+M05_BUILD_EXPECTED="0.1.0-m05-ux7-terminal-design"
+M05_PREVIOUS_OFFICIAL_BUILD="0.1.0-m05-official-db-choice-ux6"
 M05_UPGRADE_FROM="0.1.0-m05-candidate2"
 M05_UPGRADE_FROM2="0.1.0-m05-existing-safe1"
 M05_UPGRADE_FROM3="0.1.0-m05-clean-host-guard1"
@@ -100,8 +127,8 @@ M05_ROOT="/opt/vfops-modules/m05"
 M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"
 # M05 is published as an immutable reviewed public Release ZIP.
 # Never install M03/M04 in its place and verify SHA-256 before extraction.
-M05_BUNDLE_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-official-db-ux6-20261114/P07-M05-0.1.0-m05-official-db-choice-ux6.zip"
-M05_BUNDLE_SHA256="bdaf59039d63bada13317e874e7653f728d8c64ae77b38f0857ddeb6dcbc26a5"
+M05_BUNDLE_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-all-ux-v0.1.0-20261118/P07-M05-0.1.0-m05-ux7-terminal-design.zip"
+M05_BUNDLE_SHA256="24e201a701bf55ec5b1253c4a11950e620faf891c30ddd439fe45a13ba570266"
 # Immutable private Owner Trial .run identity, never a public download source.
 M05_OFFLINE_TRIAL_SHA256="e42b6b3c59719f6ec189e4c62b7cfc54385aaa6e566c8f92ca5306246f022bbb"
 M05_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/35e3fbcb1e8c40042558f9f163e4215570074793/installers/p07-m05-atomic.py"
@@ -158,6 +185,7 @@ m01_verified_current() {
   case "$installed" in
     "$M01_BOOTSTRAP_BUILD") expected_manifest="$M01_BOOTSTRAP_MANIFEST_SHA256" ;;
     "$M01_PREVIOUS_BUILD") expected_manifest="$M01_PREVIOUS_MANIFEST_SHA256" ;;
+    "$M01_LEGACY1_BUILD") expected_manifest="$M01_LEGACY1_MANIFEST_SHA256" ;;
     "$VF_NODE_EXPECTED") expected_manifest="$M01_TARGET_MANIFEST_SHA256" ;;
     *) return 1 ;;
   esac
@@ -179,54 +207,7 @@ m01_verified_current() {
 }
 
 ensure_m01_current() {
-  local upgrade_from='' answer=''
-  if m01_verified_current; then
-    upgrade_from="$(readlink "$M01_ROOT/current")"
-    if [[ "$upgrade_from" == "releases/$VF_NODE_EXPECTED" ]]; then return 0; fi
-    say "P07-M01 网络代理节点（V2Ray）：发现已验证旧版 ${upgrade_from#releases/}；目标版本 $VF_NODE_EXPECTED。"
-    say "仅升级本模块管理文件；不安装、停止或更换 V2Ray 节点。"
-    if [[ ! -t 0 || ! -t 1 ]]; then
-      say '非交互模式不自动升级 P07-M01；当前模块及其他四模块保持原样。'
-      return 7
-    fi
-    printf '确认升级 P07-M01 网络代理节点管理器？[y/N]：'
-    read -r answer || answer=''
-    [[ "$answer" =~ ^[Yy]$ ]] || { say '已取消，本次没有升级。'; return 7; }
-  elif [[ -e "$M01_ROOT/current" || -L "$M01_ROOT/current" ]]; then
-    say "${C_RED}P07-M01 网络代理节点（V2Ray）：已安装模块身份异常；拒绝用旧版回退或覆盖，请从本模块更新器修复。${C_RESET}" >&2
-    return 13
-  fi
-  if [[ "$(id -u)" != "0" ]]; then
-    say "${C_RED}P07-M01 网络代理节点（V2Ray）：独立管理器首次安装/升级需要 root。${C_RESET}" >&2
-    return 3
-  fi
-  for tool in curl sha1sum sha256sum mktemp; do
-    command -v "$tool" >/dev/null 2>&1 || {
-      say "${C_RED}P07-M01 网络代理节点（V2Ray）：缺少 $tool，其他模块保持不变。${C_RESET}" >&2
-      return 3
-    }
-  done
-  local tmp actual rc
-  tmp="$(mktemp -t p07-m01-module-installer.XXXXXXXX)" || return 13
-  chmod 0600 "$tmp"
-  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-time 60 "$M01_INSTALLER_URL" -o "$tmp"; then
-    rm -f "$tmp"
-    return 4
-  fi
-  actual="$(p07_git_blob_sha1 "$tmp" 2>/dev/null || true)"
-  if [[ "$actual" != "$M01_INSTALLER_BLOB" ]]; then
-    rm -f "$tmp"
-    say "${C_RED}P07-M01 网络代理节点（V2Ray）：管理器安装文件身份不匹配。${C_RESET}" >&2
-    return 6
-  fi
-  set +e
-  bash "$tmp" install
-  rc=$?
-  set -e
-  rm -f "$tmp"
-  [[ "$rc" == 0 ]] || return "$rc"
-  m01_verified_current || return 13
-  [[ "$(readlink "$M01_ROOT/current")" == "releases/$VF_NODE_EXPECTED" ]] || return 13
+  p07_three_ux_route P07-M01
 }
 
 run_network_node() {
@@ -247,6 +228,55 @@ sha256_file() {
   fi
 }
 
+# M02 UX3 uses a complete, SHA-verified module manifest (not the ZIP's
+# checksum as a raw vps-audit.sh digest). All bytes are checked before
+# executing even --version from the installed archive.
+m02_verified_new_release() {
+  local root="$1"
+  [[ -d "$root" && -f "$root/MODULE_MANIFEST.json" &&
+     ! -L "$root/MODULE_MANIFEST.json" &&
+     -f "$root/VERSION" && ! -L "$root/VERSION" &&
+     -f "$root/vps-audit.sh" && ! -L "$root/vps-audit.sh" ]] || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -B - "$root" "$P07_M02_META_SHA256" "$VPS_AUDIT_BUILD_EXPECTED" <<'PY'
+import hashlib,json,pathlib,sys
+root=pathlib.Path(sys.argv[1])
+expected_meta=sys.argv[2]
+expected_build=sys.argv[3]
+try:
+    record=root/"MODULE_MANIFEST.json"
+    raw=record.read_bytes()
+    if hashlib.sha256(raw).hexdigest()!=expected_meta:
+        raise ValueError("untrusted manifest")
+    meta=json.loads(raw)
+    if (meta.get("schema")!="vf.p07.ux.module-bundle.v1" or
+        meta.get("module_id")!="P07-M02" or
+        meta.get("module_build_id")!=expected_build or
+        meta.get("entrypoint")!="vps-audit.sh" or
+        meta.get("installation_isolation")!="P07-M02_ONLY"):
+        raise ValueError("module identity")
+    files=meta.get("files")
+    if not isinstance(files,dict) or set(files)!={"vps-audit.sh","VERSION"}:
+        raise ValueError("unexpected module members")
+    found=set()
+    for member in root.rglob("*"):
+        if member.is_symlink() or not member.is_file():
+            raise ValueError("link, special node or directory")
+        found.add(member.relative_to(root).as_posix())
+    if found!={"MODULE_MANIFEST.json","vps-audit.sh","VERSION"}:
+        raise ValueError("undeclared runtime file")
+    for name,digest in files.items():
+        if not isinstance(digest,str) or len(digest)!=64:
+            raise ValueError("bad digest")
+        if hashlib.sha256((root/name).read_bytes()).hexdigest()!=digest:
+            raise ValueError("runtime tamper")
+    if (root/"VERSION").read_text().strip()!=expected_build:
+        raise ValueError("wrong version")
+except (OSError,ValueError,TypeError,KeyError,UnicodeError):
+    raise SystemExit(13)
+PY
+}
+
 m02_verified_current() {
   local current="$M02_ROOT/current" script="$M02_ROOT/current/vps-audit.sh"
   local installed='' link actual version build
@@ -255,6 +285,13 @@ m02_verified_current() {
   [[ "$link" =~ ^releases/([A-Za-z0-9._-]+)$ ]] || return 1
   installed="${BASH_REMATCH[1]}"
   [[ -f "$script" && ! -L "$script" ]] || return 1
+  if [[ "$installed" == "$VPS_AUDIT_BUILD_EXPECTED" ]]; then
+    m02_verified_new_release "$current" || return 1
+    version="$(NO_COLOR=1 bash "$script" --version 2>/dev/null | awk '{print $NF}' || true)"
+    build="$(NO_COLOR=1 bash "$script" --build-id 2>/dev/null || true)"
+    [[ "$version" == "$VPS_AUDIT_EXPECTED" && "$build" == "$installed" ]]
+    return
+  fi
   actual="$(sha256_file "$script" 2>/dev/null || true)"
   [[ "$actual" =~ ^[a-f0-9]{64}$ ]] || return 1
   # Keep the existing official no-manifest install valid after a later update.
@@ -263,7 +300,7 @@ m02_verified_current() {
   case "$installed" in
     "$VPS_AUDIT_BOOTSTRAP_BUILD") required_sha="$VPS_AUDIT_BOOTSTRAP_SHA256" ;;
     "$VPS_AUDIT_PREVIOUS_BUILD") required_sha="$VPS_AUDIT_PREVIOUS_SHA256" ;;
-    "$VPS_AUDIT_BUILD_EXPECTED") required_sha="$VPS_AUDIT_SHA256" ;;
+    "$VPS_AUDIT_LEGACY1_BUILD") required_sha="$VPS_AUDIT_LEGACY1_SHA256" ;;
     *) return 1 ;;
   esac
   [[ "$actual" == "$required_sha" ]] || return 1
@@ -282,106 +319,7 @@ m02_verified_current() {
 }
 
 ensure_m02_current() {
-  local upgrade_from='' answer=''
-  if m02_verified_current; then
-    upgrade_from="$(readlink "$M02_ROOT/current")"
-    if [[ "$upgrade_from" == "releases/$VPS_AUDIT_BUILD_EXPECTED" ]]; then return 0; fi
-    say "P07-M02 服务器性能检测（VPS 验机）：发现已验证旧版 ${upgrade_from#releases/}；目标版本 $VPS_AUDIT_BUILD_EXPECTED。"
-    say "只更新本模块检测脚本；此时不运行 fio、网络或磁盘测速。"
-    if [[ ! -t 0 || ! -t 1 ]]; then
-      say '非交互模式不自动升级 P07-M02；当前模块及其他四模块保持原样。'
-      return 7
-    fi
-    printf '确认升级 P07-M02 服务器性能检测？[y/N]：'
-    read -r answer || answer=''
-    [[ "$answer" =~ ^[Yy]$ ]] || { say '已取消，本次没有升级。'; return 7; }
-  elif [[ -e "$M02_ROOT/current" || -L "$M02_ROOT/current" ]]; then
-    say "${C_RED}P07-M02 服务器性能检测（VPS 验机）：现有版本或文件校验异常；拒绝自动回退。${C_RESET}" >&2
-    return 13
-  fi
-  if [[ "$(id -u)" != "0" ]]; then
-    say "${C_RED}P07-M02 服务器性能检测：独立模块首次安装或升级需要 root；未修改其他模块。${C_RESET}" >&2
-    return 3
-  fi
-  for cmd in curl flock sha256sum mktemp; do
-    command -v "$cmd" >/dev/null 2>&1 || {
-      say "${C_RED}P07-M02 服务器性能检测：缺少命令 $cmd；没有安装其他模块。${C_RESET}" >&2
-      return 3
-    }
-  done
-  [[ ! -L /opt/vfops-modules && ! -L "$M02_ROOT" ]] || return 13
-  mkdir -p "$M02_ROOT/releases" || return 13
-  local fd current dest tmp stage link version build actual
-  exec {fd}>"$M02_ROOT/.install.lock" || return 13
-  flock -x "$fd" || return 13
-  if m02_verified_current && [[ "$(readlink "$M02_ROOT/current")" == "releases/$VPS_AUDIT_BUILD_EXPECTED" ]]; then return 0; fi
-  if [[ -n "$upgrade_from" ]]; then
-    m02_verified_current && [[ "$(readlink "$M02_ROOT/current")" == "$upgrade_from" ]] || return 13
-  elif [[ -e "$M02_ROOT/current" || -L "$M02_ROOT/current" ]]; then
-    return 13
-  fi
-  current="$M02_ROOT/current"
-  dest="$M02_ROOT/releases/$VPS_AUDIT_BUILD_EXPECTED"
-  if [[ -e "$current" || -L "$current" ]]; then
-    [[ -L "$current" ]] || return 13
-    [[ "$(readlink "$current")" =~ ^releases/[A-Za-z0-9._-]+$ ]] || return 13
-  fi
-  # Existing immutable release with wrong bytes must never be overwritten
-  # or 'repaired' by a different module's installer.
-  if [[ -e "$dest" || -L "$dest" ]]; then
-    # A verified UX2 tree may already exist after an Owner-initiated rollback.
-    # Never overwrite an unknown tree, and never trust a self-signed manifest.
-    if [[ -d "$dest" && ! -L "$dest" &&
-          -f "$dest/vps-audit.sh" && ! -L "$dest/vps-audit.sh" &&
-          -f "$dest/MANIFEST.sha256" && ! -L "$dest/MANIFEST.sha256" &&
-          "$(find "$dest" -mindepth 1 -maxdepth 1 | wc -l)" -eq 2 &&
-          "$(sha256_file "$dest/vps-audit.sh" 2>/dev/null || true)" == "$VPS_AUDIT_SHA256" &&
-          "$(cat "$dest/MANIFEST.sha256")" == "$VPS_AUDIT_SHA256  vps-audit.sh" &&
-          "$(NO_COLOR=1 bash "$dest/vps-audit.sh" --build-id 2>/dev/null || true)" == "$VPS_AUDIT_BUILD_EXPECTED" &&
-          "$(NO_COLOR=1 bash "$dest/vps-audit.sh" --version 2>/dev/null | awk '{print $NF}' || true)" == "$VPS_AUDIT_EXPECTED" ]]; then
-      link="$M02_ROOT/.current-reapply-$"
-      [[ ! -e "$link" && ! -L "$link" ]] || return 13
-      ln -s "releases/$VPS_AUDIT_BUILD_EXPECTED" "$link" || return 13
-      mv -Tf -- "$link" "$current" || { rm -f -- "$link"; return 13; }
-      m02_verified_current || return 13
-      say "${C_GREEN}P07-M02 服务器性能检测：已切回校验通过的正式新版；其他模块未操作。${C_RESET}"
-      return 0
-    fi
-    say "${C_RED}P07-M02 服务器性能检测：已有候选身份未通过校验，已保护原文件。${C_RESET}" >&2
-    return 13
-  fi
-  tmp="$(mktemp -t p07-m02-download.XXXXXXXX)" || return 13
-  chmod 0600 "$tmp"
-  if ! curl -fsSL --proto '=https' --tlsv1.2 --max-time 90 "$VPS_AUDIT_URL" -o "$tmp"; then
-    rm -f "$tmp"; return 4
-  fi
-  actual="$(sha256_file "$tmp" 2>/dev/null || true)"
-  if [[ "$actual" != "$VPS_AUDIT_SHA256" ]]; then
-    rm -f "$tmp"; return 6
-  fi
-  version="$(NO_COLOR=1 bash "$tmp" --version 2>/dev/null | awk '{print $NF}' || true)"
-  build="$(NO_COLOR=1 bash "$tmp" --build-id 2>/dev/null || true)"
-  if [[ "$version" != "$VPS_AUDIT_EXPECTED" || "$build" != "$VPS_AUDIT_BUILD_EXPECTED" ]]; then
-    rm -f "$tmp"; return 7
-  fi
-  stage="$M02_ROOT/releases/.stage-$$"
-  link="$M02_ROOT/.current-$$"
-  [[ ! -e "$stage" && ! -L "$stage" && ! -e "$link" && ! -L "$link" ]] || { rm -f "$tmp"; return 13; }
-  mkdir -m 0755 "$stage" || { rm -f "$tmp"; return 13; }
-  if ! install -m 0755 -- "$tmp" "$stage/vps-audit.sh"; then
-    rm -f "$tmp"; rm -rf -- "$stage"; return 13
-  fi
-  printf '%s  vps-audit.sh\n' "$actual" > "$stage/MANIFEST.sha256" || { rm -f "$tmp"; rm -rf -- "$stage"; return 13; }
-  chmod 0644 "$stage/MANIFEST.sha256"
-  rm -f "$tmp"
-  if ! mv -T -- "$stage" "$dest"; then rm -rf -- "$stage"; return 13; fi
-  ln -s "releases/$VPS_AUDIT_BUILD_EXPECTED" "$link" || return 13
-  mv -Tf -- "$link" "$current" || return 13
-  if ! m02_verified_current; then
-    say "${C_RED}P07-M02 服务器性能检测：本模块原子升级后回读失败。${C_RESET}" >&2
-    return 13
-  fi
-  say "${C_GREEN}P07-M02 服务器性能检测：独立版本已就绪。${C_RESET}"
+  p07_three_ux_route P07-M02
 }
 
 rollback_m02_current() {
@@ -407,23 +345,26 @@ rollback_m02_current() {
   [[ "$old" =~ ^releases/[A-Za-z0-9._-]+$ &&
      -d "$M02_ROOT/$old" && ! -L "$M02_ROOT/$old" ]] || return 13
   target="$M02_ROOT/releases/$build"
-  [[ -d "$target" && ! -L "$target" &&
-     -f "$target/MANIFEST.sha256" && ! -L "$target/MANIFEST.sha256" &&
-     -f "$target/vps-audit.sh" && ! -L "$target/vps-audit.sh" ]] || return 13
-  local manifest_line line_count
-  manifest_line="$(cat "$target/MANIFEST.sha256")" || return 13
-  line_count="$(wc -l < "$target/MANIFEST.sha256")" || return 13
-  [[ "$line_count" == 1 ]] || return 13
-  actual="$(sha256_file "$target/vps-audit.sh" 2>/dev/null || true)"
-  [[ "$actual" =~ ^[a-f0-9]{64}$ &&
-     "$manifest_line" == "$actual  vps-audit.sh" ]] || return 13
+  [[ -d "$target" && ! -L "$target" ]] || return 13
+  if [[ "$build" == "$VPS_AUDIT_BUILD_EXPECTED" ]]; then
+    m02_verified_new_release "$target" || return 13
+  else
+    [[ -f "$target/MANIFEST.sha256" && ! -L "$target/MANIFEST.sha256" &&
+       -f "$target/vps-audit.sh" && ! -L "$target/vps-audit.sh" ]] || return 13
+    local manifest_line line_count
+    manifest_line="$(cat "$target/MANIFEST.sha256")" || return 13
+    line_count="$(wc -l < "$target/MANIFEST.sha256")" || return 13
+    [[ "$line_count" == 1 ]] || return 13
+    actual="$(sha256_file "$target/vps-audit.sh" 2>/dev/null || true)"
+    [[ "$actual" =~ ^[a-f0-9]{64}$ &&
+       "$manifest_line" == "$actual  vps-audit.sh" ]] || return 13
+  fi
   version="$(NO_COLOR=1 bash "$target/vps-audit.sh" --version 2>/dev/null | awk '{print $NF}' || true)"
   reported="$(NO_COLOR=1 bash "$target/vps-audit.sh" --build-id 2>/dev/null || true)"
   [[ "$version" =~ ^V[0-9]+\.[0-9]+\.[0-9]+$ &&
      "$reported" == "$build" ]] || return 13
   if [[ "$build" == "$VPS_AUDIT_BUILD_EXPECTED" ]]; then
-    [[ "$actual" == "$VPS_AUDIT_SHA256" &&
-       "$version" == "$VPS_AUDIT_EXPECTED" ]] || return 13
+    [[ "$version" == "$VPS_AUDIT_EXPECTED" ]] || return 13
   fi
   if [[ "$old" != "releases/$build" ]]; then
     link="$M02_ROOT/.current-rollback-$$"
@@ -491,6 +432,7 @@ m03_verified_current() {
   case "$installed" in
     "$VF_SERVER_OPS_BUILD_EXPECTED") trusted_manifest="$VF_SERVER_OPS_MANIFEST_BLOB" ;;
     "$M03_PREVIOUS_BUILD") trusted_manifest="$M03_PREVIOUS_MANIFEST_BLOB" ;;
+    "$M03_LEGACY138_BUILD") trusted_manifest="$M03_LEGACY138_MANIFEST_BLOB" ;;
     "$M03_LEGACY137_BUILD") trusted_manifest="$M03_LEGACY137_MANIFEST_BLOB" ;;
     "$M03_BOOTSTRAP_BUILD") trusted_manifest="$M03_BOOTSTRAP_MANIFEST_BLOB" ;;
     "$M03_LEGACY135_BUILD") trusted_manifest="$M03_LEGACY135_MANIFEST_BLOB" ;;
@@ -527,7 +469,7 @@ ensure_server_ops_current() {
   if m03_verified_current; then
     prior="$(cat /opt/vf-server-ops/BUILD_ID)"
     if [[ "$prior" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]]; then return 0; fi
-    [[ "$prior" == "$M03_PREVIOUS_BUILD" || "$prior" == "$M03_LEGACY137_BUILD" || "$prior" == "$M03_BOOTSTRAP_BUILD" || "$prior" == "$M03_LEGACY135_BUILD" || "$prior" == "$M03_LEGACY115_BUILD" ]] || return 13
+    [[ "$prior" == "$M03_PREVIOUS_BUILD" || "$prior" == "$M03_LEGACY138_BUILD" || "$prior" == "$M03_LEGACY137_BUILD" || "$prior" == "$M03_BOOTSTRAP_BUILD" || "$prior" == "$M03_LEGACY135_BUILD" || "$prior" == "$M03_LEGACY115_BUILD" ]] || return 13
     say "P07-M03 网站与数据：已核验旧正式版 $prior，新版本 $VF_SERVER_OPS_BUILD_EXPECTED。"
     say '仅升级本模块程序；保留上一个正式运行时用于回滚，不操作网站、数据库或 DNS。'
     if [[ ! -t 0 || ! -t 1 ]]; then
@@ -1010,6 +952,12 @@ ensure_m05_current() {
     installed="$(readlink "$M05_ROOT/current")"
     case "$installed" in
       "releases/$M05_BUILD_EXPECTED") return 0 ;;
+      "releases/$M05_PREVIOUS_OFFICIAL_BUILD")
+        say "P07-M05 新服务器初始化：发现官方旧版 $M05_PREVIOUS_OFFICIAL_BUILD，目标为 $M05_BUILD_EXPECTED。"
+        if [[ ! -t 0 || ! -t 1 ]]; then say "请在交互式 SSH 中确认升级。"; return 7; fi
+        printf "确认仅升级 P07-M05 新服务器初始化？[y/N]："
+        read -r upgrade_response || upgrade_response=""
+        [[ "$upgrade_response" =~ ^[Yy]$ ]] || return 7 ;;
       "releases/$M05_UPGRADE_FROM"|"releases/$M05_UPGRADE_FROM2"|"releases/$M05_UPGRADE_FROM3"|"releases/$M05_UPGRADE_FROM4"|"releases/$M05_UPGRADE_FROM5"|"releases/$M05_UPGRADE_FROM6"|"releases/$M05_UPGRADE_FROM7"|"releases/$M05_UPGRADE_FROM8"|"releases/$M05_UPGRADE_FROM9"|"releases/$M05_UPGRADE_FROM10"|"releases/$M05_UPGRADE_FROM11"|"releases/$M05_UPGRADE_FROM12")
         upgrade_from="${installed#releases/}"
         say "${C_CYAN}P07-M05 新服务器初始化：发现已验证的旧版 $upgrade_from。${C_RESET}"
@@ -1107,7 +1055,7 @@ p07_owned_helper() {
      "$verb" == rollback &&
      "$(id -u)" == 0 ]] || return 13
   case "$module:$kind" in
-    P07-M01:bash|P07-M04:bash|P07-M05:python3) ;;
+    P07-M01:bash|P07-M04:bash|P07-M01:python3|P07-M04:python3|P07-M05:python3) ;;
     *) return 13 ;;
   esac
   for cmd in curl sha1sum mktemp; do command -v "$cmd" >/dev/null 2>&1 || return 3; done
@@ -1126,7 +1074,11 @@ p07_owned_helper() {
   fi
   set +e
   if [[ "$kind" == python3 ]]; then
-    python3 -B "$tmp" rollback "$build" --confirm "$confirm"
+    if [[ "$module" == P07-M05 ]]; then
+      python3 -B "$tmp" rollback "$build" --confirm "$confirm"
+    else
+      python3 -B "$tmp" "$module" rollback "$build" --confirm "$confirm"
+    fi
   else
     bash "$tmp" rollback "$build" "$confirm"
   fi
@@ -1266,6 +1218,9 @@ m04_verified_current() {
     "$M04_PREVIOUS_BUILD")
       expected_ui="$M04_PREVIOUS_UI_BLOB"
       expected_manifest="$M04_PREVIOUS_MANIFEST_BLOB" ;;
+    "$M04_LEGACY3_BUILD")
+      expected_ui="$M04_LEGACY3_UI_BLOB"
+      expected_manifest="$M04_LEGACY3_MANIFEST_BLOB" ;;
     "$M04_LEGACY2_BUILD")
       expected_ui="$M04_LEGACY2_UI_BLOB"
       expected_manifest="$M04_LEGACY2_MANIFEST_BLOB" ;;
@@ -1298,59 +1253,44 @@ m04_verified_current() {
 }
 
 ensure_m04_current() {
-  local upgrade_from='' answer=''
-  if m04_verified_current; then
-    upgrade_from="$(readlink "$M04_ROOT/current")"
-    if [[ "$upgrade_from" == "releases/$M04_BUILD_EXPECTED" ]]; then return 0; fi
-    say "P07-M04 服务器维护与安全：发现已验证旧版 ${upgrade_from#releases/}；目标版本 $M04_BUILD_EXPECTED。"
-    say "只更新本模块程序，不运行系统升级、清理或服务器重启。"
-    if [[ ! -t 0 || ! -t 1 ]]; then
-      say '非交互模式不自动升级 P07-M04；当前模块及其他四模块保持原样。'
-      return 7
-    fi
-    printf '确认升级 P07-M04 服务器维护与安全？[y/N]：'
-    read -r answer || answer=''
-    [[ "$answer" =~ ^[Yy]$ ]] || { say '已取消，本次没有升级。'; return 7; }
-  elif [[ -e "$M04_ROOT/current" || -L "$M04_ROOT/current" ]]; then
-    say "${C_RED}P07-M04 服务器维护与安全：现有版本文件验收失败，拒绝退回旧版。${C_RESET}" >&2
-    return 13
-  fi
-  if [[ "$(id -u)" != "0" ]]; then
-    say "${C_RED}P07-M04 服务器维护与安全：首次独立安装需要 root。${C_RESET}" >&2
-    return 3
-  fi
-  for cmd in curl sha1sum mktemp; do
-    command -v "$cmd" >/dev/null 2>&1 || {
-      say "${C_RED}P07-M04 服务器维护与安全：缺少 $cmd，没有升级任何模块。${C_RESET}" >&2
-      return 3
-    }
-  done
-  local tmp actual rc
-  tmp="$(mktemp -t p07-m04-installer.XXXXXXXX)" || return 13
-  chmod 0600 "$tmp"
-  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location --max-time 60 "$M04_INSTALLER_URL" -o "$tmp"; then
-    rm -f "$tmp"; return 4
-  fi
-  actual="$(p07_git_blob_sha1 "$tmp" 2>/dev/null || true)"
-  if [[ "$actual" != "$M04_INSTALLER_BLOB" ]]; then
-    rm -f "$tmp"
-    say "${C_RED}P07-M04 服务器维护与安全：独立安装器文件校验失败。${C_RESET}" >&2
-    return 6
-  fi
-  set +e
-  bash "$tmp" install
-  rc=$?
-  set -e
-  rm -f "$tmp"
-  [[ "$rc" -eq 0 ]] || return "$rc"
-  m04_verified_current || return 13
-  [[ "$(readlink "$M04_ROOT/current")" == "releases/$M04_BUILD_EXPECTED" ]] || return 13
+  p07_three_ux_route P07-M04
 }
 
 run_system_care() {
   screen_clear
   ensure_m04_current || return $?
   bash "$M04_RUNTIME" menu
+}
+
+# Independent official UX route for M01/M02/M04. Download verified immutable
+# Python gate only after Owner chooses that module, never during menu startup.
+# This uses the same publicly tested SHA-pinned atomic installer for all three.
+p07_three_ux_route() {
+  local module="$1" script="" digest="" rc=0
+  case "$module" in P07-M01|P07-M02|P07-M04) ;; *) return 13 ;; esac
+  for cmd in curl sha1sum python3 mktemp; do
+    command -v "$cmd" >/dev/null 2>&1 || { say "$module：缺少 $cmd，未执行操作。" >&2; return 3; }
+  done
+  script="$(mktemp -t p07-three-ux-owner-route.XXXXXXXX)" || return 13
+  chmod 0600 "$script"
+  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+      --location --max-time 60 "$P07_THREE_ROUTE_URL" -o "$script"; then
+    rm -f "$script"
+    say "$module：官方升级入口无法下载；原模块保持不变。" >&2
+    return 4
+  fi
+  digest="$(p07_git_blob_sha1 "$script" 2>/dev/null || true)"
+  if [[ "$digest" != "$P07_THREE_ROUTE_BLOB" ]]; then
+    rm -f "$script"
+    say "$module：官方升级入口身份不符，已停止。" >&2
+    return 6
+  fi
+  set +e
+  python3 -B "$script" "$module"
+  rc=$?
+  set -e
+  rm -f "$script"
+  return "$rc"
 }
 
 # Read-only reporting only. No module installers/CLI are executed and no
@@ -1450,7 +1390,7 @@ case "${1:-}" in
     if [[ "$2" == "$M01_BOOTSTRAP_BUILD" ]]; then
       p07_owned_helper P07-M01 "https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/adf4d8cc0db69255fb4a6aff58857561a0652bf6/installers/p07-vf-node-independent-rc13.sh" "8313adef7dd235b645fc815a7bded933fc289f82" bash rollback "$2" "$3"
     else
-      p07_owned_helper P07-M01 "$M01_INSTALLER_URL" "$M01_INSTALLER_BLOB" bash rollback "$2" "$3"
+      p07_owned_helper P07-M01 "$M01_INSTALLER_URL" "$M01_INSTALLER_BLOB" python3 rollback "$2" "$3"
     fi ;;
 
   --rollback-m02) [[ "$#" == 3 ]] || exit 13; rollback_m02_current "$2" "$3" ;;
@@ -1460,7 +1400,7 @@ case "${1:-}" in
     if [[ "$2" == "$M04_BOOTSTRAP_BUILD" ]]; then
       p07_owned_helper P07-M04 "https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/75c7336b8467114f8bc3396dc06144e48275a39a/installers/p07-system-care-rc83-isolated.sh" "d39cef5d0915a99753d688f10fb1dbe74c0dac98" bash rollback "$2" "$3"
     else
-      p07_owned_helper P07-M04 "$M04_INSTALLER_URL" "$M04_INSTALLER_BLOB" bash rollback "$2" "$3"
+      p07_owned_helper P07-M04 "$M04_INSTALLER_URL" "$M04_INSTALLER_BLOB" python3 rollback "$2" "$3"
     fi ;;
 
   --rollback-m05) [[ "$#" == 3 ]] || exit 13; p07_owned_helper P07-M05 "$M05_INSTALLER_URL" "$M05_INSTALLER_BLOB" python3 rollback "$2" "$3" ;;
@@ -1487,7 +1427,7 @@ case "${1:-}" in
 2. 服务器性能检测        VPS验机     ${VPS_AUDIT_PUBLIC}
 3. 网站与数据            网站/数据库/备份  ${VF_SERVER_OPS_PUBLIC}
 4. 服务器维护与安全      更新/清理/安全    ${SYSTEM_CARE_PUBLIC}
-5. 新服务器初始化        系统更新/CloudPanel/数据库选择  V0.1.0（独立模块）
+5. 新服务器初始化        空机安装/现有环境检查  V0.1.0（独立模块）
 
 说明：五模块独立安装和升级；仅选择本模块才按需下载核验发行资产。
 P07-M05 检查旧面板/容器/软件残留；非干净空机不会自动安装或清空业务。

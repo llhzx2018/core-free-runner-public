@@ -52,9 +52,12 @@ class P07Official139(unittest.TestCase):
         self.assertIn("RUNTIME_BLOB='" + MANIFEST + "'", wrapper)
         self.assertIn("INSTALLER_BLOB='c00812cf9bb3452dc4a295d635afd3624e0a3b01'", wrapper)
         self.assertIn("releases/assets/762286729", wrapper)
-        self.assertIn('VF_SERVER_OPS_BUILD_EXPECTED="' + BUILD + '"', toolbox)
-        self.assertIn("installers/p07-m03-release139-atomic.sh", toolbox)
-        self.assertIn('M03_PREVIOUS_BUILD="0.1.0-release138"', toolbox)
+        # Historical release139 ZIP and wrapper remain immutable.
+        # The separately released current Toolbox now targets release140.
+        self.assertIn('VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release140"', toolbox)
+        self.assertIn('M03_PREVIOUS_BUILD="0.1.0-release139"', toolbox)
+        self.assertIn("installers/p07-m03-release140-atomic.sh", toolbox)
+        self.assertIn('M03_LEGACY138_BUILD="0.1.0-release138"', toolbox)
         self.assertIn('M03_LEGACY137_BUILD="0.1.0-release137"', toolbox)
         self.assertIn('M03_BOOTSTRAP_BUILD="0.1.0-release136"', toolbox)
         self.assertIn('M03_LEGACY135_BUILD="0.1.0-release135"', toolbox)

@@ -24,14 +24,23 @@ class ToolboxTerminalUX(unittest.TestCase):
         os.close(slave)
         out=bytearray()
         try:
-            os.write(master,data)
+            if data!=b"0\n":
+                raise AssertionError("only safe zero-exit PTY input allowed")
+            sent=False
             end=time.monotonic()+8
             while time.monotonic()<end:
                 readable,_,_=select.select([master],[],[],0.1)
                 if readable:
                     try: out.extend(os.read(master,65536))
                     except OSError: break
+                    if not sent and "请选择 [0-5]：".encode("utf-8") in out:
+                        # Bash prints the prompt just before entering read;
+                        # writing beforehand can race with shell TTY setup.
+                        time.sleep(0.08)
+                        os.write(master,data)
+                        sent=True
                 if proc.poll() is not None: break
+            self.assertTrue(sent,"menu did not show owner prompt")
             self.assertIsNotNone(proc.poll(),"no-write menu hung")
             self.assertEqual(proc.wait(timeout=1),0)
             return out.decode("utf-8","replace")
