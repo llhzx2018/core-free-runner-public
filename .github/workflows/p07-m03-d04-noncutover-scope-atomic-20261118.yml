@@ -1,0 +1,170 @@
+name: P07 M03 D04 release137 non-cutover exact source + atomic gate
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-m03-d04-noncutover-scope-atomic-20261118.yml'
+permissions:
+  contents: read
+jobs:
+  exact-release137-fault-rollback:
+    if: github.event.action == 'opened' || github.event.action == 'synchronize' || github.event.action == 'reopened'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Checkout registered public runner temporary worktree
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Transient private P07 exact source checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: d678ec878a74b3179df7a20a5cfa6ac7834bb48b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: .p07-private
+      - name: Reuse existing M03 candidate builder, verify sealed package
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONNOUSERSITE: '1'
+          NO_COLOR: '1'
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C .p07-private rev-parse HEAD)" = d678ec878a74b3179df7a20a5cfa6ac7834bb48b
+          python3 -B .p07-private/tests/test_p07_m03_d04_release_scope.py
+          (cd .p07-private && python3 -B -m unittest discover -s tests -p 'test_p07_m03_d04_prepared_online_*.py' -q)
+          (cd .p07-private && python3 -B -m unittest discover -s tests -p 'test_p07_m03_d04_whole_private_integrity.py' -q)
+          python3 -B .p07-private/tests/test_p07_m03_d04_target_inventory_guard.py
+          (cd .p07-private && python3 -B scripts/check_p07_modules.py)
+          mkdir -p "$RUNNER_TEMP/p07-release137"
+          python3 -B .p07-private/scripts/p07_candidate_bundle.py \
+            --product-root .p07-private --public-root . \
+            --output "$RUNNER_TEMP/p07-release137/package" \
+            --product-sha d678ec878a74b3179df7a20a5cfa6ac7834bb48b \
+            --build 0.1.0-release137 --care 0.1.0-rc85 --m03-only
+          python3 -B - <<'PY'
+          import json,os,pathlib,hashlib
+          p=pathlib.Path(os.environ['RUNNER_TEMP'])/'p07-release137/package'
+          a=json.loads((p/'candidate_attestation.json').read_text())
+          assert a['status']=='FORMAL_STAGING_NOT_PUBLISHED'
+          assert a['product_source_sha']=='d678ec878a74b3179df7a20a5cfa6ac7834bb48b'
+          assert a['product_build']=='0.1.0-release137'
+          assert a['system_care_build']=='UNCHANGED'
+          assert a['other_modules_changed'] is False
+          manifest=p/'dist/p07/0.1.0/overlay/RUNTIME.gitblob'
+          names=[]
+          for line in manifest.read_text().splitlines():
+              sha,path=line.split('  ',1)
+              data=(manifest.parent/path).read_bytes()
+              actual=hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+              assert sha==actual, path
+              names.append(path)
+          assert {'lib/server_migration_pull.py','lib/migration_target_inventory_guard.py','lib/migration_prepared_whole_integrity.py','lib/migration_prepared_online_cli.py','components/p07-m03-online-menu.sh','bin/vfops-migrate-ui','BUILD_ID'} <= set(names)
+          assert not (p/'installers/p07-system-care.sh').exists()
+          assert not (p/'packages').exists()
+          print('P07_M03_RELEASE137_SEALED_STAGE_AND_MODULE_BOUNDARY=PASS')
+          PY
+      - name: Real stable136 to exact137 upgrade, reject corrupt asset, rollback after swap failure
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONNOUSERSITE: '1'
+          NO_COLOR: '1'
+          P07_ALLOW_NONROOT: '1'
+          P07_NO_EXEC: '1'
+        run: |
+          set -Eeuo pipefail
+          stage="$RUNNER_TEMP/p07-release137/package"
+          sandbox="$RUNNER_TEMP/p07-release137/atomic"
+          mkdir -p "$sandbox/bin" "$sandbox/business" "$sandbox/other-modules"
+          printf 'BUSINESS_DATA_NEVER_CHANGED' > "$sandbox/business/preserve.txt"
+          for mod in M01 M02 M04 M05; do
+            printf '%s_KEEP' "$mod" > "$sandbox/other-modules/$mod"
+          done
+          before="$(sha256sum "$sandbox"/other-modules/* | sha256sum | cut -d' ' -f1)"
+          export P07_INSTALL_DIR="$sandbox/live"
+          export P07_PREVIOUS_DIR="$sandbox/previous"
+          export P07_BIN_LINK="$sandbox/bin/vfops-rc"
+          bash installers/p07-m03-release136-atomic.sh install > "$sandbox/stable-install.log" 2>&1
+          test "$(cat "$sandbox/live/BUILD_ID")" = "0.1.0-release136"
+          test "$(NO_COLOR=1 "$sandbox/bin/vfops-rc" --build-id)" = "0.1.0-release136"
+          echo P07_M03_RELEASE136_REAL_ISOLATED_INSTALL=PASS
+
+          # The staged formal wrapper still points at published public main.
+          # Exercise the exact staged final installer directly until publication,
+          # when the public wrapper's URL and pinned blob can be updated together.
+          export P07_PUBLIC_ROOT="file://$stage"
+          mkdir -p "$sandbox/previous"
+          printf 'PRESERVE_OLD_RECOVERY' > "$sandbox/previous/marker"
+          if bash "$stage/installers/p07-final.sh" > "$sandbox/reject-existing-previous.log" 2>&1; then
+            echo 'P07_M03_EXISTING_PREVIOUS_GUARD=FAIL' >&2
+            exit 1
+          fi
+          test "$(cat "$sandbox/live/BUILD_ID")" = "0.1.0-release136"
+          test "$(cat "$sandbox/previous/marker")" = "PRESERVE_OLD_RECOVERY"
+          rmdir "$sandbox/previous" 2>/dev/null && exit 1 || true
+          rm "$sandbox/previous/marker"
+          rmdir "$sandbox/previous"
+          echo P07_M03_EXISTING_RECOVERY_SNAPSHOT_NOT_OVERWRITTEN=PASS
+
+          bad="$RUNNER_TEMP/p07-release137/corrupted-package"
+          cp -a "$stage" "$bad"
+          printf 'corrupted-manifest-not-valid\n' > "$bad/dist/p07/0.1.0/overlay/RUNTIME.gitblob"
+          export P07_PUBLIC_ROOT="file://$bad"
+          if bash "$stage/installers/p07-final.sh" > "$sandbox/reject-corrupt.log" 2>&1; then
+            echo 'P07_M03_CORRUPT_MANIFEST_REJECTED=FAIL' >&2
+            exit 1
+          fi
+          test "$(cat "$sandbox/live/BUILD_ID")" = "0.1.0-release136"
+          test ! -e "$sandbox/previous"
+          test ! -e "$sandbox/live.new"
+          echo P07_M03_CORRUPT_ASSET_REFUSED_BEFORE_UPGRADE=PASS
+
+          export P07_PUBLIC_ROOT="file://$stage"
+          chmod 0555 "$sandbox/bin"
+          # Valid existing symlink passes preflight, but the post-swap
+          # symlink replacement fails on the non-root isolated runner.
+          # Installer EXIT trap must restore original build and link.
+          if bash "$stage/installers/p07-final.sh" > "$sandbox/injected-symlink-error.log" 2>&1; then
+            chmod 0755 "$sandbox/bin"
+            echo 'P07_M03_FAULT_INJECTION_EXPECTED_FAILURE=FAIL' >&2
+            exit 1
+          fi
+          chmod 0755 "$sandbox/bin"
+          echo P07_M03_SYNTHETIC_FAULT_STAGE_DIAGNOSTIC_BEGIN
+          grep -E '安装|错误|失败|旧版本|恢复|校验|身份|目录|当前版本' "$sandbox/injected-symlink-error.log" | tail -n 15 || true
+          echo P07_M03_SYNTHETIC_FAULT_STAGE_DIAGNOSTIC_END
+          grep -Fq '已恢复安装前的旧版本目录' "$sandbox/injected-symlink-error.log"
+          test "$(cat "$sandbox/live/BUILD_ID")" = "0.1.0-release136"
+          test ! -e "$sandbox/previous"
+          test ! -e "$sandbox/live.new"
+          test "$(readlink "$sandbox/bin/vfops-rc")" = "$sandbox/live/bin/vfops-user"
+          test "$(NO_COLOR=1 "$sandbox/bin/vfops-rc" --build-id)" = "0.1.0-release136"
+          echo P07_M03_POST_SWAP_FAILURE_AUTO_ROLLBACK_TO_136=PASS
+
+          if ! bash "$stage/installers/p07-final.sh" > "$sandbox/upgrade-success.log" 2>&1; then
+            echo 'P07_M03_NORMAL_RETRY_AFTER_ROLLBACK_FAILED: bounded synthetic log follows' >&2
+            tail -n 18 "$sandbox/upgrade-success.log" >&2
+            exit 1
+          fi
+          test "$(cat "$sandbox/live/BUILD_ID")" = "0.1.0-release137"
+          test "$(cat "$sandbox/previous/BUILD_ID")" = "0.1.0-release136"
+          test "$(NO_COLOR=1 "$sandbox/bin/vfops-rc" --build-id)" = "0.1.0-release137"
+          bash "$stage/installers/p07-final.sh" > "$sandbox/idempotent.log" 2>&1
+          test "$(cat "$sandbox/previous/BUILD_ID")" = "0.1.0-release136"
+          test "$(cat "$sandbox/business/preserve.txt")" = "BUSINESS_DATA_NEVER_CHANGED"
+          after="$(sha256sum "$sandbox"/other-modules/* | sha256sum | cut -d' ' -f1)"
+          test "$before" = "$after"
+          echo P07_M03_RELEASE136_TO_137_SUCCESS_AND_IDEMPOTENCE=PASS
+          echo P07_M03_OTHER_FOUR_MODULES_AND_BUSINESS_DATA_UNCHANGED=PASS
+      - name: Clean private exact source and all synthetic assets
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- .p07-private "$RUNNER_TEMP/p07-release137"
+          test ! -e .p07-private
+          echo P07_M03_PRIVATE_SOURCE_AND_EPHEMERAL_DATA_CLEANED=PASS

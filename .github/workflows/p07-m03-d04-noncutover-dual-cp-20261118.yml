@@ -1,0 +1,313 @@
+name: P07 M03 D04 release137 non-cutover dual CloudPanel gate
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-m03-d04-noncutover-dual-cp-20261118.yml'
+permissions:
+  contents: read
+jobs:
+  dual-cloudpanel-mariadb-exact-source:
+    if: github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'synchronize'
+    strategy:
+      fail-fast: false
+      matrix:
+        scope: [WHOLE_VPS]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    steps:
+      - name: Public temporary harness checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Transient private exact P07 source checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: d678ec878a74b3179df7a20a5cfa6ac7834bb48b
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: .p07-private-exact
+      - name: Exact P07 target-inventory security and module regression
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C .p07-private-exact rev-parse HEAD)" = "d678ec878a74b3179df7a20a5cfa6ac7834bb48b"
+          python3 -B .p07-private-exact/tests/test_p07_m03_d04_release_scope.py
+          python3 -B .p07-private-exact/tests/test_p07_m03_d04_target_inventory_guard.py
+          ( cd .p07-private-exact && python3 -B scripts/check_p07_modules.py )
+          echo P07_D04_TARGET_INVENTORY_UNIT_AND_MODULES=PASS
+      - name: Reuse original dual-QEMU CloudPanel test with exact RC137 bundled runtime
+        shell: bash
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONNOUSERSITE: '1'
+          SCOPE: ${{ matrix.scope }}
+        run: |
+          set -Eeuo pipefail
+          old=80e70ba47a1f0a8dc399e0381aeb29a66a7e6c4e
+          new=d678ec878a74b3179df7a20a5cfa6ac7834bb48b
+          test "$(git -C .p07-private-exact rev-parse HEAD)" = "$new"
+          export P07_RC137_CANDIDATE="$RUNNER_TEMP/p07-rc137-candidate-$SCOPE"
+          python3 -B .p07-private-exact/scripts/p07_candidate_bundle.py \
+            --product-root .p07-private-exact --public-root . \
+            --output "$P07_RC137_CANDIDATE" \
+            --product-sha d678ec878a74b3179df7a20a5cfa6ac7834bb48b \
+            --build 0.1.0-release137 --care 0.1.0-rc85 --m03-only
+          test "$(cat "$P07_RC137_CANDIDATE/dist/p07/0.1.0/overlay/BUILD_ID")" = "0.1.0-release137"
+          grep -q '  lib/migration_target_inventory_guard.py' "$P07_RC137_CANDIDATE/dist/p07/0.1.0/overlay/RUNTIME.gitblob"
+          fixture="$RUNNER_TEMP/p07-d04-dual-cloudpanel-verified-harness.sh"
+          curl --retry 2 --connect-timeout 20 --max-time 120 -fsSL \
+            https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/83a8fbf80760040a4f97a1299207625704680c49/tests/p07_m03_d04_mariadb_e2e_20261116.sh \
+            -o "$fixture"
+          python3 - "$fixture" "$old" "$new" "$SCOPE" <<'PY'
+          from pathlib import Path
+          import sys
+          f=Path(sys.argv[1]);old,new,scope=sys.argv[2:]
+          assert scope in {"WHOLE_VPS","ONE_SITE"}
+          script=f.read_text(encoding="utf-8")
+          assert script.count(old)==1
+          assert "sudo qemu-system-x86_64" in script and "clpctl db:import" in script
+          script=script.replace(old,new)
+          runtime='"$ROOT/.p07-private-exact/bin" "$ROOT/.p07-private-exact/lib"'
+          replacement='"$P07_RC137_CANDIDATE/dist/p07/0.1.0/overlay/bin" "$P07_RC137_CANDIDATE/dist/p07/0.1.0/overlay/lib"'
+          assert script.count(runtime)==1
+          script=script.replace(runtime,replacement)
+          original_build='"$ROOT/.p07-private-exact/BUILD_ID"'
+          bundled_build='"$P07_RC137_CANDIDATE/dist/p07/0.1.0/overlay/BUILD_ID"'
+          assert script.count(original_build)==1
+          script=script.replace(original_build,bundled_build)
+          # Match the official P07 installer: bin/* are chmod +x after overlay extraction.
+          # The synthetic rsync staging bypasses the installer and otherwise leaves 0644 files.
+          stage_marker="echo P07_M03_D04_EXACT_SOURCE_PR348_STAGED=PASS"
+          assert script.count(stage_marker)==1
+          script=script.replace(stage_marker,stage_marker+'\nssh_vm "$NEW" \'chmod +x /opt/vf-server-ops/bin/*\'')
+          diag_marker='ssh_vm "$NEW" \x27bash -se\x27 <<\x27TARGET\x27'.replace('\\x27',"'").replace('\\x27',"'").replace('\\x27',"'")
+          assert script.count(diag_marker)==1
+          diagnostic = """ssh_vm "$NEW" 'python3 -B -' <<'DIAG'
+          import json,sqlite3,sys
+          from pathlib import Path
+          sys.path.insert(0,'/opt/vf-server-ops/lib')
+          try:
+              import inventory
+              manifest=inventory.build_manifest(Path('/'))
+              sites=manifest.get('sites') or []
+              result={
+                  'source': manifest.get('discovery_source'),
+                  'declared_count': (manifest.get('summary') or {}).get('site_count'),
+                  'actual_count': len(sites),
+                  'warnings_count': len(manifest.get('warnings') or []),
+                  'site_flags': [{
+                      'valid_domain':isinstance(s.get('domain'),str) and bool(s.get('domain')),
+                      'valid_user': isinstance(s.get('site_user'),str) and s.get('site_user')!='UNKNOWN',
+                      'db_list_known':isinstance(s.get('mysql_databases'),list),
+                  } for s in sites if isinstance(s,dict)],
+              }
+              print('P07_CP_TARGET_MANIFEST_DIAG='+json.dumps(result,sort_keys=True))
+          except Exception as ex:
+              print('P07_CP_TARGET_MANIFEST_DIAG_EXCEPTION='+type(ex).__name__)
+          try:
+              conn=sqlite3.connect('file:/home/clp/htdocs/app/data/db.sq3?mode=ro',uri=True)
+              cols={}
+              for tbl in ('site','database'):
+                  cols[tbl]=[row[1] for row in conn.execute('PRAGMA table_info("'+tbl+'")')]
+              print('P07_CP_TARGET_SQLITE_COLUMNS='+json.dumps(cols,sort_keys=True))
+              conn.close()
+          except Exception as ex:
+              print('P07_CP_TARGET_SQLITE_DIAG_EXCEPTION='+type(ex).__name__)
+          DIAG
+          """
+          script=script.replace(diag_marker,diagnostic+diag_marker)
+          marker='ssh_vm "$NEW" \'echo P07_M03_D04_TARGET_SSH_SESSION=PASS;'
+          assert script.count(marker)==1
+          check=('ssh_vm "$NEW" \'test "$(cat /opt/vf-server-ops/BUILD_ID)" = '
+                 '"0.1.0-release137"\'\n'
+                 'echo P07_D04_CANDIDATE_RC137_ACTUAL_TARGET_BYTES=PASS\n')
+          script=script.replace(marker,check+marker)
+          if scope=="ONE_SITE":
+              plan="  --confirm-source-helper-staging ALLOW_SOURCE_HELPER_STAGING </dev/null >/root/p07-plan.json 2>/root/p07-plan.err"
+              prepare="  --confirm PREPARE_PULL_MIGRATION </dev/null >/root/p07-prepare.json 2>/root/p07-prepare.err"
+              assert script.count(plan)==1 and script.count(prepare)==1
+              script=script.replace(plan,"  --site alpha.p07.example.com "+plan.lstrip())
+              script=script.replace(prepare,"  --site alpha.p07.example.com "+prepare.lstrip())
+              assert script.count("assert p['site_count']==2")==2
+              script=script.replace("assert p['site_count']==2","assert p['site_count']==1")
+              assert script.count("assert p['source_scope_kind']=='ALL_SOURCE_SITES'")==1
+              script=script.replace("assert p['source_scope_kind']=='ALL_SOURCE_SITES'",
+                                    "assert p['source_scope_kind']=='SELECTED_SITES'")
+              beta_file='test "$(cat /home/p07beta/htdocs/beta.p07.example.com/index.html)" = P07_BETA_STATIC_23'
+              assert script.count(beta_file)==1
+              script=script.replace(beta_file,'test ! -e /home/p07beta/htdocs/beta.p07.example.com/index.html')
+              beta_web='curl -ksS --resolve beta.p07.example.com:443:127.0.0.1 https://beta.p07.example.com/ | grep -Fq P07_BETA_STATIC_23'
+              before,sep,after=script.partition("stage=VERIFY_HTTP")
+              assert sep and after.count(beta_web)==1 and before.count(beta_web)==1
+              after=after.replace(beta_web,'test ! -e /home/p07beta/htdocs/beta.p07.example.com/index.html')
+              script=before+sep+after
+              assert script.count("P07_M03_D04_MATCHED_MARIADB_ALL_SITES_PLAN=PASS")==1
+              script=script.replace("P07_M03_D04_MATCHED_MARIADB_ALL_SITES_PLAN=PASS",
+                                    "P07_M03_D04_MATCHED_MARIADB_ONE_SITE_PLAN=PASS")
+          else:
+              assert script.count("assert p['site_count']==2")==2
+              # Keep both real CloudPanel sites; remove mixed SQLite/external
+              # assets to test strictly supported pure MySQL + static warm stage.
+              removal = {
+                  "sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'CREATE TABLE marker (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO marker VALUES(1,\"SYNTHETIC_SQLITE_42\");'": "",
+                  "mkdir -p /home/p07alpha/.vf-data": "",
+                  "printf 'P07_EXTERNAL_ASSET_42\\n' > /home/p07alpha/.vf-data/proof.txt": "",
+                  "chown -R p07alpha:p07alpha /home/p07alpha/.vf-data /home/p07alpha/htdocs/alpha.p07.example.com": "chown -R p07alpha:p07alpha /home/p07alpha/htdocs/alpha.p07.example.com",
+                  "test \"$(sqlite3 /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite 'SELECT value FROM marker WHERE id=1')\" = SYNTHETIC_SQLITE_42": "test ! -e /home/p07alpha/htdocs/alpha.p07.example.com/test.sqlite",
+                  "test \"$(cat /home/p07alpha/.vf-data/proof.txt)\" = P07_EXTERNAL_ASSET_42": "test ! -e /home/p07alpha/.vf-data/proof.txt",
+              }
+              for oldline,newline in removal.items():
+                  occurrences=script.count(oldline)
+                  assert occurrences in (1,2),(oldline[:100],occurrences)
+                  script=script.replace(oldline,newline)
+              assert script.count("assert p['sqlite_asset_count']==1")==1
+              script=script.replace("assert p['sqlite_asset_count']==1","assert p['sqlite_asset_count']==0")
+              assertion="stage=VERIFY_FILES"
+              assert script.count(assertion)==1
+              delta=r"""stage=WHOLE_PRIVATE_WARM
+          mid="$(python3 - <<'MID'
+          import json
+          from pathlib import Path
+          tasks=list(Path('/var/lib/vf-server-ops/server-migrations').glob('pull-*/state.json'))
+          assert len(tasks)==1
+          s=json.loads(tasks[0].read_text())
+          assert s['status']=='PREPARED' and s['source_scope_kind']=='ALL_SOURCE_SITES'
+          print(s['migration_id'])
+          MID
+          )"
+          # Synthetic updates occur ONLY on the isolated source KVM VM.
+          ssh -i /root/.ssh/p07_test_key -o BatchMode=yes -o StrictHostKeyChecking=accept-new root@172.29.71.11 'bash -se' <<'SOURCE_DELTA'
+          set -Eeuo pipefail
+          printf 'P07_ALPHA_WARM_73\n' > /home/p07alpha/htdocs/alpha.p07.example.com/warm-update.txt
+          chown p07alpha:p07alpha /home/p07alpha/htdocs/alpha.p07.example.com/warm-update.txt
+          printf 'P07_BETA_WARM_73\n' > /home/p07beta/htdocs/beta.p07.example.com/warm-update.txt
+          chown p07beta:p07beta /home/p07beta/htdocs/beta.p07.example.com/warm-update.txt
+          printf '%s\n' "INSERT INTO p07_marker VALUES(2,'SYNTHETIC_WARM_MYSQL_73');" > /root/p07-warm.sql
+          clpctl db:import --databaseName=p07alpha --file=/root/p07-warm.sql >/root/p07-warm-sql.log 2>&1
+          SOURCE_DELTA
+          test ! -e /home/p07alpha/htdocs/alpha.p07.example.com/warm-update.txt
+          test ! -e /home/p07beta/htdocs/beta.p07.example.com/warm-update.txt
+          "$CMD" server-migrate prepared-whole-online-options --migration-id "$mid" </dev/null >/root/p07-warm-options.json 2>/root/p07-warm-options.err
+          python3 - <<'OPTIONS'
+          import json
+          p=json.load(open('/root/p07-warm-options.json'))
+          assert p['status']=='ALL_SITES_CLASSIFIED_NOT_YET_VERIFIED',p
+          assert p['site_count']==2 and p['mysql_sites']==1 and p['static_sites']==1,p
+          assert p['sqlite_sites']==0 and p['files_only_sites']==0,p
+          assert p['cutover_allowed'] is False and p['writes_performed'] is False
+          print('P07_REAL_DUAL_CP_WHOLE_ONLINE_READONLY_OPTIONS=PASS')
+          OPTIONS
+          "$CMD" server-migrate prepared-whole-online-refresh --migration-id "$mid" --confirm "STAGE_WHOLE_VPS_ONLINE:$mid" </dev/null >/root/p07-warm-stage.json 2>/root/p07-warm-stage.err || { tail -n 14 /root/p07-warm-stage.err | cut -c 1-210; exit 14; }
+          python3 - <<'STAGE'
+          import json, pathlib,hashlib
+          result=json.load(open('/root/p07-warm-stage.json'))
+          assert result['status']=='PRIVATE_WHOLE_VPS_SITE_COPIES_STAGED',result
+          assert result['site_count']==result['staged_count']==result['files_staged_count']==2
+          assert result['cutover_allowed'] is False
+          assert result['cross_asset_point_in_time_coherent'] is False
+          tasks=list(pathlib.Path('/var/lib/vf-server-ops/server-migrations').glob('pull-*/state.json'))
+          state=json.loads(tasks[0].read_text())
+          assert state['status']=='PREPARED' and state['source_runtime_frozen'] is False
+          group=tasks[0].parent/'prepared-whole-vps-online'
+          receipt=json.loads((group/'batch-receipt.json').read_text())
+          assert receipt['status']=='PRIVATE_WHOLE_VPS_SITE_COPIES_STAGED'
+          assert receipt['cutover_allowed'] is False
+          assert len(receipt['sites'])==2
+          for domain,name in [('alpha.p07.example.com','P07_ALPHA_WARM_73'),('beta.p07.example.com','P07_BETA_WARM_73')]:
+              token=hashlib.sha256(domain.encode('ascii')).hexdigest()[:16]
+              site=group/('site-'+token)
+              found=list(site.glob('prepared-files-refresh/*/payload/warm-update.txt'))
+              if domain.startswith('beta.'):
+                  found=list(site.glob('prepared-static-refresh/*/payload/warm-update.txt'))
+              assert len(found)==1,(domain,found)
+              assert found[0].read_text().strip()==name
+          alpha=group/('site-'+hashlib.sha256(b'alpha.p07.example.com').hexdigest()[:16])
+          dumps=list(alpha.glob('prepared-mysql-refresh/*/snapshot.sql.gz'))
+          assert len(dumps)==1, 'MySQL private snapshot missing'
+          import gzip
+          with gzip.open(dumps[0], 'rb') as gz:
+              content=gz.read(4*1024*1024)
+          assert b'SYNTHETIC_WARM_MYSQL_73' in content, 'new source SQL row missing from private dump'
+          print('P07_REAL_DUAL_CP_NEW_SQL_ROW_IN_PRIVATE_MYSQL_DUMP=PASS')
+          assert not pathlib.Path('/home/p07alpha/htdocs/alpha.p07.example.com/warm-update.txt').exists()
+          assert not pathlib.Path('/home/p07beta/htdocs/beta.p07.example.com/warm-update.txt').exists()
+          print('P07_REAL_DUAL_CP_WHOLE_PRIVATE_WARM_FILES_DB_RECEIPT=PASS')
+          STAGE
+          # Complete local-only rehash and SQLite/MySQL/file receipt verification.
+          if ! "$CMD" server-migrate prepared-whole-online-verify --migration-id "$mid" </dev/null >/root/p07-private-verify.json 2>/root/p07-private-verify.err; then
+            # Fixed uppercase error class only. Never show SQL, raw stdout,
+            # target credentials or business domain/path in public logs.
+            grep -Eo 'WHOLE_VERIFY_[A-Z0-9_]+' /root/p07-private-verify.err | head -n 1 || true
+            echo P07_REAL_DUAL_CP_PRIVATE_VERIFICATION=BLOCKED >&2
+            exit 13
+          fi
+          python3 - <<'VERIFY'
+          import json
+          p=json.load(open('/root/p07-private-verify.json'))
+          assert p['status']=='PRIVATE_WHOLE_VPS_HASH_INTEGRITY_VERIFIED_NOT_RESTORED',p
+          assert p['site_count']==p['verified_site_count']==2
+          for key in ('source_contacted','writes_performed','target_site_overwritten',
+                      'target_database_modified','source_frozen','dns_changed',
+                      'cutover_allowed','restore_tested','cross_asset_point_in_time_coherent'):
+              assert p[key] is False,key
+          print('P07_REAL_DUAL_CP_WHOLE_PRIVATE_REHASH_WITHOUT_RESTORE=PASS')
+          VERIFY
+          # Corrupt ONLY the disposable VM private snapshot; no owner site and
+          # no business DB are touched. Recheck must refuse without target apply.
+          python3 - <<'CORRUPT'
+          import hashlib
+          from pathlib import Path
+          base=next(Path('/var/lib/vf-server-ops/server-migrations').glob('pull-*/state.json')).parent
+          key=hashlib.sha256(b'beta.p07.example.com').hexdigest()[:16]
+          files=list((base/'prepared-whole-vps-online'/('site-'+key)).glob(
+              'prepared-static-refresh/*/payload/warm-update.txt'))
+          assert len(files)==1
+          files[0].write_text('SYNTHETIC_TAMPER_ONLY')
+          CORRUPT
+          if "$CMD" server-migrate prepared-whole-online-verify --migration-id "$mid" >/root/p07-private-corrupt-verify.json 2>/root/p07-private-corrupt-verify.err; then
+            echo P07_UNSAFE_CORRUPTED_SNAPSHOT_ACCEPTED >&2
+            exit 17
+          fi
+          echo P07_REAL_DUAL_CP_TAMPERED_PRIVATE_COPY_REFUSED=PASS
+          # A second batch must fail before writing a new private generation.
+          if "$CMD" server-migrate prepared-whole-online-refresh --migration-id "$mid" --confirm "STAGE_WHOLE_VPS_ONLINE:$mid" >/root/p07-warm-repeat.json 2>/root/p07-warm-repeat.err; then
+            echo P07_UNSAFE_REPLAY_ACCEPTED >&2
+            exit 15
+          fi
+          test "$(python3 - <<'STATE'
+          import json
+          from pathlib import Path
+          task=next(Path('/var/lib/vf-server-ops/server-migrations').glob('pull-*/state.json'))
+          print(json.loads(task.read_text())['status'])
+          STATE
+          )" = PREPARED
+          # Final cutover is still blocked by all-writer fence before touching source.
+          if "$CMD" server-migrate cutover --migration-id "$mid" --confirm "CUTOVER_PULL:$mid" >/root/p07-warm-cutover.json 2>/root/p07-warm-cutover.err; then
+            echo P07_UNSAFE_CUTOVER_ACCEPTED >&2
+            exit 16
+          fi
+          test ! -e /home/p07alpha/htdocs/alpha.p07.example.com/warm-update.txt
+          echo P07_REAL_DUAL_CP_NO_TARGET_APPLY_OR_CUTOVER=PASS
+          """
+              script=script.replace(assertion,delta+assertion)
+          f.write_text(script,encoding="utf-8")
+          print("P07_D04_CLOUDPANEL_EXACT_TRIAL_SCOPE="+scope)
+          PY
+          bash -n "$fixture"
+          timeout --signal=TERM --kill-after=60s 3100s bash "$fixture"
+          echo "P07_D04_EXACT_R137_WHOLE_PRIVATE_TWO_CLOUDPANEL_$(echo "$SCOPE")=PASS"
+      - name: Always remove private checkout and ephemeral fixture
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- .p07-private-exact
+          rm -f -- "$RUNNER_TEMP/p07-d04-dual-cloudpanel-verified-harness.sh"
+          rm -rf -- "$RUNNER_TEMP/p07-rc137-candidate-WHOLE_VPS" "$RUNNER_TEMP/p07-rc137-candidate-ONE_SITE"
+          test ! -e .p07-private-exact
+          echo P07_D04_PRIVATE_WORKSPACE_CLEAN=PASS
