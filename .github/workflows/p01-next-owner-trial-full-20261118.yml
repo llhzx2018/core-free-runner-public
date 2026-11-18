@@ -110,25 +110,50 @@ jobs:
           set -Eeuo pipefail
           if ! P01_OWNER_TRIAL_ISOLATED_HTTP=YES python3 -B candidate/tests/compatibility/laravel/http/run_cloudpanel_fpm_full_stage.py --bundle "$RUNNER_TEMP/p01-owner-trial.zip" --engine sqlite >"$RUNNER_TEMP/p01-trial-https.txt" 2>&1; then
             grep -E '^(P01_|RuntimeError|Traceback|AssertionError)' "$RUNNER_TEMP/p01-trial-https.txt" | tail -n 22 || true
-            P01_OWNER_TRIAL_ISOLATED_HTTP=YES P01_TRIAL_BUNDLE="$RUNNER_TEMP/p01-owner-trial.zip" python3 -B - <<'PY'
-          import os,sys,tempfile
+            P01_OWNER_TRIAL_ISOLATED_HTTP=YES P01_TRIAL_BUNDLE="$RUNNER_TEMP/p01-owner-trial.zip" P01_DEV_BUNDLE="$RUNNER_TEMP/p01-exact-cloudpanel.zip" python3 -B - <<'PY'
+          import os,sys,tempfile,subprocess
           from pathlib import Path
           sys.path.insert(0,'candidate/tests/compatibility/laravel/http')
           from run_cloudpanel_fpm_full_stage import Site
-          with tempfile.TemporaryDirectory(prefix='p01-trial-get-audit-') as w:
-              site=Site(Path(w),'sqlite',Path(os.environ['P01_TRIAL_BUNDLE']))
-              try:
-                  site.start()
-                  status,page,_=site.request('GET','/setup.php')
-                  private=(Path(w)/'private').exists()
-                  category='ACTION' if '启用安装向导' in page else (
-                      'PREFLIGHT_ERROR' if '安装包' in page or '环境' in page else
-                      'SITE_GUARD' if '安全安装条件' in page else 'OTHER')
-                  print('P01_TRIAL_GET_STATUS='+str(status))
-                  print('P01_TRIAL_GET_CATEGORY='+category)
-                  print('P01_TRIAL_GET_PRIVATE_EXISTS='+str(private))
-              finally:
-                  site.stop()
+          for label,variable in [('DEV','P01_DEV_BUNDLE'),('TRIAL','P01_TRIAL_BUNDLE')]:
+              with tempfile.TemporaryDirectory(prefix='p01-full-get-audit-') as w:
+                  site=Site(Path(w),'sqlite',Path(os.environ[variable]))
+                  try:
+                      site.start()
+                      status,page,_=site.request('GET','/setup.php')
+                      private=(Path(w)/'private').exists()
+                      markers={
+                        'PHP_EXT':'PHP 环境缺少',
+                        'HTTPS':'HTTPS/Nginx 环境检查',
+                        'BUNDLE':'FULL 安装包不完整',
+                        'WRITABLE':'权限不安全',
+                        'DOCROOT':'公开目录指向',
+                        'ACTIVATE':'启用安装向导',
+                      }
+                      category=next((k for k,v in markers.items() if v in page),'OTHER')
+                      print('P01_'+label+'_GET_STATUS='+str(status))
+                      print('P01_'+label+'_GET_CLASS='+category)
+                      print('P01_'+label+'_GET_PRIVATE_CREATED='+str(private))
+                      preflight=site.app/'runtime/CloudPanelCleanFullPreflight.php'
+                      code=('require $argv[1]; $s=["DOCUMENT_ROOT"=>$argv[3],'
+                            '"SCRIPT_FILENAME"=>$argv[3]."/setup.php",'
+                            '"HTTPS"=>"on","SERVER_SOFTWARE"=>"nginx"];'
+                            '$r=VfNextCloudPanelCleanFullPreflight::inspect($argv[2],$s);'
+                            'echo $r["reason"];')
+                      p=subprocess.run(['php8.3','-r',code,str(preflight),
+                                        str(site.app),str(site.public)],
+                                       capture_output=True,text=True)
+                      reason=p.stdout.strip()
+                      allowed={'READY_FOR_PROTECTED_ACTIVATION',
+                        'UNSAFE_APPLICATION_ROOT','WRONG_CLOUDPANEL_DOCUMENT_ROOT',
+                        'HTTPS_NGINX_REQUIRED','PHP_EXTENSION_REQUIRED',
+                        'PDO_ENGINE_REQUIRED','INCOMPLETE_FULL_PACKAGE',
+                        'APPLICATION_NOT_WRITABLE','UNSAFE_BOOTSTRAP_CACHE',
+                        'STALE_BOOTSTRAP_CACHE'}
+                      print('P01_'+label+'_READONLY_PREFLIGHT='+
+                            (reason if reason in allowed else 'UNVERIFIED'))
+                  finally:
+                      site.stop()
           PY
             exit 1
           fi
