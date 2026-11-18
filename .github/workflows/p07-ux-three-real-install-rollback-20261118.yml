@@ -1,0 +1,120 @@
+name: P07 M01 M02 M04 UX exact ZIP and real isolated atomic proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'installers/p07-three-ux-atomic.py'
+      - 'scripts/build_p07_ux_three_release_candidates.py'
+      - '.github/workflows/p07-ux-three-real-install-rollback-20261118.yml'
+permissions:
+  contents: read
+jobs:
+  independent-modules:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    env:
+      NO_COLOR: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Build each installable exact-module ZIP twice and verify all digests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          out="$RUNNER_TEMP/p07-three-releases"; mkdir -p "$out/one" "$out/two"
+          python3 -B scripts/build_p07_ux_three_release_candidates.py --output-dir "$out/one"
+          python3 -B scripts/build_p07_ux_three_release_candidates.py --output-dir "$out/two"
+          (cd "$out/one" && sha256sum -c SHA256SUMS)
+          cmp "$out/one/SHA256SUMS" "$out/two/SHA256SUMS"
+          for name in "$out/one/"*.zip; do
+            cmp "$name" "$out/two/$(basename "$name")"
+          done
+          bash -n packages/p07-network-node/0.1.0-ux3/vf-node.sh
+          bash -n packages/p07-system-care/0.1.0-ux5/vf-system-care.sh
+          bash -n experiments/p07-vps-audit-v21-ux3.sh
+          python3 -B -m py_compile installers/p07-three-ux-atomic.py
+          echo P07_UX_M01_M02_M04_BUNDLE_REPRODUCIBLE_BYTES=PASS
+      - name: Real official previous bytes to next UX versions, bad SHA, injected switch fault, restore
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          out="$RUNNER_TEMP/p07-three-releases"
+          curl -fLsS --retry 2 --connect-timeout 12 --max-time 90 \
+            'https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m01-m02-v0.1.0-original-ux2-20261114/P07-M02-2.1.1-ux2.sh' \
+            -o "$out/old-m02.sh"
+          test "$(sha256sum "$out/old-m02.sh" | cut -d' ' -f1)" = 18a7a7dc401772fda7344845b952bc307a46f05443d086ec5e38a1954308587d
+          sudo env NO_COLOR=1 P07_TEST_OUT="$out" python3 -B - <<'PY'
+          import hashlib,importlib.util,os,pathlib,re,shutil,subprocess,zipfile
+          from unittest.mock import patch
+          P=pathlib.Path
+          root=P(os.environ["P07_TEST_OUT"])
+          source=P("installers/p07-three-ux-atomic.py")
+          spec=importlib.util.spec_from_file_location("p07_mod_atomic",source)
+          mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
+          module_base=root/"isolation";module_base.mkdir()
+          mod.BASE=module_base
+          base_versions={"P07-M01":"0.1.0-ux2","P07-M02":"2.1.1-ux2","P07-M04":"0.1.0-ux4"}
+          next_versions={"P07-M01":"0.1.0-ux3","P07-M02":"2.1.1-ux3","P07-M04":"0.1.0-ux5"}
+          def side():
+              return {m: hashlib.sha256((module_base/m/"OTHER_CANARY").read_bytes()).hexdigest()
+                      for m in ("m01","m02","m03","m04","m05")}
+          for m in ("m01","m02","m03","m04","m05"):
+              (module_base/m).mkdir()
+              (module_base/m/"OTHER_CANARY").write_text("no-other-module-changes-"+m)
+          for module in base_versions:
+              old=base_versions[module];new=next_versions[module]
+              slot=module.rsplit("-",1)[-1].lower()
+              home=module_base/slot
+              (home/"releases"/old).mkdir(parents=True)
+              legacy=home/"releases"/old
+              if module in ("P07-M01","P07-M04"):
+                  folder=P("packages/p07-network-node/0.1.0-ux2" if module=="P07-M01"
+                           else "packages/p07-system-care/0.1.0-ux4")
+                  manifest="MANIFEST.sha256" if module=="P07-M01" else "MANIFEST.gitblob"
+                  raw=(folder/manifest).read_text()
+                  for line in raw.splitlines():
+                      digest,name=line.split("  ",1)
+                      dest=legacy/name;dest.parent.mkdir(parents=True,exist_ok=True)
+                      shutil.copy2(folder/name,dest)
+                  shutil.copy2(folder/manifest,legacy/manifest)
+              else:
+                  shutil.copy2(root/"old-m02.sh",legacy/"vps-audit.sh")
+                  (legacy/"MANIFEST.sha256").write_text(
+                    "18a7a7dc401772fda7344845b952bc307a46f05443d086ec5e38a1954308587d  vps-audit.sh\n")
+              (home/"current").symlink_to("releases/"+old)
+              current=home/"current"
+              assert mod.current_state(home,module)[1]==old
+              canaries=side()
+              zipfile_path=root/"one"/f"{module}-{new}-RELEASE-CANDIDATE.zip"
+              digest=hashlib.sha256(zipfile_path.read_bytes()).hexdigest()
+              try:mod.install(module,zipfile_path,"0"*64)
+              except mod.Rejected:pass
+              else:raise AssertionError("corrupt expected SHA accepted")
+              assert os.readlink(current)=="releases/"+old
+              replacement=os.replace
+              def failing_replace(src,dst):
+                  if str(dst)==str(current):raise OSError("simulated switch fault")
+                  return replacement(src,dst)
+              with patch.object(mod.os,"replace",side_effect=failing_replace):
+                  try:mod.install(module,zipfile_path,digest)
+                  except OSError:pass
+                  else:raise AssertionError("switch failure not exercised")
+              assert os.readlink(current)=="releases/"+old
+              assert mod.install(module,zipfile_path,digest)==new
+              assert os.readlink(current)=="releases/"+new
+              assert mod.install(module,zipfile_path,digest)==new
+              assert mod.rollback(module,old,module+":"+old)==old
+              assert os.readlink(current)=="releases/"+old
+              assert side()==canaries
+              print("P07_"+slot.upper()+"_REAL_OFFICIAL_PREVIOUS_TO_NEW_UX_ATOMIC_ROLLBACK=PASS")
+          print("P07_FIVE_MODULE_ISOLATION=PASS")
+          print("P07_OWNER_CP2_M05_CLOUDPANEL_DNS_MIGRATION=NOT_RUN")
+          PY
+      - name: Always clean artifact and only Runner-local test modules
+        if: always()
+        shell: bash
+        run: |
+          sudo rm -rf -- "$RUNNER_TEMP/p07-three-releases"
+          echo P07_UX_THREE_TRANSIENT_ARTIFACT_CLEANUP=PASS
