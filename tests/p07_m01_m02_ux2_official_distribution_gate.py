@@ -50,10 +50,16 @@ def tty(script: Path, selection: bytes, timeout: float = 135) -> str:
                             cwd=ROOT, env=dict(os.environ, NO_COLOR="1", TERM="dumb"))
     os.close(child)
     output = bytearray()
+    returned_to_toolbox = False
+    exit_sent = False
     try:
-        # UX2 PTY canned input needs safe trailing main-menu exits after
-        # explicit Enter-to-return. Extra zeroes cannot authorize writes.
+        # Exercise the real child-menu sequence first. The number of nested
+        # Enter-to-return prompts varies by module state; canned final zeroes
+        # can be consumed as blank pause answers, leaving Toolbox at its menu.
+        # Send exactly one safe EXIT only after the SECOND Toolbox menu is
+        # actually visible, never while a confirmation/child menu is active.
         os.write(fd, selection + b"\n0\n0\n")
+        toolbox_prompt = "请选择 [0-5]".encode("utf-8")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             ready, _, _ = select.select([fd], [], [], 0.25)
@@ -62,9 +68,18 @@ def tty(script: Path, selection: bytes, timeout: float = 135) -> str:
                     output.extend(os.read(fd, 65536))
                 except OSError:
                     break
+                if output.count(toolbox_prompt) >= 2:
+                    returned_to_toolbox = True
+                    if not exit_sent and proc.poll() is None:
+                        try:
+                            os.write(fd, b"0\n")
+                        except OSError:
+                            pass
+                        exit_sent = True
             if proc.poll() is not None:
                 break
         check(proc.poll() is not None, "Toolbox TTY hung; stopped without success: " + output.decode("utf-8", "replace")[-1900:])
+        check(returned_to_toolbox, "Toolbox never returned to the main menu: " + output.decode("utf-8", "replace")[-1900:])
         check(proc.wait(timeout=2) == 0, "Toolbox TTY command rejected: " + output.decode("utf-8", "replace")[-1800:])
         return output.decode("utf-8", "replace")
     finally:
