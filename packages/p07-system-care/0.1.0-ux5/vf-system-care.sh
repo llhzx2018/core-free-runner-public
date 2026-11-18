@@ -45,7 +45,8 @@ show_header() {
   cache_get summary STATUS health
   cache_get summary SECURITY_ADVISORIES advisory
   cache_get intrusion STATUS evidence
-  ui_note '本页只显示最近缓存；选择项目后才进行新检查。'\n  if [[ "$health" == ATTENTION ]]; then
+  ui_note '本页只显示最近缓存；选择项目后才进行新检查。'
+  if [[ "$health" == ATTENTION ]]; then
     ui_attention '服务器有待检查项'
   elif [[ "$health" == HEALTHY ]]; then
     ui_good '服务器状态：正常'
@@ -172,7 +173,8 @@ selfcheck_local_module() {
     missing=$((missing + 1))
   fi
   if (( missing == 0 )); then
-    ui_good '检查通过 · 本模块文件与版本一致（只读）'\n    ui_note '下一步：返回主菜单选择需要的检查；其它模块未修改。'
+    ui_good '检查通过 · 本模块文件与版本一致（只读）'
+    ui_note '下一步：返回主菜单选择需要的检查；其它模块未修改。'
   else
     ui_attention '本模块检查失败；请从工具箱的 P07-M04 服务器维护与安全入口单独安装或修复'
   fi
@@ -194,7 +196,8 @@ recent_local_actions() {
     fi
   done
   if (( found == 0 )); then
-    ui_attention '暂无最近检查结果（只读）。'\n    ui_note '下一步：返回菜单，选择需要执行的检查。'
+    ui_attention '暂无最近检查结果（只读）。'
+    ui_note '下一步：返回菜单，选择需要执行的检查。'
   fi
   ui_note '这是最近检查缓存，不是持久操作审计日志。'
   pause_menu
