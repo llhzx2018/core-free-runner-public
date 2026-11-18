@@ -191,14 +191,7 @@ jobs:
           actual="$(sha256sum "$tmp/$file" | cut -d' ' -f1)"
           test "$actual" = "c900be7ff8997ef4432489ac28ac85a8ebcebeb0b4974baff7f8e3a93acd2daa"
           test "$(sed -n '1s/ .*//p' "$tmp/SHA256SUMS")" = "$actual"
-          if gh release view "$tag" --repo "$repo" >/dev/null 2>&1; then
-             echo P07_FORMAL_TAG_ALREADY_EXISTS_NO_OVERWRITE
-             exit 81
-          fi
-          if gh api "repos/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then
-             echo P07_FORMAL_ORPHAN_TAG_COLLISION
-             exit 81
-          fi
+
           main="$(gh api "repos/$repo/git/ref/heads/main" --jq .object.sha)"
           # GitHub checkout is shallow and the synthetic merge parent may be
           # absent. Compare with the GitHub event's exact PR base SHA.
@@ -214,17 +207,39 @@ jobs:
           BACKUP_CREATED != RESTORE_VERIFIED. Integrity checks prove only saved files/SQL snapshot hashes, not a single consistent production recovery point. Source server stays in service, existing receiver sites/databases not overwritten, original failed 18-site task not replayed. M01/M02/M04/M05 unchanged.
           Production upgrade and any actual site migration remain manual Owner actions; no server or DNS writes by this publication.
           NOTES
-          gh release create "$tag" "$tmp/$file" "$tmp/SHA256SUMS" \
-            --repo "$repo" --target "$main" --draft --latest=false \
-            --title "P07-M03 网站与数据 · release137 · 非切换迁入与私有预同步" \
-            --notes-file "$tmp/RELEASE_NOTES.md"
-          id="$(gh api "repos/$repo/releases/tags/$tag" --jq '.assets[]|select(.name=="P07-M03-0.1.0-release137.zip")|.id')"
-          test -n "$id"
+          # Release can be a still-DRAFT object with no Git tag ref. Inspect
+          # the existing exact draft by ID; do not re-create or re-upload it.
+          found="$(gh api "repos/$repo/releases?per_page=100" \
+            | jq -c --arg t "$tag" '.[] | select(.tag_name==$t)')"
+          if [[ -z "$found" ]]; then
+             if gh api "repos/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then
+                echo P07_FORMAL_ORPHAN_TAG_COLLISION; exit 81
+             fi
+             gh release create "$tag" "$tmp/$file" "$tmp/SHA256SUMS" \
+               --repo "$repo" --target "$main" --draft --latest=false \
+               --title "P07-M03 网站与数据 · release137 · 非切换迁入与私有预同步" \
+               --notes-file "$tmp/RELEASE_NOTES.md"
+             found="$(gh api "repos/$repo/releases?per_page=100" \
+               | jq -c --arg t "$tag" '.[] | select(.tag_name==$t)')"
+          fi
+          test "$(printf '%s' "$found" | jq -r '.draft')" = true || {
+             echo P07_FORMAL_RELEASE_ALREADY_PUBLISHED_NEEDS_READBACK; exit 81;
+          }
+          test "$(printf '%s' "$found" | jq -r '.target_commitish')" = "$main"
+          test "$(printf '%s' "$found" | jq -r '.assets|length')" = 2
+          id="$(printf '%s' "$found" | jq -r --arg n "$file" '.assets[] | select(.name==$n) | .id')"
+          release_id="$(printf '%s' "$found" | jq -r .id)"
+          digest="$(printf '%s' "$found" | jq -r --arg n "$file" '.assets[] | select(.name==$n) | .digest')"
+          test "$digest" = "sha256:$actual"
+          test -n "$id" && test -n "$release_id"
           gh api "repos/$repo/releases/assets/$id" -H 'Accept: application/octet-stream' > "$tmp/downloaded.zip"
           test "$(sha256sum "$tmp/downloaded.zip" | cut -d' ' -f1)" = "$actual" || {
              echo P07_FORMAL_REMOTE_DOWNLOAD_SHA_MISMATCH; exit 78;
           }
-          gh release edit "$tag" --repo "$repo" --draft=false --prerelease=false --latest=false
+          gh api --method PATCH "repos/$repo/releases/$release_id" \
+              -F draft=false -F prerelease=false > "$tmp/published.json"
+          test "$(jq -r .draft "$tmp/published.json")" = false
+          test "$(jq -r .prerelease "$tmp/published.json")" = false
           test "$(gh api "repos/$repo/releases/tags/$tag" --jq '.draft')" = false
           test "$(gh api "repos/$repo/releases/tags/$tag" --jq '.prerelease')" = false
           test "$(gh api "repos/$repo/releases/tags/$tag" --jq '.assets|length')" = 2
