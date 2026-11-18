@@ -99,7 +99,11 @@ class ToolboxTerminalUX(unittest.TestCase):
             self.assertEqual(p.returncode,0,p.stderr)
             self.assertNotIn("\033[",p.stdout)
         code=SHELL.read_text(encoding="utf-8")
-        self.assertIn('-t 0 && -t 1 && -z "\${NO_COLOR:-}"',code)
+        self.assertIn('-t 0 && -t 1 && -z "'+'
+
+if __name__=="__main__":
+    unittest.main()
++'{NO_COLOR:-}"',code)
 
 if __name__=="__main__":
     unittest.main()
