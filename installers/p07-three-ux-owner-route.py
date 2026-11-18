@@ -138,7 +138,10 @@ def main():
             print("仅升级本模块程序；其它模块、V2Ray 服务、系统更新和 CloudPanel 均不自动执行。")
             if not sys.stdin.isatty() or not sys.stdout.isatty():
                 blocked("升级需要在交互式 SSH 中由本人确认")
-            answer=input("确认仅升级本模块？[y/N]：").strip()
+            try:
+                answer=input("确认仅升级本模块？[y/N]：").strip()
+            except EOFError:
+                blocked("终端已关闭输入；本次未确认升级，原模块不变")
             if answer.lower()!="y":blocked("已取消，本次无写入")
         if os.geteuid()!=0:blocked("首次安装或升级必须使用 root")
         zipfile=temp/conf["filename"]
