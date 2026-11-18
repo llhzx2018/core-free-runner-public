@@ -1,0 +1,242 @@
+# Temporary public-safe evidence only. No merge, no Production, no private artifact.
+name: P02 W4 official 25131 FULL to W3 real cutover
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/p02-w4-official-full-to-w3-20261118.yml'
+      - 'proof/p02-w4-official-full-to-w3-20261118.json'
+permissions:
+  contents: read
+env:
+  TARGET_REPO: llhzx2018/vf-library
+  TARGET_VERSION: '2.5.133'
+  TARGET_SHA: '344da13cb0d928edf51cdf15dbbac2095b55b17e'
+concurrency:
+  group: p02-w4-official-full-to-w3-20261118
+  cancel-in-progress: false
+jobs:
+  official-full-joined-cutover:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'proof/p02-w4-official-full-to-w3-20261118'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout registered public-safe runner harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: runner-lane
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Audit exact source identity before transient private checkout
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 runner-lane/scripts/ephemeral_lane_spec.py audit-rendered \
+            --spec runner-lane/proof/p02-w4-official-full-to-w3-20261118.json \
+            --input runner-lane/.github/workflows/p02-w4-official-full-to-w3-20261118.yml >/dev/null
+          test "$TARGET_SHA" = "344da13cb0d928edf51cdf15dbbac2095b55b17e"
+          echo P02_W4_EXACT_TEMP_LANE_IDENTITY=PASS
+      - name: Checkout private candidate in disposable workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-library
+          ref: ${{ env.TARGET_SHA }}
+          path: vf-library
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify candidate source and prepare native PHP/Laravel/Vue
+        shell: bash
+        working-directory: vf-library
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(cat VERSION)" = "$TARGET_VERSION"
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php-cli php-sqlite3 php-mysql php-mbstring php-xml php-curl php-zip composer sqlite3 unzip >/dev/null
+          php -r 'exit(PHP_VERSION_ID>=80300 && extension_loaded("pdo_sqlite") && extension_loaded("zip") ? 0 : 1);'
+          composer --working-dir=modern/laravel install --no-dev --no-scripts --no-plugins --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p02-w4-composer.log" 2>&1 || { echo P02_W4_CANDIDATE_VENDOR=FAIL; exit 1; }
+          npm ci --prefix modern/inertia-page --no-audit --no-fund > "$RUNNER_TEMP/p02-w4-npm.log" 2>&1 || { echo P02_W4_CANDIDATE_NPM=FAIL; exit 1; }
+          npm run build --prefix modern/inertia-page > "$RUNNER_TEMP/p02-w4-vue.log" 2>&1 || { echo P02_W4_CANDIDATE_VUE=FAIL; exit 1; }
+          test -s modern/laravel/vendor/autoload.php
+          test -s public/assets/w2d/inertia-material.js
+          echo P02_W4_EXACT_NATIVE_W3_CANDIDATE_BUILT=PASS
+      - name: Fetch, pin SHA256 and extract immutable 2.5.131 official FULL
+        shell: bash
+        working-directory: vf-library
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          sandbox="$(mktemp -d -p /tmp p02-w4-release-XXXXXXXX)"
+          legacy="$(python3 - <<'PY'
+          import os,secrets,tempfile
+          from pathlib import Path
+          root=Path(tempfile.gettempdir()).resolve()/("p02-w4-legacy-"+secrets.token_hex(8))
+          root.mkdir(mode=0o700)
+          print(root)
+          PY
+          )"
+          echo "P02_W4_RELEASE_WORKDIR=$sandbox" >> "$GITHUB_ENV"
+          echo "P02_W4_LEGACY_ROOT=$legacy" >> "$GITHUB_ENV"
+          gh release download v2.5.131 --repo llhzx2018/vf-library --pattern VF_Library_V2.5.131_FULL.zip --dir "$sandbox" > "$RUNNER_TEMP/p02-w4-release-download.log" 2>&1 || { echo P02_W4_OFFICIAL_RELEASE_ASSET_ACCESS=FAIL; exit 1; }
+          archive="$sandbox/VF_Library_V2.5.131_FULL.zip"
+          test -f "$archive"
+          digest="$(sha256sum "$archive" | cut -d' ' -f1)"
+          test "$digest" = '88dd21c77d7b1843fc756baa8d03ad4ad30b3b59e8ceb9414176428d7fb34307' || { echo P02_W4_OFFICIAL_FULL_SHA256=FAIL; exit 1; }
+          python3 - "$archive" "$legacy/htdocs" <<'PY'
+          from pathlib import Path
+          import sys,stat,zipfile
+          archive=Path(sys.argv[1]); dest=Path(sys.argv[2])
+          with zipfile.ZipFile(archive) as z:
+              members=z.infolist()
+              names=[x.filename for x in members]
+              assert len(names)==len(set(names)) and len(names)>20
+              assert {'VERSION.txt','index.php','setup.php','app/bootstrap.php','app/w2-offline-vendor.php'}.issubset(names)
+              for entry in members:
+                  path=Path(entry.filename)
+                  assert not path.is_absolute() and all(part not in ('','.', '..') for part in path.parts)
+                  assert not stat.S_ISLNK(entry.external_attr>>16)
+                  assert entry.file_size<=16_000_000
+              dest.mkdir(mode=0o700)
+              z.extractall(dest)
+          assert (dest/'VERSION.txt').read_text().strip()=='2.5.131'
+          PY
+          echo P02_W4_IMMUTABLE_OFFICIAL_FULL_25131_BYTES_SHA256=PASS
+      - name: Install official old FULL through real PHP HTTP and Owner CSRF
+        shell: bash
+        working-directory: vf-library
+        run: |
+          set -Eeuo pipefail
+          set +x
+          site="$P02_W4_LEGACY_ROOT/htdocs"
+          port="$(python3 - <<'PY'
+          import socket
+          with socket.socket() as sock:
+              sock.bind(("127.0.0.1",0))
+              print(sock.getsockname()[1])
+          PY
+          )"
+          base="http://127.0.0.1:$port"
+          cookie="$RUNNER_TEMP/p02-w4-cookie"
+          VFTB_TEST_MODE=1 php -d display_errors=0 -S "127.0.0.1:$port" -t "$site" > "$RUNNER_TEMP/p02-w4-setup-server.log" 2>&1 &
+          server=$!
+          trap 'kill "$server" 2>/dev/null || true; wait "$server" 2>/dev/null || true' EXIT
+          ready=0
+          for i in $(seq 1 60); do
+            if curl --silent --fail "$base/setup.php" >/dev/null 2>&1; then ready=1; break; fi
+            sleep .25
+          done
+          test "$ready" = 1 || { echo P02_W4_OFFICIAL_SETUP_SERVER=FAIL; exit 1; }
+          curl --silent --show-error --fail -c "$cookie" -b "$cookie" "$base/setup.php" -o "$RUNNER_TEMP/p02-w4-setup.html"
+          csrf="$(python3 - "$RUNNER_TEMP/p02-w4-setup.html" <<'PY'
+          import re,html,sys
+          text=open(sys.argv[1],encoding='utf-8').read()
+          match=re.search(r'name="setup_csrf"\s+value="([^"]+)"',text)
+          assert match
+          print(html.unescape(match.group(1)))
+          PY
+          )"
+          status="$(curl -sS -b "$cookie" -c "$cookie" -H "Origin: $base" -o "$RUNNER_TEMP/p02-w4-install.html" -w '%{http_code}' \
+            --data-urlencode "setup_csrf=$csrf" \
+            --data-urlencode 'password=W4-Isolated-Password-2026!' \
+            --data-urlencode 'password_confirm=W4-Isolated-Password-2026!' \
+            "$base/setup.php")"
+          test "$status" = 303 || { echo "P02_W4_OFFICIAL_SETUP_HTTP_STATUS=$status"; exit 1; }
+          curl --silent --show-error --fail -b "$cookie" "$base/api.php?action=session" -o "$RUNNER_TEMP/p02-w4-session.json"
+          python3 - "$RUNNER_TEMP/p02-w4-session.json" "$P02_W4_LEGACY_ROOT" <<'PY'
+          import json,sys
+          from pathlib import Path
+          body=json.load(open(sys.argv[1]))
+          assert body['ok'] is True and body['site']['auth'] is True
+          assert body['version']=='2.5.131'
+          root=Path(sys.argv[2]); site=root/'htdocs'
+          assert (site/'app/.runtime.php').is_file()
+          priv=list(root.glob('.vftextbox-data-*'))
+          assert len(priv)==1 and len(list(priv[0].glob('textbox-*.sqlite')))==1
+          assert (root/'private/w2/releases/2.5.131/vendor/autoload.php').is_file()
+          PY
+          echo P02_W4_IMMUTABLE_OFFICIAL_25131_FULL_HTTP_OWNER_SETUP=PASS
+      - name: Actual W2 UpdateCore v1 bootstrap, writer freeze and same-site handoff
+        shell: bash
+        working-directory: vf-library
+        env:
+          P02_W2_ATOMIC_SYNTHETIC: '1'
+          P02_W4_SYNTHETIC_ONLY: '1'
+          P02_W3_SYNTHETIC_ONLY: '1'
+          P02_W3_ENGINE: sqlite
+        run: |
+          set -Eeuo pipefail
+          set +x
+          export P02_W4_REAL_INSTALLED_W2_ROOT="$P02_W4_LEGACY_ROOT"
+          export P02_W4_JOINED_W2_BOOTSTRAP=1
+          export P02_W4_JOINED_ROOT_POINTER="$RUNNER_TEMP/p02-w4-joined-root"
+          python3 -B tests/integration/p02_w4_official_w2_atomic_bootstrap.py > "$RUNNER_TEMP/p02-w4-w2-bootstrap.log" 2>&1 || { echo P02_W4_GENUINE_W2_CORE_V1_BOOTSTRAP=FAIL; exit 1; }
+          grep -q 'P02_W4_W2_BOOTSTRAPPED_SAME_SITE_READY=PASS' "$RUNNER_TEMP/p02-w4-w2-bootstrap.log"
+          grep -q 'P02_W4_GENUINE_W2_25131_UPDATECORE_V1_BOOTSTRAP=PASS' "$RUNNER_TEMP/p02-w4-w2-bootstrap.log"
+          test -s "$RUNNER_TEMP/p02-w4-joined-root"
+          echo P02_W4_GENUINE_W2_25131_TO_25132_OLD_UPDATECORE=PASS
+      - name: Joined real installed W2 to extracted W3, five SIGKILL and independent rollback
+        shell: bash
+        working-directory: vf-library
+        env:
+          P02_W2_ATOMIC_SYNTHETIC: '1'
+          P02_W4_SYNTHETIC_ONLY: '1'
+          P02_W3_SYNTHETIC_ONLY: '1'
+          P02_W3_ENGINE: sqlite
+          P02_W4_EXPECTED_SOURCE_SHA: ${{ env.TARGET_SHA }}
+          P02_W3_VENDOR_AUTOLOAD: ${{ github.workspace }}/vf-library/modern/laravel/vendor/autoload.php
+        run: |
+          set -Eeuo pipefail
+          set +x
+          export P02_W4_REAL_INSTALLED_W2_ROOT="$(cat "$RUNNER_TEMP/p02-w4-joined-root")"
+          export P02_W4_JOINED_W2_BOOTSTRAP=1
+          export P02_W4_CUTOVER_SCRIPT="$PWD/scripts/p02_w4_webroot_cutover_trial.py"
+          python3 -B tests/integration/p02_w4_candidate_from_bundle.py > "$RUNNER_TEMP/p02-w4-joined-machine.log" 2>&1 || {
+            grep -E '^P02_W4_NATIVE_CHILD_STAGE=[0-9]+$' "$RUNNER_TEMP/p02-w4-joined-machine.log" | head -1 || true
+            echo P02_W4_GENUINE_JOINED_FULL_TO_W3=FAIL
+            exit 1
+          }
+          for marker in \
+            P02_W4_GENUINE_25131_FULL_INSTALLED_W2_TO_W3_STAGED_DATA=PASS \
+            P02_W4_REAL_SIGKILL_JOURNAL_TEMP_RECOVERY=PASS \
+            P02_W4_REAL_HTDOCS_TWO_RENAME_CRASH_RECOVERY=PASS \
+            P02_W4_CUTOVER_OWNER_DATA_PRESERVED_NOT_PRODUCTION=PASS \
+            P02_W4_JOINED_REAL_W2_25132_TO_W3_25133_BOTH_DATA_GENERATIONS=PASS \
+            P02_W4_REAL_INSTALLED_W2_TO_W3_SIGKILL=PASS; do
+            grep -Fqx "$marker" "$RUNNER_TEMP/p02-w4-joined-machine.log" || {
+              echo P02_W4_REQUIRED_GENUINE_MARKER_MISSING
+              exit 1
+            }
+          done
+          echo P02_W4_OFFICIAL_25131_INSTALLED_FULL_W2_V1_TO_25132_W3_25133_FIVE_OS_SIGKILL_RESTORED=PASS
+          echo P02_W4_NON_PRODUCTION_ISOLATED_MIGRATION_ONLY=PASS
+      - name: Always securely erase temporary installed W2 and private checkout
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          python3 - <<'PY'
+          import os,re,shutil,tempfile
+          from pathlib import Path
+          temp=Path(tempfile.gettempdir()).resolve()
+          names=[os.environ.get("P02_W4_RELEASE_WORKDIR",""),os.environ.get("P02_W4_LEGACY_ROOT","")]
+          joined=Path(os.environ.get("RUNNER_TEMP","/not-runner"))/"p02-w4-joined-root"
+          if joined.is_file() and not joined.is_symlink():
+              names.append(joined.read_text().strip())
+          for name in names:
+              if not name: continue
+              p=Path(name)
+              if p.parent==temp and not p.is_symlink() and p.is_dir() and (
+                  re.fullmatch(r'p02-w4-legacy-[a-f0-9]{16}',p.name) or
+                  re.fullmatch(r'p02-w4-release-[A-Za-z0-9]{8}',p.name)):
+                  shutil.rmtree(p)
+          if joined.is_file() and not joined.is_symlink():
+              joined.unlink()
+          PY
+          rm -rf -- vf-library
+          rm -f -- "$RUNNER_TEMP"/p02-w4-*.log "$RUNNER_TEMP"/p02-w4-cookie "$RUNNER_TEMP"/p02-w4-*.html "$RUNNER_TEMP"/p02-w4-*.json
+          test ! -e vf-library && echo P02_W4_PRIVATE_WORKSPACE_CLEANUP=PASS
