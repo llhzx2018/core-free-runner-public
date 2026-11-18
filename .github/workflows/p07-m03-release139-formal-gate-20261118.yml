@@ -1,0 +1,252 @@
+name: P07 M03 release139 exact final package formal release
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p07-m03-release139-formal-gate-20261118.yml']
+permissions:
+  contents: read
+jobs:
+  issue:
+    if: github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' && github.event.pull_request.head.ref == 'trial/p07-m03-release139-formal-gate-20261118'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NO_COLOR: '1'
+      PRODUCT_SHA: '9b977e8d4c16bbc3799aef8ac7f598b9ec234b33'
+      PRODUCT_BASE: '9352e4d7eafda74cfeb0cb6f11688431a6a10d80'
+      PUBLIC_SHA: 'de0c49b11d89610f0bd776d78d162692e01d811d'
+      BUILD: '0.1.0-release139'
+      TAG: 'p07-m03-d04-v0.1.0-release139-noncutover-20261118'
+      ZIPNAME: 'P07-M03-0.1.0-release139.zip'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 9b977e8d4c16bbc3799aef8ac7f598b9ec234b33
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: .p07-private
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .gov-current
+      - name: Exact merged source; architecture, module and non-cutover safety
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C .p07-private rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(git -C .p07-private rev-parse origin/main)" = "$PRODUCT_SHA"
+          test "$(cat .p07-private/BUILD_ID)" = "$BUILD"
+          test "$(git rev-parse HEAD^1)" = "$PUBLIC_SHA"
+          grep -Fq '## 0.1.0-release139' .p07-private/CHANGELOG.md
+          if grep -Fq 'UNPUBLISHED CANDIDATE' .p07-private/CHANGELOG.md; then exit 78; fi
+          python3 -B .p07-private/.github/checks/architecture_gate.py --manifest .p07-private/.github/checks/code_architecture.json --gov-root .gov-current --git-root .p07-private --base-sha "$PRODUCT_BASE" --head-sha "$PRODUCT_SHA"
+          (cd .p07-private && python3 -B scripts/check_p07_terminal_ux.py --base-ref "$PRODUCT_BASE" && python3 -B scripts/check_p07_modules.py)
+          for t in test_p07_m03_d04_preparation_checklist test_p07_dynamic_preflight test_p07_m03_d04_release_scope test_p07_m03_d04_prepared_online_ui test_p07_m03_d04_whole_vps_online_ui test_p07_m03_candidate_runtime_closure test_p07_m03_manifest_upgrade_guard; do
+            (cd .p07-private && python3 -B "tests/$t.py" -q)
+          done
+          echo P07_M03_RELEASE138_EXACT_MERGED_SOURCE_SAFETY=PASS
+      - name: Build deterministic final ZIP and prove every Git blob, size and privacy boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          out="$RUNNER_TEMP/p07-139-formal"
+          mkdir -m 0700 -p "$out"
+          python3 -B .p07-private/scripts/p07_candidate_bundle.py --product-root "$PWD/.p07-private" --public-root "$PWD" --output "$out/bundle" --product-sha "$PRODUCT_SHA" --build "$BUILD" --care 0.1.0-rc82 --m03-only
+          python3 -B - "$out" "$ZIPNAME" <<'PY'
+          import hashlib,pathlib,re,stat,sys,zipfile
+          root=pathlib.Path(sys.argv[1]);name=sys.argv[2]
+          bundle=root/'bundle';overlay=bundle/'dist/p07/0.1.0/overlay'
+          man=(overlay/'RUNTIME.gitblob').read_bytes()
+          def blob(b):return hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest()
+          names=set()
+          for row in man.decode().splitlines():
+              sha,rel=row.split('  ',1)
+              assert re.fullmatch('[a-f0-9]{40}',sha)
+              assert re.fullmatch(r'(?:bin|lib|components)/[A-Za-z0-9_./-]+|BUILD_ID',rel) and '..' not in pathlib.PurePosixPath(rel).parts
+              assert rel not in names
+              names.add(rel)
+              p=overlay/rel
+              assert p.is_file() and not p.is_symlink() and blob(p.read_bytes())==sha
+          assert {'BUILD_ID','bin/vfops-migrate-ui','lib/migration_release_scope.py','lib/migration_readiness_cli.py','lib/migration_preparation_checklist.py','components/p07-m03-migration-readiness.sh'}<=names
+          assert (overlay/'BUILD_ID').read_text().strip()=='0.1.0-release139'
+          paths=['dist/p07/0.1.0/overlay/'+n for n in names]
+          paths+=['dist/p07/0.1.0/overlay/RUNTIME.gitblob','dist/p07/0.1.0-rc2/P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz','installers/p07-final.sh']
+          assert 50<=len(paths)<=240 and len(paths)==len(set(paths))
+          for n in paths:
+              p=bundle/n
+              assert p.is_file() and not p.is_symlink() and p.stat().st_size<64*1024*1024
+              assert not n.endswith(('.db','.sqlite','.sqlite3','.pem','.key')) and '/.env' not in n
+              if p.stat().st_size<1_000_000 and n.startswith('dist/p07/0.1.0/overlay/'):
+                  data=p.read_bytes()
+                  assert b'-----BEGIN OPENSSH PRIVATE KEY-----' not in data
+                  assert b'-----BEGIN RSA PRIVATE KEY-----' not in data
+          def write(dest):
+              with zipfile.ZipFile(dest,'x',compression=zipfile.ZIP_DEFLATED,compresslevel=9,allowZip64=False) as z:
+                  for n in sorted(paths):
+                      info=zipfile.ZipInfo(n,(2026,11,18,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.external_attr=(stat.S_IFREG|0o644)<<16
+                      z.writestr(info,(bundle/n).read_bytes(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+          write(root/name);write(root/('repeat-'+name))
+          a=(root/name).read_bytes();b=(root/('repeat-'+name)).read_bytes()
+          assert a==b and len(a)<100*1024*1024
+          (root/('repeat-'+name)).unlink()
+          sha=hashlib.sha256(a).hexdigest()
+          (root/'SHA256SUMS').write_text(sha+'  '+name+'\n')
+          (root/'runtime_sha').write_text(blob(man)+'\n')
+          (root/'installer_sha').write_text(blob((bundle/'installers/p07-final.sh').read_bytes())+'\n')
+          assert blob(man)=='efdfff0b4348b334bbbc2da26d40280338fc7868'
+          print('P07_M03_139_FINAL_ZIP_SHA256='+sha)
+          print('P07_M03_139_FINAL_RUNTIME_BLOB='+blob(man))
+          print('P07_M03_139_FINAL_INSTALLER_BLOB='+blob((bundle/'installers/p07-final.sh').read_bytes()))
+          print('P07_M03_139_ARCHIVE_MEMBERS='+str(len(paths)))
+          print('P07_M03_139_REAL_FINAL_ZIP_IDENTICAL_REBUILD_AND_PRIVACY=PASS')
+          PY
+          (cd "$out" && sha256sum -c SHA256SUMS)
+          mkdir "$out/extracted"
+          unzip -q "$out/$ZIPNAME" -d "$out/extracted"
+          bash -n "$out/extracted/installers/p07-final.sh"
+      - name: Actual final ZIP fresh install, corrupt-file rejection, published137 upgrade and rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          out="$RUNNER_TEMP/p07-139-formal";pack="$out/extracted";run="$RUNNER_TEMP/p07-139-machine"
+          mkdir -p "$run/bin" "$run/canary"
+          for n in m01 m02 m04 m05 business; do echo "keep-$n" > "$run/canary/$n"; done
+          before="$(sha256sum "$run/canary"/* | sha256sum)"
+          export P07_INSTALL_DIR="$run/fresh" P07_PREVIOUS_DIR="$run/fresh-prev" P07_BIN_LINK="$run/bin/fresh" P07_PUBLIC_ROOT="file://$pack" P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          bash "$pack/installers/p07-final.sh" > "$run/fresh.log" 2>&1 || { tail -n 20 "$run/fresh.log"; exit 78; }
+          test "$(cat "$run/fresh/BUILD_ID")" = "$BUILD"
+          NO_COLOR=1 bash "$run/fresh/bin/vfops-migrate-ui" </dev/null > "$run/menu.log" 2>&1
+          grep -Fq '先检查旧 VPS 和新机数据库选项' "$run/menu.log"
+          bash "$pack/installers/p07-final.sh" > "$run/idempotent.log" 2>&1
+          test ! -e "$run/fresh-prev"
+          cp -a "$pack" "$run/corrupt"
+          echo '# malicious mutation' >> "$run/corrupt/dist/p07/0.1.0/overlay/lib/migration_readiness_cli.py"
+          export P07_INSTALL_DIR="$run/corrupt-live" P07_PREVIOUS_DIR="$run/corrupt-prev" P07_BIN_LINK="$run/bin/corrupt" P07_PUBLIC_ROOT="file://$run/corrupt"
+          if bash "$pack/installers/p07-final.sh" > "$run/corrupt.log" 2>&1; then echo TAMPER_ACCEPTED; exit 78; fi
+          test ! -e "$run/corrupt-live"
+          export P07_INSTALL_DIR="$run/live" P07_PREVIOUS_DIR="$run/previous" P07_BIN_LINK="$run/bin/vfops"
+          unset P07_PUBLIC_ROOT
+          bash installers/p07-m03-release138-atomic.sh install > "$run/old.log" 2>&1 || { tail -n 20 "$run/old.log"; exit 78; }
+          test "$(cat "$run/live/BUILD_ID")" = 0.1.0-release138
+          export P07_PUBLIC_ROOT="file://$pack"
+          python3 -B - "$pack/installers/p07-final.sh" "$run/fault.sh" <<'PY'
+          from pathlib import Path
+          import sys
+          s=Path(sys.argv[1]).read_text();mark='if ! verify_installed_current; then'
+          assert s.count(mark)==1
+          Path(sys.argv[2]).write_text(s.replace(mark,'if true; then',1))
+          PY
+          if bash "$run/fault.sh" > "$run/fault.log" 2>&1; then echo FAULT_ACCEPTED; exit 78; fi
+          test "$(cat "$run/live/BUILD_ID")" = 0.1.0-release138
+          test ! -e "$run/previous"
+          bash "$pack/installers/p07-final.sh" > "$run/new.log" 2>&1 || { tail -n 25 "$run/new.log"; exit 78; }
+          test "$(cat "$run/live/BUILD_ID")" = "$BUILD"
+          test "$(cat "$run/previous/BUILD_ID")" = 0.1.0-release138
+          test -f "$run/live/lib/migration_readiness_cli.py"
+          test "$(NO_COLOR=1 "$run/bin/vfops" --build-id)" = "$BUILD"
+          test "$(sha256sum "$run/canary"/* | sha256sum)" = "$before"
+          echo P07_M03_139_REAL_FINAL_ZIP_FRESH_INSTALL=PASS
+          echo P07_M03_139_REAL_RELEASE138_TO_139_ATOMIC_AND_POST_SWAP_ROLLBACK=PASS
+          echo P07_M03_139_REAL_TAMPER_FAIL_CLOSED_AND_FOUR_MODULES_UNCHANGED=PASS
+      - name: Verify actual ZIP against required Public Authority delivery contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          out="$RUNNER_TEMP/p07-139-formal"
+          zipsha="$(sha256sum "$out/$ZIPNAME" | cut -d' ' -f1)"
+          python3 -B - "$PRODUCT_SHA" "$ZIPNAME" "$zipsha" "$out/task-delivery.json" <<'PY'
+          import json,sys,pathlib
+          sha,name,digest,dest=sys.argv[1:]
+          receipt={
+             "schema":"vf.public-authority.task-delivery-check.v1",
+             "project":"P07","source":sha,
+             "project_authority":{"agents":"AGENTS.md","current":"docs/authority/CURRENT.md","acceptance":"docs/authority/ACCEPTANCE_MATRIX.md","applicability":"docs/authority/PUBLIC_AUTHORITY_APPLICABILITY.md"},
+             "acceptance_markers":["D04 迁移前检查与初始化建议","P07-M03 网站与数据"],
+             "task_capabilities":["installer","release","atomic","migration","release_source","ui_change"],
+             "required_domains":["INSTALL","SECURITY","TESTING","UPGRADE","DATA_SCHEMA","GIT","UA_UI"],
+             "delivery":{"profile":"static_bundle_zip","entrypoint":"installers/p07-final.sh","artifact":name,"sha256":digest,"requires_git":False,"requires_manual_source_copy":False}
+          }
+          pathlib.Path(dest).write_text(json.dumps(receipt,sort_keys=True))
+          PY
+          python3 -B .gov-current/governance/public-authority/tools/task_delivery_contract_lint.py --phase delivery \
+            --receipt "$out/task-delivery.json" --project-root "$PWD/.p07-private" --artifact-root "$out" \
+            --public-router "$PWD/.gov-current/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json"
+          echo P07_M03_139_ACTUAL_ZIP_DELIVERY_STRUCTURE=PASS
+      - name: Publish precisely verified new product and public GitHub Release assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$GH_TOKEN" ]] || { echo RELEASE_SECRET_MISSING; exit 78; }
+          out="$RUNNER_TEMP/p07-139-formal"
+          zipsha="$(sha256sum "$out/$ZIPNAME" | cut -d' ' -f1)"
+          test "$(cat "$out/runtime_sha")" = efdfff0b4348b334bbbc2da26d40280338fc7868
+          test "$(cat "$out/SHA256SUMS")" = "$zipsha  $ZIPNAME"
+          product=llhzx2018/vf-server-ops
+          public=llhzx2018/core-free-runner-public
+          for repo in "$product" "$public"; do
+            test "$(gh api "repos/$repo" --jq .full_name)" = "$repo"
+            matches="$(gh api "repos/$repo/releases?per_page=100" | jq --arg tag "$TAG" '[.[]|select(.tag_name==$tag)]|length')"
+            test "$matches" = 0 || { echo RELEASE_ALREADY_EXISTS; exit 78; }
+            if gh api "repos/$repo/git/ref/tags/$TAG" >/dev/null 2>&1; then echo RELEASE_TAG_ALREADY_EXISTS; exit 78; fi
+          done
+          notes="P07-M03 网站与数据 / D04 服务器迁移 release139: Debian13 CloudPanel MySQL8.4 installer recommendation for source Percona 8.4, strict runtime flavor verification, source-first SSH menu. D05 remains separate. No auto Production, CP2, old VPS, DNS, data migration or engine conversion."
+          for repo in "$product" "$public"; do
+            target="$PUBLIC_SHA"
+            [[ "$repo" == "$product" ]] && target="$PRODUCT_SHA"
+            gh release create "$TAG" "$out/$ZIPNAME" "$out/SHA256SUMS" \
+              --repo "$repo" --target "$target" --draft --latest=false \
+              --title "P07-M03 网站与数据 / D04 服务器迁移 · release139" --notes "$notes" >/dev/null
+            rel="$(gh api "repos/$repo/releases?per_page=100" | jq -c --arg tag "$TAG" '[.[] | select(.tag_name==$tag)] | .[0]')"
+            test "$(jq -r .draft <<< "$rel")" = true
+            test "$(jq -r .prerelease <<< "$rel")" = false
+            test "$(jq -r .target_commitish <<< "$rel")" = "$target"
+            test "$(jq -r '.assets|length' <<< "$rel")" = 2
+            for name in "$ZIPNAME" SHA256SUMS; do
+              expected="sha256:$(sha256sum "$out/$name" | cut -d' ' -f1)"
+              test "$(jq -r --arg n "$name" '.assets[]|select(.name==$n)|.digest' <<< "$rel")" = "$expected"
+              test "$(jq -r --arg n "$name" '.assets[]|select(.name==$n)|.state' <<< "$rel")" = uploaded
+            done
+            echo "P07_139_NEW_DRAFT_ASSETS_VERIFIED=$(basename "$repo")"
+          done
+          for repo in "$product" "$public"; do
+            gh release edit "$TAG" --repo "$repo" --draft=false >/dev/null
+          done
+          for repo in "$product" "$public"; do
+            target="$PUBLIC_SHA"
+            [[ "$repo" == "$product" ]] && target="$PRODUCT_SHA"
+            test "$(gh api "repos/$repo/releases/tags/$TAG" --jq .draft)" = false
+            test "$(gh api "repos/$repo/git/ref/tags/$TAG" --jq .object.sha)" = "$target"
+            dir="$out/download-$(basename "$repo")"
+            mkdir -p "$dir"
+            gh release download "$TAG" --repo "$repo" --dir "$dir"
+            (cd "$dir" && sha256sum -c SHA256SUMS)
+            test "$(sha256sum "$dir/$ZIPNAME" | cut -d' ' -f1)" = "$zipsha"
+            echo "P07_139_PUBLISHED_REMOTE_BYTES_VERIFIED=$(basename "$repo")"
+          done
+          echo "P07_139_OFFICIAL_ZIP_SHA256=$zipsha"
+          echo "P07_139_OFFICIAL_RUNTIME_BLOB=$(cat "$out/runtime_sha")"
+          echo "P07_139_OFFICIAL_INSTALLER_BLOB=$(cat "$out/installer_sha")"
+          echo "P07_139_OFFICIAL_PUBLIC_ZIP_ASSET_ID=$(gh api "repos/$public/releases/tags/$TAG" --jq '.assets[]|select(.name=="P07-M03-0.1.0-release139.zip")|.id')"
+          echo P07_139_FORMAL_RELEASE_BOTH_REPOS=PASS
+          echo P07_139_OWNER_CP2_AND_DNS=NOT_TOUCHED
+      - name: Always erase private checkout and transient build data
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- .p07-private .gov-current
+          rm -rf -- "$RUNNER_TEMP/p07-139-formal" "$RUNNER_TEMP/p07-139-machine"
+          echo P07_139_PRIVATE_SOURCE_CLEANUP=PASS
