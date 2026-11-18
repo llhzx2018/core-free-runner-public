@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-import urllib.request
+import subprocess
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,11 +33,12 @@ def run(*args: str, env=None, timeout=120):
 
 class P07Official138(unittest.TestCase):
     def test_exact_official_remote_release_and_single_public_wrapper(self):
-        with urllib.request.urlopen(
-            "https://api.github.com/repos/llhzx2018/core-free-runner-public/releases/tags/" + TAG,
-            timeout=30,
-        ) as resp:
-            data = json.load(resp)
+        # Authenticated read-only GH_TOKEN avoids unauthenticated GitHub rate limits.
+        remote = subprocess.run(
+            ["gh", "api", "repos/llhzx2018/core-free-runner-public/releases/tags/" + TAG],
+            capture_output=True, text=True, check=True, timeout=30,
+        )
+        data = json.loads(remote.stdout)
         self.assertFalse(data["draft"])
         self.assertFalse(data["prerelease"])
         assets = {a["name"]: a for a in data["assets"]}
