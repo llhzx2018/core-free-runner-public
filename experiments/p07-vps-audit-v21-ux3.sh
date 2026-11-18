@@ -45,7 +45,8 @@ show_yabs_original_version() {
 show_vps_audit_menu() {
   local option=''
   while true; do
-    printf '\n服务器性能检测 · %s\n' "$VERSION"\n    printf '当前：选择后才运行；完整验机会使用 CPU、磁盘和网络资源。\n'
+    printf '\n服务器性能检测 · %s\n' "$VERSION"
+    printf '当前：选择后才运行；完整验机会使用 CPU、磁盘和网络资源。\n'
     printf '  1. 开始完整 VPS 验机（建议空闲时运行）\n'
     printf '  2. 查看 YABS 原作者版本（只读）\n'
     printf '  0. 返回工具箱\n'
