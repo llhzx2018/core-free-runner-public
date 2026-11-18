@@ -136,7 +136,8 @@ def main() -> None:
     for pin in (
         'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release139"',
         'M03_PREVIOUS_BUILD="0.1.0-release138"',
-        'M03_PREVIOUS_MANIFEST_BLOB="fc94d7c573a0437517726de22c4ac6ff33e582e7"',
+        'M03_PREVIOUS_MANIFEST_BLOB="2c6ccd51b7e73d3d9db1ec6d37beaa6ce1cdff73"',
+        'M03_LEGACY137_MANIFEST_BLOB="fc94d7c573a0437517726de22c4ac6ff33e582e7"',
     ):
         check(pin in toolbox, f"approved M03 current release139 pin absent: {pin}")
     m01_src = ROOT / "packages/p07-network-node/0.1.0-ux2"
