@@ -80,12 +80,30 @@ expect174(is_link($root.'/current') && readlink($root.'/current')==='releases/'.
     'RESCUE_AUTOMATICALLY_CHANGED_POINTER');
 $next=$root.'/storage/app/private/adops/owner-next-update';
 $history=$next.'/history';
-expect174(!is_file($next.'/intent.json')
-    && is_dir($history)
+expect174(is_dir($history)
     && is_file($history.'/r168-failed-'.str_repeat('a',32).'.json'),
     'FAILED_JOURNAL_NOT_ARCHIVED');
+$oldAudit=$history.'/r168-audit-'.str_repeat('a',32).'.json';
+expect174(is_file($oldAudit),'FAILED_JOURNAL_AUDIT_MISSING');
+$archived=json_decode((string)file_get_contents($history.'/r168-failed-'.str_repeat('a',32).'.json'),true,24,JSON_THROW_ON_ERROR);
+expect174(($archived['status']??null)==='NEEDS_RECOVERY'
+    && ($archived['failure_phase']??null)==='PREPARE',
+    'ORIGINAL_FAILED_PREPARE_NOT_PRESERVED');
+// The genuine safe recovery intentionally creates a NEW PREPARED intent:
+// absence of intent.json would mean no Owner-authenticated Apply can follow.
+expect174(is_file($next.'/intent.json'),'NEW_PREPARED_INTENT_MISSING');
+$newIntent=json_decode((string)file_get_contents($next.'/intent.json'),true,24,JSON_THROW_ON_ERROR);
+expect174(($newIntent['status']??null)==='PREPARED'
+    && ($newIntent['source_sha']??null)===$old
+    && ($newIntent['target_sha']??null)==='aad233c72213d2fcb3e2400ee1316bb7d8e9f071'
+    && ($newIntent['target_version']??null)==='0.1.7'
+    && ($newIntent['id']??null)!==str_repeat('a',32),
+    'NEW_PREPARED_INTENT_IDENTITY_MISMATCH');
 $record=json_decode((string)file_get_contents($next.'/status.json'),true,24,JSON_THROW_ON_ERROR);
-expect174(($record['status']??null)==='PREPARED','ONLINE_PREPARE_NOT_VERIFIED');
+expect174(($record['status']??null)==='PREPARED'
+    && ($record['job_id']??null)===$newIntent['id']
+    && ($record['target_sha']??null)==='aad233c72213d2fcb3e2400ee1316bb7d8e9f071',
+    'ONLINE_PREPARE_NOT_VERIFIED');
 expect174(hash_file('sha256',$root.'/current/FULL_MANIFEST.json')===$manifestHash,
     'SOURCE_CHANGED_DURING_PREPARE');
 $private=$root.'/storage/app/private/adops/recovery';
