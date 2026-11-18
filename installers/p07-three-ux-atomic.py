@@ -90,17 +90,61 @@ def read_package(zip_path, expected_sha, expected_module):
     except (ValueError,TypeError,KeyError,UnicodeError):
         block("模块清单无法解析")
 
-def verify_saved(root,expected):
-    if not root.is_dir() or root.is_symlink(): block("旧版本路径异常")
+def legacy_verification(root,build,module):
+    """Only the exact publicly pinned previous runtime bytes may be upgraded."""
+    old=CONFIG[module][4]
+    if build!=old: block("不允许未知旧版升级")
+    if module=="P07-M02":
+        files={p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+        if files not in ({"vps-audit.sh"},{"vps-audit.sh","MANIFEST.sha256"}):
+            block("旧版 VPS 运行目录不一致")
+        script=root/"vps-audit.sh"
+        expected="18a7a7dc401772fda7344845b952bc307a46f05443d086ec5e38a1954308587d"
+        if script.is_symlink() or sha(script.read_bytes())!=expected: block("旧 VPS 脚本字节不可信")
+        if "MANIFEST.sha256" in files and (root/"MANIFEST.sha256").read_text()!=expected+"  vps-audit.sh\n":
+            block("旧版脚本清单已变更")
+        return
+    manifest_name="MANIFEST.sha256" if module=="P07-M01" else "MANIFEST.gitblob"
+    pinned=("1f66f642769848e5be0c9a25ccb58a60e97e40fe2eb58a088233a5c129f1cb90"
+            if module=="P07-M01" else "4a20bbe1f1c7622ee54a10761f52fe719130024a")
+    marker=root/manifest_name
+    if marker.is_symlink() or not marker.is_file():block("旧版受信清单缺失")
+    raw=marker.read_bytes()
+    gitblob=lambda b:hashlib.sha1(b"blob "+str(len(b)).encode()+b"\0"+b).hexdigest()
+    actual=sha(raw) if module=="P07-M01" else gitblob(raw)
+    if actual!=pinned: block("旧版官方清单身份不符")
+    files={}
+    for line in raw.decode().splitlines():
+        parts=line.split("  ",1)
+        if len(parts)!=2 or not re.fullmatch(r"[A-Za-z0-9_./-]+",parts[1]) or ".." in PurePosixPath(parts[1]).parts:
+            block("旧版文件清单含不安全路径")
+        expected,p=parts
+        target=root/p
+        if p in files or not target.is_file() or target.is_symlink():
+            block("旧版文件丢失或重复")
+        data=target.read_bytes()
+        if (sha(data) if module=="P07-M01" else gitblob(data))!=expected:
+            block("旧版运行时字节不可信")
+        files[p]=True
+    actual_paths={p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
+    if actual_paths!=set(files)|{manifest_name}:block("旧版目录有未知文件")
+    if (root/"VERSION").read_text().strip()!=build:block("旧版版本身份不符")
+
+def verify_saved(root,expected,module):
+    if not root.is_dir() or root.is_symlink():block("旧版本路径异常")
     marker=root/"MODULE_MANIFEST.json"
-    if not marker.is_file() or marker.is_symlink(): block("旧版本没有完整性清单")
-    try: meta=json.loads(marker.read_bytes())
-    except Exception: block("旧模块清单损坏")
-    if meta.get("module_build_id")!=expected: block("旧版本身份不符")
+    if marker.is_symlink():block("旧版清单不能为符号链接")
+    if not marker.is_file():
+        legacy_verification(root,expected,module)
+        return
+    try:meta=json.loads(marker.read_bytes())
+    except Exception:block("旧模块清单损坏")
+    if meta.get("module_build_id")!=expected or meta.get("module_id")!=module:
+        block("旧版本身份不符")
     files=meta.get("files")
-    if not isinstance(files,dict): block("旧版本完整性损坏")
+    if not isinstance(files,dict):block("旧版本完整性损坏")
     actual={p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file()}
-    if actual!=set(files)|{"MODULE_MANIFEST.json"}: block("旧模块文件数量变化")
+    if actual!=set(files)|{"MODULE_MANIFEST.json"}:block("旧模块文件数量变化")
     for name,expected_sha in files.items():
         p=root/name
         if p.is_symlink() or not p.is_file() or sha(p.read_bytes())!=expected_sha:
@@ -113,7 +157,7 @@ def current_state(home,module):
         if not re.fullmatch(r"releases/[A-Za-z0-9._-]{1,64}",link): block("现有模块指针异常")
         build=link.removeprefix("releases/")
         if build not in CONFIG[module][3:]: block("旧版本不在本次许可来源内")
-        verify_saved(home/link,build)
+        verify_saved(home/link,build,module)
         return current,build
     if current.exists(): block("现有模块目录不能覆盖")
     return current,None
@@ -141,7 +185,7 @@ def install(module,archive,checksum):
         current,prior=current_state(home,module)
         target=rel/build
         if target.exists() or target.is_symlink():
-            verify_saved(target,build)
+            verify_saved(target,build,module)
             if prior!=build: switching(home,current,build)
             return build
         stage=home/(".stage-"+uuid.uuid4().hex)
@@ -173,7 +217,7 @@ def rollback(module,build,confirmation):
     if home.is_symlink() or not home.is_dir(): block("模块不存在")
     current,now=current_state(home,module)
     if not now:block("模块尚未安装")
-    verify_saved(home/"releases"/build,build)
+    verify_saved(home/"releases"/build,build,module)
     switching(home,current,build)
     return build
 
