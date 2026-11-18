@@ -38,7 +38,13 @@ def run_menu(script: Path, answers: bytes = b"0\n", timeout: float = 7.0) -> str
     os.close(slave)
     output = bytearray()
     try:
-        os.write(parent, answers)
+        # Wait for the real menu prompt before answering. Early PTY input can
+        # be consumed by Bash/terminal setup and leave a safe 0 menu hanging.
+        # Never inject options other than the test's 0/invalid input queue.
+        queue = [x + b"\n" for x in answers.split(b"\n") if x]
+        if any(x not in (b"0\n", b"9\n") for x in queue):
+            raise AssertionError("non-safe menu answer rejected")
+        sent = 0
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             ready, _, _ = select.select([parent], [], [], 0.1)
@@ -47,6 +53,10 @@ def run_menu(script: Path, answers: bytes = b"0\n", timeout: float = 7.0) -> str
                     output.extend(os.read(parent, 65536))
                 except OSError:
                     break
+                prompts = output.decode("utf-8", "replace").count("请选择 [")
+                if prompts > sent and sent < len(queue):
+                    os.write(parent, queue[sent])
+                    sent += 1
             if child.poll() is not None:
                 break
         if child.poll() is None:
