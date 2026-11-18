@@ -1,0 +1,221 @@
+name: P07 M03 release138 exact final package formal release
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p07-m03-release138-formal-gate-20261118.yml']
+permissions:
+  contents: read
+jobs:
+  issue:
+    if: github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' && github.event.pull_request.head.ref == 'trial/p07-m03-release138-formal-gate-20261118'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NO_COLOR: '1'
+      PRODUCT_SHA: '9352e4d7eafda74cfeb0cb6f11688431a6a10d80'
+      PRODUCT_BASE: '9e5beb351f6d0a712ae388a49e510620398002fa'
+      PUBLIC_SHA: 'c0e1359c4ec06933605eb7f01c4e4343c97c747a'
+      BUILD: '0.1.0-release138'
+      TAG: 'p07-m03-d04-v0.1.0-release138-noncutover-20261118'
+      ZIPNAME: 'P07-M03-0.1.0-release138.zip'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 9352e4d7eafda74cfeb0cb6f11688431a6a10d80
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: .p07-private
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .gov-current
+      - name: Exact merged source; architecture, module and non-cutover safety
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C .p07-private rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(git -C .p07-private rev-parse origin/main)" = "$PRODUCT_SHA"
+          test "$(cat .p07-private/BUILD_ID)" = "$BUILD"
+          test "$(git rev-parse HEAD^1)" = "$PUBLIC_SHA"
+          grep -Fq '## 0.1.0-release138' .p07-private/CHANGELOG.md
+          if grep -Fq 'UNPUBLISHED CANDIDATE' .p07-private/CHANGELOG.md; then exit 78; fi
+          python3 -B .p07-private/.github/checks/architecture_gate.py --manifest .p07-private/.github/checks/code_architecture.json --gov-root .gov-current --git-root .p07-private --base-sha "$PRODUCT_BASE" --head-sha "$PRODUCT_SHA"
+          (cd .p07-private && python3 -B scripts/check_p07_terminal_ux.py --base-ref "$PRODUCT_BASE" && python3 -B scripts/check_p07_modules.py)
+          for t in test_p07_m03_d04_preparation_checklist test_p07_dynamic_preflight test_p07_m03_d04_release_scope test_p07_m03_d04_prepared_online_ui test_p07_m03_d04_whole_vps_online_ui test_p07_m03_candidate_runtime_closure test_p07_m03_manifest_upgrade_guard; do
+            (cd .p07-private && python3 -B "tests/$t.py" -q)
+          done
+          echo P07_M03_RELEASE138_EXACT_MERGED_SOURCE_SAFETY=PASS
+      - name: Build deterministic final ZIP and prove every Git blob, size and privacy boundary
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          out="$RUNNER_TEMP/p07-138-formal"
+          mkdir -m 0700 -p "$out"
+          python3 -B .p07-private/scripts/p07_candidate_bundle.py --product-root "$PWD/.p07-private" --public-root "$PWD" --output "$out/bundle" --product-sha "$PRODUCT_SHA" --build "$BUILD" --care 0.1.0-rc82 --m03-only
+          python3 -B - "$out" "$ZIPNAME" <<'PY'
+          import hashlib,pathlib,re,stat,sys,zipfile
+          root=pathlib.Path(sys.argv[1]);name=sys.argv[2]
+          bundle=root/'bundle';overlay=bundle/'dist/p07/0.1.0/overlay'
+          man=(overlay/'RUNTIME.gitblob').read_bytes()
+          def blob(b):return hashlib.sha1(b'blob '+str(len(b)).encode()+b'\0'+b).hexdigest()
+          names=set()
+          for row in man.decode().splitlines():
+              sha,rel=row.split('  ',1)
+              assert re.fullmatch('[a-f0-9]{40}',sha)
+              assert re.fullmatch(r'(?:bin|lib|components)/[A-Za-z0-9_./-]+|BUILD_ID',rel) and '..' not in pathlib.PurePosixPath(rel).parts
+              assert rel not in names
+              names.add(rel)
+              p=overlay/rel
+              assert p.is_file() and not p.is_symlink() and blob(p.read_bytes())==sha
+          assert {'BUILD_ID','bin/vfops-migrate-ui','lib/migration_release_scope.py','lib/migration_readiness_cli.py','lib/migration_preparation_checklist.py','components/p07-m03-migration-readiness.sh'}<=names
+          assert (overlay/'BUILD_ID').read_text().strip()=='0.1.0-release138'
+          paths=['dist/p07/0.1.0/overlay/'+n for n in names]
+          paths+=['dist/p07/0.1.0/overlay/RUNTIME.gitblob','dist/p07/0.1.0-rc2/P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz','installers/p07-final.sh']
+          assert 50<=len(paths)<=240 and len(paths)==len(set(paths))
+          for n in paths:
+              p=bundle/n
+              assert p.is_file() and not p.is_symlink() and p.stat().st_size<64*1024*1024
+              assert not n.endswith(('.db','.sqlite','.sqlite3','.pem','.key')) and '/.env' not in n
+              if p.stat().st_size<1_000_000 and n.startswith('dist/p07/0.1.0/overlay/'):
+                  data=p.read_bytes()
+                  assert b'-----BEGIN OPENSSH PRIVATE KEY-----' not in data
+                  assert b'-----BEGIN RSA PRIVATE KEY-----' not in data
+          def write(dest):
+              with zipfile.ZipFile(dest,'x',compression=zipfile.ZIP_DEFLATED,compresslevel=9,allowZip64=False) as z:
+                  for n in sorted(paths):
+                      info=zipfile.ZipInfo(n,(2026,11,18,0,0,0))
+                      info.compress_type=zipfile.ZIP_DEFLATED
+                      info.external_attr=(stat.S_IFREG|0o644)<<16
+                      z.writestr(info,(bundle/n).read_bytes(),compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+          write(root/name);write(root/('repeat-'+name))
+          a=(root/name).read_bytes();b=(root/('repeat-'+name)).read_bytes()
+          assert a==b and len(a)<100*1024*1024
+          (root/('repeat-'+name)).unlink()
+          sha=hashlib.sha256(a).hexdigest()
+          (root/'SHA256SUMS').write_text(sha+'  '+name+'\n')
+          (root/'runtime_sha').write_text(blob(man)+'\n')
+          (root/'installer_sha').write_text(blob((bundle/'installers/p07-final.sh').read_bytes())+'\n')
+          assert blob(man)=='2c6ccd51b7e73d3d9db1ec6d37beaa6ce1cdff73'
+          print('P07_M03_138_FINAL_ZIP_SHA256='+sha)
+          print('P07_M03_138_FINAL_RUNTIME_BLOB='+blob(man))
+          print('P07_M03_138_FINAL_INSTALLER_BLOB='+blob((bundle/'installers/p07-final.sh').read_bytes()))
+          print('P07_M03_138_ARCHIVE_MEMBERS='+str(len(paths)))
+          print('P07_M03_138_REAL_FINAL_ZIP_IDENTICAL_REBUILD_AND_PRIVACY=PASS')
+          PY
+          (cd "$out" && sha256sum -c SHA256SUMS)
+          mkdir "$out/extracted"
+          unzip -q "$out/$ZIPNAME" -d "$out/extracted"
+          bash -n "$out/extracted/installers/p07-final.sh"
+      - name: Actual final ZIP fresh install, corrupt-file rejection, published137 upgrade and rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          out="$RUNNER_TEMP/p07-138-formal";pack="$out/extracted";run="$RUNNER_TEMP/p07-138-machine"
+          mkdir -p "$run/bin" "$run/canary"
+          for n in m01 m02 m04 m05 business; do echo "keep-$n" > "$run/canary/$n"; done
+          before="$(sha256sum "$run/canary"/* | sha256sum)"
+          export P07_INSTALL_DIR="$run/fresh" P07_PREVIOUS_DIR="$run/fresh-prev" P07_BIN_LINK="$run/bin/fresh" P07_PUBLIC_ROOT="file://$pack" P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          bash "$pack/installers/p07-final.sh" > "$run/fresh.log" 2>&1 || { tail -n 20 "$run/fresh.log"; exit 78; }
+          test "$(cat "$run/fresh/BUILD_ID")" = "$BUILD"
+          NO_COLOR=1 bash "$run/fresh/bin/vfops-migrate-ui" </dev/null > "$run/menu.log" 2>&1
+          grep -Fq '迁移前检查原服务器与初始化方案' "$run/menu.log"
+          bash "$pack/installers/p07-final.sh" > "$run/idempotent.log" 2>&1
+          test ! -e "$run/fresh-prev"
+          cp -a "$pack" "$run/corrupt"
+          echo '# malicious mutation' >> "$run/corrupt/dist/p07/0.1.0/overlay/lib/migration_readiness_cli.py"
+          export P07_INSTALL_DIR="$run/corrupt-live" P07_PREVIOUS_DIR="$run/corrupt-prev" P07_BIN_LINK="$run/bin/corrupt" P07_PUBLIC_ROOT="file://$run/corrupt"
+          if bash "$pack/installers/p07-final.sh" > "$run/corrupt.log" 2>&1; then echo TAMPER_ACCEPTED; exit 78; fi
+          test ! -e "$run/corrupt-live"
+          export P07_INSTALL_DIR="$run/live" P07_PREVIOUS_DIR="$run/previous" P07_BIN_LINK="$run/bin/vfops"
+          unset P07_PUBLIC_ROOT
+          bash installers/p07-m03-release137-atomic.sh install > "$run/old.log" 2>&1 || { tail -n 20 "$run/old.log"; exit 78; }
+          test "$(cat "$run/live/BUILD_ID")" = 0.1.0-release137
+          export P07_PUBLIC_ROOT="file://$pack"
+          python3 -B - "$pack/installers/p07-final.sh" "$run/fault.sh" <<'PY'
+          from pathlib import Path
+          import sys
+          s=Path(sys.argv[1]).read_text();mark='if ! verify_installed_current; then'
+          assert s.count(mark)==1
+          Path(sys.argv[2]).write_text(s.replace(mark,'if true; then',1))
+          PY
+          if bash "$run/fault.sh" > "$run/fault.log" 2>&1; then echo FAULT_ACCEPTED; exit 78; fi
+          test "$(cat "$run/live/BUILD_ID")" = 0.1.0-release137
+          test ! -e "$run/previous"
+          bash "$pack/installers/p07-final.sh" > "$run/new.log" 2>&1 || { tail -n 25 "$run/new.log"; exit 78; }
+          test "$(cat "$run/live/BUILD_ID")" = "$BUILD"
+          test "$(cat "$run/previous/BUILD_ID")" = 0.1.0-release137
+          test -f "$run/live/lib/migration_readiness_cli.py"
+          test "$(NO_COLOR=1 "$run/bin/vfops" --build-id)" = "$BUILD"
+          test "$(sha256sum "$run/canary"/* | sha256sum)" = "$before"
+          echo P07_M03_138_REAL_FINAL_ZIP_FRESH_INSTALL=PASS
+          echo P07_M03_138_REAL_RELEASE137_TO_138_ATOMIC_AND_POST_SWAP_ROLLBACK=PASS
+          echo P07_M03_138_REAL_TAMPER_FAIL_CLOSED_AND_FOUR_MODULES_UNCHANGED=PASS
+      - name: Two official draft releases; remote SHA256; publish only after all hard gates
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          [[ -n "$GH_TOKEN" ]] || { echo P07_RELEASE_WRITE_CAPABILITY_MISSING; exit 78; }
+          gh api repos/llhzx2018/vf-server-ops --jq '.full_name' | grep -Fxq llhzx2018/vf-server-ops
+          gh api repos/llhzx2018/core-free-runner-public --jq '.full_name' | grep -Fxq llhzx2018/core-free-runner-public
+          for repo in llhzx2018/vf-server-ops llhzx2018/core-free-runner-public; do
+            if gh api "repos/$repo/git/ref/tags/$TAG" >/dev/null 2>&1 || gh api "repos/$repo/releases/tags/$TAG" >/dev/null 2>&1; then echo OFFICIAL_TAG_ALREADY_EXISTS_STOP; exit 78; fi
+          done
+          out="$RUNNER_TEMP/p07-138-formal"
+          cat > "$out/notes.md" <<EOF
+          # P07-M03 网站与数据 / D04 服务器迁移 · release138 非切换正式版
+          发行日期：2026-11-18。源码：$PRODUCT_SHA。
+          新功能：迁移前先检测旧 VPS 的系统、CloudPanel、实际数据库引擎和网站/数据库/SQLite/外部资源清单；再查看新服务器初始化及目标冲突，按 CloudPanel 官方支持组合推荐匹配数据库（用户自行选择）。
+          可用范围：严格同引擎已验的迁入、在线预同步、私有备用快照；不支持 D05 不同引擎转换和最终停写/切换；不修改 DNS、已占用目标、旧 VPS 业务。
+          安装：公共服务器工具箱唯一入口，官方 ZIP 含完整运行时及受控 Atomic 文件更新材料；非 Web/PHP 站点安装包，不包含业务备份或数据库。
+          旧版升级：实际 release137→release138 原子升级验证；不在支持范围内的旧版/现有冲突目标拒绝覆盖。
+          回滚：安装过程中失败自动恢复前版软件文件；不等于业务数据库回滚。升级后留存 release137 恢复目录。
+          SHA-256：见 SHA256SUMS；下载后核验整个 ZIP 字节和嵌入逐文件 Git blob 清单。
+          已知限制：数据库不同引擎返回 D04_DIFFERENT_DB_ENGINE_USE_D05_CONVERSION，不能直接在现有异构 CP2 完成整 VPS 迁移。
+          Production：没有升级，仍由 Owner 手工处理；真实迁移/DNS 为独立批准操作。
+          EOF
+          gh release create "$TAG" -R llhzx2018/vf-server-ops --target "$PRODUCT_SHA" --draft --title "P07-M03 网站与数据 / D04 服务器迁移 release138" --notes-file "$out/notes.md"
+          gh release create "$TAG" -R llhzx2018/core-free-runner-public --target "$PUBLIC_SHA" --draft --title "P07-M03 网站与数据 release138 官方 ZIP" --notes-file "$out/notes.md"
+          for repo in llhzx2018/vf-server-ops llhzx2018/core-free-runner-public; do
+            gh release upload "$TAG" -R "$repo" "$out/$ZIPNAME" "$out/SHA256SUMS"
+            test "$(gh api "repos/$repo/releases/tags/$TAG" --jq '.draft')" = true
+            test "$(gh api "repos/$repo/releases/tags/$TAG" --jq '.assets|length')" = 2
+            target="$out/remote-$(basename "$repo")"
+            mkdir -m 0700 -p "$target"
+            gh release download "$TAG" -R "$repo" --dir "$target"
+            (cd "$target" && sha256sum -c SHA256SUMS)
+            test "$(sha256sum "$target/$ZIPNAME" | cut -d' ' -f1)" = "$(sha256sum "$out/$ZIPNAME" | cut -d' ' -f1)"
+            expected="sha256:$(sha256sum "$out/$ZIPNAME" | cut -d' ' -f1)"
+            test "$(gh api "repos/$repo/releases/tags/$TAG" --jq '.assets[]|select(.name=="P07-M03-0.1.0-release138.zip")|.digest')" = "$expected"
+            echo P07_M03_138_DRAFT_REMOTE_BYTES_AND_DIGEST_VERIFIED
+          done
+          gh release edit "$TAG" -R llhzx2018/vf-server-ops --draft=false
+          gh release edit "$TAG" -R llhzx2018/core-free-runner-public --draft=false
+          for repo in llhzx2018/vf-server-ops llhzx2018/core-free-runner-public; do
+            test "$(gh api "repos/$repo/releases/tags/$TAG" --jq '.draft')" = false
+            test "$(gh api "repos/$repo/releases/tags/$TAG" --jq '.prerelease')" = false
+          done
+          echo "P07_M03_138_OFFICIAL_ZIP_SHA256=$(sha256sum "$out/$ZIPNAME" | cut -d' ' -f1)"
+          echo "P07_M03_138_OFFICIAL_RUNTIME_GIT_BLOB=$(cat "$out/runtime_sha")"
+          echo "P07_M03_138_OFFICIAL_INSTALLER_GIT_BLOB=$(cat "$out/installer_sha")"
+          gh api "repos/llhzx2018/core-free-runner-public/releases/tags/$TAG" --jq '.assets[]|select(.name=="P07-M03-0.1.0-release138.zip")|.id' | xargs -I{} echo "P07_M03_138_OFFICIAL_PUBLIC_ZIP_ASSET_ID={}"
+          echo P07_M03_138_PRODUCT_AND_PUBLIC_RELEASE_REMOTE_VERIFIED=PASS
+          echo P07_M03_138_PRODUCTION_DNS_REAL_MIGRATION=NOT_TOUCHED
+      - name: Always remove temporary private source and candidate bytes
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- .p07-private .gov-current
+          rm -rf -- "$RUNNER_TEMP/p07-138-formal" "$RUNNER_TEMP/p07-138-machine"
+          echo P07_M03_138_PUBLIC_RUNNER_PRIVATE_SOURCE_SANITIZED=PASS
