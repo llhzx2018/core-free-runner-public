@@ -151,6 +151,18 @@ class FiveModuleOwnerRoute(unittest.TestCase):
                 self.assertEqual(os.readlink(home/"current"),"releases/"+route.MODULES[module]["previous"])
                 self.assertEqual(self.before(),before)
 
+    def test_invalid_or_eof_confirmation_cannot_upgrade_any_module(self):
+        for answer in ("x\n", ""):
+            for module in route.MODULES:
+                with self.subTest(answer=repr(answer), module=module):
+                    home, _ = self.old_install(module)
+                    before = self.before()
+                    with self.assertRaisesRegex(route.Blocked, "取消|输入|未确认"):
+                        self.invoke(module, answer=answer)
+                    self.assertEqual(os.readlink(home / "current"),
+                                     "releases/" + route.MODULES[module]["previous"])
+                    self.assertEqual(self.before(), before)
+
     def test_failure_rejects_tampered_old_and_keeps_four_siblings(self):
         for module in route.MODULES:
             with self.subTest(module=module):
