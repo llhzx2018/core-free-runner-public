@@ -36,7 +36,7 @@ class P07ModuleTargetUpgradeGate(FiveModuleOwnerRoute):
         ):
             with self.subTest(module=module):
                 config=route.MODULES[module]
-                home=self.modules/config["slot"]]
+                home=self.modules[config["slot"]]
                 unknown=home/"releases"/legacy
                 unknown.mkdir(parents=True)
                 (home/"current").symlink_to("releases/"+legacy)
