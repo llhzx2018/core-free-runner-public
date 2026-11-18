@@ -55,6 +55,9 @@ def run_menu(script: Path, answers: bytes = b"0\n", timeout: float = 7.0) -> str
                     break
                 prompts = output.decode("utf-8", "replace").count("请选择 [")
                 if prompts > sent and sent < len(queue):
+                    # Give Bash a moment to enter read(1): the prompt is
+                    # printed just before the line editor starts consuming.
+                    time.sleep(0.08)
                     os.write(parent, queue[sent])
                     sent += 1
             if child.poll() is not None:
