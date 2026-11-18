@@ -114,7 +114,7 @@ def main() -> None:
     toolbox = subprocess.check_output(
         ["git", "-C", str(ROOT), "show", historical_ref + ":installers/p07-toolbox.sh"],
         text=True, timeout=15)
-    check(hashlib.sha1(b"blob " + str(len(toolbox.encode())).encode() + b"\\0" +
+    check(hashlib.sha1(b"blob " + str(len(toolbox.encode())).encode() + bytes([0]) +
                        toolbox.encode()).hexdigest()
           == "702ac995a08e01379b126a97253dae66e588094a",
           "historical UX2 Toolbox source drift")
