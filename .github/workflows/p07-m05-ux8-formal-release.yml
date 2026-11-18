@@ -1,0 +1,243 @@
+# Owner 2026-11-18: P07-M05 新服务器初始化 UX8 PR #365 only.
+# PR = exact-source security/install/upgrade/rollback stage; main merge = remote publication.
+# No Customer VPS, CloudPanel, database, migration, DNS, or M01-M04 writes.
+name: P07-M05 UX8 PR365 exact Formal Release
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/p07-m05-ux8-formal-release.yml]
+  push:
+    branches: [main]
+    paths: [.github/workflows/p07-m05-ux8-formal-release.yml]
+permissions:
+  contents: read
+jobs:
+  m05-ux8-exact:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NO_COLOR: '1'
+      PRODUCT_SHA: 6309d912675b23ca4b3d46497461871960ca4b0c
+      PRODUCT_TREE: c0e15561352314c33ecd84b2b63ce7c86b18fe53
+      NEW_BUILD: 0.1.0-m05-ux8-atomic-backup-guard
+      OLD_BUILD: 0.1.0-m05-ux7-terminal-design
+      OLD_SHA: 24e201a701bf55ec5b1253c4a11950e620faf891c30ddd439fe45a13ba570266
+      EXPECTED_SHA: STAGE_ONLY_UNSET
+      RELEASE_TAG: p07-m05-v0.1.0-ux8-atomic-backup-guard-20261118
+      ASSET: P07-M05-0.1.0-m05-ux8-atomic-backup-guard.zip
+      RECEIPT: P07-M05-UX8-FORMAL-RELEASE.json
+    steps:
+      - name: Checkout immutable public release script and pinned atomic installer
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact merged private P07 product source temporarily
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 6309d912675b23ca4b3d46497461871960ca4b0c
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: product
+      - name: Verify only PR365 immutable product source and relevant M05 tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C product rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(git -C product rev-parse HEAD^{tree})" = "$PRODUCT_TREE"
+          test "$(cat product/VERSION)" = 0.1.0
+          test "$(grep -E '^BUILD_ID = ' product/scripts/build_p07_m05_bundle.py)" = "BUILD_ID = \"$NEW_BUILD\""
+          export PYTHONPATH=product/lib
+          python3 -B -m unittest discover -s product/tests -p 'test_p07_m05_dirty_host_guard.py' -q
+          python3 -B -m unittest discover -s product/tests -p 'test_p07_m05_host_write_gate.py' -q
+          python3 -B -m unittest discover -s product/tests -p 'test_p07_m05_isolated_module.py' -q
+          python3 -B product/scripts/check_p07_modules.py
+          python3 -B product/scripts/check_p07_terminal_ux.py
+          test "$(git hash-object installers/p07-m05-atomic.py)" = 17e47121ac27f31162d93a72aa0b1dbea602ea01
+          bash -n installers/p07-toolbox.sh
+          echo P07_M05_UX8_EXACT_SOURCE_AND_SAFE_TESTS=PASS
+      - name: Build twice from immutable private source; inspect actual ZIP security
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          mkdir -p "$RUNNER_TEMP/p07-m05-ux8"
+          m="$RUNNER_TEMP/p07-m05-ux8"
+          python3 -B product/scripts/build_p07_m05_bundle.py --output "$m/$ASSET" >/dev/null
+          python3 -B product/scripts/build_p07_m05_bundle.py --output "$m/rebuild.zip" >/dev/null
+          cmp "$m/$ASSET" "$m/rebuild.zip"
+          rm -f "$m/rebuild.zip"
+          real="$(sha256sum "$m/$ASSET" | cut -d ' ' -f1)"
+          echo "P07_M05_UX8_ACTUAL_SHA256=$real"
+          if [[ "$EXPECTED_SHA" == STAGE_ONLY_UNSET ]]; then
+            [[ "$GITHUB_EVENT_NAME" == pull_request ]] || exit 77
+            echo P07_M05_UX8_PIN_SHA_REQUIRED_BEFORE_MAIN=YES
+          else
+            [[ "$real" == "$EXPECTED_SHA" ]] || exit 78
+          fi
+          python3 - "$m/$ASSET" <<'PY'
+          import hashlib,json,pathlib,re,stat,sys,zipfile
+          f=pathlib.Path(sys.argv[1])
+          with zipfile.ZipFile(f) as z:
+              infos=z.infolist()
+              names=[x.filename for x in infos]
+              assert 40<=len(names)<=400 and len(set(names))==len(names)
+              assert 'p07-m05/lib/m05_toolbox_backup_guard.py' in names
+              assert 'p07-m05/lib/m05_environment_guard.py' in names
+              assert 'p07-m05/MODULE_MANIFEST.json' in names
+              manifest=json.loads(z.read('p07-m05/MODULE_MANIFEST.json'))
+              assert manifest['module_id']=='P07-M05'
+              assert manifest['installation_isolation']=='P07-M05_ONLY'
+              assert manifest['module_build_id']=='0.1.0-m05-ux8-atomic-backup-guard'
+              for member in infos:
+                  p=pathlib.PurePosixPath(member.filename)
+                  assert len(p.parts)>1 and p.parts[0]=='p07-m05'
+                  assert not p.is_absolute() and '..' not in p.parts
+                  assert not member.is_dir()
+                  assert (member.external_attr>>16 & 0o170000)==stat.S_IFREG
+                  assert not any(x in p.parts for x in ('.git','.github','.env','__pycache__'))
+                  assert not p.name.endswith(('.pyc','.pem','.key'))
+                  raw=z.read(member)
+                  assert b'-----BEGIN PRIVATE KEY-----' not in raw
+                  assert b'-----BEGIN RSA PRIVATE KEY-----' not in raw
+                  assert b'PRIVATE DATA - BEGIN' not in raw
+          print('P07_M05_UX8_SECURITY_MANIFEST_AND_PACKAGE_CONTENT=PASS')
+          PY
+      - name: Download official prior UX7 ZIP and verify exact release bytes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          m="$RUNNER_TEMP/p07-m05-ux8"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --max-time 90 \
+            'https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-all-ux-v0.1.0-20261118/P07-M05-0.1.0-m05-ux7-terminal-design.zip' \
+            -o "$m/old-ux7.zip"
+          echo "$OLD_SHA  $m/old-ux7.zip" | sha256sum -c -
+          echo P07_M05_PREVIOUS_FORMAL_UX7_ZIP=VERIFIED
+      - name: Real isolated M05 UX7 to UX8 Atomic; idempotence, tamper refusal, rollback and sibling unchanged
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          m="$RUNNER_TEMP/p07-m05-ux8"
+          new_sha="$(sha256sum "$m/$ASSET" | cut -d ' ' -f1)"
+          test ! -e /opt/vfops-modules/m05
+          for mod in m01 m02 m03 m04; do
+            sudo -n mkdir -p "/opt/vfops-modules/$mod"
+            printf "P07-KEEP-$mod\n" | sudo -n tee "/opt/vfops-modules/$mod/KEEP" >/dev/null
+          done
+          (cd /opt/vfops-modules && sha256sum m0{1,2,3,4}/KEEP) > "$m/siblings-before.sha"
+          sudo -n python3 -B installers/p07-m05-atomic.py install "$m/old-ux7.zip" "$OLD_SHA"
+          test "$(sudo -n readlink /opt/vfops-modules/m05/current)" = "releases/$OLD_BUILD"
+          sudo -n python3 -B installers/p07-m05-atomic.py install "$m/$ASSET" "$new_sha"
+          test "$(sudo -n readlink /opt/vfops-modules/m05/current)" = "releases/$NEW_BUILD"
+          sudo -n python3 -B installers/p07-m05-atomic.py install "$m/$ASSET" "$new_sha"
+          test "$(sudo -n readlink /opt/vfops-modules/m05/current)" = "releases/$NEW_BUILD"
+          if sudo -n python3 -B installers/p07-m05-atomic.py install "$m/$ASSET" "$(printf '0%.0s' {1..64})" >/dev/null 2>&1; then exit 51; fi
+          if sudo -n python3 -B installers/p07-m05-atomic.py rollback "$OLD_BUILD" --confirm WRONG >/dev/null 2>&1; then exit 52; fi
+          test "$(sudo -n readlink /opt/vfops-modules/m05/current)" = "releases/$NEW_BUILD"
+          python3 - "$m/$ASSET" "$m/invalid-identity.zip" <<'PY'
+          import sys,zipfile
+          with zipfile.ZipFile(sys.argv[1]) as src, zipfile.ZipFile(sys.argv[2],'x') as dst:
+              for i in src.infolist():
+                  value=src.read(i)
+                  if i.filename=='p07-m05/MODULE_ID': value=b'P07-M99\n'
+                  dst.writestr(i,value)
+          PY
+          bad_sha="$(sha256sum "$m/invalid-identity.zip" | cut -d ' ' -f1)"
+          if sudo -n python3 -B installers/p07-m05-atomic.py install "$m/invalid-identity.zip" "$bad_sha" >/dev/null 2>&1; then exit 53; fi
+          test "$(sudo -n readlink /opt/vfops-modules/m05/current)" = "releases/$NEW_BUILD"
+          sudo -n python3 -B installers/p07-m05-atomic.py rollback "$OLD_BUILD" --confirm "P07-M05:$OLD_BUILD"
+          test "$(sudo -n readlink /opt/vfops-modules/m05/current)" = "releases/$OLD_BUILD"
+          sudo -n python3 -B installers/p07-m05-atomic.py install "$m/$ASSET" "$new_sha"
+          test "$(sudo -n readlink /opt/vfops-modules/m05/current)" = "releases/$NEW_BUILD"
+          (cd /opt/vfops-modules && sha256sum -c "$m/siblings-before.sha")
+          echo P07_M05_UX7_TO_UX8_REAL_ATOMIC_IDEMPOTENCE_CORRUPT_REJECT_ROLLBACK=PASS
+          echo P07_M01_M02_M03_M04_HASH_PRESERVED=PASS
+      - name: Prepare pinned SHA256SUMS and immutable release evidence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          m="$RUNNER_TEMP/p07-m05-ux8"
+          python3 - <<'PY'
+          import hashlib,json,os,pathlib
+          m=pathlib.Path(os.environ['RUNNER_TEMP'])/'p07-m05-ux8'
+          name=os.environ['ASSET']
+          sha=hashlib.sha256((m/name).read_bytes()).hexdigest()
+          info={
+            'schema':'p07.m05.standalone.formal-release.v1',
+            'module':'P07-M05 新服务器初始化',
+            'source_repo':'llhzx2018/vf-server-ops',
+            'source_commit':os.environ['PRODUCT_SHA'],
+            'source_tree':os.environ['PRODUCT_TREE'],
+            'build':os.environ['NEW_BUILD'],
+            'tag':os.environ['RELEASE_TAG'],
+            'asset':name,
+            'sha256':sha,
+            'previous_formal_build':os.environ['OLD_BUILD'],
+            'previous_formal_sha256':os.environ['OLD_SHA'],
+            'real_atomic_rollback':'THIS_EXACT_MACHINE_WORKFLOW',
+            'sibling_modules':'UNCHANGED_HASH_VERIFIED',
+            'cp2':'NOT_RUN_OWNER_MANUAL',
+            'production':'NOT_RUN_OWNER_MANUAL',
+            'database':'NOT_RUN_OWNER_MANUAL',
+            'dns':'NOT_RUN_OWNER_MANUAL',
+            'migration':'NOT_RUN_OWNER_MANUAL'
+          }
+          receipt=m/os.environ['RECEIPT']
+          receipt.write_text(json.dumps(info,sort_keys=True,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+          sums=m/'SHA256SUMS'
+          sums.write_text(f"{sha}  {name}\n{hashlib.sha256(receipt.read_bytes()).hexdigest()}  {receipt.name}\n",encoding='utf-8')
+          PY
+          (cd "$m" && sha256sum -c SHA256SUMS)
+          echo P07_M05_UX8_EXACT_RELEASE_RECEIPT=PASS
+      - name: Publish private source tag plus single-module public immutable assets and read back
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && startsWith(github.event.head_commit.message, 'P07 M05 UX8 formal release')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN" || { echo P07_M05_RELEASE_WRITE_CAPABILITY_MISSING; exit 78; }
+          test "$EXPECTED_SHA" != STAGE_ONLY_UNSET
+          p=llhzx2018/vf-server-ops
+          r=llhzx2018/core-free-runner-public
+          test "$(gh api "repos/$p/git/ref/heads/main" --jq '.object.sha')" = "$PRODUCT_SHA"
+          test "$(gh api "repos/$r/git/ref/heads/main" --jq '.object.sha')" = "$GITHUB_SHA"
+          if gh release view "$RELEASE_TAG" -R "$p" >/dev/null 2>&1; then
+            test "$(gh api "repos/$p/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')" = "$PRODUCT_SHA"
+          else
+            if gh api "repos/$p/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then exit 81; fi
+            gh release create "$RELEASE_TAG" -R "$p" --target "$PRODUCT_SHA" \
+              --title 'P07-M05 新服务器初始化 UX8 正式源码' \
+              --notes "仅 PR #365 合并源码 $PRODUCT_SHA；旧备份识别严格校验。正式机验与 UX7→UX8 独立安装、回滚通过；CP2、数据库、迁移和 DNS 均由 Owner 手工。"
+          fi
+          if gh release view "$RELEASE_TAG" -R "$r" >/dev/null 2>&1; then
+            test "$(gh api "repos/$r/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')" = "$GITHUB_SHA"
+            test "$(gh api "repos/$r/releases/tags/$RELEASE_TAG" --jq '.assets|length')" = 3
+          else
+            if gh api "repos/$r/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then exit 81; fi
+            gh release create "$RELEASE_TAG" -R "$r" --target "$GITHUB_SHA" \
+              --title 'P07-M05 新服务器初始化 UX8 独立正式更新' \
+              --notes "P07-M05 UX8 单模块包、SHA256SUMS 与发行证据。旧 UX7→UX8、原子升级、坏包拒绝、回滚与 M01～M04 不变机验通过。正式分发不代表 CP2 已升级。"
+            gh release upload "$RELEASE_TAG" -R "$r" \
+              "$RUNNER_TEMP/p07-m05-ux8/$ASSET" \
+              "$RUNNER_TEMP/p07-m05-ux8/$RECEIPT" \
+              "$RUNNER_TEMP/p07-m05-ux8/SHA256SUMS"
+          fi
+          remote="$(mktemp -d)"
+          trap 'rm -rf -- "$remote"' EXIT
+          gh release download "$RELEASE_TAG" -R "$r" --dir "$remote"
+          (cd "$remote" && sha256sum -c SHA256SUMS)
+          cmp "$remote/$ASSET" "$RUNNER_TEMP/p07-m05-ux8/$ASSET"
+          cmp "$remote/$RECEIPT" "$RUNNER_TEMP/p07-m05-ux8/$RECEIPT"
+          test "$(gh api "repos/$p/git/ref/tags/$RELEASE_TAG" --jq '.object.sha')" = "$PRODUCT_SHA"
+          test "$(gh api "repos/$r/releases/tags/$RELEASE_TAG" --jq '.assets|length')" = 3
+          echo P07_M05_UX8_GITHUB_FORMAL_RELEASE_REMOTE_BYTES=PASS
+          echo P07_OWNER_CP2_PRODUCTION_DATABASE_MIGRATION_DNS=NOT_RUN
+      - name: Remove ephemeral private checkout and temporary ZIP contents
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- product "$RUNNER_TEMP/p07-m05-ux8"
+          echo P07_M05_TEMPORARY_PRIVATE_SOURCE_AND_PACKAGE_CLEANUP=YES
