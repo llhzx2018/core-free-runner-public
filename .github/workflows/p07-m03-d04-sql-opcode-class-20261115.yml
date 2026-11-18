@@ -1,0 +1,191 @@
+name: P07 M03 D04 formal release137 M03-only package gate TEMP
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-m03-d04-sql-opcode-class-20261115.yml'
+permissions:
+  contents: read
+jobs:
+  m03-formal-only-package:
+    if: github.event.action == 'opened' || github.event.action == 'reopened' || github.event.action == 'synchronize'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONNOUSERSITE: '1'
+      NO_COLOR: '1'
+    steps:
+      - name: Checkout exact current private P07 formal staged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 74b99b8606ac96e1db0d71fba66229bc400b1b7d
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: .p07-product
+      - name: Checkout current published public M03 base
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-free-runner-public
+          ref: main
+          persist-credentials: false
+          path: .p07-public
+      - name: Checkout mandatory GOV-DOC architecture gate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .p07-gov
+      - name: Exact source M03-only package source and structural gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C .p07-product rev-parse HEAD)" = 74b99b8606ac96e1db0d71fba66229bc400b1b7d
+          test "$(cat .p07-product/BUILD_ID)" = "0.1.0-release137"
+          cd .p07-product
+          export PYTHONPATH="$PWD/scripts:$PWD/lib"
+          python3 -B -m unittest discover -s tests -p test_p07_m03_candidate_runtime_closure.py -v
+          python3 -B scripts/check_p07_modules.py
+          python3 -B .github/checks/test_architecture_gate.py
+          python3 -B .github/checks/architecture_gate.py \
+            --manifest .github/checks/code_architecture.json \
+            --gov-root ../.p07-gov --git-root . \
+            --base-sha a6da82f35fdbd06020a7e65c8cbd5717f617f2f3 \
+            --head-sha 74b99b8606ac96e1db0d71fba66229bc400b1b7d
+      - name: Build formal M03-only real package and verify every runtime blob
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stage="$RUNNER_TEMP/p07-m03-137/stage"
+          mkdir -p "$RUNNER_TEMP/p07-m03-137"
+          python3 -B .p07-product/scripts/p07_candidate_bundle.py \
+            --product-root .p07-product --public-root .p07-public \
+            --output "$stage" \
+            --product-sha 74b99b8606ac96e1db0d71fba66229bc400b1b7d \
+            --build 0.1.0-release137 --care 0.1.0-rc85 --m03-only
+          python3 - <<'PY'
+          import hashlib,json,os,zipfile,stat
+          from pathlib import Path
+          stage=Path(os.environ["RUNNER_TEMP"])/"p07-m03-137/stage"
+          a=json.loads((stage/"candidate_attestation.json").read_text("utf-8"))
+          assert a["status"]=="FORMAL_STAGING_NOT_PUBLISHED"
+          assert a["product_source_sha"]=="74b99b8606ac96e1db0d71fba66229bc400b1b7d"
+          assert a["product_build"]=="0.1.0-release137"
+          assert a["independent_module_only"] and not a["other_modules_changed"]
+          assert not any((stage/path).exists() for path in (
+            "packages","installers/p07-system-care.sh","installers/p07-toolbox.sh"))
+          root=stage/"dist/p07/0.1.0/overlay"
+          manifest=root/"RUNTIME.gitblob"
+          names=set()
+          for line in manifest.read_text("utf-8").splitlines():
+            sha,name=line.split("  ",1)
+            names.add(name)
+            data=(root/name).read_bytes()
+            assert hashlib.sha1(b"blob "+str(len(data)).encode()+b"\x00"+data).hexdigest()==sha
+          assert {"lib/migration_target_inventory_guard.py",
+                  "lib/server_migration_pull.py",
+                  "bin/vfops-migrate-ui", "BUILD_ID"}<=names
+          assert (root/"BUILD_ID").read_text().strip()=="0.1.0-release137"
+          assert 'EXPECTED_BUILD_ID="0.1.0-release137"' in (stage/"installers/p07-final.sh").read_text()
+          files=[("dist/p07/0.1.0/overlay/"+name,root/name) for name in sorted(names)]
+          files.extend([
+            ("dist/p07/0.1.0/overlay/RUNTIME.gitblob",manifest),
+            ("dist/p07/0.1.0-rc2/P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz",
+             stage/"dist/p07/0.1.0-rc2/P07_VF_SERVER_OPS_0.1.0-rc2.tar.gz"),
+            ("installers/p07-final.sh",stage/"installers/p07-final.sh"),
+          ])
+          out=stage.parent/"P07-M03-0.1.0-release137.zip"
+          def emit(dst):
+            with zipfile.ZipFile(dst,"x",zipfile.ZIP_DEFLATED,compresslevel=9,allowZip64=False) as z:
+              for name,src in sorted(files):
+                assert src.is_file() and not src.is_symlink()
+                info=zipfile.ZipInfo(name,(2026,1,1,0,0,0))
+                info.compress_type=zipfile.ZIP_DEFLATED
+                info.external_attr=(stat.S_IFREG|(0o755 if name.endswith(".sh") else 0o644))<<16
+                z.writestr(info,src.read_bytes())
+          emit(out)
+          check=stage.parent/"second.zip"
+          emit(check)
+          digest=hashlib.sha256(out.read_bytes()).hexdigest()
+          assert hashlib.sha256(check.read_bytes()).hexdigest()==digest
+          check.unlink()
+          with zipfile.ZipFile(out) as z:
+            assert len(z.namelist())==len(set(z.namelist()))==len(files)
+          print("P07_M03_FORMAL_137_ONLY_PACKAGED_SHA256="+digest)
+          print("P07_M03_FORMAL_137_ONLY_RUNTIME_FILES="+str(len(names)))
+          print("P07_M03_FORMAL_137_OTHER_FOUR_MODULE_ARTIFACTS=NONE")
+          print("P07_M03_FORMAL_137_PUBLISHED=NO")
+          PY
+      - name: Real isolated M03 release137 fresh install and published136 atomic upgrade
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stage="$RUNNER_TEMP/p07-m03-137/stage"
+          sandbox="$RUNNER_TEMP/p07-m03-137/installed"
+          mkdir -p "$sandbox/bin" "$sandbox/business"
+          printf 'ORIGINAL_BUSINESS_KEEP' > "$sandbox/business/keep"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          export P07_INSTALL_DIR="$sandbox/current"
+          export P07_PREVIOUS_DIR="$sandbox/previous"
+          export P07_BIN_LINK="$sandbox/bin/vfops"
+          export P07_PUBLIC_ROOT="file://$stage"
+          bash "$stage/installers/p07-final.sh" > "$sandbox/fresh.out"
+          test "$("$sandbox/bin/vfops" --build-id)" = "0.1.0-release137"
+          bash "$stage/installers/p07-final.sh" > "$sandbox/idempotent.out"
+          test ! -e "$sandbox/previous"
+          test "$(cat "$sandbox/business/keep")" = ORIGINAL_BUSINESS_KEEP
+          echo P07_M03_FORMAL137_FRESH_INSTALL_AND_IDEMPOTENCE=PASS
+          upgrade="$RUNNER_TEMP/p07-m03-137/upgrade"
+          mkdir -p "$upgrade/bin" "$upgrade/business"
+          printf 'TARGET_KEEP' > "$upgrade/business/data"
+          export P07_INSTALL_DIR="$upgrade/current"
+          export P07_PREVIOUS_DIR="$upgrade/previous"
+          export P07_BIN_LINK="$upgrade/bin/vfops"
+          unset P07_PUBLIC_ROOT
+          bash .p07-public/installers/p07-m03-release136-atomic.sh install > "$upgrade/installed136.out"
+          test "$("$upgrade/bin/vfops" --build-id)" = "0.1.0-release136"
+          export P07_PUBLIC_ROOT="file://$stage"
+          bash "$stage/installers/p07-final.sh" > "$upgrade/upgraded137.out"
+          test "$("$upgrade/bin/vfops" --build-id)" = "0.1.0-release137"
+          test "$(cat "$upgrade/previous/BUILD_ID")" = "0.1.0-release136"
+          test "$(cat "$upgrade/business/data")" = TARGET_KEEP
+          echo P07_M03_FORMAL137_ATOMIC_UPGRADE_136_TO_137=PASS
+          echo P07_M03_FORMAL137_PREVIOUS_VERSION_RETAINED=PASS
+      - name: Failure injection refuses corrupt package without touching existing M03
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stage="$RUNNER_TEMP/p07-m03-137/stage"
+          test -s "$stage/dist/p07/0.1.0/overlay/lib/server_migration_pull.py"
+          printf '\n# unauthorized-byte-change\n' >> "$stage/dist/p07/0.1.0/overlay/lib/server_migration_pull.py"
+          keep="$RUNNER_TEMP/p07-m03-137/corrupt-on-136"
+          mkdir -p "$keep/bin" "$keep/business"
+          cp -a "$RUNNER_TEMP/p07-m03-137/upgrade/previous" "$keep/current"
+          ln -s "$keep/current/bin/vfops-user" "$keep/bin/vfops"
+          printf 'TARGET_KEEP' > "$keep/business/data"
+          test "$("$keep/bin/vfops" --build-id)" = "0.1.0-release136"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          export P07_INSTALL_DIR="$keep/current"
+          export P07_PREVIOUS_DIR="$keep/previous"
+          export P07_BIN_LINK="$keep/bin/vfops"
+          export P07_PUBLIC_ROOT="file://$stage"
+          if bash "$stage/installers/p07-final.sh" >"$keep/corrupt-attempt.out" 2>&1; then
+            echo P07_M03_FORMAL137_CORRUPT_PACKAGE_ACCEPTED
+            exit 77
+          fi
+          test "$("$keep/bin/vfops" --build-id)" = "0.1.0-release136"
+          test ! -e "$keep/previous"
+          test "$(cat "$keep/business/data")" = TARGET_KEEP
+          echo P07_M03_FORMAL137_CORRUPT_REFUSAL_AND_OWNER_ASSET_PRESERVED=PASS
+      - name: Always wipe transient private source, GOV source and formal staging
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- .p07-product .p07-public .p07-gov "$RUNNER_TEMP/p07-m03-137"
+          test ! -e .p07-product && test ! -e .p07-public && test ! -e .p07-gov
+          echo P07_M03_FORMAL137_PRIVATE_WORKSPACE_CLEAN=PASS
