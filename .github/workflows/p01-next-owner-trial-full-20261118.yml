@@ -1,0 +1,119 @@
+name: P01 independent Owner trial real FULL build gate
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  owner-trial-full-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_SHA: 5dfd45732f2fb6feaefc2523eb0285f315218da6
+    steps:
+      - name: Checkout exact private P01 source without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 5dfd45732f2fb6feaefc2523eb0285f315218da6
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: candidate
+      - name: Checkout current public architecture rules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: gov-doc
+      - name: Verify exact source and targeted negative regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_REPOSITORY" = "llhzx2018/core-free-runner-public"
+          test "$GITHUB_HEAD_REF" = "test/p01-next-owner-trial-full-20261118"
+          test "$(git -C candidate rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(cat candidate/VERSION)" = 2.47.517
+          test "$(cat candidate/src/VERSION.txt)" = 2.47.517
+          python3 -B -m unittest discover -s candidate/tests/architecture -p test_p01_next_full_bundle.py >"$RUNNER_TEMP/p01-exact-bundle-unit.txt" 2>&1 || {
+            grep -E '(^FAIL|^ERROR|AssertionError|RuntimeError|BuildError)' "$RUNNER_TEMP/p01-exact-bundle-unit.txt" | head -n 14 || true
+            exit 1
+          }
+          python3 -B -m unittest discover -s candidate/tests/architecture -p test_p01_next_owner_trial.py >"$RUNNER_TEMP/p01-trial-negative.txt" 2>&1 || {
+            grep -E '(^FAIL|^ERROR|BuildError|AssertionError)' "$RUNNER_TEMP/p01-trial-negative.txt" | head -n 15 || true
+            exit 1
+          }
+          echo P01_FULL_EXACT_SOURCE_STAGED_UNTRACKED_AND_ZIP_NEGATIVES=PASS
+          echo P01_OWNER_TRIAL_PACKAGE_POSITIVE_AND_NEGATIVE=PASS
+      - name: Verify source-diff architecture naming and negative fixtures
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -B candidate/.github/checks/test_architecture_gate.py > "$RUNNER_TEMP/p01-exact-arch-neg.txt" 2>&1
+          python3 -B candidate/.github/checks/architecture_gate.py --manifest candidate/.github/checks/code_architecture.json --gov-root gov-doc --base-sha c377dc3e0696585b207561081f6dc462108c904f --head-sha "$PRODUCT_SHA" --git-root candidate > "$RUNNER_TEMP/p01-exact-arch.txt" 2>&1 || {
+            grep -E 'PROJECT_ARCHITECTURE=|FAIL|ERROR' "$RUNNER_TEMP/p01-exact-arch.txt" | head -n 8 || true
+            exit 1
+          }
+          grep -F 'PROJECT_ARCHITECTURE=STRUCTURAL_PASS' "$RUNNER_TEMP/p01-exact-arch.txt" >/dev/null
+          echo P01_FULL_SOURCE_ARCHITECTURE_NAMING=PASS
+      - name: Install ephemeral Composer and native PHP dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq >"$RUNNER_TEMP/p01-exact-apt.txt" 2>&1
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php8.3-cli php8.3-sqlite3 php8.3-mysql php8.3-mbstring php8.3-curl php8.3-xml php8.3-zip php8.3-gd php8.3-intl composer >>"$RUNNER_TEMP/p01-exact-apt.txt" 2>&1
+          echo P01_FULL_NATIVE_COMPOSER_BUILD_DEPS=PASS
+      - name: Build and verify final exact-source developer FULL and CloudPanel layout
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          (cd candidate && python3 -B scripts/build_p01_next_clean_full.py build --source-sha "$PRODUCT_SHA" --output "$RUNNER_TEMP/p01-exact-clean.zip" --composer composer >"$RUNNER_TEMP/p01-exact-build.json" 2>"$RUNNER_TEMP/p01-exact-build.err")
+          python3 -B candidate/scripts/build_p01_next_clean_full.py verify --zip "$RUNNER_TEMP/p01-exact-clean.zip" >"$RUNNER_TEMP/p01-exact-verify.json"
+          python3 -B candidate/scripts/build_p01_next_cloudpanel_full.py build --source-zip "$RUNNER_TEMP/p01-exact-clean.zip" --output "$RUNNER_TEMP/p01-exact-cloudpanel.zip" >"$RUNNER_TEMP/p01-exact-layout.json"
+          python3 -B candidate/scripts/build_p01_next_cloudpanel_full.py verify --zip "$RUNNER_TEMP/p01-exact-cloudpanel.zip" >"$RUNNER_TEMP/p01-exact-layout-verify.json"
+          python3 -B - <<'PY'
+          import json,os
+          from pathlib import Path
+          base=Path(os.environ['RUNNER_TEMP'])
+          for name in ['p01-exact-build.json','p01-exact-verify.json','p01-exact-layout.json','p01-exact-layout-verify.json']:
+              lines=[line for line in (base/name).read_text().splitlines() if line.strip()]
+              receipt=json.loads(lines[-1])
+              assert receipt['source_sha']==os.environ['PRODUCT_SHA']
+              assert receipt['readiness']=='DEVELOPER_ISOLATED_ONLY'
+          assert (base/'p01-exact-cloudpanel.zip').stat().st_size>10000
+          print('P01_FULL_EXACT_COMPOSER_VITE_AND_CLOUDPANEL_LAYOUT=PASS')
+          PY
+          parent_sha="$(sha256sum "$RUNNER_TEMP/p01-exact-cloudpanel.zip" | cut -d' ' -f1)"
+          python3 -B candidate/scripts/build_p01_next_owner_trial.py build --developer-zip "$RUNNER_TEMP/p01-exact-cloudpanel.zip" --source-sha "$PRODUCT_SHA" --developer-sha256 "$parent_sha" --output "$RUNNER_TEMP/p01-owner-trial.zip" >"$RUNNER_TEMP/p01-trial-build.json"
+          python3 -B candidate/scripts/build_p01_next_owner_trial.py verify --zip "$RUNNER_TEMP/p01-owner-trial.zip" --source-sha "$PRODUCT_SHA" --developer-sha256 "$parent_sha" >"$RUNNER_TEMP/p01-trial-verify.json"
+          python3 -B - <<'PY'
+          import json,os
+          from pathlib import Path
+          base=Path(os.environ['RUNNER_TEMP'])
+          for name in ['p01-trial-build.json','p01-trial-verify.json']:
+              r=json.loads((base/name).read_text())
+              assert r['source_sha']==os.environ['PRODUCT_SHA']
+              assert r['scope']['new_empty_site_only'] is True
+              assert r['scope']['legacy_data_import_authorized'] is False
+              assert r['scope']['old_site_cutover_authorized'] is False
+              assert r['scope']['automatic_update_authorized'] is False
+              assert r['scope']['formal_release_authorized'] is False
+              assert r['formal_release'] is False
+          assert (base/'p01-owner-trial.zip').stat().st_size>10000
+          print('P01_OWNER_TRIAL_TRUE_VENDOR_VITE_CLOUDPANEL_ZIP=PASS')
+          PY
+      - name: Remove private checkout and generated ZIP without upload
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- candidate gov-doc
+          rm -f "$RUNNER_TEMP"/p01-exact-*.zip "$RUNNER_TEMP"/p01-exact-*.json "$RUNNER_TEMP"/p01-exact-*.err "$RUNNER_TEMP"/p01-exact-*.txt
+          rm -f "$RUNNER_TEMP"/p01-owner-trial.zip "$RUNNER_TEMP"/p01-trial-*.json "$RUNNER_TEMP"/p01-trial-*.txt
+          if test ! -e candidate && test ! -e "$RUNNER_TEMP/p01-exact-cloudpanel.zip"; then
+            echo P01_FULL_PRIVATE_SOURCE_AND_BUNDLE_PERSISTED=NONE
+          else
+            exit 1
+          fi
