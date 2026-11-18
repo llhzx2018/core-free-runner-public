@@ -103,7 +103,8 @@ class ToolboxTerminalUX(unittest.TestCase):
             (m04,"检查服务器健康（完整）","ui_menu_back 0 '返回工具箱'")):
             self.assertIn(token,source)
             self.assertIn(back,source)
-        self.assertIn("exact_confirm",m01)
+        self.assertIn("exact_confirm",(
+            ROOT/"packages/p07-network-node/0.1.0-ux2/lib/common.sh").read_text())
         self.assertIn("confirm_numeric",(
             ROOT/"packages/p07-system-care/0.1.0-ux4/lib/common.sh").read_text())
         self.assertIn("menu()",m04)
