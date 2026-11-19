@@ -156,9 +156,9 @@ PY
         $part=str_contains($url,"contents/projects/")?"live-channel.json":(str_contains($url,"releases/tags/")?"live-release.json":"live-tag.json");
         return [200,(string)file_get_contents($tmp."/".$part)];
       };
-      $g=new \\VF\\AdOps\\Upgrade\\OwnerNextReleaseGateway($transport);
+      $g=new \VF\AdOps\Upgrade\OwnerNextReleaseGateway($transport);
       $installed=$g->installed($site);
-      try{$g->check(str_repeat("Z",40),$installed);}catch(\\RuntimeException $e){
+      try{$g->check(str_repeat("Z",40),$installed);}catch(\RuntimeException $e){
         if($e->getMessage()==="P08_NEXT_SOURCE_OR_SCHEMA_UNSUPPORTED"){
           echo "P08_R202_REAL_ISSUED_010_CLIENT_REFUSES_NEXT_V011=PASS\n";exit(0);
         }
