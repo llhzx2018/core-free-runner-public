@@ -1,0 +1,96 @@
+name: P01 v516 official Core Updates manifest and remote asset gate
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  verify-p01-channel:
+    if: github.event.pull_request.number == 4145 && github.actor == 'llhzx2018' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - name: Checkout registered Runner control
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact proposed Core Updates one-file channel candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/core-updates
+          ref: 93d0c53fd8102360569918b85c42fda8b84728f1
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: channel-src
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact distribution diff and native schema/protocol machine suite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C channel-src rev-parse HEAD)" = 93d0c53fd8102360569918b85c42fda8b84728f1
+          git -C channel-src merge-base --is-ancestor e0df94e31d7082cf3d04dcf628fd2fbc8f96f901 HEAD
+          test "$(git -C channel-src diff --name-only e0df94e31d7082cf3d04dcf628fd2fbc8f96f901 HEAD)" = "projects/P01.json"
+          test -z "$(git -C channel-src status --porcelain --untracked-files=all)"
+          python3 - <<'PY'
+          import json,pathlib
+          data=json.loads(pathlib.Path('channel-src/projects/P01.json').read_text())
+          expected=dict(project_id='P01',component_id='APP',enabled=True,
+             current_version='2.47.515',target_version='2.47.516',
+             update_type='ATOMIC',from_versions=['2.47.515'],
+             schema_from='2026102201',schema_to='2026102201',
+             repository='llhzx2018/vf-start',release_tag='v2.47.516',
+             release_id=450865608,product_identity='ab49e83c4715cc9246c4333679fc5388e554cc98',
+             asset_name='VF_Start_V2.47.516_UPDATE.zip',asset_bytes=4058614,
+             asset_sha256='962a3b084b5bf2294baa092bb1098b6ea8f52b999bf24dcb92a0064ddad325a8',
+             backup_required=True,rollback_supported=True,
+             released_at='2026-11-19T04:06:05Z')
+          for k,v in expected.items():assert data.get(k)==v,(k,data.get(k),v)
+          assert len(data.get('notes',''))>120
+          assert data.get('minimum_php')=='8.0.0'
+          print('P01_V516_ONE_SOURCE_515_TO_516_CHANNEL_SCHEMA_AND_IDENTITY=PASS')
+          PY
+          (cd channel-src && python3 scripts/check_manifest_contract.py)
+          (cd channel-src && php update-core/php/tests/run.php)
+          test -z "$(git -C channel-src status --porcelain --untracked-files=all)"
+          echo P01_V516_NATIVE_CHANNEL_SCHEMA_AND_UPDATE_CORE_PROTOCOL=PASS
+      - name: Independently check true official GitHub tag asset IDs, sizes, digest and remote bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          P=llhzx2018/vf-start
+          TAG=v2.47.516
+          test "$(gh api "repos/$P/git/ref/tags/$TAG" --jq .object.sha)" = ab49e83c4715cc9246c4333679fc5388e554cc98
+          gh api "repos/$P/releases/tags/$TAG" >"$RUNNER_TEMP/P01-516-release.json"
+          python3 - <<'PY'
+          import json,os,pathlib
+          release=json.loads((pathlib.Path(os.environ['RUNNER_TEMP'])/'P01-516-release.json').read_text())
+          assert release['id']==450865608 and release['tag_name']=='v2.47.516'
+          assert not release['draft'] and not release['prerelease']
+          expected={
+            'VF-Start-V2.47.516-FULL.zip':(766156722,1874648,'016edb85c7cfa48bf939d69fce1f0925f6f50647fded286a5b6df3789ca580ce'),
+            'VF_Start_V2.47.516_UPDATE.zip':(766156724,4058614,'962a3b084b5bf2294baa092bb1098b6ea8f52b999bf24dcb92a0064ddad325a8')
+          }
+          assert set(a['name'] for a in release['assets'])==set(expected)
+          for a in release['assets']:
+            ident,size,digest=expected[a['name']]
+            assert a['id']==ident and a['size']==size
+            assert a.get('digest') in (None,'sha256:'+digest)
+          print('P01_V516_OFFICIAL_REMOTE_TAG_RELEASE_ASSET_IDS_BYTES_DIGEST=PASS')
+          PY
+          mkdir -p "$RUNNER_TEMP/p01-v516-remote"
+          gh release download "$TAG" -R "$P" -D "$RUNNER_TEMP/p01-v516-remote" \
+            -p 'VF-Start-V2.47.516-FULL.zip' \
+            -p 'VF_Start_V2.47.516_UPDATE.zip'
+          test "$(sha256sum "$RUNNER_TEMP/p01-v516-remote/VF-Start-V2.47.516-FULL.zip" | cut -d' ' -f1)" = 016edb85c7cfa48bf939d69fce1f0925f6f50647fded286a5b6df3789ca580ce
+          test "$(sha256sum "$RUNNER_TEMP/p01-v516-remote/VF_Start_V2.47.516_UPDATE.zip" | cut -d' ' -f1)" = 962a3b084b5bf2294baa092bb1098b6ea8f52b999bf24dcb92a0064ddad325a8
+          echo P01_V516_OFFICIAL_ASSET_REMOTE_DOWNLOAD_SHA256=PASS
+      - name: Cleanup transient private sources and official asset bytes
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- channel-src "$RUNNER_TEMP/p01-v516-remote"
+          rm -f -- "$RUNNER_TEMP/P01-516-release.json"
+          echo P01_V516_CORE_CHANNEL_PRIVATE_SOURCE_AND_PACKAGE_PERSISTENCE=NONE
