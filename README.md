@@ -1,5 +1,14 @@
 # core-free-runner-public
 
+## P07 公共服务器工具箱（唯一用户安装指令）
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-toolbox.sh)
+```
+
+**普通用户无需 GitHub 账号、Git Token、`gh`、私有仓权限或手工处理 ZIP。** 该命令只能安装当前已正式公开分发并通过校验的版本，不会自动获得内测候选版。以后 P07 所有五模块的用户安装／升级说明只提供这同一条命令；来源、自动门禁及版本/正式发行边界见 [P07 匿名分发合同](docs/authority/P07_PUBLIC_INSTALL_CONTRACT.md)。
+
+
 VF 固定的 **Public-safe GitHub Hosted Runner + Evidence 基础设施**。
 
 ## Current Authority

@@ -2,6 +2,16 @@
 
 > CURRENT PUBLIC P07 UI APPLICABILITY / REQUIRED。唯一项目规范：[`vf-server-ops/docs/authority/P07_TERMINAL_UX_STANDARD_V3.md`](https://github.com/llhzx2018/vf-server-ops/blob/main/docs/authority/P07_TERMINAL_UX_STANDARD_V3.md)。模块与子模块以 [P07 UX 机器矩阵](https://github.com/llhzx2018/vf-server-ops/blob/main/docs/authority/P07_TERMINAL_UX_MODULES_V1.json) 为准。本文件只记录**公共分发仓的接线**，不创建第二份 UX 标准。
 
+## 唯一对外安装入口与用户免 Git 授权
+
+公共使用者只拿到 [P07 匿名安装／升级合同](P07_PUBLIC_INSTALL_CONTRACT.md)中的这一条 SSH 指令：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-toolbox.sh)
+```
+
+此规则同时适用于“Owner 试用”和正式公开使用：不得让用户登录 GitHub、授权 `gh`／Token、读取私有试用仓或手工解压 ZIP；内部候选只可作为工程取证，未完成公共发行不提供假 141 安装命令。公共安装体验除本 UX V3 交互 Gate 外，还必须通过现有 PR CI 接入的 `scripts/check_p07_public_install_contract.py` 与正反例；静态门禁不能替代真实发行证据。
+
 ## 哪些公共源码受约束
 
 - 公共 Toolbox `installers/p07-toolbox.sh`：五项一级入口、按需分发、用户确认与错误反馈（统一入口，绝不自动跨模块升级）。
