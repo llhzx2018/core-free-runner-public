@@ -170,7 +170,7 @@ PY
     # Reconstruct the new candidate on the disposable machine from its exact
     # private source, while the installed site is still running old v0.1.10 PHP.
     test "$(cat target/VERSION)" = 0.1.12
-    test "$(git -C target rev-parse HEAD)" = "$P08_R204_TARGET_SHA"
+    test "$(git -C target rev-parse HEAD)" = "$P08_DEV012_SHA"
     composer install --working-dir=target --no-dev --no-scripts --prefer-dist --no-interaction --no-progress --optimize-autoloader
     npm ci --prefix target --ignore-scripts --no-audit --no-fund
     npm run typecheck --prefix target
@@ -183,12 +183,12 @@ PY
     actual="$(sha256sum "$site/current/FULL_MANIFEST.json" | cut -d' ' -f1)"
     test "$actual" = efebfefde3115864dba71c2e56fedae2f7ada8ad4064010473d716b689f67fe9
     for part in A B; do
-      python3 -B target/scripts/build_full.py --source target --output "$tmp/012-full-$part.zip" --version 0.1.12 --source-sha "$P08_R204_TARGET_SHA" --governance-root gov
-      python3 -B target/scripts/build_atomic.py --source target --output "$tmp/012-update-$part.zip" --source-version 0.1.10 --source-sha "$target_sha" --source-full-manifest-sha256 "$actual" --previous-full-manifest "$site/current/FULL_MANIFEST.json" --target-version 0.1.12 --target-sha "$P08_R204_TARGET_SHA"
+      python3 -B target/scripts/build_full.py --source target --output "$tmp/012-full-$part.zip" --version 0.1.12 --source-sha "$P08_DEV012_SHA" --governance-root gov
+      python3 -B target/scripts/build_atomic.py --source target --output "$tmp/012-update-$part.zip" --source-version 0.1.10 --source-sha "$target_sha" --source-full-manifest-sha256 "$actual" --previous-full-manifest "$site/current/FULL_MANIFEST.json" --target-version 0.1.12 --target-sha "$P08_DEV012_SHA"
     done
     cmp "$tmp/012-full-A.zip" "$tmp/012-full-B.zip"
     cmp "$tmp/012-update-A.zip" "$tmp/012-update-B.zip"
-    python3 - "$tmp/012-update-A.zip" "$actual" "$P08_R204_TARGET_SHA" <<'PY'
+    python3 - "$tmp/012-update-A.zip" "$actual" "$P08_DEV012_SHA" <<'PY'
 import json,sys,zipfile
 name,digest,target=sys.argv[1:]
 with zipfile.ZipFile(name) as z:
@@ -202,7 +202,7 @@ with zipfile.ZipFile(name) as z:
 print('P08_R204_GENUINE_010_LINEAGE_BACKCOMPAT_STAGE=PASS')
 PY
     P08_R205_CHAINED=YES php target/tests/compatibility/r205_chained_atomic_apply.php \
-      "$site" "$target_sha" "$actual" "$tmp/012-update-A.zip" "$P08_R204_TARGET_SHA" 0.1.12
+      "$site" "$target_sha" "$actual" "$tmp/012-update-A.zip" "$P08_DEV012_SHA" 0.1.12
     echo "P08_R204_$engine"_REAL_019_TO_010_TO_012_SOURCE_BACKCOMPAT=PASS
 
     # The newly installed v0.1.12 PHP can now stage full target metadata.
@@ -222,7 +222,7 @@ result=write_full(Path(source),Path(dest),"0.1.13",sha)
 assert result["status"]=="FULL_BUILT_NOT_RELEASED"
 print("P08_R204_SYNTHETIC_ONLY_FULL=PASS")
 PY
-    python3 -B target/scripts/build_atomic.py --source "$tmp/synthetic-013" --output "$tmp/013-synthetic-update.zip" --source-version 0.1.12 --source-sha "$P08_R204_TARGET_SHA" --source-full-manifest-sha256 "$new_source_digest" --previous-full-manifest "$site/current/FULL_MANIFEST.json" --target-version 0.1.13 --target-sha "$synthetic_sha"
+    python3 -B target/scripts/build_atomic.py --source "$tmp/synthetic-013" --output "$tmp/013-synthetic-update.zip" --source-version 0.1.12 --source-sha "$P08_DEV012_SHA" --source-full-manifest-sha256 "$new_source_digest" --previous-full-manifest "$site/current/FULL_MANIFEST.json" --target-version 0.1.13 --target-sha "$synthetic_sha"
     python3 - "$tmp/013-synthetic-update.zip" <<'PY'
 import json,zipfile,sys
 with zipfile.ZipFile(sys.argv[1]) as z:
@@ -231,7 +231,7 @@ with zipfile.ZipFile(sys.argv[1]) as z:
 print('P08_R204_FUTURE_ATOMIC_COMPLETE_TARGET_METADATA=PASS')
 PY
     P08_R205_CHAINED=YES php target/tests/compatibility/r205_chained_atomic_apply.php \
-      "$site" "$P08_R204_TARGET_SHA" "$new_source_digest" "$tmp/013-synthetic-update.zip" "$synthetic_sha" 0.1.13
+      "$site" "$P08_DEV012_SHA" "$new_source_digest" "$tmp/013-synthetic-update.zip" "$synthetic_sha" 0.1.13
     unzip -p "$tmp/013-synthetic-full.zip" FULL_MANIFEST.json > "$tmp/013-canonical.json"
     cmp "$tmp/013-canonical.json" "$site/current/FULL_MANIFEST.json"
     echo "P08_R204_$engine"_FUTURE_ATOMIC_MANIFEST_EQUALS_CLEAN_FULL=PASS
