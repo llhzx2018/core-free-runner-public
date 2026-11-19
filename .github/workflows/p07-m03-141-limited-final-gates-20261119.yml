@@ -5,7 +5,7 @@ on:
     paths:
       - '.github/workflows/p07-m03-141-limited-final-gates-20261119.yml'
 permissions:
-  contents: read
+  contents: write
 jobs:
   standalone-module-trial:
     if: github.repository == 'llhzx2018/core-free-runner-public'
@@ -305,10 +305,13 @@ jobs:
       - name: Issue scoped141 dual official draft releases only after final safety/installation gates
         shell: bash
         env:
-          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          PRODUCT_RELEASE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+          PUBLIC_RELEASE_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
-          test -n "$GH_TOKEN" || { echo RELEASE_WRITE_TOKEN_UNAVAILABLE; exit 78; }
+          test -n "$PRODUCT_RELEASE_TOKEN" && test -n "$PUBLIC_RELEASE_TOKEN" || { echo RELEASE_WRITE_TOKEN_UNAVAILABLE; exit 78; }
+          product_gh() { GH_TOKEN="$PRODUCT_RELEASE_TOKEN" gh "$@"; }
+          public_gh() { GH_TOKEN="$PUBLIC_RELEASE_TOKEN" gh "$@"; }
           product=llhzx2018/vf-server-ops
           public=llhzx2018/core-free-runner-public
           tag=p07-m03-v0.1.0-release141-limited-20261119
@@ -351,45 +354,58 @@ jobs:
             --project-root "$PWD/.product" --artifact-root "$dir" \
             --public-router "$PWD/.gov/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json"
           echo P07_M03_LIMITED141_REAL_ZIP_DELIVERY_CONTRACT=PASS
-          if gh release view "$tag" --repo "$product" >/dev/null 2>&1; then
+          # Preflight normal existing Release/Contents authority for BOTH repos
+          # before any tag/draft write. A scoped private-repo PAT must not
+          # query public repos, and the public GITHUB_TOKEN must not query
+          # private product source or release endpoints.
+          product_write="$(product_gh api "repos/$product" --jq .permissions.push)" || { echo PRODUCT_RELEASE_REPOSITORY_ACCESS=BLOCKED; exit 78; }
+          public_write="$(public_gh api "repos/$public" --jq .permissions.push)" || { echo PUBLIC_RELEASE_REPOSITORY_ACCESS=BLOCKED; exit 78; }
+          test "$product_write" = true || { echo PRODUCT_RELEASE_WRITE_PERMISSION=BLOCKED; exit 78; }
+          test "$public_write" = true || { echo PUBLIC_RELEASE_WRITE_PERMISSION=BLOCKED; exit 78; }
+          echo P07_M03_TWO_REPO_RELEASE_CAPABILITIES=VERIFIED
+          if product_gh release view "$tag" --repo "$product" >/dev/null 2>&1; then
             echo RELEASE_TAG_ALREADY_EXISTS_PRODUCT; exit 78
           fi
-          if gh release view "$tag" --repo "$public" >/dev/null 2>&1; then
+          if public_gh release view "$tag" --repo "$public" >/dev/null 2>&1; then
             echo RELEASE_TAG_ALREADY_EXISTS_PUBLIC; exit 78
           fi
-          public_sha="$(gh api "repos/$public/git/ref/heads/main" --jq .object.sha)"
+          public_sha="$(public_gh api "repos/$public/git/ref/heads/main" --jq .object.sha)"
           test -n "$public_sha"
           notes="P07-M03 网站与数据 release141 受限版：仅 Laravel12/13 /public 建站修复、失败任务只读 UX、SQLite/无数据库单站首轮迁入。跨数据库引擎自动迁移及 D05 转换禁用；同引擎 SQL 业务、完整整机最终同步、旧失败迁移均未因此验收。正式业务迁移、Owner CP2/旧 VPS/数据库、Production 和 DNS 必须 Owner 手工执行。源码 $P07_PRODUCT_SHA，ZIP SHA256 $expected。"
-          gh release create "$tag" "$dir/$zip" "$dir/SHA256SUMS" \
+          product_gh release create "$tag" "$dir/$zip" "$dir/SHA256SUMS" \
             --repo "$product" --target "$P07_PRODUCT_SHA" --draft \
             --latest=false --title "P07 网站与数据 release141 受限版" --notes "$notes" >/dev/null
-          gh release create "$tag" "$dir/$zip" "$dir/SHA256SUMS" \
+          public_gh release create "$tag" "$dir/$zip" "$dir/SHA256SUMS" \
             --repo "$public" --target "$public_sha" --draft \
             --latest=false --title "P07 网站与数据 release141 受限版" --notes "$notes" >/dev/null
           for repository in "$product" "$public"; do
-            item="$(gh api "repos/$repository/releases/tags/$tag")"
+            item="$(if [[ "$repository" == "$product" ]]; then product_gh api "repos/$repository/releases/tags/$tag"; else public_gh api "repos/$repository/releases/tags/$tag"; fi)"
             test "$(jq -r .draft <<< "$item")" = true
             test "$(jq -r '.assets|length' <<< "$item")" = 2
             test "$(jq -r --arg n "$zip" '.assets[]|select(.name==$n)|.digest' <<< "$item")" = "sha256:$expected"
             test "$(jq -r --arg n "$zip" '.assets[]|select(.name==$n)|.state' <<< "$item")" = uploaded
             echo "P07_M03_LIMITED141_DRAFT_ASSETS_VERIFIED=$repository"
           done
-          gh release edit "$tag" --repo "$product" --draft=false >/dev/null
-          gh release edit "$tag" --repo "$public" --draft=false >/dev/null
+          product_gh release edit "$tag" --repo "$product" --draft=false >/dev/null
+          public_gh release edit "$tag" --repo "$public" --draft=false >/dev/null
           for repository in "$product" "$public"; do
-            item="$(gh api "repos/$repository/releases/tags/$tag")"
+            item="$(if [[ "$repository" == "$product" ]]; then product_gh api "repos/$repository/releases/tags/$tag"; else public_gh api "repos/$repository/releases/tags/$tag"; fi)"
             test "$(jq -r .draft <<< "$item")" = false
             target="$P07_PRODUCT_SHA"
             [[ "$repository" == "$public" ]] && target="$public_sha"
-            test "$(gh api "repos/$repository/git/ref/tags/$tag" --jq .object.sha)" = "$target"
+            test "$(if [[ "$repository" == "$product" ]]; then product_gh api "repos/$repository/git/ref/tags/$tag" --jq .object.sha; else public_gh api "repos/$repository/git/ref/tags/$tag" --jq .object.sha; fi)" = "$target"
             folder="$dir/download-$(basename "$repository")"
             mkdir -p "$folder"
-            gh release download "$tag" --repo "$repository" --dir "$folder"
+            if [[ "$repository" == "$product" ]]; then
+              product_gh release download "$tag" --repo "$repository" --dir "$folder"
+            else
+              public_gh release download "$tag" --repo "$repository" --dir "$folder"
+            fi
             (cd "$folder" && sha256sum -c SHA256SUMS)
             test "$(sha256sum "$folder/$zip" | cut -d' ' -f1)" = "$expected"
             echo "P07_M03_LIMITED141_OFFICIAL_REMOTE_BYTES_VERIFIED=$repository"
           done
-          gh api "repos/$public/releases/tags/$tag" --jq '.assets[]|select(.name=="P07-M03-0.1.0-release141.zip")|("P07_M03_LIMITED141_PUBLIC_ASSET_ID="+(.id|tostring))'
+          public_gh api "repos/$public/releases/tags/$tag" --jq '.assets[]|select(.name=="P07-M03-0.1.0-release141.zip")|("P07_M03_LIMITED141_PUBLIC_ASSET_ID="+(.id|tostring))'
           echo "P07_M03_LIMITED141_PRODUCT_SHA=$P07_PRODUCT_SHA"
           echo "P07_M03_LIMITED141_PUBLIC_SHA=$public_sha"
           echo "P07_M03_LIMITED141_TAG=$tag"
