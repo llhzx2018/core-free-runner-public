@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""P08 R200: single-issue exact merged v0.1.11 FULL and official v0.1.11→0.1.11 Atomic; no channel/Production writes."""
+"""P08 R200: single-issue exact merged v0.1.11 FULL and official v0.1.10→v0.1.11 Atomic; no channel/Production writes."""
 import hashlib
 import json
 import os
@@ -146,7 +146,7 @@ def main():
     print("P08_R200_OFFICIAL_UPDATE_BYTES="+str((root/UPDATE).stat().st_size))
     print("P08_R200_OFFICIAL_UPDATE_SHA256="+sha(root/UPDATE))
     print("P08_R200_OFFICIAL_ATOMIC_010_TO_011=ISSUED_VERIFIED")
-    print("P08_R200_OLD_V010_RELEASE_AND_019_CHANNEL=UNCHANGED_UNTIL_APPROVED_ATOMIC_CHANNEL_COMMIT")
+    print("P08_R200_OLD_V010_RELEASE_AND_V010_CHANNEL=UNCHANGED_UNTIL_APPROVED_ATOMIC_CHANNEL_COMMIT")
     print("P08_R200_PRODUCTION_CLOUDPANEL_DNS=UNTOUCHED")
 
 if __name__=="__main__":
