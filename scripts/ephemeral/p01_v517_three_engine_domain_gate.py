@@ -59,7 +59,7 @@ def main():
 
     for engine in ENGINES:
         reset(engine)
-        with tempfile.TemporaryDirectory(prefix="p01-v517-domain-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="p01-d14-stage-v517domain-") as tmp:
             site = Site(Path(tmp), engine, bundle)
             try:
                 site.start()
@@ -71,7 +71,7 @@ def main():
               flush=True)
 
         reset(engine)
-        with tempfile.TemporaryDirectory(prefix="p01-v517-rss-") as tmp:
+        with tempfile.TemporaryDirectory(prefix="p01-d14-stage-v517rss-") as tmp:
             site = Site(Path(tmp), engine, bundle)
             try:
                 site.start()
