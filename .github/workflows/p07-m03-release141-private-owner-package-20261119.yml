@@ -1,0 +1,176 @@
+name: P07 M03 private owner-trial candidate (NOT RELEASE)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-m03-release141-private-owner-package-20261119.yml'
+permissions:
+  contents: read
+jobs:
+  standalone-module-trial:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NO_COLOR: '1'
+      P07_PRODUCT_SHA: '0357c6b9e1ea108d67f52c8e7a202d68caf668db'
+      P07_BUILD: '0.1.0-release141'
+      P07_TAG: 'p07-all-ux-v0.1.0-20261118'
+      P07_ARCHIVE: 'P07-M03-0.1.0-release140.zip'
+      P07_OFFICIAL_SHA256: '8633631f76ca5ecd1a3c79e2edb64438eb920b6c5407fa5d5057611f9a7e77b8'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout current public packaging authority
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout only exact private product source into transient directory
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 0357c6b9e1ea108d67f52c8e7a202d68caf668db
+          fetch-depth: 0
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .product
+      - name: Fetch immutable official M03 release140 and verify declared SHA256
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dir="$RUNNER_TEMP/p07-m03-rc141"
+          mkdir -p "$dir"
+          gh release download "$P07_TAG" --repo llhzx2018/core-free-runner-public \
+            --pattern "$P07_ARCHIVE" --dir "$dir" --clobber > /dev/null
+          printf '%s  %s\n' "$P07_OFFICIAL_SHA256" "$dir/$P07_ARCHIVE" \
+            | sha256sum -c - > /dev/null
+          echo P07_M03_OFFICIAL140_RELEASE_ASSET=SHA256_PASS
+      - name: Build unpublished formal141 package from official140 baseline, verify manifest and boundaries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dir="$RUNNER_TEMP/p07-m03-rc141"
+          src=".product/scripts/p07_m03_trial_from_official.py"
+          test "$(git -C .product rev-parse HEAD)" = "$P07_PRODUCT_SHA"
+          test "$(cat .product/BUILD_ID)" = 0.1.0-release140
+          if python3 -B "$src" --official-zip "$dir/$P07_ARCHIVE" \
+            --product-root .product --product-sha "$P07_PRODUCT_SHA" \
+            --build "$P07_BUILD" --output "$dir/forbidden-unflagged.zip" \
+            > "$dir/unflagged.log" 2>&1; then
+            echo FORMAL_ID_ACCEPTED_WITHOUT_EXPLICIT_FLAG=FAIL
+            exit 13
+          fi
+          grep -qx 'P07_M03_TRIAL_BUILD=BLOCKED:TRIAL_VERSION_NOT_ALLOWED' "$dir/unflagged.log"
+          test ! -e "$dir/forbidden-unflagged.zip"
+          echo FORMAL_BUILD_REQUIRES_EXPLICIT_FLAG=PASS
+          if ! python3 -B "$src" --official-zip "$dir/$P07_ARCHIVE" \
+            --product-root .product --product-sha "$P07_PRODUCT_SHA" \
+            --formal-candidate --build "$P07_BUILD" --output "$dir/trial.zip" > "$dir/builder.log" 2>&1; then
+            grep -E '^P07_M03_TRIAL_BUILD=' "$dir/builder.log" | cut -c1-110 || true
+            echo P07_M03_RC141_PACKAGE=BLOCKED
+            exit 1
+          fi
+          grep -E '^P07_M03_TRIAL_(BUILD|SHA256|RUNTIME_BLOB|FILE_COUNT)=' "$dir/builder.log" | cut -c1-150
+          python3 -B - "$dir/$P07_ARCHIVE" "$dir/trial.zip" "$P07_BUILD" <<'PY'
+          import hashlib,re,sys,zipfile
+          old,new,build=sys.argv[1:]
+          def sha(p):
+              data=open(p,'rb').read()
+              return hashlib.sha256(data).hexdigest()
+          with zipfile.ZipFile(old) as f,zipfile.ZipFile(new) as g:
+              a={i.filename:f.read(i) for i in f.infolist()}
+              b={i.filename:g.read(i) for i in g.infolist()}
+          prefix='dist/p07/0.1.0/overlay/'
+          allowed={prefix+'RUNTIME.gitblob',prefix+'BUILD_ID',
+                   prefix+'lib/migration_php_site_template.py',
+                   prefix+'lib/server_migration_pull.py',prefix+'lib/restore_apply.py',
+                   'installers/p07-final.sh'}
+          changes={p for p in (set(a)|set(b)) if a.get(p)!=b.get(p)}
+          assert changes==allowed, ('Unexpected changes',len(changes))
+          assert b[prefix+'BUILD_ID']==(build+'\n').encode()
+          rows=b[prefix+'RUNTIME.gitblob'].decode().splitlines()
+          assert len(rows)>=50
+          for row in rows:
+              digest,rel=row.split('  ',1)
+              p=prefix+rel
+              raw=b[p]
+              calculated=hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
+              assert digest==calculated
+          assert len(b)==len(rows)+3
+          print('P07_M03_RC141_CHANGED_FILES='+str(len(changes)))
+          print('P07_M03_RC141_MANIFEST_FILE_COUNT='+str(len(rows)))
+          print('P07_M03_RC141_ZERO_OTHER_MODULE_DIFF=PASS')
+          print('P07_M03_RC141_ZIP_SHA256='+sha(new))
+          PY
+          mkdir -p "$dir/baseline" "$dir/candidate"
+          unzip -q "$dir/$P07_ARCHIVE" -d "$dir/baseline"
+          unzip -q "$dir/trial.zip" -d "$dir/candidate"
+          bash -n "$dir/candidate/installers/p07-final.sh"
+          echo P07_M03_RC141_REAL_ARCHIVE_STRUCTURE=PASS
+      - name: Deliver exact SHA-locked binary to private trial branch and verify remote bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          if test -z "$GH_TOKEN"; then echo PRIVATE_TRIAL_DELIVERY=BLOCKED_WRITE_CAPABILITY; exit 13; fi
+          destination_repo="llhzx2018/core-free-runner-private"
+          branch="trial/p07-m03-d04-owner-141-20261119"
+          d="$RUNNER_TEMP/p07-m03-rc141"
+          trial="$d/trial.zip"
+          receipt="owner-trials/p07-m03-d04/20261119"
+          expected="b0a060e74515bae377bb12b967d39fee96b9519d0b532dd1eb995574616b119c"
+          printf '%s  %s\n' "$expected" "$trial" | sha256sum -c - >/dev/null || { echo PRIVATE_TRIAL_DELIVERY=CANDIDATE_SHA_CHANGED; exit 13; }
+          if test "$(gh api "repos/$destination_repo" --jq '.private' 2>/dev/null)" != true; then
+            echo PRIVATE_TRIAL_DELIVERY=PRIVATE_REPO_UNVERIFIED
+            exit 13
+          fi
+          gh auth setup-git >/dev/null 2>&1
+          if ! git clone --depth 1 --quiet "https://github.com/$destination_repo.git" "$d/private" >"$d/private-clone.log" 2>&1; then
+            echo PRIVATE_TRIAL_DELIVERY=PRIVATE_REPO_CLONE_BLOCKED
+            exit 13
+          fi
+          cd "$d/private"
+          if git ls-remote --heads origin "refs/heads/$branch" | grep -q .; then
+            echo PRIVATE_TRIAL_DELIVERY=TARGET_BRANCH_ALREADY_EXISTS
+            exit 13
+          fi
+          git switch -q -c "$branch"
+          mkdir -p "$receipt"
+          install -m 0600 "$trial" "$receipt/P07-M03-D04-OWNER-TRIAL-release141.zip"
+          cat > "$receipt/README.txt" <<'EOF'
+          P07-M03 网站与数据 / P07-M03-D04 服务器迁移
+          OWNER_TRIAL_CANDIDATE: NOT RELEASE / NOT PRODUCTION
+          Source PR: https://github.com/llhzx2018/vf-server-ops/pull/368
+          Source HEAD: 0357c6b9e1ea108d67f52c8e7a202d68caf668db
+          Candidate BUILD_ID: 0.1.0-release141
+          Candidate SHA256: b0a060e74515bae377bb12b967d39fee96b9519d0b532dd1eb995574616b119c
+          Official release140 ZIP SHA256: 8633631f76ca5ecd1a3c79e2edb64438eb920b6c5407fa5d5057611f9a7e77b8
+          Exact source install/rollback evidence: https://github.com/llhzx2018/core-free-runner-public/actions/runs/44474531853
+          Only use in an independently approved EMPTY ISOLATED test VPS.
+          DO NOT install in existing CP2/Production or resume the PREPARE_FAILED 22-site migration.
+          MySQL 8.4 -> MariaDB 11.8, SQLite and no-database real two-host gates are NOT_PASS.
+          No formal release, public distribution, production, database, DNS or site migration performed.
+          EOF
+          git add -- "$receipt/"
+          git -c user.name="P07 Trial Bot" -c user.email="p07-trial@users.noreply.github.com" commit -qm "trial(P07-M03-D04): verified private 141 owner candidate not release"
+          if ! git push --quiet origin "HEAD:refs/heads/$branch" >"$d/private-push.log" 2>&1; then
+            echo PRIVATE_TRIAL_DELIVERY=PRIVATE_BRANCH_PUSH_BLOCKED
+            exit 13
+          fi
+          cd "$RUNNER_TEMP"
+          if ! git clone --depth 1 --quiet --branch "$branch" "https://github.com/$destination_repo.git" "$d/readback" > "$d/private-readback.log" 2>&1; then
+            echo PRIVATE_TRIAL_DELIVERY=PRIVATE_REMOTE_READBACK_BLOCKED
+            exit 13
+          fi
+          printf '%s  %s\n' "$expected" "$d/readback/$receipt/P07-M03-D04-OWNER-TRIAL-release141.zip" | sha256sum -c - >/dev/null || { echo PRIVATE_TRIAL_DELIVERY=PRIVATE_REMOTE_SHA_MISMATCH; exit 13; }
+          echo PRIVATE_TRIAL_DELIVERY=PASS_PRIVATE_REMOTE_BYTES_VERIFIED
+          echo PRIVATE_TRIAL_FORMAL_RELEASE=NOT_DONE
+          echo PRIVATE_TRIAL_REAL_SERVER_MIGRATION=NOT_DONE
+      - name: Erase temporary private source, trial archive, and install fixtures
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- .product .gov .cloudpanel-official "$RUNNER_TEMP/p07-m03-rc141"
+          rm -f -- "$RUNNER_TEMP/p07-rc141-architecture.log" "$RUNNER_TEMP/p07-rc141-modules.log"
+          echo P07_M03_PRIVATE_SOURCE_AND_TEST_ARTIFACT_CLEANUP=PASS
