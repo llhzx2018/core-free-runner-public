@@ -366,6 +366,139 @@ jobs:
           grep -Fx 'P01_V516_SPOOF_REPLAY_TAMPER_FAIL_CLOSED=PASS' "$RUNNER_TEMP/p01-bridge-major-test.txt"
           grep -Fx 'P01_V516_OLD_SQLITE_OWNER_CODE_UNTOUCHED=PASS' "$RUNNER_TEMP/p01-bridge-major-test.txt"
           grep -Fx 'P01_V516_PRODUCTION_CLOUDPANEL_MIGRATION_EXECUTED=NO' "$RUNNER_TEMP/p01-bridge-major-test.txt"
+      - name: Checkout official v515 exact baseline for current canonical test inventory
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ddd9d5dd0325772e2741d7a9e498b043e964c310
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: baseline-src
+          fetch-depth: 1
+      - name: Official v515 versus exact v516 canonical regression
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C baseline-src rev-parse HEAD)" = ddd9d5dd0325772e2741d7a9e498b043e964c310
+          test "$(git -C bridge-src rev-parse HEAD)" = "$BRIDGE_SHA"
+          if ! bash bridge-src/tests/canonical_release_regression.sh bridge-src baseline-src >"$RUNNER_TEMP/p01-v516-canonical.txt" 2>&1; then
+            grep -E 'P01_CANONICAL_|P01_STACK_|FAIL|Traceback|Error' "$RUNNER_TEMP/p01-v516-canonical.txt" | tail -n 35 || true
+            exit 1
+          fi
+          grep -Fx 'P01_CANONICAL_UNIT_REGRESSION=PASS' "$RUNNER_TEMP/p01-v516-canonical.txt"
+          grep -E '^P01_CANONICAL_(BASELINE_TEST_COUNT|CURRENT_TEST_COUNT|NEW_REGRESSION_COUNT|REMOVED_BASELINE_TEST_COUNT|LEGACY_TEST_DEBT_COUNT)=' "$RUNNER_TEMP/p01-v516-canonical.txt"
+          echo P01_V516_OFFICIAL_BASELINE_CANONICAL_REGRESSION=PASS
+      - name: Actual official-named v516 FULL Clean install and dirty-reinstall refusal
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          BASE="$RUNNER_TEMP/p01-bridge-official-A"
+          SITE="$RUNNER_TEMP/p01-bridge-clean-full"
+          mkdir -m 0700 "$SITE"
+          FULL_NAME="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["full"]["filename"])' "$BASE/bridge-candidate-receipt.json")"
+          test -f "$BASE/$FULL_NAME"
+          unzip -q "$BASE/$FULL_NAME" -d "$SITE"
+          test "$(cat "$SITE/VERSION.txt")" = 2.47.516
+          test -f "$SITE/setup.php"
+          test -f "$SITE/cli/verify.php"
+          php8.3 -l "$SITE/setup.php" >/dev/null
+          php8.3 -S 127.0.0.1:19437 -t "$SITE" >"$RUNNER_TEMP/p01-v516-clean-http.txt" 2>&1 &
+          echo $! >"$RUNNER_TEMP/p01-bridge-http-19437.pid"
+          COOKIE="$RUNNER_TEMP/p01-v516-clean.cookie"
+          READY=0
+          for i in $(seq 1 40); do
+            if curl --noproxy '*' -sSf -b "$COOKIE" -c "$COOKIE" -D "$RUNNER_TEMP/p01-v516-clean-headers.txt" http://127.0.0.1:19437/setup.php >"$RUNNER_TEMP/p01-v516-clean-setup.html"; then READY=1; break; fi
+            sleep 1
+          done
+          test "$READY" -eq 1
+          grep -Eiq '^X-Robots-Tag:.*noindex' "$RUNNER_TEMP/p01-v516-clean-headers.txt"
+          CSRF="$(python3 -c 'import re,sys;m=re.search(r"name=\"setup_csrf\"\s+value=\"([^\"]+)\"",open(sys.argv[1]).read());assert m;print(m.group(1))' "$RUNNER_TEMP/p01-v516-clean-setup.html")"
+          curl --noproxy '*' -sSf -b "$COOKIE" -c "$COOKIE" -X POST http://127.0.0.1:19437/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=P01_516_Release_Clean' --data-urlencode 'admin_password=IsolatedCleanPass-2026!' --data-urlencode 'admin_password_confirm=IsolatedCleanPass-2026!' >"$RUNNER_TEMP/p01-v516-clean-result.html"
+          (cd "$SITE" && php8.3 cli/verify.php) | grep -Fx VERIFY_PASS=YES
+          export P01_CLEAN_SITE="$SITE"
+          python3 - <<'PY'
+          import glob,json,os,sqlite3
+          site=os.environ['P01_CLEAN_SITE']
+          cfg=glob.glob(site+'/.vfnav-data-*/config-*.json')
+          dbs=glob.glob(site+'/.vfnav-data-*/nav-*.sqlite')
+          assert len(cfg)==len(dbs)==1,(len(cfg),len(dbs))
+          conf=json.load(open(cfg[0]))
+          assert conf['version']=='2.47.516'
+          assert conf.get('admin_password_hash')
+          db=sqlite3.connect(dbs[0])
+          for table in ('categories','links','import_batches'):
+              assert db.execute('select count(*) from '+table).fetchone()[0]==0,table
+          db.close()
+          with open(os.environ['RUNNER_TEMP']+'/p01-v516-owner-original-hash.txt','w') as f:
+              f.write(conf['admin_password_hash'])
+          print('P01_V516_OFFICIAL_CLEAN_SEED_ZERO_USER_ROWS=PASS')
+          PY
+          STATUS="$(curl --noproxy '*' -sS -b "$COOKIE" -c "$COOKIE" -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:19437/setup.php --data-urlencode "setup_csrf=$CSRF" --data-urlencode 'site_title=UNSAFE_OVERWRITE' --data-urlencode 'admin_password=DirtyOverwrite-2026!' --data-urlencode 'admin_password_confirm=DirtyOverwrite-2026!')"
+          test "$STATUS" = 302
+          python3 - <<'PY'
+          import glob,json,os
+          site=os.environ['P01_CLEAN_SITE']
+          cfg=glob.glob(site+'/.vfnav-data-*/config-*.json')
+          assert len(cfg)==1
+          data=json.load(open(cfg[0]))
+          assert data['admin_password_hash']==open(os.environ['RUNNER_TEMP']+'/p01-v516-owner-original-hash.txt').read()
+          assert data['site_title']=='P01_516_Release_Clean'
+          print('P01_V516_OFFICIAL_FULL_DIRTY_INSTALL_REFUSED=PASS')
+          PY
+          CODE="$(curl --noproxy '*' -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' --data '{}' http://127.0.0.1:19437/api.php?action=update_major_stage)"
+          case "$CODE" in 401|403) ;; *) echo P01_V516_CLEAN_GUEST_MAJOR_WRITE_DENIAL=FAIL; exit 1 ;; esac
+          echo P01_V516_OFFICIAL_CLEAN_GUEST_MAJOR_WRITE_DENIAL=PASS
+          echo P01_V516_OFFICIAL_CONTENT_REAL_CLEAN_FULL_INSTALL=PASS
+      - name: Real Chrome 390 768 1440 Owner login and runtime smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          command -v google-chrome >/dev/null
+          python3 -m venv "$RUNNER_TEMP/p01-v516-selenium"
+          "$RUNNER_TEMP/p01-v516-selenium/bin/pip" install -q --disable-pip-version-check selenium==4.31.0 >"$RUNNER_TEMP/p01-v516-browser-deps.txt" 2>&1
+          cat >"$RUNNER_TEMP/p01-v516-browser.py" <<'PY'
+          from selenium import webdriver
+          from selenium.webdriver.chrome.options import Options
+          from selenium.webdriver.support.ui import WebDriverWait
+          base='http://127.0.0.1:19437'
+          opts=Options()
+          opts.add_argument('--headless=new')
+          opts.add_argument('--no-sandbox')
+          opts.add_argument('--disable-dev-shm-usage')
+          opts.add_argument('--disable-gpu')
+          opts.add_argument('--window-size=1440,900')
+          driver=webdriver.Chrome(options=opts)
+          try:
+              driver.get(base+'/')
+              login=driver.execute_async_script("""
+              const done=arguments[arguments.length-1];
+              fetch('api.php?action=login',{method:'POST',headers:{'Content-Type':'application/json'},
+                credentials:'same-origin',body:JSON.stringify({password:'IsolatedCleanPass-2026!'})})
+                .then(r=>r.json()).then(done).catch(e=>done({ok:false,error:String(e)}));
+              """)
+              assert login.get('ok') is True,'Owner login failure'
+              for width in (390,768,1440):
+                  driver.set_window_size(width,900)
+                  driver.get(base+'/home.php')
+                  WebDriverWait(driver,15).until(lambda d:d.execute_script("return document.readyState")=='complete')
+                  assert len(driver.page_source)>1000,'Owner Home empty'
+                  assert driver.execute_script("return document.body!==null"),'body missing'
+                  # Owner session must survive full browser navigation.
+                  state=driver.execute_async_script("""
+                  const done=arguments[arguments.length-1];
+                  fetch('api.php?action=update_status',{credentials:'same-origin'})
+                    .then(async r=>({status:r.status,data:await r.json()}))
+                    .then(done).catch(e=>done({status:0,error:String(e)}));
+                  """)
+                  assert state.get('status')==200,('Owner update status denied',state.get('status'))
+                  assert state.get('data',{}).get('ok') is True,'Owner status is not OK'
+                  assert driver.execute_script('return document.documentElement.scrollWidth<=window.innerWidth+3'),('horizontal page overflow',width)
+                  print('P01_V516_CHROME_OWNER_HOME_RUNTIME_'+str(width)+'=PASS')
+              print('P01_V516_BROWSER_REAL_OWNER_SMOKE=PASS')
+          finally:
+              driver.quit()
+          PY
+          "$RUNNER_TEMP/p01-v516-selenium/bin/python" "$RUNNER_TEMP/p01-v516-browser.py"
       - name: Cleanup all private source and FULL/UPDATE and old-site SQLite
         if: always()
         shell: bash
@@ -373,6 +506,6 @@ jobs:
           for path in "$RUNNER_TEMP"/p01-bridge-http-*.pid; do
             [ ! -f "$path" ] || kill "$(cat "$path")" 2>/dev/null || true
           done
-          rm -rf -- bridge-src "$RUNNER_TEMP/p01-bridge-base" "$RUNNER_TEMP/p01-bridge-out" "$RUNNER_TEMP/p01-bridge-work"
+          rm -rf -- bridge-src baseline-src "$RUNNER_TEMP/p01-bridge-clean-full" "$RUNNER_TEMP/p01-v516-selenium" "$RUNNER_TEMP/p01-bridge-base" "$RUNNER_TEMP/p01-bridge-out" "$RUNNER_TEMP/p01-bridge-work"
           rm -f -- "$RUNNER_TEMP"/p01-bridge-*.json "$RUNNER_TEMP"/p01-bridge-*.cookie "$RUNNER_TEMP"/p01-bridge-*.txt "$RUNNER_TEMP"/p01-bridge-*.html "$RUNNER_TEMP"/p01-bridge-*.pid
           echo P01_BRIDGE_PRIVATE_SOURCE_AND_DATA_PERSISTENCE=NONE
