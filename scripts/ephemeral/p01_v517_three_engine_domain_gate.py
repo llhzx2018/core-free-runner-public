@@ -46,16 +46,11 @@ def main():
     sys.path.insert(0, str(root / "tests/compatibility/laravel/http"))
 
     from run_cloudpanel_fpm_full_stage import Site
-    from d79_job_crash_recovery import verify_recovery
-    from d86_schedule_owner_controls import verify_schedules
-    from d82_link_health_worker import verify_network_health
 
-    def focused_domains(site):
-        # The real installed Owner D77 JobManager safety proof is already
-        # executed by Site.run before this callback.
-        verify_recovery(site)
-        verify_schedules(site)
-        verify_network_health(site)
+    # Site.run already runs D77's real Owner integration, which in turn
+    # invokes D79 recovery, D82 SSRF, D86 schedules and D81/83/84/87.
+    # Re-entering the same stateful probes would be a test harness bug:
+    # the fixed synthetic seeded job summary is no longer a virgin fixture.
 
     for engine in ENGINES:
         reset(engine)
@@ -63,7 +58,7 @@ def main():
             site = Site(Path(tmp), engine, bundle)
             try:
                 site.start()
-                site.run(before_business=focused_domains)
+                site.run()
             finally:
                 site.stop()
         print("P01_V517_" + engine.upper() +
