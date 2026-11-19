@@ -104,7 +104,7 @@ for tool in flock mv readlink; do command -v "$tool" >/dev/null 2>&1 || deny APP
 [[ -d "$(dirname "$m03_root")" && ! -L "$(dirname "$m03_root")" &&
    ! -L "$m03_lock" ]] || deny APPLY_FAILED
 # Serialize overlapping invocations before examining or moving any backup.
-exec {m03_lock_fd}>"$m03_lock" || deny APPLY_FAILED
+exec {m03_lock_fd}>>"$m03_lock" || deny APPLY_FAILED
 flock -x "$m03_lock_fd" || deny APPLY_FAILED
 
 verified_m03_build() {
