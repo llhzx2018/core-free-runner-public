@@ -60,7 +60,7 @@ VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
 VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release141"
 VF_SERVER_OPS_INSTALLER_REF="main"
-VF_SERVER_OPS_INSTALLER_BLOB="39ecd14f1daf201196704580d8d1fa12b80efa0b"
+VF_SERVER_OPS_INSTALLER_BLOB="1257bc3e240d3adfa8aeeb24ff1bf0b8e453da4f"
 # Exact stable P07-M03 runtime manifest; reject a self-edited manifest before execution.
 VF_SERVER_OPS_MANIFEST_BLOB="6a3a949064ffb8fe1df56e7bc555173b5ca9cf3b"
 VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07-m03-release141-atomic.sh"
