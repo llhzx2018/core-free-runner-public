@@ -9,6 +9,16 @@ VF/Kewaro 工程任务先 live-read [CURRENT.md](https://github.com/llhzx2018/go
 
 `core-free-runner-public` 是 VF 固定的 **Public-safe GitHub Hosted Runner + Evidence 基础设施**，不是产品仓、Release 仓或私人数据仓。
 
+## P07 公共 SSH 安装／升级唯一入口 · MUST（OWNER 2026-11-19）
+
+本仓的**唯一对外指令**见 [P07 公开匿名分发合同](docs/authority/P07_PUBLIC_INSTALL_CONTRACT.md)：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-toolbox.sh)
+```
+
+面向任何使用者，包括 Owner 手动试用，一律不要求 GitHub 登录、`gh auth`、Git Token、访问私有仓、git clone 或手工搬运 ZIP；技术上内部用 GitHub Release/ZIP 是开发与分发实现细节，不得加到使用者操作流程里。公共工具箱五模块升级及文件校验独立，脚本只能锁定真实已公开且经批准的正式资产；新候选尚未公开就明确 `NOT_PUBLISHED`，不造第二个“试用一键入口”。发布 PR 必须通过 `scripts/check_p07_public_install_contract.py`、`tests/test_p07_public_install_contract.py` 以及原发布/升级/恢复与安全门禁，静态检查不替代真实机器和 Owner 现场验收。默认不修改主 Toolbox、生产、CP2、DNS 或迁移。 
+
 ## P07 公共工具箱终端 UX V3 · 专属硬要求（OWNER 2026-11-13）
 
 修改本仓 P07 单一公共工具箱及 P07-M01 网络代理节点（V2Ray）、P07-M02 服务器性能检测（VPS 验机）、P07-M03 网站与数据、P07-M04 服务器维护与安全、P07-M05 新服务器初始化相关的用户可见 SSH 菜单/输出时，必须先读 [《P07 Public Terminal UX Adoption》](docs/authority/P07_TERMINAL_UX_ADOPTION.md)，并追溯 P07 产品仓唯一 [企业级 UX V3 Authority](https://github.com/llhzx2018/vf-server-ops/blob/main/docs/authority/P07_TERMINAL_UX_STANDARD_V3.md)。改动有用户提示/菜单/确认/进度时必须附七场景 UX 审查+具名正反测试；`scripts/check_p07_public_terminal_ux.py` 和现有公共 Actions 的 PR Gate 必须 PASS。非 UI 的哈希/版本变化不额外触发 UX 证据；UX Gate 不授权自动更新其它模块、正式发行或 Production。这是仅用于 **P07 自有公共入口** 的指针，不改变其它 Runner/产品的 Authority。
