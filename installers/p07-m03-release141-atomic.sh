@@ -90,6 +90,123 @@ if len(names)+3!=len(items): raise ValueError("extra asset")
 if (manifest.parent/"BUILD_ID").read_text().strip()!="0.1.0-release141": raise ValueError("build")
 PY
 bash -n "$tmp/files/installers/p07-final.sh" || deny INSTALLER_REJECTED
+# Owner safety recovery: release139->140 legitimately retains an earlier
+# .previous snapshot. The signed release141 internal installer refuses to
+# overwrite that existing path. Preserve it with verified, non-overwriting
+# versioned rotation; then the signed installer can retain current140 as
+# .previous. Do not erase, overwrite, assume ownership, or process unknown
+# recoveries. All paths are module runtime paths, not website/data snapshots.
+m03_root="${P07_INSTALL_DIR:-/opt/vf-server-ops}"
+m03_previous="${P07_PREVIOUS_DIR:-/opt/vf-server-ops.previous}"
+m03_bin="${P07_BIN_LINK:-/usr/local/bin/vfops}"
+m03_lock="$m03_root.upgrade.lock"
+for tool in flock mv readlink; do command -v "$tool" >/dev/null 2>&1 || deny APPLY_FAILED; done
+[[ -d "$(dirname "$m03_root")" && ! -L "$(dirname "$m03_root")" &&
+   ! -L "$m03_lock" ]] || deny APPLY_FAILED
+# Serialize overlapping invocations before examining or moving any backup.
+exec {m03_lock_fd}>"$m03_lock" || deny APPLY_FAILED
+flock -x "$m03_lock_fd" || deny APPLY_FAILED
+
+verified_m03_build() {
+  python3 -B - "$1" <<'PY_CHECK'
+import hashlib, pathlib, re, sys
+root=pathlib.Path(sys.argv[1])
+trusted={
+    "0.1.0-release115":"4acbaca22aac0da681b34376e2cc86d876593181",
+    "0.1.0-release135":"f57e114e0ef23f73a1ec12ba864d8f2e67a5bd30",
+    "0.1.0-release136":"59153685ef834114e01e0330c78ae174a042c1fa",
+    "0.1.0-release137":"fc94d7c573a0437517726de22c4ac6ff33e582e7",
+    "0.1.0-release138":"2c6ccd51b7e73d3d9db1ec6d37beaa6ce1cdff73",
+    "0.1.0-release139":"efdfff0b4348b334bbbc2da26d40280338fc7868",
+    "0.1.0-release140":"239bd543e4f64449ca498c1d67ccb7471abbee66",
+    "0.1.0-release141":"6a3a949064ffb8fe1df56e7bc555173b5ca9cf3b",
+}
+def digest(raw):
+    return hashlib.sha1(b"blob "+str(len(raw)).encode()+b"\0"+raw).hexdigest()
+try:
+    if not root.is_dir() or root.is_symlink(): raise ValueError()
+    manifest=root/".runtime-manifest.gitblob"
+    marker=root/"BUILD_ID"
+    if any(not p.is_file() or p.is_symlink() for p in (manifest,marker)): raise ValueError()
+    build=marker.read_text(encoding="utf-8").strip()
+    if build not in trusted or digest(manifest.read_bytes()) != trusted[build]: raise ValueError()
+    rows=manifest.read_text(encoding="utf-8").splitlines()
+    if not 50 <= len(rows) <= 240: raise ValueError()
+    seen=set()
+    for row in rows:
+        match=re.fullmatch(r"([0-9a-f]{40})  ((?:bin|lib|components)/[A-Za-z0-9_./-]+|BUILD_ID)",row)
+        if match is None: raise ValueError()
+        expected,rel=match.groups()
+        path=pathlib.PurePosixPath(rel)
+        if ".." in path.parts or rel in seen: raise ValueError()
+        seen.add(rel)
+        member=root.joinpath(*path.parts)
+        if not member.is_file() or member.is_symlink() or digest(member.read_bytes())!=expected:
+            raise ValueError()
+    if "BUILD_ID" not in seen or "bin/vfops-user" not in seen: raise ValueError()
+    print(build)
+except (OSError, UnicodeError, ValueError, TypeError, RecursionError):
+    sys.exit(13)
+PY_CHECK
+}
+
+m03_rotation=0
+m03_old_current=""
+m03_old_previous=""
+m03_archive=""
+if [[ -e "$m03_previous" || -L "$m03_previous" ]]; then
+  [[ ! -e "$m03_root.new" && ! -L "$m03_root.new" ]] || {
+    msg 'P07-M03 网站与数据：临时升级目录未完成恢复，拒绝自动移动旧恢复点。' >&2
+    deny APPLY_FAILED
+  }
+  m03_old_current="$(verified_m03_build "$m03_root")" || {
+    msg 'P07-M03 网站与数据：现有程序身份无法核实，恢复目录原样保留。' >&2
+    deny APPLY_FAILED
+  }
+  if [[ "$m03_old_current" != "$BUILD" ]]; then
+    m03_old_previous="$(verified_m03_build "$m03_previous")" || {
+      msg 'P07-M03 网站与数据：旧恢复目录不属于可识别的完整正式版本，原样保留。' >&2
+      deny APPLY_FAILED
+    }
+    [[ -L "$m03_bin" && "$(readlink "$m03_bin")" == "$m03_root/bin/vfops-user" ]] || {
+      msg 'P07-M03 网站与数据：程序入口不是已验证的目标，拒绝调整恢复点。' >&2
+      deny APPLY_FAILED
+    }
+    m03_archive="$m03_previous.preserved-$m03_old_previous"
+    [[ ! -e "$m03_archive" && ! -L "$m03_archive" ]] || {
+      msg 'P07-M03 网站与数据：同版本恢复档案已经存在，拒绝覆盖；请保留现场。' >&2
+      deny APPLY_FAILED
+    }
+    if ! mv -nT -- "$m03_previous" "$m03_archive"; then deny APPLY_FAILED; fi
+    [[ ! -e "$m03_previous" && ! -L "$m03_previous" &&
+       -d "$m03_archive" && ! -L "$m03_archive" ]] || deny APPLY_FAILED
+    m03_rotation=1
+    msg "P07-M03 网站与数据：已无损保留历史恢复版本 $m03_old_previous；当前版 $m03_old_current 将作为升级回滚点。"
+  fi
+fi
+
 msg 'P07-M03 网站与数据：正式包已验证，开始仅升级本模块程序。'
-P07_PUBLIC_ROOT="file://$tmp/files" P07_NO_EXEC=1 bash "$tmp/files/installers/p07-final.sh" || deny APPLY_FAILED
+if ! P07_PUBLIC_ROOT="file://$tmp/files" P07_NO_EXEC=1 bash "$tmp/files/installers/p07-final.sh"; then
+  # An independent installer error normally restores the active old runtime.
+  # Rehydrate the original .previous path only if the current old runtime
+  # was fully restored and no other process/path owns that recovery slot.
+  if (( m03_rotation == 1 )) &&
+     [[ ! -e "$m03_previous" && ! -L "$m03_previous" ]] &&
+     [[ "$(verified_m03_build "$m03_root" 2>/dev/null || true)" == "$m03_old_current" ]] &&
+     [[ "$(verified_m03_build "$m03_archive" 2>/dev/null || true)" == "$m03_old_previous" ]]; then
+    mv -nT -- "$m03_archive" "$m03_previous" || true
+    if [[ -d "$m03_previous" && ! -e "$m03_archive" ]]; then
+      msg 'P07-M03 网站与数据：升级失败，已保留现有程序并恢复原历史恢复目录。'
+    fi
+  fi
+  deny APPLY_FAILED
+fi
+if (( m03_rotation == 1 )); then
+  [[ "$(verified_m03_build "$m03_root" 2>/dev/null || true)" == "$BUILD" &&
+     "$(verified_m03_build "$m03_previous" 2>/dev/null || true)" == "$m03_old_current" &&
+     "$(verified_m03_build "$m03_archive" 2>/dev/null || true)" == "$m03_old_previous" ]] || {
+    msg 'P07-M03 网站与数据：升级后恢复点核验未通过，全部恢复目录保留待安全处理。' >&2
+    deny APPLY_FAILED
+  }
+fi
 msg 'P07-M03 网站与数据：已完成本模块升级；未迁移网站、数据库或切换 DNS。'
