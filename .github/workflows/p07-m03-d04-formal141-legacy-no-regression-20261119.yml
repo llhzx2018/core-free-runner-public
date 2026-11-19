@@ -1,0 +1,91 @@
+# One-shot P07-M03-D04 test, private failure diagnostics are never logged.
+name: P07 M03 D04 release141 formal legacy no-regression
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-m03-d04-formal141-legacy-no-regression-20261119.yml'
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      NO_COLOR: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      BASE_SHA: '089c62e39e6c4998a92304cce30c73bfb1f2726d'
+      PR_SHA: '26b67ed9d93934d7164d95f2d8ae72dd372765f6'
+    steps:
+      - name: Transient checkout exact baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 089c62e39e6c4998a92304cce30c73bfb1f2726d
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: .p07-baseline
+      - name: Transient checkout exact PR source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 26b67ed9d93934d7164d95f2d8ae72dd372765f6
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: .p07-candidate
+      - name: Compare existing suites without revealing test output
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C .p07-baseline rev-parse HEAD)" = "$BASE_SHA"
+          test "$(git -C .p07-candidate rev-parse HEAD)" = "$PR_SHA"
+          python3 -B - <<'PY'
+          import os, pathlib, re, subprocess, sys, hashlib, json
+          root=pathlib.Path.cwd()
+          files=('test_server_migration_pull.py','test_server_migration.py','test_restore_apply.py')
+          groups={}
+          for label, folder in (('BASELINE','.p07-baseline'),('CANDIDATE','.p07-candidate')):
+              cwd=root / folder
+              runs={}
+              for name in files:
+                  env=dict(os.environ)
+                  env['PYTHONPATH']=str(cwd / 'lib')+os.pathsep+str(cwd)
+                  try:
+                      proc=subprocess.run(
+                          [sys.executable,'-B',str(cwd/'tests'/name),'-q'],
+                          cwd=cwd,env=env,text=True,stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE,timeout=240,check=False)
+                      output=(proc.stdout or '')+'\n'+(proc.stderr or '')
+                      m=re.findall(r'Ran (\d+) tests',output)
+                      failures=re.findall(r'^FAIL: (test_[A-Za-z0-9_]+)',output,re.M)
+                      errors=re.findall(r'^ERROR: (test_[A-Za-z0-9_]+)',output,re.M)
+                      numbers=(len(failures),len(errors))
+                      total=int(m[-1]) if m else -1
+                      raw=json.dumps([sorted(failures),sorted(errors)]).encode()
+                      digest=hashlib.sha256(raw).hexdigest()
+                      runs[name]=(total,*numbers,proc.returncode,digest)
+                  except subprocess.TimeoutExpired:
+                      runs[name]=(-1,-1,-1,124,'TIMEOUT')
+              groups[label]=runs
+          changed=[]
+          for name in files:
+              a=groups['BASELINE'][name]; b=groups['CANDIDATE'][name]
+              print(name.replace('test_','').replace('.py','').upper()+
+                    ':BASE='+','.join(map(str,a[:4]))+
+                    ':PR='+','.join(map(str,b[:4]))+
+                    ':FAILURE_SIGNATURE_EQUAL='+str(a[4]==b[4]))
+              if a!=b:
+                  changed.append(name)
+          if changed:
+              print('P07_EXISTING_SUITES=DIFFERENT; DETAILS_RETAINED_ONLY_IN_PRIVATE_PROCESS')
+              sys.exit(12)
+          print('P07_EXISTING_SUITES=IDENTICAL_BASE_VS_PR; NOT_A_CLEAN_SUITE_PASS')
+          PY
+      - name: Always erase temporary private checkouts
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- .p07-baseline .p07-candidate
+          echo PRIVATE_WORKSPACE_CLEANUP=PASS
