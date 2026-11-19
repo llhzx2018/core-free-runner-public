@@ -71,8 +71,13 @@ def validate(root: Path = ROOT) -> str:
           "M03 模块安装器不是公共 Toolbox 所声称的版本")
     check(re.search(r"(?m)^ZIP_SHA256='[a-f0-9]{64}'$", m03) is not None,
           "M03 官方 ZIP SHA256 锁定缺失")
+    has_real_sha_check = (
+        "sha256sum -c" in m03
+        or ("actual_sha=\"$(sha256sum " in m03
+            and '[[ "$actual_sha" == "$ZIP_SHA256" ]]' in m03)
+    )
     check("https://github.com/llhzx2018/core-free-runner-public/releases/download/"
-          in m03 and "sha256sum -c" in m03,
+          in m03 and has_real_sha_check,
           "M03 不再是可匿名下载、可校验的公共正式制品")
     check(not re.search(r"\bgh\s+(?:auth|api|login)\b|core-free-runner-private", m03),
           "M03 正式安装器不得要求 GitHub 授权或私有仓")
