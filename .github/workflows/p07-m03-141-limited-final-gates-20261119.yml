@@ -14,7 +14,7 @@ jobs:
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       NO_COLOR: '1'
-      P07_PRODUCT_SHA: '54118edec465afa5b2e214221a4acb3837a58020'
+      P07_PRODUCT_SHA: '23fc0f1dc961df2e439ab1289141ab563cf57a95'
       P07_BUILD: '0.1.0-release141'
       P07_TAG: 'p07-all-ux-v0.1.0-20261118'
       P07_ARCHIVE: 'P07-M03-0.1.0-release140.zip'
@@ -29,7 +29,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-server-ops
-          ref: 54118edec465afa5b2e214221a4acb3837a58020
+          ref: 23fc0f1dc961df2e439ab1289141ab563cf57a95
           fetch-depth: 0
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
@@ -302,6 +302,100 @@ jobs:
           test ! -e "$run/current.new"
           echo P07_M03_POST_SWAP_FAULT_ROLLBACK_TO140=PASS
           echo P07_M03_OWNER_CP2_AND_DNS=NOT_TOUCHED
+      - name: Issue scoped141 dual official draft releases only after final safety/installation gates
+        shell: bash
+        env:
+          GH_TOKEN: \${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN" || { echo RELEASE_WRITE_TOKEN_UNAVAILABLE; exit 78; }
+          product=llhzx2018/vf-server-ops
+          public=llhzx2018/core-free-runner-public
+          tag=p07-m03-v0.1.0-release141-limited-20261119
+          zip=P07-M03-0.1.0-release141.zip
+          dir="$RUNNER_TEMP/p07-m03-rc141"
+          expected=22c23818bc7268e6d3d95bc2552f42a5a3c12e97e387fdc542d59934c658b6d1
+          test "$P07_PRODUCT_SHA" = 23fc0f1dc961df2e439ab1289141ab563cf57a95
+          test "$(git -C .product rev-parse HEAD)" = "$P07_PRODUCT_SHA"
+          test "$(sha256sum "$dir/trial.zip" | cut -d' ' -f1)" = "$expected"
+          cp "$dir/trial.zip" "$dir/$zip"
+          python3 -B .product/scripts/p07_m03_trial_from_official.py \
+            --official-zip "$dir/$P07_ARCHIVE" --product-root .product \
+            --product-sha "$P07_PRODUCT_SHA" --formal-candidate \
+            --build "$P07_BUILD" --output "$dir/repeat.zip" > "$dir/repeat.log" 2>&1
+          cmp -s "$dir/$zip" "$dir/repeat.zip"
+          rm -f "$dir/repeat.zip"
+          printf '%s  %s\n' "$expected" "$zip" > "$dir/SHA256SUMS"
+          (cd "$dir" && sha256sum -c SHA256SUMS)
+          echo P07_M03_LIMITED141_FINAL_DOUBLE_BUILD=PASS
+          python3 -B - "$P07_PRODUCT_SHA" "$zip" "$expected" "$dir/task-delivery.json" <<'PY'
+          import json,pathlib,sys
+          sha,name,digest,target=sys.argv[1:]
+          receipt={
+              "schema":"vf.public-authority.task-delivery-check.v1",
+              "project":"P07","source":sha,
+              "project_authority":{"agents":"AGENTS.md",
+                 "current":"docs/authority/CURRENT.md",
+                 "acceptance":"docs/authority/ACCEPTANCE_MATRIX.md",
+                 "applicability":"docs/authority/PUBLIC_AUTHORITY_APPLICABILITY.md"},
+              "acceptance_markers":["release141 受限发行一次性补充 Gate","P07-M03 网站与数据"],
+              "task_capabilities":["installer","release","atomic","migration","release_source","ui_change"],
+              "required_domains":["INSTALL","SECURITY","TESTING","UPGRADE","DATA_SCHEMA","GIT","UA_UI"],
+              "delivery":{"profile":"static_bundle_zip","entrypoint":"installers/p07-final.sh",
+                "artifact":name,"sha256":digest,"requires_git":False,
+                "requires_manual_source_copy":False}}
+          pathlib.Path(target).write_text(json.dumps(receipt,sort_keys=True),encoding="utf-8")
+          PY
+          python3 -B .gov/governance/public-authority/tools/task_delivery_contract_lint.py \
+            --phase delivery --receipt "$dir/task-delivery.json" \
+            --project-root "$PWD/.product" --artifact-root "$dir" \
+            --public-router "$PWD/.gov/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json"
+          echo P07_M03_LIMITED141_REAL_ZIP_DELIVERY_CONTRACT=PASS
+          if gh release view "$tag" --repo "$product" >/dev/null 2>&1; then
+            echo RELEASE_TAG_ALREADY_EXISTS_PRODUCT; exit 78
+          fi
+          if gh release view "$tag" --repo "$public" >/dev/null 2>&1; then
+            echo RELEASE_TAG_ALREADY_EXISTS_PUBLIC; exit 78
+          fi
+          public_sha="$(gh api "repos/$public/git/ref/heads/main" --jq .object.sha)"
+          test -n "$public_sha"
+          notes="P07-M03 网站与数据 release141 受限版：仅 Laravel12/13 /public 建站修复、失败任务只读 UX、SQLite/无数据库单站首轮迁入。跨数据库引擎自动迁移及 D05 转换禁用；同引擎 SQL 业务、完整整机最终同步、旧失败迁移均未因此验收。正式业务迁移、Owner CP2/旧 VPS/数据库、Production 和 DNS 必须 Owner 手工执行。源码 $P07_PRODUCT_SHA，ZIP SHA256 $expected。"
+          gh release create "$tag" "$dir/$zip" "$dir/SHA256SUMS" \
+            --repo "$product" --target "$P07_PRODUCT_SHA" --draft \
+            --latest=false --title "P07 网站与数据 release141 受限版" --notes "$notes" >/dev/null
+          gh release create "$tag" "$dir/$zip" "$dir/SHA256SUMS" \
+            --repo "$public" --target "$public_sha" --draft \
+            --latest=false --title "P07 网站与数据 release141 受限版" --notes "$notes" >/dev/null
+          for repository in "$product" "$public"; do
+            item="$(gh api "repos/$repository/releases/tags/$tag")"
+            test "$(jq -r .draft <<< "$item")" = true
+            test "$(jq -r '.assets|length' <<< "$item")" = 2
+            test "$(jq -r --arg n "$zip" '.assets[]|select(.name==$n)|.digest' <<< "$item")" = "sha256:$expected"
+            test "$(jq -r --arg n "$zip" '.assets[]|select(.name==$n)|.state' <<< "$item")" = uploaded
+            echo "P07_M03_LIMITED141_DRAFT_ASSETS_VERIFIED=$repository"
+          done
+          gh release edit "$tag" --repo "$product" --draft=false >/dev/null
+          gh release edit "$tag" --repo "$public" --draft=false >/dev/null
+          for repository in "$product" "$public"; do
+            item="$(gh api "repos/$repository/releases/tags/$tag")"
+            test "$(jq -r .draft <<< "$item")" = false
+            target="$P07_PRODUCT_SHA"
+            [[ "$repository" == "$public" ]] && target="$public_sha"
+            test "$(gh api "repos/$repository/git/ref/tags/$tag" --jq .object.sha)" = "$target"
+            folder="$dir/download-$(basename "$repository")"
+            mkdir -p "$folder"
+            gh release download "$tag" --repo "$repository" --dir "$folder"
+            (cd "$folder" && sha256sum -c SHA256SUMS)
+            test "$(sha256sum "$folder/$zip" | cut -d' ' -f1)" = "$expected"
+            echo "P07_M03_LIMITED141_OFFICIAL_REMOTE_BYTES_VERIFIED=$repository"
+          done
+          gh api "repos/$public/releases/tags/$tag" --jq '.assets[]|select(.name=="P07-M03-0.1.0-release141.zip")|("P07_M03_LIMITED141_PUBLIC_ASSET_ID="+(.id|tostring))'
+          echo "P07_M03_LIMITED141_PRODUCT_SHA=$P07_PRODUCT_SHA"
+          echo "P07_M03_LIMITED141_PUBLIC_SHA=$public_sha"
+          echo "P07_M03_LIMITED141_TAG=$tag"
+          echo "P07_M03_LIMITED141_ZIP_SHA256=$expected"
+          echo P07_M03_LIMITED141_DUAL_OFFICIAL_RELEASE_REMOTE=PASS
+          echo P07_M03_OWNER_CP2_DATABASE_DNS=NOT_TOUCHED
       - name: Erase temporary private source, trial archive, and install fixtures
         if: always()
         shell: bash
