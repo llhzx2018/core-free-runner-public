@@ -16,7 +16,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLBOX = ROOT / "installers/p07-toolbox.sh"
-INSTALLER = ROOT / "installers/p07-m03-release140-atomic.sh"
+INSTALLER = ROOT / "installers/p07-m03-release141-atomic.sh"
 OLD_BUILD = "0.1.0-release115"
 
 
@@ -60,7 +60,7 @@ while (( $# )); do
 done
 [[ -n "$out" ]] || exit 33
 printf '%s\\n' "$url" >> "$P07_TEST_DOWNLOAD_LOG"
-if [[ "$url" == *'/installers/p07-m03-release140-atomic.sh' ]]; then
+if [[ "$url" == *'/installers/p07-m03-release141-atomic.sh' ]]; then
   cp -- "$P07_TEST_REAL_INSTALLER" "$out"
 else
   # Caller reached the REAL M03 installer and its guarded ZIP phase.
@@ -82,15 +82,16 @@ fi
                 """#!/usr/bin/env bash
 set -Eeuo pipefail
 C_RED=''; C_RESET=''
-VF_SERVER_OPS_BUILD_EXPECTED='0.1.0-release140'
+VF_SERVER_OPS_BUILD_EXPECTED='0.1.0-release141'
+M03_OFFICIAL140_BUILD='0.1.0-release140'
 M03_BOOTSTRAP_BUILD='0.1.0-release115'
 M03_PREVIOUS_BUILD='0.1.0-release139'
 M03_LEGACY138_BUILD='0.1.0-release138'
 M03_LEGACY135_BUILD='0.1.0-release135'
 M03_LEGACY115_BUILD='0.1.0-release115'
 M03_LEGACY137_BUILD='0.1.0-release137'
-VF_SERVER_OPS_INSTALLER_BLOB='dfa22a6563ce361e3c783a802c7eb6617b6267f7'
-VF_SERVER_OPS_INSTALLER='https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-m03-release140-atomic.sh'
+VF_SERVER_OPS_INSTALLER_BLOB='08f8fe7eebd9791a635312e38886c0d61a42f3ad'
+VF_SERVER_OPS_INSTALLER='https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-m03-release141-atomic.sh'
 say() { printf '%s\\n' "$*"; }
 m03_verified_current() { [[ "$(cat "$P07_TEST_RUNTIME/BUILD_ID")" == '0.1.0-release115' ]]; }
 p07_git_blob_sha1() { git hash-object "$1"; }
@@ -127,8 +128,8 @@ exit 0
         self.assertIn("错误阶段：HASH_MISMATCH", out)
         self.assertNotIn("错误阶段：P07_M03_VERIFY_FAILED", out)
         self.assertEqual(len(urls), 2, urls)
-        self.assertTrue(urls[0].endswith("/p07-m03-release140-atomic.sh"))
-        self.assertIn("p07-all-ux-v0.1.0-20261118", urls[1])
+        self.assertTrue(urls[0].endswith("/p07-m03-release141-atomic.sh"))
+        self.assertIn("p07-m03-v0.1.0-release141-limited-20261119", urls[1])
 
     def test_historical_missing_install_argument_reproduces_real_failure(self):
         out, urls = self.run_upgrade("y\n", omit_install=True)
