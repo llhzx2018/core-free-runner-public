@@ -1,0 +1,147 @@
+name: P01 v517 native owner SQLite restore and browser (one-off)
+on:
+  push:
+    branches: [test/p01-v517-owner-restore-20261119]
+permissions:
+  contents: read
+jobs:
+  p01-v517-synthetic:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    steps:
+      - name: Confirm public-safe task and no production access
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_REPOSITORY" = "llhzx2018/core-free-runner-public"
+          test "$GITHUB_REF_NAME" = "test/p01-v517-owner-restore-20261119"
+          echo "P01_TEST_INPUT=SYNTHETIC_ONLY"
+          echo "PRODUCTION_WRITES=NO"
+      - name: Verify private source read capability
+        shell: bash
+        env:
+          READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$READ_TOKEN"
+          echo "P01_SOURCE_READ_CAPABILITY=PRESENT"
+      - name: Checkout exact private P01 source without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: 7f310b5c0d117ced6adaadaa0639c4a2c906ad26
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: candidate
+          persist-credentials: false
+      - name: Check actual source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "7f310b5c0d117ced6adaadaa0639c4a2c906ad26"
+          test "$(cat candidate/VERSION)" = "2.47.517"
+          test "$(cat candidate/src/VERSION.txt)" = "2.47.517"
+          echo "P01_V517_EXACT_SOURCE=PASS"
+      - name: Install PHP, PDO SQLite and pinned Composer tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! command -v composer >/dev/null || ! php -r 'exit(PHP_VERSION_ID>=80300 && extension_loaded("pdo_sqlite") && extension_loaded("pdo_mysql") && extension_loaded("mbstring") && extension_loaded("dom") && extension_loaded("curl") ? 0 : 1);'; then
+            sudo apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq php-cli php-sqlite3 php-mysql php-mbstring php-xml php-curl unzip composer >/dev/null
+          fi
+          php -r 'if (!in_array("sqlite",PDO::getAvailableDrivers(),true))exit(1);echo "P01_NATIVE_PDO_SQLITE=PASS\n";'
+          composer install --working-dir=candidate/tests/compatibility/laravel --no-interaction --no-progress --no-scripts --prefer-dist --optimize-autoloader
+          composer install --working-dir=candidate/tests/compatibility/laravel/http --no-interaction --no-progress --no-scripts --prefer-dist --optimize-autoloader
+      - name: Real native chunk I/O and syntax
+        id: chunks
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          php -l candidate/src/app/next/runtime/OwnerSqliteUpload.php
+          php -l candidate/src/app/next/runtime/OwnerSqliteRecovery.php
+          php -l candidate/src/app/next/http/OwnerSqliteRecoveryRoutes.php
+          php -l candidate/tests/compatibility/laravel/run_owner_sqlite_restore.php
+          php candidate/tests/integration/owner_sqlite_chunk_transfer.php
+          echo "P01_V517_CHUNKS=PASS"
+      - name: Real native Laravel 13 SQLite install + restore + readback
+        id: restore
+        continue-on-error: true
+        shell: bash
+        env:
+          P01_ISOLATED_DB_TEST: "YES"
+          P01_DB_TEST_ENGINE: sqlite
+          P01_HTTP_PROBE_ONLY: "YES"
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          php tests/compatibility/laravel/run_owner_sqlite_restore.php
+          echo "P01_V517_RESTORE=PASS"
+      - name: Real native Laravel HTTP clean install and sealed runtime
+        id: http
+        continue-on-error: true
+        shell: bash
+        env:
+          P01_ISOLATED_DB_TEST: "YES"
+          P01_DB_TEST_ENGINE: sqlite
+          P01_HTTP_PROBE_ONLY: "YES"
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          php tests/compatibility/laravel/run_http_clean_install.php
+          php tests/compatibility/laravel/run_installed_runtime.php
+          echo "P01_V517_HTTP_SETUP=PASS"
+      - name: Setup pinned Node22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: npm ci from locked frontend dependencies
+        shell: bash
+        run: npm ci --prefix candidate/src/app/next/frontend --no-audit --no-fund
+      - name: Vue typecheck, unit and Vite production build
+        id: vue
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate/src/app/next/frontend
+          npm run typecheck
+          npm run test:unit
+          npm run build
+          echo "P01_V517_VUE=PASS"
+      - name: Chromium Playwright fixture E2E
+        id: browser
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate/src/app/next/frontend
+          npx playwright install --with-deps chromium
+          npm run test:e2e
+          echo "P01_V517_CHROMIUM=PASS"
+      - name: Exact-source result classification
+        if: always()
+        shell: bash
+        env:
+          CHUNKS: ${{ steps.chunks.outcome }}
+          RESTORE: ${{ steps.restore.outcome }}
+          HTTP: ${{ steps.http.outcome }}
+          VUE: ${{ steps.vue.outcome }}
+          BROWSER: ${{ steps.browser.outcome }}
+        run: |
+          echo "P01_V517_NATIVE_CHUNKS=$CHUNKS"
+          echo "P01_V517_NATIVE_RESTORE=$RESTORE"
+          echo "P01_V517_NATIVE_HTTP=$HTTP"
+          echo "P01_V517_VUE=$VUE"
+          echo "P01_V517_BROWSER=$BROWSER"
+          if [ "$CHUNKS" != success ] || [ "$RESTORE" != success ] || [ "$HTTP" != success ] || [ "$VUE" != success ] || [ "$BROWSER" != success ]; then
+            echo "P01_V517_ISOLATED_PROOF=FAIL_OR_BLOCKED"
+            exit 1
+          fi
+          echo "P01_V517_ISOLATED_PROOF=PASS"
+          echo "P01_V517_REAL_PRIVATE_BACKUP_HTTP=NOT_PROVEN"
+      - name: Always clean transient source and synthetic data
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- candidate
+          echo "P01_V517_PRIVATE_SOURCE_PERSISTED=NO"
