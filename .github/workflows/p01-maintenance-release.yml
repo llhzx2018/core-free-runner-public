@@ -35,7 +35,11 @@ jobs:
           if [ -f release-requests/P01.json ]; then
             jq -e '
               .project_id == "P01" and
-              .mode == "maintenance" and
+              (.mode == "maintenance" or
+               (.mode == "legacy-bridge" and
+                .version == "2.47.516" and
+                .source_version == "2.47.515" and
+                .target_sha == "ab49e83c4715cc9246c4333679fc5388e554cc98")) and
               (.version | type == "string") and
               (.source_version | type == "string") and
               (.target_sha | type == "string") and
@@ -73,7 +77,11 @@ jobs:
           mapfile -t changed < <(git diff --name-only "$CURRENT_MAIN" "$REQUEST_SHA")
           test "${#changed[@]}" -eq 1
           test "${changed[0]}" = "$REQUEST"
-          jq -e '.project_id=="P01" and .mode=="maintenance"' "$REQUEST" >/dev/null
+          jq -e '.project_id=="P01" and
+             (.mode=="maintenance" or (.mode=="legacy-bridge" and
+             .version=="2.47.516" and .source_version=="2.47.515" and
+             .target_sha=="ab49e83c4715cc9246c4333679fc5388e554cc98"))' "$REQUEST" >/dev/null
+          MODE="$(jq -r '.mode' "$REQUEST")"
 
           VERSION="$(jq -r '.version' "$REQUEST")"
           SOURCE="$(jq -r '.source_version' "$REQUEST")"
@@ -85,6 +93,7 @@ jobs:
           test "$VERSION" != "$SOURCE"
 
           {
+            echo "MODE=$MODE"
             echo "VERSION=$VERSION"
             echo "SOURCE=$SOURCE"
             echo "TARGET_SHA=$TARGET_SHA"
@@ -141,6 +150,13 @@ jobs:
           unzip -q "$REL/VF_Start_V${SOURCE}_UPDATE.zip" -d "$REL/update"
           test "$(tr -d '\r\n ' < "$REL/full/VERSION.txt")" = "$SOURCE"
           test -f "$REL/update/repair-v${SOURCE}.php"
+          if [ "$MODE" = "legacy-bridge" ]; then
+            test "$TARGET_SHA" = "ab49e83c4715cc9246c4333679fc5388e554cc98"
+            test "$TARGET_TREE" = "20820cabb6c018e7e2f34bfa04dcc7e604835de3"
+            test "$(sha256sum "$REL/VF-Start-V2.47.515-FULL.zip" | awk '{print $1}')" = 5ee0c031dda82c53353929dc4519b0cc1b647b2af82a1bcd8a27a03ab7866778
+            test "$(sha256sum "$REL/VF_Start_V2.47.515_UPDATE.zip" | awk '{print $1}')" = 3a5e6528e8ef1204ef1fc4f6d4568aad0634dced649200f5744df5cb9c082556
+            echo P01_V516_EXACT_GITHUB_V515_OFFICIAL_ASSETS_AND_FINAL_TREE=PASS
+          fi
           echo P01_EXACT_SOURCE_AND_BASELINE=PASS
 
       - name: Projects exact-source Chromium geometry regression
@@ -186,12 +202,47 @@ jobs:
         run: |
           set -Eeuo pipefail
           rm -rf "$ART"
-          python3 scripts/p01-maintenance-release.py             --candidate candidate/src             --baseline-full "$REL/full"             --baseline-repair "$REL/update/repair-v${SOURCE}.php"             --out "$ART"             --version "$VERSION"             --source-version "$SOURCE"             --target-sha "$TARGET_SHA"             --target-tree "$TARGET_TREE" | tee /tmp/p01-maintenance-build.json
+          if [ "$MODE" = "legacy-bridge" ]; then
+            PYTHONDONTWRITEBYTECODE=1 python3 -B candidate/scripts/build_p01_247516_legacy_atomic.py \
+              --candidate candidate/src \
+              --baseline-full-dir "$REL/full" \
+              --baseline-repair "$REL/update/repair-v$SOURCE.php" \
+              --runner-atomic-engine scripts/p01-build-release-v2.py \
+              --target-sha "$TARGET_SHA" --prepare-official-content \
+              --output-dir "$ART" > /tmp/p01-v516-bridge-build.txt 2>&1 || {
+                grep -Eo '(P01_247516_BRIDGE_[A-Z0-9_]{4,96}|BridgeError|Traceback|RuntimeError)' /tmp/p01-v516-bridge-build.txt | sort -u | head -n 12 || true
+                exit 1
+              }
+            jq -e --arg sha "$TARGET_SHA" '
+              .schema=="p01-php-major-bridge-candidate/v1" and
+              .status=="OFFICIAL_CONTENT_PREPARED_NOT_PUBLISHED" and
+              .source_git_sha==$sha and
+              .from_version=="2.47.515" and .bridge_version=="2.47.516" and
+              .official_named_release_assets==true and
+              .real_github_release_or_channel_verified==false and
+              .owner_prod_installable==false and .can_publish==false
+            ' "$ART/bridge-candidate-receipt.json" >/dev/null
+            test "$(jq -r '.full.sha256' "$ART/bridge-candidate-receipt.json")" = 016edb85c7cfa48bf939d69fce1f0925f6f50647fded286a5b6df3789ca580ce
+            test "$(jq -r '.atomic.sha256' "$ART/bridge-candidate-receipt.json")" = 962a3b084b5bf2294baa092bb1098b6ea8f52b999bf24dcb92a0064ddad325a8
+            echo P01_V516_MERGED_FINAL_OFFICIAL_NAMED_ARTIFACT_SHA_MATCH_MACHINE=PASS
+          else
+            python3 scripts/p01-maintenance-release.py \
+              --candidate candidate/src \
+              --baseline-full "$REL/full" \
+              --baseline-repair "$REL/update/repair-v$SOURCE.php" \
+              --out "$ART" --version "$VERSION" \
+              --source-version "$SOURCE" --target-sha "$TARGET_SHA" \
+              --target-tree "$TARGET_TREE" | tee /tmp/p01-maintenance-build.json
+          fi
 
           test -f "$ART/VF-Start-V${VERSION}-FULL.zip"
           test -f "$ART/VF_Start_V${VERSION}_UPDATE.zip"
           test -f "$ART/P01_MAINTENANCE_ARTIFACT_RECEIPT.json"
-          echo P01_MAINTENANCE_BUILD=PASS
+          if [ "$MODE" = "legacy-bridge" ]; then
+            echo P01_V516_FINAL_BRIDGE_BUILD=PASS
+          else
+            echo P01_MAINTENANCE_BUILD=PASS
+          fi
 
       - name: Verify clean FULL and Atomic UPDATE
         shell: bash
@@ -321,8 +372,29 @@ jobs:
           echo P01_ATOMIC_ROLLBACK=PASS
 
           unzip -p "$FULL" VERSION.txt | tr -d '\r\n ' | grep -Fx "$VERSION"
+          if [ "$MODE" = "legacy-bridge" ]; then
+            unzip -p "$FULL" release-manifest.json | php -r '
+            $m=json_decode(stream_get_contents(STDIN),true);
+            if(!is_array($m)||($m["version"]??"")!=="2.47.516"
+              ||($m["source_version"]??"")!=="2.47.515"
+              ||($m["source_commit"]??"")!==$argv[1]
+              ||($m["stage"]??"")!=="OFFICIAL_ARTIFACT_CONTENT"
+              ||($m["release_type"]??"")!=="P01_PHP_MAJOR_BRIDGE"
+              ||($m["schema_change"]??true)!==false
+              ||($m["deployable"]??false)!==true
+              ||($m["runtime_data_included"]??true)!==false
+              ||($m["bridge"]["laravel_target_version"]??"")!=="2.47.517"
+              ||($m["bridge"]["cloudpanel_migration_executed"]??true)!==false
+              ||($m["bridge"]["production_authorized"]??true)!==false)
+                exit(1);
+            echo "P01_V516_RELEASE_MANIFEST=PASS\n";' "$TARGET_SHA"
+            unzip -p "$FULL" app/LegacyMajorOwnerApiActions.php | grep -Fq 'vf_require_recent_auth();'
+            unzip -p "$FULL" app/BrandUpload.php | grep -Fq 'vf_brand_upload'
+            echo P01_V516_FINAL_CLEAN_FULL_ATOMIC_RECOVERY_GATE=PASS
+          else
           unzip -p "$FULL" release-manifest.json | php -r '$m=json_decode(stream_get_contents(STDIN),true); if(($m["version"]??"")!==$argv[1]||($m["source_version"]??"")!==$argv[2]||empty($m["maintenance_release"]["schema_unchanged"])) exit(1); echo "P01_RELEASE_MANIFEST=PASS\n";' "$VERSION" "$SOURCE"
           echo P01_MAINTENANCE_ARTIFACT_GATE=PASS
+          fi
 
       - name: Publish exact Tag and GitHub Release
         shell: bash
@@ -337,6 +409,16 @@ jobs:
           FULL_BYTES="$(stat -c %s "$FULL")"
           UPDATE_BYTES="$(stat -c %s "$UPDATE")"
           SUMMARY="$(jq -r '.summary' "$REQUEST")"
+          RELEASE_MODE_NOTE="reusable maintenance path"
+          RELEASE_SAFETY_NOTE="Schema / migrations / updater mechanism: unchanged"
+          if [ "$MODE" = "legacy-bridge" ]; then
+            RELEASE_MODE_NOTE="single-case P01 v516 legacy PHP Atomic bridge; later Laravel 517 remains separate"
+            RELEASE_SAFETY_NOTE="No schema migration or automated CloudPanel/DNS switch; updater safety bridge changed; Owner operates Production manually."
+            if gh release view "$TAG" -R "$PRODUCT_REPO" >/dev/null 2>&1; then
+              echo P01_V516_EXISTING_RELEASE_IMMUTABLE_NO_CLOBBER
+              exit 86
+            fi
+          fi
 
           if gh api "repos/$PRODUCT_REPO/git/ref/tags/$TAG" >/tmp/p01-tag.json 2>/dev/null; then
             test "$(jq -r '.object.sha' /tmp/p01-tag.json)" = "$TARGET_SHA"
@@ -354,13 +436,14 @@ jobs:
           - Target Version: V$VERSION
           - Exact Source: $TARGET_SHA
           - Exact Tree: $TARGET_TREE
-          - Release Mode: reusable maintenance path
-          - Schema / migrations / updater mechanism: unchanged
+          - Release Mode: $RELEASE_MODE_NOTE
+          - $RELEASE_SAFETY_NOTE
           - Canonical regression / Clean FULL / Atomic UPDATE / rollback / data preservation / idempotency: PASS
           - Production: not changed; OWNER upgrades manually from the backend
           EOF
 
           if gh release view "$TAG" -R "$PRODUCT_REPO" >/dev/null 2>&1; then
+            test "$MODE" = "maintenance"
             gh release upload "$TAG" "$FULL" "$UPDATE" -R "$PRODUCT_REPO" --clobber
           else
             gh release create "$TAG" "$FULL" "$UPDATE" -R "$PRODUCT_REPO"               --title "VF Start V$VERSION"               --notes-file /tmp/p01-release-notes.md               --verify-tag
@@ -395,4 +478,21 @@ jobs:
             }' >/tmp/P01_MAINTENANCE_PUBLICATION_RECEIPT.json
 
           cat /tmp/P01_MAINTENANCE_PUBLICATION_RECEIPT.json
-          echo P01_MAINTENANCE_GITHUB_RELEASE=PASS
+          if [ "$MODE" = "legacy-bridge" ]; then
+            echo P01_V516_OFFICIAL_GITHUB_RELEASE_REMOTE_FULL_ATOMIC_SHA=PASS
+          else
+            echo P01_MAINTENANCE_GITHUB_RELEASE=PASS
+          fi
+
+      - name: Cleanup private release code and temporary assets
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- candidate stable \
+            /tmp/p01-maintenance-source /tmp/p01-maintenance-artifacts \
+            /tmp/p01-maintenance-gate /tmp/p01-remote-readback
+          rm -f -- /tmp/p01-v516-bridge-build.txt \
+            /tmp/p01-release-notes.md /tmp/p01-tag.json \
+            /tmp/p01-release.json /tmp/p01-lane-spec.json
+          echo P01_RELEASE_EPHEMERAL_PRIVATE_WORKSPACE_CLEANED=PASS
