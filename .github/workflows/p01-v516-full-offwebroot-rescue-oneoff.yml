@@ -9,11 +9,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      BRIDGE_SHA: 8a670132c5b3020e5e2d91bce3b0b92d78eda0df
+      BRIDGE_SHA: d20e7097f1b38602c4b1943ee72ef65922a29c0e
       SOURCE_TAG: v2.47.515
       BRIDGE_VERSION: 2.47.516
       TARGET_VERSION: 2.47.516
-      TARGET_SHA: 8a670132c5b3020e5e2d91bce3b0b92d78eda0df
+      TARGET_SHA: d20e7097f1b38602c4b1943ee72ef65922a29c0e
     steps:
       - name: Checkout registered public-safe Runner
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -36,7 +36,7 @@ jobs:
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           path: bridge-src
-          fetch-depth: 2
+          fetch-depth: 5
       - name: PHP extensions and exact source identity
         shell: bash
         run: |
@@ -58,8 +58,16 @@ jobs:
           # Latest current main was merged into this bridge candidate, not the
           # reverse. The real v515 baseline, complete DB contract and RP-07S
           # source-scoped human-preview rule must all survive the merge.
-          test "$(git -C bridge-src rev-parse HEAD^)" = "545b5ae7655dbffadfb5e2ed8e15d79bfc97ca7a"
-          test "$(git -C bridge-src cat-file -p HEAD^ | sed -n 's/^parent //p' | paste -sd' ' -)" = "7583754655c3f68f3f54553e91043b2847fb0d5b c377dc3e0696585b207561081f6dc462108c904f"
+          test "$(git -C bridge-src rev-parse HEAD~3)" = "8a670132c5b3020e5e2d91bce3b0b92d78eda0df"
+          test "$(git -C bridge-src rev-parse HEAD~4)" = "545b5ae7655dbffadfb5e2ed8e15d79bfc97ca7a"
+          test "$(git -C bridge-src cat-file -p HEAD~4 | sed -n 's/^parent //p' | paste -sd' ' -)" = "7583754655c3f68f3f54553e91043b2847fb0d5b c377dc3e0696585b207561081f6dc462108c904f"
+          git -C bridge-src diff --name-only 8a670132c5b3020e5e2d91bce3b0b92d78eda0df..HEAD | sort >"$RUNNER_TEMP/p01-v516-scoped-ux-diff.txt"
+          printf '%s\n' scripts/build_p01_247516_legacy_atomic.py src/app/FunctionalWorkspaceShell.php src/assets/update-core.js >"$RUNNER_TEMP/p01-v516-allowed-ux-diff.txt"
+          cmp "$RUNNER_TEMP/p01-v516-allowed-ux-diff.txt" "$RUNNER_TEMP/p01-v516-scoped-ux-diff.txt"
+          php8.3 -l bridge-src/src/app/FunctionalWorkspaceShell.php >/dev/null
+          node --check bridge-src/src/assets/update-core.js
+          grep -Fq '"app/FunctionalWorkspaceShell.php"' bridge-src/scripts/build_p01_247516_legacy_atomic.py
+          echo P01_V516_UX_ONLY_EXACT_DIFF_AND_PACKAGE_ALLOWLIST=PASS
           test -f bridge-src/config/p01-fullstack-target.json
           grep -F '| DB-10 |' bridge-src/docs/authority/ACCEPTANCE_MATRIX.md >/dev/null
           grep -F '| TECH-08 |' bridge-src/docs/authority/ACCEPTANCE_MATRIX.md >/dev/null
@@ -401,6 +409,9 @@ jobs:
           test "$(cat "$SITE/VERSION.txt")" = 2.47.516
           test -f "$SITE/setup.php"
           test -f "$SITE/cli/verify.php"
+          grep -Fq 'id="refreshMajorStatus"' "$SITE/app/FunctionalWorkspaceShell.php"
+          grep -Fq 'function refreshMajorStatus()' "$SITE/assets/update-core.js"
+          echo P01_V516_NATIVE_UPGRADE_UI_SHIPPED_IN_REAL_FULL=PASS
           php8.3 -l "$SITE/setup.php" >/dev/null
           php8.3 -S 127.0.0.1:19437 -t "$SITE" >"$RUNNER_TEMP/p01-v516-clean-http.txt" 2>&1 &
           echo $! >"$RUNNER_TEMP/p01-bridge-http-19437.pid"
@@ -495,6 +506,92 @@ jobs:
                   assert driver.execute_script('return document.documentElement.scrollWidth<=window.innerWidth+3'),('horizontal page overflow',width)
                   print('P01_V516_CHROME_OWNER_HOME_RUNTIME_'+str(width)+'=PASS')
               print('P01_V516_BROWSER_REAL_OWNER_SMOKE=PASS')
+              # The actual Owner management dialog, not a synthetic detached DOM,
+              # must load the installed update worker in the same page.
+              from selenium.webdriver.common.by import By
+              from selenium.common.exceptions import TimeoutException
+              for width in (390,768,1440):
+                  driver.set_window_size(width,900)
+                  driver.get(base+'/home.php')
+                  WebDriverWait(driver,15).until(lambda d:d.execute_script("return document.readyState")=='complete')
+                  opener=WebDriverWait(driver,15).until(
+                      lambda d:d.find_element(By.CSS_SELECTOR,'[data-vf-global-manage-open]'))
+                  opener.click()
+                  WebDriverWait(driver,15).until(lambda d:d.execute_script(
+                      'return !!document.querySelector("#vf-local-management[open]")'))
+                  group=driver.find_element(By.CSS_SELECTOR,'[data-vf-global-group="update"]')
+                  group.click()
+                  WebDriverWait(driver,20).until(lambda d:d.execute_script(
+                      'return document.querySelector("[data-vf-global-group=update]")?.getAttribute("aria-pressed")==="true"'))
+                  WebDriverWait(driver,30).until(lambda d:d.execute_script(
+                      'return document.querySelector("#updatePanel")?.dataset.vfUpdateLoader==="ready" && document.querySelector("#updateCurrent")?.textContent.includes("2.47.516")'))
+                  WebDriverWait(driver,20).until(lambda d:d.find_element(By.ID,"checkUpdate").text=="检查重大升级包")
+                  check=driver.find_element(By.ID,"checkUpdate")
+                  refresh=driver.find_element(By.ID,"refreshMajorStatus")
+                  install=driver.find_element(By.ID,"installUpdate")
+                  assert check.is_displayed() and check.is_enabled(),'major check unavailable'
+                  assert refresh.is_displayed() and refresh.is_enabled(),'read-only refresh unavailable'
+                  assert not install.is_displayed(),'Atomic install was exposed for MAJOR'
+                  assert "2.47.517" in driver.find_element(By.ID,"updateLatest").text
+                  assert "不会自动安装或迁移" in driver.find_element(By.ID,"updateIntro").text
+                  assert driver.execute_script('return document.documentElement.scrollWidth<=innerWidth+3'),('page overflow',width)
+                  assert driver.execute_script('return document.querySelector("#vf-local-management").scrollWidth<=document.querySelector("#vf-local-management").clientWidth+3'),('dialog overflow',width)
+                  driver.execute_script("""
+                  window.__p01Requests=[];
+                  if(!window.__p01FetchWrapped){
+                    const realFetch=window.fetch;
+                    window.fetch=function(input,opts){
+                      const url=String(typeof input==='string'?input:(input&&input.url)||'');
+                      if(url.includes('api.php?action=')){
+                        window.__p01Requests.push({url:url,method:String((opts&&opts.method)||'GET')});
+                      }
+                      return realFetch.apply(this,arguments);
+                    };
+                    window.__p01FetchWrapped=true;
+                  }
+                  """)
+                  refresh.click()
+                  WebDriverWait(driver,20).until(lambda d:(
+                      not d.execute_script('return !!window.vfUpdateBusy') and
+                      d.find_element(By.ID,"checkUpdate").text=="检查重大升级包" and
+                      any("update_status" in x["url"] for x in d.execute_script('return window.__p01Requests'))))
+                  urls=[x["url"] for x in driver.execute_script('return window.__p01Requests')]
+                  assert not any(t in url for url in urls for t in
+                      ("update_install","update_major_intent","update_major_stage","update_major_final_consent")),(width,urls)
+                  assert not install.is_displayed()
+                  assert check.is_enabled()
+                  print('P01_V516_CHROME_NATIVE_MAJOR_PANEL_READONLY_REFRESH_'+str(width)+'=PASS')
+              driver.set_window_size(1440,900)
+              driver.get(base+'/home.php?vf_manage=1&vf_tab=global&vf_group=update')
+              WebDriverWait(driver,25).until(lambda d:d.execute_script(
+                  'return !!document.querySelector("#vf-local-management[open]") && document.querySelector("[data-vf-global-group=update]")?.getAttribute("aria-pressed")==="true"'))
+              WebDriverWait(driver,20).until(lambda d:d.find_element(By.ID,"checkUpdate").text=="检查重大升级包")
+              assert "vf_manage" not in driver.current_url and "vf_tab" not in driver.current_url
+              assert driver.execute_script('return document.querySelectorAll("dialog[open]").length')==1
+              assert not driver.find_element(By.ID,"installUpdate").is_displayed()
+              print('P01_V516_CHROME_LEGACY_MANAGEMENT_DEEP_LINK_SAME_DIALOG=PASS')
+              driver.execute_script("""
+              window.__p01Requests=[];
+              const old=window.fetch;
+              window.fetch=function(input,opts){
+                const url=String(typeof input==='string'?input:(input&&input.url)||'');
+                if(url.includes('api.php?action=')){
+                  window.__p01Requests.push({url:url,method:String((opts&&opts.method)||'GET')});
+                }
+                return old.apply(this,arguments);
+              };
+              """)
+              driver.find_element(By.ID,"checkUpdate").click()
+              WebDriverWait(driver,30).until(lambda d:any(
+                  "update_major_available" in x["url"] for x in d.execute_script('return window.__p01Requests')))
+              WebDriverWait(driver,30).until(lambda d:not d.execute_script('return !!window.vfUpdateBusy'))
+              requests=[x["url"] for x in driver.execute_script('return window.__p01Requests')]
+              assert any("update_major_available" in x for x in requests)
+              assert not any(t in url for url in requests for t in
+                  ("update_install","update_major_intent","update_major_stage","update_major_final_consent")),requests
+              assert not driver.find_element(By.ID,"installUpdate").is_displayed()
+              print('P01_V516_CHROME_MISSING_OFFICIAL_MAJOR_FAIL_CLOSED_NO_INTENT=PASS')
+
           finally:
               driver.quit()
           PY
