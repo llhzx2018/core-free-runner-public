@@ -15,6 +15,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = ROOT / "installers/p07-m03-release141-atomic.sh"
 OLD = ROOT / "installers/p07-m03-release140-atomic.sh"
+OLDER = ROOT / "installers/p07-m03-release139-atomic.sh"
 TOOLBOX = ROOT / "installers/p07-toolbox.sh"
 BUILD = "0.1.0-release141"
 OLD_BUILD = "0.1.0-release140"
@@ -46,7 +47,7 @@ class Official141PublicDistribution(unittest.TestCase):
         self.assertIn('M03_OFFICIAL140_MANIFEST_BLOB="239bd543e4f64449ca498c1d67ccb7471abbee66"', toolbox)
         self.assertIn('M03_PREVIOUS_BUILD="0.1.0-release139"', toolbox)
         self.assertIn(f'VF_SERVER_OPS_MANIFEST_BLOB="{RUNTIME_BLOB}"', toolbox)
-        self.assertIn('VF_SERVER_OPS_INSTALLER_BLOB="08f8fe7eebd9791a635312e38886c0d61a42f3ad"', toolbox)
+        self.assertIn('VF_SERVER_OPS_INSTALLER_BLOB="39ecd14f1daf201196704580d8d1fa12b80efa0b"', toolbox)
         self.assertIn("installers/p07-m03-release141-atomic.sh", toolbox)
         for key, value in (
             ("BUILD", BUILD),
@@ -59,7 +60,7 @@ class Official141PublicDistribution(unittest.TestCase):
             self.assertIn(f"{key}='{value}'", wrapper)
         self.assertIn("releases/assets/767910493", wrapper)
         self.assertIn('[[ "$actual_sha" == "$ZIP_SHA256" ]]', wrapper)
-        for script in (WRAPPER, OLD, TOOLBOX):
+        for script in (WRAPPER, OLD, OLDER, TOOLBOX):
             checked = run("bash", "-n", str(script), timeout=15)
             self.assertEqual(checked.returncode, 0, checked.stderr[-1000:])
         self.assertNotIn("gh auth", wrapper)
@@ -78,18 +79,74 @@ class Official141PublicDistribution(unittest.TestCase):
                 )).hexdigest()
             untouched = snapshot()
             env = env_for(root)
+            first = run("bash", str(OLDER), "install", env=env)
+            self.assertEqual(first.returncode, 0, first.stderr[-1800:])
+            self.assertEqual((root / "current/BUILD_ID").read_text().strip(), "0.1.0-release139")
             initial = run("bash", str(OLD), "install", env=env)
             self.assertEqual(initial.returncode, 0, initial.stderr[-1800:])
             self.assertEqual((root / "current/BUILD_ID").read_text().strip(), OLD_BUILD)
+            self.assertEqual((root / "previous/BUILD_ID").read_text().strip(), "0.1.0-release139")
             upgrade = run("bash", str(WRAPPER), "install", env=env)
             self.assertEqual(upgrade.returncode, 0, upgrade.stderr[-1800:])
             self.assertEqual((root / "current/BUILD_ID").read_text().strip(), BUILD)
             self.assertEqual((root / "previous/BUILD_ID").read_text().strip(), OLD_BUILD)
+            self.assertEqual((root / "previous.preserved-0.1.0-release139/BUILD_ID").read_text().strip(), "0.1.0-release139")
             self.assertEqual(snapshot(), untouched)
             version = run(str(root / "bin/vfops"), "--build-id", env=env, timeout=15)
             self.assertEqual(version.returncode, 0, version.stderr[-900:])
             self.assertEqual(version.stdout.strip(), BUILD)
             self.assertTrue((root / "current/components/p07-m03-failed-task-ux.sh").is_file())
+
+    def test_unknown_backup_is_preserved_without_changes(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p07-m03-unverified141-") as tmp:
+            root=Path(tmp)
+            env=env_for(root)
+            initial=run("bash",str(OLD),"install",env=env)
+            self.assertEqual(initial.returncode,0,initial.stderr[-1000:])
+            previous=root/"previous"
+            previous.mkdir()
+            (previous/"BUILD_ID").write_text("UNVERIFIED\n",encoding="utf-8")
+            before=(root/"current/.runtime-manifest.gitblob").read_bytes()
+            refused=run("bash",str(WRAPPER),"install",env=env)
+            self.assertNotEqual(refused.returncode,0)
+            self.assertIn("恢复目录",refused.stdout+refused.stderr)
+            self.assertEqual((previous/"BUILD_ID").read_text(),"UNVERIFIED\n")
+            self.assertEqual((root/"current/.runtime-manifest.gitblob").read_bytes(),before)
+            self.assertFalse((root/"previous.preserved-0.1.0-release139").exists())
+
+    def test_verified_backup_collision_stops_without_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p07-m03-collision141-") as tmp:
+            root=Path(tmp)
+            env=env_for(root)
+            for script in (OLDER,OLD):
+                result=run("bash",str(script),"install",env=env)
+                self.assertEqual(result.returncode,0,result.stderr[-1000:])
+            archive=root/"previous.preserved-0.1.0-release139"
+            archive.mkdir()
+            (archive/"canary").write_text("DO_NOT_OVERWRITE",encoding="utf-8")
+            refused=run("bash",str(WRAPPER),"install",env=env)
+            self.assertNotEqual(refused.returncode,0)
+            self.assertEqual((archive/"canary").read_text(),"DO_NOT_OVERWRITE")
+            self.assertEqual((root/"previous/BUILD_ID").read_text().strip(),"0.1.0-release139")
+            self.assertEqual((root/"current/BUILD_ID").read_text().strip(),OLD_BUILD)
+
+    def test_recover_original_backup_if_inner_installer_fails(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="p07-m03-recovery141-") as tmp:
+            root=Path(tmp)
+            env=env_for(root)
+            for script in (OLDER,OLD):
+                result=run("bash",str(script),"install",env=env)
+                self.assertEqual(result.returncode,0,result.stderr[-1000:])
+            content=WRAPPER.read_text(encoding="utf-8")
+            expected='P07_PUBLIC_ROOT="file://$tmp/files" P07_NO_EXEC=1 bash "$tmp/files/installers/p07-final.sh"'
+            self.assertEqual(content.count(expected),1)
+            faulty=root/"injected-inner-error.sh"
+            faulty.write_text(content.replace(expected,"false",1),encoding="utf-8")
+            result=run("bash",str(faulty),"install",env=env)
+            self.assertNotEqual(result.returncode,0)
+            self.assertEqual((root/"current/BUILD_ID").read_text().strip(),OLD_BUILD)
+            self.assertEqual((root/"previous/BUILD_ID").read_text().strip(),"0.1.0-release139")
+            self.assertFalse((root/"previous.preserved-0.1.0-release139").exists())
 
     def test_corrupt_official_digest_stops_before_any_install(self) -> None:
         with tempfile.TemporaryDirectory(prefix="p07-m03-corrupt141-") as tmp:
