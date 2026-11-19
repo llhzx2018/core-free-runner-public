@@ -58,12 +58,14 @@ M02_ROOT="/opt/vfops-modules/m02"  # 独立 VPS 验机版本；不写入 M01/M03
 
 VF_SERVER_OPS_PUBLIC="V0.1.0"
 VF_SERVER_OPS_EXPECTED="VF Server Ops 0.1.0"
-VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release140"
+VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release141"
 VF_SERVER_OPS_INSTALLER_REF="main"
-VF_SERVER_OPS_INSTALLER_BLOB="dfa22a6563ce361e3c783a802c7eb6617b6267f7"
+VF_SERVER_OPS_INSTALLER_BLOB="08f8fe7eebd9791a635312e38886c0d61a42f3ad"
 # Exact stable P07-M03 runtime manifest; reject a self-edited manifest before execution.
-VF_SERVER_OPS_MANIFEST_BLOB="239bd543e4f64449ca498c1d67ccb7471abbee66"
-VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07-m03-release140-atomic.sh"
+VF_SERVER_OPS_MANIFEST_BLOB="6a3a949064ffb8fe1df56e7bc555173b5ca9cf3b"
+VF_SERVER_OPS_INSTALLER="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${VF_SERVER_OPS_INSTALLER_REF}/installers/p07-m03-release141-atomic.sh"
+M03_OFFICIAL140_BUILD="0.1.0-release140"
+M03_OFFICIAL140_MANIFEST_BLOB="239bd543e4f64449ca498c1d67ccb7471abbee66"
 M03_PREVIOUS_BUILD="0.1.0-release139"
 M03_LEGACY138_BUILD="0.1.0-release138"
 M03_LEGACY138_MANIFEST_BLOB="2c6ccd51b7e73d3d9db1ec6d37beaa6ce1cdff73"
@@ -434,6 +436,7 @@ m03_verified_current() {
   local trusted_manifest=''
   case "$installed" in
     "$VF_SERVER_OPS_BUILD_EXPECTED") trusted_manifest="$VF_SERVER_OPS_MANIFEST_BLOB" ;;
+    "$M03_OFFICIAL140_BUILD") trusted_manifest="$M03_OFFICIAL140_MANIFEST_BLOB" ;;
     "$M03_PREVIOUS_BUILD") trusted_manifest="$M03_PREVIOUS_MANIFEST_BLOB" ;;
     "$M03_LEGACY138_BUILD") trusted_manifest="$M03_LEGACY138_MANIFEST_BLOB" ;;
     "$M03_LEGACY137_BUILD") trusted_manifest="$M03_LEGACY137_MANIFEST_BLOB" ;;
@@ -472,7 +475,7 @@ ensure_server_ops_current() {
   if m03_verified_current; then
     prior="$(cat /opt/vf-server-ops/BUILD_ID)"
     if [[ "$prior" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]]; then return 0; fi
-    [[ "$prior" == "$M03_PREVIOUS_BUILD" || "$prior" == "$M03_LEGACY138_BUILD" || "$prior" == "$M03_LEGACY137_BUILD" || "$prior" == "$M03_BOOTSTRAP_BUILD" || "$prior" == "$M03_LEGACY135_BUILD" || "$prior" == "$M03_LEGACY115_BUILD" ]] || return 13
+    [[ "$prior" == "$M03_OFFICIAL140_BUILD" || "$prior" == "$M03_PREVIOUS_BUILD" || "$prior" == "$M03_LEGACY138_BUILD" || "$prior" == "$M03_LEGACY137_BUILD" || "$prior" == "$M03_BOOTSTRAP_BUILD" || "$prior" == "$M03_LEGACY135_BUILD" || "$prior" == "$M03_LEGACY115_BUILD" ]] || return 13
     say "P07-M03 网站与数据：已核验旧正式版 $prior，新版本 $VF_SERVER_OPS_BUILD_EXPECTED。"
     say '仅升级本模块程序；保留上一个正式运行时用于回滚，不操作网站、数据库或 DNS。'
     if [[ ! -t 0 || ! -t 1 ]]; then
