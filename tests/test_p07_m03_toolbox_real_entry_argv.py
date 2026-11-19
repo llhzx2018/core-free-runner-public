@@ -90,7 +90,7 @@ M03_LEGACY138_BUILD='0.1.0-release138'
 M03_LEGACY135_BUILD='0.1.0-release135'
 M03_LEGACY115_BUILD='0.1.0-release115'
 M03_LEGACY137_BUILD='0.1.0-release137'
-VF_SERVER_OPS_INSTALLER_BLOB='39ecd14f1daf201196704580d8d1fa12b80efa0b'
+VF_SERVER_OPS_INSTALLER_BLOB='1257bc3e240d3adfa8aeeb24ff1bf0b8e453da4f'
 VF_SERVER_OPS_INSTALLER='https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-m03-release141-atomic.sh'
 say() { printf '%s\\n' "$*"; }
 m03_verified_current() { [[ "$(cat "$P07_TEST_RUNTIME/BUILD_ID")" == '0.1.0-release115' ]]; }
