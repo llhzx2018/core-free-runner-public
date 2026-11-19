@@ -1,0 +1,223 @@
+name: P07 M03 release142 RC1 signed141-baseline candidate gate (NO RELEASE)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-m03-142-rc1-candidate-proof-20261119.yml'
+permissions:
+  contents: read
+jobs:
+  isolated-candidate:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NO_COLOR: '1'
+      P07_PRODUCT_SHA: 'e54e5e4379c09faccee684b21c45d4b36f8160c0'
+      P07_PRODUCT_BASE: '45a67013630734119e021e013f5ddcb0b0ddff3d'
+      P07_RC: '0.1.0-release142-rc1'
+      P07_BASELINE: '0.1.0-release141'
+      P07_BASE_SHA256: '22c23818bc7268e6d3d95bc2552f42a5a3c12e97e387fdc542d59934c658b6d1'
+    steps:
+      - name: Checkout existing public runner without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact private product SHA transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: e54e5e4379c09faccee684b21c45d4b36f8160c0
+          fetch-depth: 0
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .product
+      - name: Checkout current official naming and architecture policy transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .gov
+      - name: Verify exact source and builder tests plus architecture gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C .product rev-parse HEAD)" = "$P07_PRODUCT_SHA"
+          test "$(cat .product/BUILD_ID)" = 0.1.0-release140
+          (cd .product && python3 -B -m unittest discover -s tests -p test_p07_m03_trial_builder_142.py -q) > "$RUNNER_TEMP/p07-142-builder-tests.log" 2>&1 || {
+            echo P07_M03_142_BUILDER_TESTS=BLOCKED; exit 1;
+          }
+          if ! python3 -B .product/.github/checks/architecture_gate.py \
+            --manifest .product/.github/checks/code_architecture.json \
+            --gov-root .gov --git-root .product \
+            --base-sha "$P07_PRODUCT_BASE" --head-sha "$P07_PRODUCT_SHA" \
+            > "$RUNNER_TEMP/p07-142-arch.log" 2>&1; then
+            echo P07_M03_142_ARCHITECTURE=BLOCKED
+            grep -E '^PROJECT_ARCHITECTURE=' "$RUNNER_TEMP/p07-142-arch.log" | cut -c1-160 || true
+            exit 1
+          fi
+          (cd .product && python3 -B scripts/check_p07_modules.py) \
+            > "$RUNNER_TEMP/p07-142-module-check.log" 2>&1
+          echo P07_M03_142_EXACT_SOURCE_UNIT_ARCH_MODULE=PASS
+      - name: Download and authenticate only immutable published official141 archive
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dir="$RUNNER_TEMP/p07-m03-142"
+          mkdir -p "$dir"
+          url='https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m03-v0.1.0-release141-limited-20261119/P07-M03-0.1.0-release141.zip'
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 2 --connect-timeout 10 --max-time 120 \
+            "$url" -o "$dir/release141.zip"
+          echo "$P07_BASE_SHA256  $dir/release141.zip" | sha256sum -c -
+          unzip -q "$dir/release141.zip" -d "$dir/baseline"
+          bash -n "$dir/baseline/installers/p07-final.sh"
+          echo P07_M03_142_SIGNED_141_BASE=PASS
+      - name: Build deterministic full candidate from 141 and validate exact patch closure
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dir="$RUNNER_TEMP/p07-m03-142"
+          for suffix in one two; do
+            python3 -B .product/scripts/p07_m03_trial_from_official.py \
+              --official-zip "$dir/release141.zip" --product-root .product \
+              --product-sha "$P07_PRODUCT_SHA" --official-build "$P07_BASELINE" \
+              --build "$P07_RC" --output "$dir/$suffix.zip" \
+              > "$dir/build-$suffix.log" 2>&1 || {
+                echo P07_M03_142_PACKAGE_BUILD=BLOCKED; exit 1;
+              }
+          done
+          cmp -s "$dir/one.zip" "$dir/two.zip"
+          unzip -q "$dir/one.zip" -d "$dir/candidate"
+          python3 -B - "$dir/release141.zip" "$dir/one.zip" "$P07_RC" <<'PY'
+          import hashlib,re,sys,zipfile
+          old,new,build=sys.argv[1:]
+          def blob(raw):
+              return hashlib.sha1(b"blob "+str(len(raw)).encode()+b"\0"+raw).hexdigest()
+          with zipfile.ZipFile(old) as archive:
+              originals={i.filename:archive.read(i) for i in archive.infolist()}
+          with zipfile.ZipFile(new) as archive:
+              patched={i.filename:archive.read(i) for i in archive.infolist()}
+          prefix="dist/p07/0.1.0/overlay/"
+          changed={
+              "bin/vfops-migrate-ui","components/p07-m03-migration-readiness.sh",
+              "lib/migration_preparation_checklist.py","lib/migration_target_inventory_guard.py",
+              "lib/server_migration_pull.py","BUILD_ID","RUNTIME.gitblob",
+          }
+          allowed={prefix+n for n in changed}|{"installers/p07-final.sh"}
+          assert set(patched)==set(originals)
+          delta={n for n in patched if patched[n]!=originals[n]}
+          assert delta<=allowed,("UNEXPECTED_FILE_DIFF_COUNT",len(delta-allowed))
+          assert {prefix+n for n in changed} <=delta
+          manifest=patched[prefix+"RUNTIME.gitblob"]
+          rows=manifest.decode().splitlines()
+          assert 50<=len(rows)<=240
+          for line in rows:
+              found=re.fullmatch(r"([a-f0-9]{40})  ((?:bin|lib|components)/[A-Za-z0-9_./-]+|BUILD_ID)",line)
+              assert found is not None
+              want,rel=found.groups()
+              assert blob(patched[prefix+rel])==want
+          assert patched[prefix+"BUILD_ID"]==(build+"\n").encode()
+          installer=patched["installers/p07-final.sh"]
+          assert ('EXPECTED_BUILD_ID="'+build+'"').encode() in installer
+          assert ('RUNTIME_MANIFEST_BLOB="'+blob(manifest)+'"').encode() in installer
+          print("P07_M03_142_CANDIDATE_SHA256="+hashlib.sha256(open(new,'rb').read()).hexdigest())
+          print("P07_M03_142_RUNTIME_BLOB="+blob(manifest))
+          print("P07_M03_142_PATCH_FILES="+str(len(delta)))
+          print("P07_M03_142_MODULES_M01_M02_M04_M05_UNCHANGED=PASS")
+          PY
+          bash -n "$dir/candidate/installers/p07-final.sh" \
+            "$dir/candidate/dist/p07/0.1.0/overlay/bin/vfops-migrate-ui" \
+            "$dir/candidate/dist/p07/0.1.0/overlay/components/p07-m03-migration-readiness.sh"
+          echo P07_M03_142_DETERMINISTIC_REAL_ZIP=PASS
+      - name: Isolated official141 to RC142 Atomic install and tamper rejection
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dir="$RUNNER_TEMP/p07-m03-142"
+          host="$dir/host"
+          mkdir -p "$host"
+          install_pkg() {
+            local pkg="$1" log="$2"
+            P07_INSTALL_DIR="$host/current" P07_PREVIOUS_DIR="$host/previous" \
+            P07_BIN_LINK="$host/bin/vfops" P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 \
+            P07_PUBLIC_ROOT="file://$pkg" \
+            bash "$pkg/installers/p07-final.sh" > "$log" 2>&1
+          }
+          install_pkg "$dir/baseline" "$dir/base-install.log" || {
+            echo P07_M03_142_OFFICIAL141_BASE_INSTALL=BLOCKED; exit 1;
+          }
+          test "$(cat "$host/current/BUILD_ID")" = "$P07_BASELINE"
+          test "$(NO_COLOR=1 "$host/bin/vfops" --build-id)" = "$P07_BASELINE"
+          current_hash="$(sha256sum "$host/current/.runtime-manifest.gitblob" | cut -d' ' -f1)"
+          cp -a "$dir/candidate" "$dir/tampered"
+          printf 'corrupt\n' >> "$dir/tampered/dist/p07/0.1.0/overlay/lib/migration_target_inventory_guard.py"
+          if install_pkg "$dir/tampered" "$dir/tamper-reject.log"; then
+            echo P07_M03_142_BAD_FILE_ACCEPTED; exit 1
+          fi
+          test "$(cat "$host/current/BUILD_ID")" = "$P07_BASELINE"
+          test ! -e "$host/previous"
+          test "$(sha256sum "$host/current/.runtime-manifest.gitblob" | cut -d' ' -f1)" = "$current_hash"
+          echo P07_M03_142_BAD_PACKAGE_FAIL_CLOSED=PASS
+          install_pkg "$dir/candidate" "$dir/upgrade.log" || {
+            echo P07_M03_142_141_TO_142_ATOMIC=BLOCKED; exit 1;
+          }
+          test "$(cat "$host/current/BUILD_ID")" = "$P07_RC"
+          test "$(cat "$host/previous/BUILD_ID")" = "$P07_BASELINE"
+          test "$(NO_COLOR=1 "$host/bin/vfops" --build-id)" = "$P07_RC"
+          for path in bin/vfops-migrate-ui components/p07-m03-migration-readiness.sh lib/migration_preparation_checklist.py lib/migration_target_inventory_guard.py lib/server_migration_pull.py; do
+            cmp -s ".product/$path" "$host/current/$path"
+          done
+          echo P07_M03_142_REAL_INSTALL_AND_141_ROLLBACK_POINT=PASS
+      - name: Fail-closed when occupied rollback slot and post-swap fault restores old141
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dir="$RUNNER_TEMP/p07-m03-142"
+          host="$dir/blocked-host"
+          mkdir -p "$host"
+          install_pkg() {
+            local pkg="$1" log="$2"
+            P07_INSTALL_DIR="$host/current" P07_PREVIOUS_DIR="$host/previous" \
+            P07_BIN_LINK="$host/bin/vfops" P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 \
+            P07_PUBLIC_ROOT="file://$pkg" \
+            bash "$pkg/installers/p07-final.sh" > "$log" 2>&1
+          }
+          install_pkg "$dir/baseline" "$dir/blocked-base.log"
+          mkdir "$host/previous"
+          printf 'owner-restore-point\n' > "$host/previous/OWNER_CANARY"
+          if install_pkg "$dir/candidate" "$dir/blocked-upgrade.log"; then
+            echo P07_M03_142_PREEXISTING_RESTORE_POINT_OVERWRITTEN; exit 1
+          fi
+          test "$(cat "$host/current/BUILD_ID")" = "$P07_BASELINE"
+          test "$(cat "$host/previous/OWNER_CANARY")" = owner-restore-point
+          echo P07_M03_142_UNVERIFIED_RESTORE_POINT_PRESERVED=PASS
+          host="$dir/fault-host"
+          mkdir -p "$host"
+          install_pkg "$dir/baseline" "$dir/fault-base.log"
+          cp -a "$dir/candidate" "$dir/fault"
+          python3 -B - "$dir/fault/installers/p07-final.sh" <<'PY'
+          from pathlib import Path
+          import sys
+          f=Path(sys.argv[1]); s=f.read_text()
+          marker='if ! verify_installed_current; then'
+          assert s.count(marker)==1
+          f.write_text(s.replace(marker,'if true; then',1))
+          PY
+          if install_pkg "$dir/fault" "$dir/fault-injected.log"; then
+            echo P07_M03_142_POST_SWAP_FAULT_ACCEPTED; exit 1
+          fi
+          test "$(cat "$host/current/BUILD_ID")" = "$P07_BASELINE"
+          test ! -e "$host/previous"
+          test ! -e "$host/current.new"
+          test "$(NO_COLOR=1 "$host/bin/vfops" --build-id)" = "$P07_BASELINE"
+          echo P07_M03_142_FAULT_INJECTION_ROLLBACK_TO141=PASS
+          echo P07_M03_142_PRODUCTION_OLD_VPS_SQL_DNS=NOT_TOUCHED
+      - name: Clean private checkout and candidate package without artifacts
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- .product .gov "$RUNNER_TEMP/p07-m03-142"
+          echo P07_M03_142_PRIVATE_SOURCE_AND_ZIP_CLEANUP=PASS
