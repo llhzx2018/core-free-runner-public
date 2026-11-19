@@ -47,7 +47,7 @@ class Official141PublicDistribution(unittest.TestCase):
         self.assertIn('M03_OFFICIAL140_MANIFEST_BLOB="239bd543e4f64449ca498c1d67ccb7471abbee66"', toolbox)
         self.assertIn('M03_PREVIOUS_BUILD="0.1.0-release139"', toolbox)
         self.assertIn(f'VF_SERVER_OPS_MANIFEST_BLOB="{RUNTIME_BLOB}"', toolbox)
-        self.assertIn('VF_SERVER_OPS_INSTALLER_BLOB="39ecd14f1daf201196704580d8d1fa12b80efa0b"', toolbox)
+        self.assertIn('VF_SERVER_OPS_INSTALLER_BLOB="1257bc3e240d3adfa8aeeb24ff1bf0b8e453da4f"', toolbox)
         self.assertIn("installers/p07-m03-release141-atomic.sh", toolbox)
         for key, value in (
             ("BUILD", BUILD),
