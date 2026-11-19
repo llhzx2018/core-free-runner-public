@@ -212,7 +212,16 @@ PY
     sed -i 's/0\.1\.12/0.1.13/g' "$tmp/synthetic-013/CLOUDPANEL_INSTALL.txt" "$tmp/synthetic-013/public/p08-install-build.txt"
     synthetic_sha="$(printf '3%.0s' {1..40})"
     new_source_digest="$(sha256sum "$site/current/FULL_MANIFEST.json" | cut -d' ' -f1)"
-    python3 -B target/scripts/build_full.py --source "$tmp/synthetic-013" --output "$tmp/013-synthetic-full.zip" --version 0.1.13 --source-sha "$synthetic_sha"
+    python3 - "$tmp/synthetic-013" "$tmp/013-synthetic-full.zip" "$synthetic_sha" <<'PY'
+from pathlib import Path
+import sys
+sys.path.insert(0,"target/scripts")
+from build_full import write_full
+source,dest,sha=sys.argv[1:]
+result=write_full(Path(source),Path(dest),"0.1.13",sha)
+assert result["status"]=="FULL_BUILT_NOT_RELEASED"
+print("P08_R204_SYNTHETIC_ONLY_FULL=PASS")
+PY
     python3 -B target/scripts/build_atomic.py --source "$tmp/synthetic-013" --output "$tmp/013-synthetic-update.zip" --source-version 0.1.12 --source-sha "$P08_R204_TARGET_SHA" --source-full-manifest-sha256 "$new_source_digest" --previous-full-manifest "$site/current/FULL_MANIFEST.json" --target-version 0.1.13 --target-sha "$synthetic_sha"
     python3 - "$tmp/013-synthetic-update.zip" <<'PY'
 import json,zipfile,sys
