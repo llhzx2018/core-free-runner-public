@@ -1,0 +1,174 @@
+name: P07 M03 D04 release140 immutable trial RC141 (no publish)
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-m03-d04-rc141-official140-20261119.yml'
+permissions:
+  contents: read
+jobs:
+  standalone-module-trial:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NO_COLOR: '1'
+      P07_PRODUCT_SHA: '9a73920202756f92b1c82e107e4103526fcdcb84'
+      P07_BUILD: '0.1.0-release141-rc1'
+      P07_TAG: 'p07-all-ux-v0.1.0-20261118'
+      P07_ARCHIVE: 'P07-M03-0.1.0-release140.zip'
+      P07_OFFICIAL_SHA256: '8633631f76ca5ecd1a3c79e2edb64438eb920b6c5407fa5d5057611f9a7e77b8'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout current public packaging authority
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout only exact private product source into transient directory
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 9a73920202756f92b1c82e107e4103526fcdcb84
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .product
+      - name: Fetch immutable official M03 release140 and verify declared SHA256
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dir="$RUNNER_TEMP/p07-m03-rc141"
+          mkdir -p "$dir"
+          gh release download "$P07_TAG" --repo llhzx2018/core-free-runner-public \
+            --pattern "$P07_ARCHIVE" --dir "$dir" --clobber > /dev/null
+          printf '%s  %s\n' "$P07_OFFICIAL_SHA256" "$dir/$P07_ARCHIVE" \
+            | sha256sum -c - > /dev/null
+          echo P07_M03_OFFICIAL140_RELEASE_ASSET=SHA256_PASS
+      - name: Build unpublished RC141 using official baseline, verify manifest and boundaries
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          dir="$RUNNER_TEMP/p07-m03-rc141"
+          src=".product/scripts/p07_m03_trial_from_official.py"
+          test "$(git -C .product rev-parse HEAD)" = "$P07_PRODUCT_SHA"
+          test "$(cat .product/BUILD_ID)" = 0.1.0-release140
+          if ! python3 -B "$src" --official-zip "$dir/$P07_ARCHIVE" \
+            --product-root .product --product-sha "$P07_PRODUCT_SHA" \
+            --build "$P07_BUILD" --output "$dir/trial.zip" > "$dir/builder.log" 2>&1; then
+            grep -E '^P07_M03_TRIAL_BUILD=' "$dir/builder.log" | cut -c1-110 || true
+            echo P07_M03_RC141_PACKAGE=BLOCKED
+            exit 1
+          fi
+          grep -E '^P07_M03_TRIAL_(BUILD|SHA256|RUNTIME_BLOB|FILE_COUNT)=' "$dir/builder.log" | cut -c1-150
+          python3 -B - "$dir/$P07_ARCHIVE" "$dir/trial.zip" "$P07_BUILD" <<'PY'
+          import hashlib,re,sys,zipfile
+          old,new,build=sys.argv[1:]
+          def sha(p):
+              data=open(p,'rb').read()
+              return hashlib.sha256(data).hexdigest()
+          with zipfile.ZipFile(old) as f,zipfile.ZipFile(new) as g:
+              a={i.filename:f.read(i) for i in f.infolist()}
+              b={i.filename:g.read(i) for i in g.infolist()}
+          prefix='dist/p07/0.1.0/overlay/'
+          allowed={prefix+'RUNTIME.gitblob',prefix+'BUILD_ID',
+                   prefix+'lib/migration_php_site_template.py',
+                   prefix+'lib/server_migration_pull.py',prefix+'lib/restore_apply.py',
+                   'installers/p07-final.sh'}
+          changes={p for p in (set(a)|set(b)) if a.get(p)!=b.get(p)}
+          assert changes==allowed, ('Unexpected changes',len(changes))
+          assert b[prefix+'BUILD_ID']==(build+'\n').encode()
+          rows=b[prefix+'RUNTIME.gitblob'].decode().splitlines()
+          assert len(rows)>=50
+          for row in rows:
+              digest,rel=row.split('  ',1)
+              p=prefix+rel
+              raw=b[p]
+              calculated=hashlib.sha1(b'blob '+str(len(raw)).encode()+b'\0'+raw).hexdigest()
+              assert digest==calculated
+          assert len(b)==len(rows)+3
+          print('P07_M03_RC141_CHANGED_FILES='+str(len(changes)))
+          print('P07_M03_RC141_MANIFEST_FILE_COUNT='+str(len(rows)))
+          print('P07_M03_RC141_ZERO_OTHER_MODULE_DIFF=PASS')
+          print('P07_M03_RC141_ZIP_SHA256='+sha(new))
+          PY
+          mkdir -p "$dir/baseline" "$dir/candidate"
+          unzip -q "$dir/$P07_ARCHIVE" -d "$dir/baseline"
+          unzip -q "$dir/trial.zip" -d "$dir/candidate"
+          bash -n "$dir/candidate/installers/p07-final.sh"
+          echo P07_M03_RC141_REAL_ARCHIVE_STRUCTURE=PASS
+      - name: Fresh install official140, tamper rejection and isolated RC141 atomic upgrade
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          base="$RUNNER_TEMP/p07-m03-rc141"
+          run="$base/isolated"
+          mkdir -p "$run"
+          install_pkg() {
+            local pkg="$1" target="$2" log="$3"
+            P07_INSTALL_DIR="$target/current" \
+            P07_PREVIOUS_DIR="$target/previous" \
+            P07_BIN_LINK="$target/bin/vfops" \
+            P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 \
+            P07_PUBLIC_ROOT="file://$pkg" \
+            bash "$pkg/installers/p07-final.sh" > "$log" 2>&1
+          }
+          install_pkg "$base/baseline" "$run" "$base/initial.log" \
+            || { echo P07_M03_RELEASE140_INITIAL_INSTALL=FAIL; exit 1; }
+          test "$(cat "$run/current/BUILD_ID")" = 0.1.0-release140
+          test "$(NO_COLOR=1 "$run/bin/vfops" --build-id)" = 0.1.0-release140
+          before="$(sha256sum "$run/current/.runtime-manifest.gitblob" | cut -d ' ' -f 1)"
+          cp -a "$base/candidate" "$base/tampered"
+          printf 'invalid\n' >> "$base/tampered/dist/p07/0.1.0/overlay/lib/migration_php_site_template.py"
+          if install_pkg "$base/tampered" "$run" "$base/tamper.log"; then
+            echo P07_M03_BAD_PACKAGE_ACCEPTED; exit 1
+          fi
+          test "$(cat "$run/current/BUILD_ID")" = 0.1.0-release140
+          test "$(sha256sum "$run/current/.runtime-manifest.gitblob" | cut -d ' ' -f 1)" = "$before"
+          test ! -e "$run/previous"
+          echo P07_M03_BAD_FILE_REJECTED_WITHOUT_SWAP=PASS
+          install_pkg "$base/candidate" "$run" "$base/upgrade.log" \
+            || { echo P07_M03_RC141_ATOMIC_UPGRADE=FAIL; exit 1; }
+          test "$(cat "$run/current/BUILD_ID")" = "$P07_BUILD"
+          test "$(NO_COLOR=1 "$run/bin/vfops" --build-id)" = "$P07_BUILD"
+          test "$(cat "$run/previous/BUILD_ID")" = 0.1.0-release140
+          echo P07_M03_OFFICIAL140_TO_RC141_ATOMIC_UPGRADE=PASS
+      - name: Fault-injected post-swap rollback preserves previous140
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          base="$RUNNER_TEMP/p07-m03-rc141"
+          run="$base/rollback"
+          mkdir -p "$run"
+          install_pkg() {
+            local pkg="$1" log="$2"
+            P07_INSTALL_DIR="$run/current" P07_PREVIOUS_DIR="$run/previous" \
+            P07_BIN_LINK="$run/bin/vfops" P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 \
+            P07_PUBLIC_ROOT="file://$pkg" \
+            bash "$pkg/installers/p07-final.sh" > "$log" 2>&1
+          }
+          install_pkg "$base/baseline" "$base/rollback-base.log" \
+            || { echo P07_M03_ROLLBACK_BASE_INSTALL=FAIL; exit 1; }
+          cp -a "$base/candidate" "$base/fault"
+          python3 -B - "$base/fault/installers/p07-final.sh" <<'PY'
+          from pathlib import Path
+          import sys
+          file=Path(sys.argv[1]); content=file.read_text()
+          marker='if ! verify_installed_current; then'
+          assert content.count(marker)==1
+          file.write_text(content.replace(marker,'if true; then',1))
+          PY
+          if install_pkg "$base/fault" "$base/rollback-fault.log"; then
+            echo P07_M03_FAULT_NOT_BLOCKED; exit 1
+          fi
+          test "$(cat "$run/current/BUILD_ID")" = 0.1.0-release140
+          test "$(NO_COLOR=1 "$run/bin/vfops" --build-id)" = 0.1.0-release140
+          test ! -e "$run/previous"
+          test ! -e "$run/current.new"
+          echo P07_M03_POST_SWAP_FAULT_ROLLBACK_TO140=PASS
+          echo P07_M03_OWNER_CP2_AND_DNS=NOT_TOUCHED
+      - name: Erase temporary private source, trial archive, and install fixtures
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- .product "$RUNNER_TEMP/p07-m03-rc141"
+          echo P07_M03_PRIVATE_SOURCE_AND_TEST_ARTIFACT_CLEANUP=PASS
