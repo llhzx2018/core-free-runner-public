@@ -186,11 +186,105 @@ jobs:
           print("P07_SQL_GUARD_TEST_FAILURES="+str(len(result.failures)))
           PY
           )
+      - name: Exercise standard MySQL 8.4 native dump against Percona 8.4 and strict P07 SQL guard
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          docker pull mysql:8.4 >/dev/null
+          docker run -d --name p07-native-mysql8-target --network none \
+            -e MYSQL_ROOT_PASSWORD=SYNTHETIC_ci_root_2026 \
+            -e PERCONA_TELEMETRY_DISABLE=1 \
+            percona/percona-server:8.4 >/dev/null
+          ready=0
+          for attempt in $(seq 1 65); do
+            if docker exec -e MYSQL_PWD=SYNTHETIC_ci_root_2026 \
+              p07-native-mysql8-target mysql --no-defaults --protocol=tcp \
+              --host=127.0.0.1 --user=root --execute 'SELECT 1' >/dev/null 2>&1; then
+              ready=1; break
+            fi
+            sleep 2
+          done
+          test "$ready" = 1 || { echo P07_D04_ALTERNATE_CLIENT_TARGET=BLOCKED; exit 1; }
+          (cd .product && python3 -B - <<'PY'
+          import contextlib,gzip,hashlib,os,subprocess,sys,tempfile
+          from pathlib import Path
+          sys.path.insert(0,str(Path("lib").resolve()))
+          import migration_source_mysql_hex_export as exporter
+          import migration_prepared_mysql_snapshot as snap
+          import server_migration_pull as api
+          DB="p07_native_oracle_client_evidence"
+          PASS="SYNTHETIC_ci_root_2026"
+          USER="p07reader"
+          APPPASS="SYNTHETIC_ci_reader_2026"
+          def query(box,sql):
+              p=subprocess.run(["docker","exec","-e","MYSQL_PWD="+PASS,
+                  box,"mysql","--no-defaults","--protocol=tcp","--host=127.0.0.1",
+                  "--user=root","--batch","--raw","--skip-column-names","--execute",sql],
+                  capture_output=True,timeout=90)
+              if p.returncode:raise AssertionError("NATIVE_DB_SETUP_OR_QUERY_FAILED")
+              return p.stdout
+          source="p07-native-mysql8-source"
+          target="p07-native-mysql8-target"
+          query(source,"CREATE DATABASE "+DB)
+          query(source,"CREATE USER IF NOT EXISTS '"+USER+"'@'%' IDENTIFIED BY '"+APPPASS+"';"
+               "GRANT SELECT, SHOW VIEW, TRIGGER, EVENT ON "+DB+".* TO '"+USER+"'@'%';"
+               "CREATE TABLE "+DB+".snap_data (id INT PRIMARY KEY,label VARCHAR(80),payload BLOB) ENGINE=InnoDB;"
+               "INSERT INTO "+DB+".snap_data VALUES (101,'alpha',X'00FF'),(102,'汉字测试',X'AA55')")
+          original=query(source,"SELECT id,HEX(CONVERT(label USING utf8mb4)),HEX(payload) FROM "+DB+".snap_data ORDER BY id")
+          with tempfile.TemporaryDirectory(prefix="p07-standardsql-") as tmp:
+              root=Path(tmp)
+              data=root/"pull-p07-safe-20261120"/"data"
+              data.mkdir(mode=0o700,parents=True)
+              output=data/"aabbccddee112233-hex.sql.gz"
+              client=root/"mysqldump"
+              client.write_text(
+                  "#!/bin/sh\nexec docker run --rm --network container:"+source+
+                  ' -e MYSQL_PWD="$MYSQL_PWD" mysql:8.4 mysqldump "$@"\n',
+                  encoding="utf-8")
+              client.chmod(0o700)
+              site=root/"site"
+              site.mkdir()
+              (site/"wp-config.php").write_text(
+                  "define('DB_NAME', '"+DB+"');\n"
+                  "define('DB_USER', '"+USER+"');\n"
+                  "define('DB_PASSWORD', '"+APPPASS+"');\n"
+                  "define('DB_HOST', '127.0.0.1');\n",encoding="utf-8")
+              oldpath=os.environ.get("PATH","")
+              os.environ["PATH"]=str(root)+os.pathsep+oldpath
+              try:
+                  status=exporter.export_wordpress_hex_blob(database=DB,site_root=str(site),
+                      output=output,root=root)
+              finally:
+                  os.environ["PATH"]=oldpath
+              assert status["status"]=="UTF8_VALID_SOURCE_EXPORT"
+              assert status["client_dialect"]=="MYSQL_8.4"
+              assert status["source_db_writes"]==status["target_db_writes"]==0
+              print("P07_D04_ORACLE84_TO_PERCONA84_NATIVE_EXPORT=PASS")
+              api.require_source_sql_safe_before_import(output)
+              assert snap.verify_sql(api,output)>0
+              print("P07_D04_ORACLE84_SQL_GUARD_UNCHANGED=PASS")
+              query(target,"CREATE DATABASE "+DB)
+              with gzip.open(output,"rb") as gz:
+                  raw=gz.read()
+              imported=subprocess.run(["docker","run","--rm","--network",
+                  "container:"+target,"-i","-e","MYSQL_PWD="+PASS,
+                  "mysql:8.4","mysql","--no-defaults","--protocol=tcp",
+                  "--host=127.0.0.1","--user=root","--default-character-set=utf8mb4",
+                  "--database",DB],input=raw,capture_output=True,timeout=150)
+              if imported.returncode:raise AssertionError("NATIVE_SOURCE_TO_TARGET_RESTORE_FAILED")
+              actual=query(target,"SELECT id,HEX(CONVERT(label USING utf8mb4)),HEX(payload) FROM "+DB+".snap_data ORDER BY id")
+              assert len(original.splitlines())==len(actual.splitlines())==2
+              assert hashlib.sha256(original).digest()==hashlib.sha256(actual).digest()
+              print("P07_D04_ORACLE84_NATIVE_IMPORT_AND_REAL_ROWS=PASS")
+              assert query(source,"SELECT COUNT(*) FROM "+DB+".snap_data").strip()==b"2"
+              print("P07_D04_ORACLE84_NO_SOURCE_WRITES=PASS")
+          PY
+          )
       - name: Destroy all synthetic state and temporary source
         if: always()
         shell: bash
         run: |
-          docker rm -f p07-native-mysql8-source >/dev/null 2>&1 || true
+          docker rm -f p07-native-mysql8-source p07-native-mysql8-target >/dev/null 2>&1 || true
           sudo rm -rf /home/p07native
           rm -rf .product
           echo P07_SQL_GUARD_DIAG_CLEANUP=YES
