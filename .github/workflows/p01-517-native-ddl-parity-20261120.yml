@@ -1,0 +1,117 @@
+name: P01 v517 native installed Laravel SQLite schema-only extraction
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  p01-native-schema-only:
+    if: github.head_ref == 'test/p01-517-native-ddl-private-local-parity-20261120' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 39
+    steps:
+      - name: Public-safe contract no real Owner private data
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_REPOSITORY" = llhzx2018/core-free-runner-public
+          echo P01_TEST_INPUT=SYNTHETIC_ONLY
+          echo P01_RESTORED_REAL_OWNER_DATA=NO
+          echo P01_EXPORTED_SCHEMA_ONLY=YES
+          echo P01_PRODUCTION_WRITES=NO
+      - name: Checkout P01 exact source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: af6756821c02a153337e211b465d755b80eb64b1
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: candidate
+          persist-credentials: false
+      - name: Check exact source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = 'af6756821c02a153337e211b465d755b80eb64b1'
+          test "$(cat candidate/VERSION)" = '2.47.517'
+          test "$(cat candidate/src/VERSION.txt)" = '2.47.517'
+          echo P01_SCHEMA_ONLY_EXACT_SOURCE=PASS
+      - name: Install native php SQLite ZIP Nginx FPM Composer
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+            nginx openssl curl unzip composer php8.3-cli php8.3-fpm \
+            php8.3-sqlite3 php8.3-mysql php8.3-mbstring php8.3-xml \
+            php8.3-curl php8.3-zip >/dev/null
+          php -r 'if(PHP_VERSION_ID<80300||!in_array("sqlite",PDO::getAvailableDrivers(),true)||!class_exists(ZipArchive::class))exit(2);'
+          echo P01_NATIVE_PHP_SQLITE_ZIP=PASS
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Native Laravel full bundle from composer and vite locks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          python3 scripts/build_p01_next_clean_full.py build \
+            --source-sha af6756821c02a153337e211b465d755b80eb64b1 \
+            --output /tmp/p01-native-ddl-clean.zip
+          python3 scripts/build_p01_next_clean_full.py verify \
+            --zip /tmp/p01-native-ddl-clean.zip
+          python3 scripts/build_p01_next_cloudpanel_full.py build \
+            --source-zip /tmp/p01-native-ddl-clean.zip \
+            --output /tmp/p01-native-ddl-cloudpanel.zip
+          python3 scripts/build_p01_next_cloudpanel_full.py verify \
+            --zip /tmp/p01-native-ddl-cloudpanel.zip
+          echo P01_NATIVE_SCHEMA_ONLY_ACTUAL_FULL_BUILD=PASS
+      - name: Native HTTPS fresh install; export DDL only, no rows
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          PYTHONPATH=tests/compatibility/laravel/http python3 - <<'PY'
+          import base64, hashlib, json, sqlite3, tempfile, zlib
+          from pathlib import Path
+          from run_cloudpanel_fpm_full_stage import Site, require
+          with tempfile.TemporaryDirectory(prefix='p01-ddl-only-') as temp:
+              site=Site(Path(temp),'sqlite',Path('/tmp/p01-native-ddl-cloudpanel.zip'))
+              try:
+                  site.start()
+                  site.run(only_owner_media_restore=True)
+                  sqlite=site.work/'private'/'data'/'owner.sqlite'
+                  require(sqlite.is_file() and not sqlite.is_symlink(),'NATIVE_INSTALLED_SCHEMA_DB_MISSING')
+                  with sqlite3.connect('file:'+str(sqlite)+'?mode=ro',uri=True) as db:
+                      db.execute('PRAGMA query_only=ON')
+                      require(db.execute('PRAGMA integrity_check').fetchone()[0]=='ok','NATIVE_SCHEMA_DB_INTEGRITY')
+                      records=db.execute("SELECT type,name,sql FROM sqlite_master "
+                          "WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite_%' "
+                          "AND type IN ('table','index','trigger','view') "
+                          "ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 "
+                          "WHEN 'trigger' THEN 2 ELSE 3 END,name").fetchall()
+                      tables=[name for typ,name,_ in records if typ=='table']
+                      require(len(tables)==35 and len(records)>=35,'NATIVE_SCHEMA_35_TABLES')
+                      package={'kind':'p01-v517-laravel-native-sqlite-DDL-only/1',
+                          'product_sha':'af6756821c02a153337e211b465d755b80eb64b1',
+                          'table_count':len(tables),
+                          'table_names':sorted(tables),
+                          'objects':[{'type':typ,'name':name,'sql':sql} for typ,name,sql in records]}
+                      raw=json.dumps(package,sort_keys=True,separators=(',',':')).encode()
+                      packed=base64.b64encode(zlib.compress(raw,9)).decode()
+                      print('P01_NATIVE_DDL_SHA256='+hashlib.sha256(raw).hexdigest(),flush=True)
+                      print('P01_NATIVE_DDL_BYTES='+str(len(raw)),flush=True)
+                      print('P01_NATIVE_DDL_CHUNKS='+str((len(packed)+899)//900),flush=True)
+                      for i in range(0,len(packed),900):
+                          print('P01_NATIVE_DDL_CHUNK_%03d='%(i//900)+packed[i:i+900],flush=True)
+                      print('P01_LARAVEL_REAL_INSTALLED_SCHEMA_ONLY_EXPORT=PASS',flush=True)
+              finally:
+                  site.stop()
+          print('P01_NATIVE_DDL_ONE_OFF_SANDBOX_REMOVED=PASS',flush=True)
+          PY
+      - name: Always clear temporary source and bundles
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- candidate
+          rm -f -- /tmp/p01-native-ddl-clean.zip /tmp/p01-native-ddl-cloudpanel.zip
+          echo P01_PRIVATE_SOURCE_AND_PACKAGE_ARTIFACT=NONE
