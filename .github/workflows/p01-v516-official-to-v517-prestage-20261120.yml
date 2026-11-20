@@ -1,0 +1,124 @@
+name: P01 v516 issued assets to v517 DEV ONLY major staging
+on:
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  official-prestage:
+    if: github.head_ref == 'test/p01-v516-official-to-v517-prestage-20261120' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Verify exact candidate and scope
+        run: |
+          set -Eeuo pipefail
+          test "$GITHUB_REPOSITORY" = llhzx2018/core-free-runner-public
+          echo P01_REAL_OFFICIAL_V516_TO_V517_SCOPE=DEV_ISOLATED_NO_PRODUCTION
+      - name: Checkout exact P01 source without persistent credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-start
+          ref: ae4092739d930a1b529b1cae5a67673c7ab36f50
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+      - name: Check exact source and asset reader
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = ae4092739d930a1b529b1cae5a67673c7ab36f50
+          test "$(cat candidate/VERSION)" = 2.47.517
+          test "$(cat candidate/src/VERSION.txt)" = 2.47.517
+          php -l candidate/tests/compatibility/laravel/http/p01_official_v516_release_assets.php
+          python3 -m py_compile candidate/scripts/build_p01_next_major_migration_candidate.py candidate/scripts/stage_p01_next_major_migration_candidate.py
+          echo P01_V517_EXACT_CANDIDATE_FOR_OFFICIAL_V516=PASS
+      - name: Set up native ZIP and Composer
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl unzip composer php8.3-cli php8.3-zip php8.3-mbstring php8.3-xml php8.3-curl php8.3-sqlite3 >/dev/null
+          php -r 'if(!class_exists("ZipArchive"))exit(1);'
+      - name: Setup Node22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Authenticate issued v516 FULL and UPDATE bytes
+        env:
+          P01_TEST_READ_ONLY_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          OFFICIAL_DIR="$RUNNER_TEMP/p01-v516-official-$(python3 -c 'import secrets;print(secrets.token_hex(12))')"
+          (umask 077; mkdir -m 700 "$OFFICIAL_DIR")
+          echo "OFFICIAL_DIR=$OFFICIAL_DIR" >> "$GITHUB_ENV"
+          P01_V516_REAL_ASSET_ONLY=YES php candidate/tests/compatibility/laravel/http/p01_official_v516_release_assets.php "$OFFICIAL_DIR"
+          test "$(sha256sum "$OFFICIAL_DIR/VF-Start-V2.47.516-FULL.zip" | cut -d' ' -f1)" = 016edb85c7cfa48bf939d69fce1f0925f6f50647fded286a5b6df3789ca580ce
+          test "$(sha256sum "$OFFICIAL_DIR/VF_Start_V2.47.516_UPDATE.zip" | cut -d' ' -f1)" = 962a3b084b5bf2294baa092bb1098b6ea8f52b999bf24dcb92a0064ddad325a8
+          echo P01_REAL_ISSUED_V516_FULL_UPDATE_CHECKSUMS=PASS
+      - name: Build verified self-contained Laravel v517 developer FULL
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          python3 scripts/build_p01_next_clean_full.py build --source-sha ae4092739d930a1b529b1cae5a67673c7ab36f50 --output "$RUNNER_TEMP/p01-517-clean-dev.zip"
+          python3 scripts/build_p01_next_clean_full.py verify --zip "$RUNNER_TEMP/p01-517-clean-dev.zip"
+          python3 scripts/build_p01_next_cloudpanel_full.py build --source-zip "$RUNNER_TEMP/p01-517-clean-dev.zip" --output "$RUNNER_TEMP/p01-517-cloudpanel-dev.zip"
+          python3 scripts/build_p01_next_cloudpanel_full.py verify --zip "$RUNNER_TEMP/p01-517-cloudpanel-dev.zip"
+          echo P01_517_DEV_FULL_VENDOR_AND_VITE_SEALED=PASS
+      - name: Bind genuine official v516 FULL to v517 developer-only envelope
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          MAJOR="$RUNNER_TEMP/VF_Start_V2.47.516_to_V2.47.517_MAJOR_DEV_ONLY.zip"
+          python3 scripts/build_p01_next_major_migration_candidate.py build --bridge-v516-full "$OFFICIAL_DIR/VF-Start-V2.47.516-FULL.zip" --laravel-v517-full "$RUNNER_TEMP/p01-517-cloudpanel-dev.zip" --output "$MAJOR"
+          python3 scripts/build_p01_next_major_migration_candidate.py verify --zip "$MAJOR"
+          python3 - "$MAJOR" <<'PY'
+          import sys,zipfile,json
+          with zipfile.ZipFile(sys.argv[1]) as z:
+              j=json.loads(z.read('MAJOR-MIGRATION-MANIFEST.json'))
+          assert j['legacy_official_full_sha256']=='016edb85c7cfa48bf939d69fce1f0925f6f50647fded286a5b6df3789ca580ce'
+          assert j['legacy_official_full_bytes']==1874648 and j['legacy_release_tag']=='v2.47.516'
+          assert j['target_source_sha']=='ae4092739d930a1b529b1cae5a67673c7ab36f50'
+          assert j['target_version']=='2.47.517' and j['readiness']=='DEVELOPER_ISOLATED_ONLY'
+          assert all(j[k] is False for k in ('signed_official_release','production_apply_authorized','includes_owner_data','includes_schema_migration_executor'))
+          print('P01_REAL_V516_ISSUED_FULL_TO_V517_BOUND_DEV_ENVELOPE=PASS')
+          PY
+      - name: Stage developer code, tamper and replay refusal, independent readback
+        run: |
+          set -Eeuo pipefail
+          cd candidate
+          MAJOR="$RUNNER_TEMP/VF_Start_V2.47.516_to_V2.47.517_MAJOR_DEV_ONLY.zip"
+          STAGE="/tmp/p01-d84-stage-$(python3 -c 'import secrets;print(secrets.token_hex(12))')"
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+          python3 scripts/stage_p01_next_major_migration_candidate.py stage --envelope "$MAJOR" --destination "$STAGE" > "$RUNNER_TEMP/p01-d84-result.json"
+          python3 scripts/stage_p01_next_major_migration_candidate.py verify --envelope "$MAJOR" --destination "$STAGE" > "$RUNNER_TEMP/p01-d84-readback.json"
+          python3 - "$RUNNER_TEMP/p01-d84-readback.json" <<'PY'
+          import sys,json
+          with open(sys.argv[1]) as f:j=json.load(f)
+          assert j['status']=='DISPOSABLE_CODE_STAGED_VERIFIED'
+          assert j['source_sha']=='ae4092739d930a1b529b1cae5a67673c7ab36f50'
+          assert j['old_program_or_data_modified'] is False
+          assert j['official_major_migration_ready'] is False
+          assert j['cloudpanel_root_change_performed'] is False
+          print('P01_REAL_V516_TO_V517_DEV_CODE_STAGE_READBACK=PASS')
+          PY
+          printf 'untrusted fixture\n' > "$STAGE/INJECTED_FILE"
+          if python3 scripts/stage_p01_next_major_migration_candidate.py verify --envelope "$MAJOR" --destination "$STAGE" >/dev/null 2>&1; then exit 88; fi
+          rm -f -- "$STAGE/INJECTED_FILE"
+          python3 scripts/stage_p01_next_major_migration_candidate.py verify --envelope "$MAJOR" --destination "$STAGE" >/dev/null
+          if python3 scripts/stage_p01_next_major_migration_candidate.py stage --envelope "$MAJOR" --destination "$STAGE" >/dev/null 2>&1; then exit 89; fi
+          echo P01_REAL_V516_TO_V517_DIRTY_STAGE_AND_REPLAY_DENIED=PASS
+      - name: Always clean official bytes, private source and trial envelope
+        if: always()
+        run: |
+          set -eo pipefail
+          if [[ "$OFFICIAL_DIR" =~ ^/home/runner/work/_temp/p01-v516-official-[a-f0-9]{24}$ ]]; then
+            rm -rf -- "$OFFICIAL_DIR"
+          fi
+          if [[ "$STAGE" =~ ^/tmp/p01-d84-stage-[a-f0-9]{24}$ ]]; then
+            rm -rf -- "$STAGE"
+          fi
+          rm -rf -- candidate
+          rm -f -- "$RUNNER_TEMP/p01-517-clean-dev.zip" "$RUNNER_TEMP/p01-517-cloudpanel-dev.zip"
+          rm -f -- "$RUNNER_TEMP/VF_Start_V2.47.516_to_V2.47.517_MAJOR_DEV_ONLY.zip"
+          rm -f -- "$RUNNER_TEMP/p01-d84-result.json" "$RUNNER_TEMP/p01-d84-readback.json"
+          echo P01_PRIVATE_SOURCE_AND_ISSUED_ASSET_BYTES_PERSISTED=NO
+          echo P01_PUBLIC_ARTIFACTS_OR_PRODUCTION_WRITES=NONE
