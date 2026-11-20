@@ -65,8 +65,17 @@ if ($mode==='archive_v010') {
     echo "P08_081_REAL_ISSUED_V010_NATIVE_ARCHIVE=PASS\n";
     exit;
 }
-$history=$site.'/storage/app/private/adops/owner-next-update/history';
+$next=$site.'/storage/app/private/adops/owner-next-update';
+$history=$next.'/history';
 if ($mode==='seed_v012_failed') {
+    if (!is_dir($next) && !mkdir($next,0700))
+        throw new RuntimeException('P08_081_NEXT_DIR_UNWRITABLE');
+    if (!file_exists($next.'/state.lock')) {
+        $f=fopen($next.'/state.lock','xb');
+        if (!is_resource($f))throw new RuntimeException('P08_081_NEXT_LOCK_CREATE_FAILED');
+        chmod($next.'/state.lock',0600);
+        fclose($f);
+    }
     if (is_dir($history)||!mkdir($history,0700))
         throw new RuntimeException('P08_081_EXPECT_FRESH_HISTORY');
     $jid=bin2hex(random_bytes(16));
