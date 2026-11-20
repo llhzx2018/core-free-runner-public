@@ -13,15 +13,19 @@ test.use({ignoreHTTPSErrors:true})
 test('issued v013 in-app normal one-click → native backup → 014 same-site readback',async({page,request})=>{
   test.setTimeout(180000)
   const errors:string[]=[]
+  console.log('P08_85_LEGACY_BROWSER_STAGE=BOOT')
   page.on('pageerror',e=>errors.push(e.message))
 
   const unauthorized=await request.post('/app/system/update/next/one-click',{
     form:{_token:'wrong-guest-csrf'},failOnStatusCode:false,maxRedirects:0,
     headers:{Accept:'application/json'},
   })
+  console.log('P08_85_LEGACY_BROWSER_GUEST_CODE='+unauthorized.status())
   expect([401,419,302,403]).toContain(unauthorized.status())
+  console.log('P08_85_LEGACY_BROWSER_STAGE=GUEST_DENIED')
 
   await page.goto('/app?tab=updates')
+  console.log('P08_85_LEGACY_BROWSER_STAGE=LOGIN_PAGE')
   await expect(page).toHaveURL(/\/login(?:\?.*)?$/)
   const isSqlite=process.env.P08_TEST_DB_DRIVER==='sqlite'
   const username=isSqlite?'sqlite_admin':'mysql_admin'
@@ -32,12 +36,14 @@ test('issued v013 in-app normal one-click → native backup → 014 same-site re
   await page.getByLabel('密码').fill(password)
   await page.getByRole('button',{name:'登录',exact:true}).click()
   await expect(page).toHaveURL(/\/app(?:\?.*)?$/, {timeout:20000})
+  console.log('P08_85_LEGACY_BROWSER_STAGE=OWNER_LOGGED_IN')
   await page.getByRole('button',{name:'系统更新'}).click()
   const panel=page.getByRole('region',{name:'系统更新工作区'})
   await expect(panel).toBeVisible()
   await expect(panel).toContainText('当前版本 0.1.13')
   await expect(page.getByRole('region',{name:'官方更新与升级'})).toBeVisible()
   await expect(page.getByRole('button',{name:'检查官方更新',exact:true})).toBeEnabled()
+  console.log('P08_85_LEGACY_BROWSER_STAGE=UPDATE_READY')
   await expect(page.getByRole('button',{name:/一键安全升级到/})).toHaveCount(0)
   for(const width of [390,768,1440]){
     await page.setViewportSize({width,height:860})
@@ -53,10 +59,12 @@ test('issued v013 in-app normal one-click → native backup → 014 same-site re
   expect(csrfDenied.status()).toBe(419)
   console.log('P08_85_NORMAL_OWNER_ONE_CLICK_CSRF_DENIAL=PASS')
 
+  console.log('P08_85_LEGACY_BROWSER_STAGE=CHECK_PREPARE')
   const checkResponse=page.waitForResponse(r=>r.url().endsWith('/app/system/update/next/check')
      && r.request().method()==='POST')
   await page.getByRole('button',{name:'检查官方更新',exact:true}).click()
   const check=await checkResponse
+  console.log('P08_85_LEGACY_BROWSER_CHECK_HTTP='+check.status())
   expect(check.status()).toBe(200)
   expect(await check.json()).toMatchObject({
     status:'OFFICIAL_NEXT_VERIFIED_NOT_STAGED',target_version:'0.1.14',
@@ -65,10 +73,12 @@ test('issued v013 in-app normal one-click → native backup → 014 same-site re
   await expect(page.getByRole('button',{name:'一键安全升级到 0.1.14'})).toBeEnabled()
   console.log('P08_85_REAL_ISSUED_OWNER_NEXT_CHANNEL_CHECK=PASS')
 
+  console.log('P08_85_LEGACY_BROWSER_STAGE=NEXT_CLICK_PREPARE')
   const accepted=page.waitForResponse(r=>r.url().endsWith('/app/system/update/next/one-click')
       && r.request().method()==='POST')
   await page.getByRole('button',{name:'一键安全升级到 0.1.14'}).click()
   const response=await accepted
+  console.log('P08_85_LEGACY_BROWSER_NEXT_HTTP='+response.status())
   expect(response.status()).toBe(202)
   const receipt=await response.json() as {status:string;preparation_id:string;worker_dispatch:string}
   expect(receipt.status).toBe('PENDING_PREPARE')
