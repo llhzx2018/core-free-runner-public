@@ -1,0 +1,153 @@
+name: P08 v013 extracted FINAL candidate FULL native 3DB and recovery
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/p08-v013-native-three-database.yml
+permissions:
+  contents: read
+jobs:
+  native-db:
+    if: github.repository == 'llhzx2018/core-free-runner-public' && github.event.pull_request.head.ref == 'proof/p08-v013-candidate-source-20261119' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kind: sqlite
+            image: mysql:8.4
+            health: mysqladmin ping --silent
+          - kind: mysql
+            image: mysql:8.4
+            health: mysqladmin ping --silent
+          - kind: mariadb
+            image: mariadb:11.8
+            health: healthcheck.sh --connect --innodb_initialized
+    services:
+      db:
+        image: ${{ matrix.image }}
+        env:
+          MYSQL_ROOT_PASSWORD: p08-synthetic-disposable-only
+          MYSQL_ROOT_HOST: '%'
+          MARIADB_ROOT_PASSWORD: p08-synthetic-disposable-only
+          MARIADB_ROOT_HOST: '%'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="${{ matrix.health }}"
+          --health-interval=10s
+          --health-timeout=6s
+          --health-retries=18
+    env:
+      P08_ISOLATED_INSTALL_TEST: 'YES'
+      P08_CANDIDATE_SOURCE_SHA: e09ec111888290537f7f8ec9c38ae446521a77aa
+      P08_CANDIDATE_VERSION: '0.1.13'
+      P08_TEST_DB_DRIVER: ${{ matrix.kind }}
+      P08_TEST_DB_HOST: 127.0.0.1
+      P08_TEST_DB_USER: root
+      P08_TEST_DB_PASSWORD: p08-synthetic-disposable-only
+      P08_TEST_DB_CLEAN: p08_ci_clean
+      P08_TEST_DB_DIRTY: p08_ci_dirty
+      P08_TEST_DB_RESTORE: p08_ci_restore
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Checkout exact private P08 candidate (ephemeral)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: e09ec111888290537f7f8ec9c38ae446521a77aa
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p08
+      - name: Checkout exact GOV-DOC Mode U candidate (ephemeral)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: a6e476ccc54fec29cf5264177cf65675b282d4da
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: gov
+      - name: PHP 8.4 and Composer
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: zip,curl,mbstring,pdo_mysql,pdo_sqlite,sqlite3,openssl,posix,dom,intl,fileinfo
+          tools: composer:v2
+          coverage: none
+      - name: Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Independent native DB and SQLite tools
+        run: |
+          set -Eeuo pipefail
+          timeout 420 sudo apt-get -qq update
+          timeout 420 sudo DEBIAN_FRONTEND=noninteractive apt-get -qq install -y mariadb-client sqlite3
+          command -v mariadb-dump
+          command -v sqlite3
+      - name: Build exact-source FULL with canonical Git purity/authority gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C p08 rev-parse HEAD)" = "$P08_CANDIDATE_SOURCE_SHA"
+          test "$(git -C gov rev-parse HEAD)" = a6e476ccc54fec29cf5264177cf65675b282d4da
+          test "$(cat p08/VERSION)" = 0.1.13
+          cd p08
+          npm ci --no-audit --no-fund
+          npm run build
+          composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
+          python3 scripts/check_stack_contract.py --phase full
+          git diff --exit-code
+          git diff --cached --exit-code
+          mapfile -t generated < <(git ls-files --others --exclude-standard)
+          for f in "${generated[@]}"; do
+            case "$f" in
+              bootstrap/cache/packages.php|bootstrap/cache/services.php)
+                test -f "$f" && ! test -L "$f" && rm -- "$f"
+                ;;
+              *) echo "P08_V013_DB_UNEXPECTED_UNTRACKED=$f"; exit 22 ;;
+            esac
+          done
+          test -z "$(git status --porcelain --untracked-files=all)"
+          mkdir -p "$RUNNER_TEMP/p08-real-package"
+          python3 scripts/build_full.py --source "$PWD" \
+            --output "$RUNNER_TEMP/p08-real-package/FULL.zip" --version 0.1.13 \
+            --source-sha "$P08_CANDIDATE_SOURCE_SHA" --governance-root "$GITHUB_WORKSPACE/gov"
+          test "$(sha256sum "$RUNNER_TEMP/p08-real-package/FULL.zip" | cut -d' ' -f1)" = 6c21fce8ce8bc88facfa236b3f5ded920402308e7db629ef692a120da91e1237
+          mkdir -p "$RUNNER_TEMP/p08-real-package/extracted"
+          unzip -q "$RUNNER_TEMP/p08-real-package/FULL.zip" -d "$RUNNER_TEMP/p08-real-package/extracted"
+          echo "P08_V013_REAL_FINAL_FULL_REBUILT_MATCH=${{ matrix.kind }}:PASS"
+      - name: Native initial install and recover using extracted real FULL ZIP
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          root="$RUNNER_TEMP/p08-real-package/extracted"
+          test -f "$root/FULL_MANIFEST.json"
+          test -f "$root/vendor/autoload.php"
+          test -f "$root/public/build/manifest.json"
+          mkdir -p "$root/tests/compatibility"
+          cp p08/tests/compatibility/r101_complete_schema.php "$root/tests/compatibility/"
+          if test "${{ matrix.kind }}" = sqlite; then
+            cp p08/tests/test_install_sqlite_e2e.php p08/tests/test_recovery_sqlite_e2e.php "$root/tests/"
+            php "$root/tests/test_install_sqlite_e2e.php"
+            php "$root/tests/test_recovery_sqlite_e2e.php"
+          else
+            mariadb -h127.0.0.1 -uroot -p"$P08_TEST_DB_PASSWORD" -e \
+              'CREATE DATABASE p08_ci_clean; CREATE DATABASE p08_ci_dirty; CREATE DATABASE p08_ci_restore; CREATE TABLE p08_ci_dirty.synthetic_dirty (id integer primary key);'
+            cp p08/tests/test_install_mysql_e2e.php p08/tests/test_recovery_sql_e2e.php "$root/tests/"
+            php "$root/tests/test_install_mysql_e2e.php"
+            php "$root/tests/test_recovery_sql_e2e.php"
+          fi
+          test -f "$root/.env"
+          test -f "$root/storage/app/private/adops/installation/installed.json"
+          echo "P08_V013_EXTRACTED_3DB_NATIVE_INSTALL_BACKUP_RESTORE=${{ matrix.kind }}:PASS"
+      - name: Destroy extracted FULL, DB fixtures and both private checkouts
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- p08 gov "$RUNNER_TEMP/p08-real-package"
+          test ! -e p08 && test ! -e gov && test ! -e "$RUNNER_TEMP/p08-real-package"
+          echo P08_V013_NATIVE_DB_SOURCE_CLEANUP=PASS
