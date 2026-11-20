@@ -1,0 +1,133 @@
+name: P08 R119 one-case governance current and RP07M proof
+on:
+  pull_request:
+    paths: [.github/workflows/p08-r119-governance-rule-proof.yml]
+permissions:
+  contents: read
+jobs:
+  exact-rule-proof:
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GOV_BASE: d291dc02bb736f7736af90af20c1d223a9386a16
+      GOV_HEAD: 3afd9f1eae0ed9f920c84a761300c4b141d1aa6e
+      P08_BASE: 7220ae4a12dc9472b391a8c40a38ac538d92e654
+      P08_HEAD: a99f2667abc63ee3692958b2e74da16038e3ab2d
+    steps:
+      - name: Immutable GOV-DOC scoped source checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: 3afd9f1eae0ed9f920c84a761300c4b141d1aa6e
+          path: gov
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      - name: Immutable P08 stable acceptance-only checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: a99f2667abc63ee3692958b2e74da16038e3ab2d
+          path: p08
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      - name: Source and diff locked, no executable product changes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C gov rev-parse HEAD)" = "$GOV_HEAD"
+          test "$(git -C p08 rev-parse HEAD)" = "$P08_HEAD"
+          test "$(cat p08/VERSION)" = 0.1.2
+          python3 -B - <<'PY'
+          import os,subprocess
+          def changed(repo,base,head):
+              return set(subprocess.check_output(
+                  ['git','-C',repo,'diff','--name-only',base,head],
+                  text=True).splitlines())
+          assert changed('p08',os.environ['P08_BASE'],os.environ['P08_HEAD']) == {
+             'docs/authority/ACCEPTANCE_MATRIX.md'
+          },'PROJECT_EXECUTABLE_OR_SCOPE_DRIFT'
+          assert changed('gov',os.environ['GOV_BASE'],os.environ['GOV_HEAD']) == {
+            'CURRENT.md','skills/README.md',
+            'skills/skill-release/V3.12/SKILL.md',
+            'governance/release/cases/P08_ADOPS_013_APP_LOCAL_ATOMIC_POST_RELEASE_OWNER_MANUAL_20261116.md'
+          },'GOV_RULE_SCOPE_DRIFT'
+          print('R119_GOV_AND_P08_DOC_ONLY_EXACT_SCOPE=PASS')
+          PY
+      - name: Real GOV Current dependency lint with exact PR impact
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          cd gov
+          PR_BODY="$(cat <<'EOF'
+          PUBLIC_AUTHORITY_IMPACT: REVIEWED_NO_CHANGE
+          AFFECTED_DOMAINS: NONE
+          IMPACT_REASON: Only P08 v0.1.3 PR53 human acceptance timing changes; all Public Authority machine security and recovery standards stay in place.
+          EOF
+          )"
+          export PR_BODY
+          python3 -B governance/public-authority/tools/current_dependency_lint.py \
+            --root "$PWD" --git-base "$GOV_BASE" --git-head "$GOV_HEAD" \
+            > "$RUNNER_TEMP/r119-current.log" 2>&1 || {
+            echo R119_GOV_CURRENT_DEPENDENCY=FAIL
+            grep -E '^CURRENT_DEPENDENCY=BLOCKED:[A-Z0-9_:]+' "$RUNNER_TEMP/r119-current.log" | head -5 || true
+            exit 1
+          }
+          grep -q '^CURRENT_DEPENDENCY=STRUCTURAL_PASS:' "$RUNNER_TEMP/r119-current.log"
+          echo R119_GOV_CURRENT_SOURCE_AND_IMPACT=PASS
+      - name: Sealed predecessor modes unchanged and exactly one Mode M
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          python3 -B - <<'PY'
+          from pathlib import Path
+          import re
+          root=Path('gov')
+          older=(root/'skills/skill-release/V3.11/SKILL.md').read_text()
+          newer=(root/'skills/skill-release/V3.12/SKILL.md').read_text()
+          assert newer.count('### Mode M · ONE_CASE_P08_ADOPS_013_')==1
+          assert 'previous_version: "3.11"' in newer
+          def blocks(txt):
+              pattern=re.compile(r'(?m)^### Mode ([A-L]) · ')
+              matches=list(pattern.finditer(txt))
+              output={}
+              for i,match in enumerate(matches):
+                  end=matches[i+1].start() if i+1<len(matches) else txt.index('\n## 2. Release-time Public Authority',match.start())
+                  piece=txt[match.start():end].rstrip()
+                  # Only the new version has a new Mode M directly before section 2.
+                  piece=piece.split('\n### Mode M ·')[0].rstrip()
+                  output[match.group(1)]=piece
+              return output
+          previous=blocks(older)
+          now=blocks(newer)
+          assert len(previous)==12 and previous.keys()==now.keys()
+          for key in previous:
+              assert previous[key]==now[key], 'SEALED_MODE_DRIFT_'+key
+          case=(root/'governance/release/cases/P08_ADOPS_013_APP_LOCAL_ATOMIC_POST_RELEASE_OWNER_MANUAL_20261116.md').read_text()
+          p08=Path('p08/docs/authority/ACCEPTANCE_MATRIX.md').read_text()
+          assert '## RP-07M · v0.1.3 / PR #53' in p08
+          assert 'MODE_M_CASE_ID=P08_VF_ADOPS_0_1_3_PR53_ONLY' in case
+          assert 'OWNER_PREVIEW_RUNTIME_APPLICABILITY=REQUIRED' in case
+          assert 'POST_PRODUCTION_REQUIRED' in p08
+          assert 'PRODUCTION_AUTO_APPLY=NO' in case
+          for domain in ('INSTALL','SECURITY','TESTING','UPGRADE','DATA_SCHEMA',
+                         'API_PROVIDER','SEO','CRON_JOB','NOTIFICATION','OBSERVABILITY',
+                         'PERFORMANCE','GIT','UA_UI'):
+              assert domain in newer and domain in case and domain in p08, 'DOMAIN_MISSING_'+domain
+          assert 'skill-release | V3.12 |' in (root/'CURRENT.md').read_text()
+          assert 'skill-release | V3.12 | V2.6 |' in (root/'skills/README.md').read_text()
+          print('R119_MODE_A_THROUGH_L_UNCHANGED_AND_MODE_M_SCOPED=PASS')
+          PY
+      - name: Purge temporary private checkout and logs
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- gov p08
+          rm -f -- "$RUNNER_TEMP"/r119-*.log
+          echo R119_TEMP_GOV_AND_P08_SOURCE_PURGED=YES
