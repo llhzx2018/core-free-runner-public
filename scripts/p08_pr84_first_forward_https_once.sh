@@ -5,7 +5,7 @@ set +x
 [[ "$GITHUB_ACTIONS" == true && "$P08_ISOLATED_INSTALL_TEST" == YES && "$(id -u)" != 0 ]] || exit 3
 engine="$1"
 [[ "$engine" =~ ^(sqlite|mysql|mariadb)$ ]] || exit 3
-head=acd89e2ebe9aefb40a4dff3a3a8ba844df28b1db
+head=efa29c9f1095aa326adb244729c21bf3d10830e0
 issued=8b385fecd132a02ac79f5b67e670783e98997c3e
 zipsha=f8075f065d1413c984f80ef7531242cfc894bf272e90f6d89282074f6617c1ec
 [[ "$(git -C p08 rev-parse HEAD)" == "$head" && "$(cat p08/VERSION)" == 0.1.13 ]] || exit 3
