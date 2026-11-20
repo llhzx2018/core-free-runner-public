@@ -143,7 +143,7 @@ try {
        assert.equal(posts.length,0,'retry POST')
      }
      if(scenario.name==='running') {
-       await page.getByText('正在下载、校验和备份').waitFor()
+       await page.locator('.updates-next-action--running strong').filter({hasText:'正在下载、校验和备份'}).waitFor()
        assert.equal(await page.getByRole('button',{name:'检查官方更新'}).count(),0)
        assert.equal(posts.length,0,'running POST')
      }
