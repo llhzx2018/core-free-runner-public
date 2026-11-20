@@ -5,7 +5,9 @@ declare(strict_types=1);
  * actually committed using official issued ZIPs and original PHP primitives.
  * The test-only owner-job witness IS NOT a real Owner browser click; it is
  * labeled as such and cannot be used outside the isolated Runner site.
- * Actual new v0.1.12 Owner click happens later in real HTTPS Chromium.
+ * Real old-v0.1.12 Owner HTTPS click remains SQLite-only in this lane;
+ * SQL native historic predecessor steps use only original committed ZIPs,
+ * receipts, backups and explicitly labeled synthetic prior job witnesses.
  */
 if (PHP_SAPI !== 'cli' || getenv('GITHUB_ACTIONS') !== 'true'
     || getenv('P08_ISOLATED_INSTALL_TEST') !== 'YES'
@@ -15,12 +17,16 @@ if (PHP_SAPI !== 'cli' || getenv('GITHUB_ACTIONS') !== 'true'
 }
 [, $site, $expected, $mode] = $argv;
 $tmp = (string) getenv('RUNNER_TEMP');
-if (!in_array($mode, ['archive_v010', 'witness_v012'], true)
+if (!in_array($mode, ['archive_v010', 'archive_v012', 'witness_v012', 'witness_v013'], true)
     || !preg_match('/^[a-f0-9]{40}$/D', $expected)
-    || ($expected !== ($mode === 'archive_v010'
-        ? 'ef78dcb21117c822e2756360280f2418f794704f'
-        : 'dac7bc1d5410c077f32e522eb5740537f618ef9d'))
-    || !str_starts_with($site, $tmp.'/p08-r129-real-issued-r131-r155-sqlite-chain')
+    || $expected !== match ($mode) {
+        'archive_v010' => 'ef78dcb21117c822e2756360280f2418f794704f',
+        'archive_v012','witness_v012' => 'dac7bc1d5410c077f32e522eb5740537f618ef9d',
+        'witness_v013' => '8b385fecd132a02ac79f5b67e670783e98997c3e',
+    }
+    || !in_array($site, array_map(
+        fn(string $engine):string=>$tmp.'/p08-r129-real-issued-r131-r155-'.$engine.'-chain',
+        ['sqlite','mysql','mariadb']),true)
     || realpath($site) !== $site || is_link($site)
     || fileowner($site) !== posix_geteuid()
     || readlink($site.'/current') !== 'releases/'.$expected) {
@@ -29,7 +35,11 @@ if (!in_array($mode, ['archive_v010', 'witness_v012'], true)
 require_once $site.'/current/vendor/autoload.php';
 $id=(new \VF\AdOps\Upgrade\OwnerNextReleaseGateway())->installed($site);
 if (($id['source_sha'] ?? null) !== $expected
-    || ($id['version'] ?? null) !== ($mode === 'archive_v010'?'0.1.10':'0.1.12')) {
+    || ($id['version'] ?? null) !== match ($mode) {
+        'archive_v010'=>'0.1.10',
+        'archive_v012','witness_v012'=>'0.1.12',
+        'witness_v013'=>'0.1.13',
+    }) {
     throw new RuntimeException('P08_607B_REAL_INSTALLED_MANIFEST_REQUIRED');
 }
 $dir=$site.'/storage/app/private/adops/upgrade';
@@ -68,7 +78,7 @@ try{
     if (!chmod($job,0600)||fwrite($f,$raw)!==strlen($raw)||!fflush($f))
         throw new RuntimeException('P08_607B_JOB_WRITE_FAILED');
 }finally{fclose($f);}
-if ($mode === 'archive_v010') {
+if (in_array($mode,['archive_v010','archive_v012'],true)) {
     // This is the exact ORIGINAL shipped v010 production class, not a
     // simulated or relaxed archive. It independently verifies stage seal,
     // native backup, committed pointer and credential before rotating.
@@ -79,7 +89,7 @@ if ($mode === 'archive_v010') {
             fn(string $s):bool=>preg_match('/^[a-f0-9]{32}$/D',$s)===1))!==0) {
         throw new RuntimeException('P08_607B_V010_ARCHIVE_FAILED');
     }
-    echo "P08_607B_ISSUED_V010_NATIVE_BACKUP_STAGE_ARCHIVE=PASS\n";
+    echo "P08_607B_ISSUED_".($mode==='archive_v010'?'V010':'V012')."_NATIVE_BACKUP_STAGE_ARCHIVE=PASS\n";
 } else {
-    echo "P08_607B_ISSUED_V012_COMMITTED_NATIVE_STAGE_WITNESS=PASS\n";
+    echo "P08_607B_ISSUED_".($mode==='witness_v012'?'V012':'V013')."_COMMITTED_NATIVE_STAGE_WITNESS_TEST_ONLY=PASS\n";
 }
