@@ -62,11 +62,16 @@ fi
 python3 - "$site/.env" <<'PY'
 from pathlib import Path
 import sys
-import re
 p=Path(sys.argv[1]);s=p.read_text()
-# The issued Owner installer uses distinct host fixtures across native DBs.
-# Accept only ONE HTTPS APP_URL and replace it in this disposable root.
-pattern=r'(?m)^APP_URL="https://[^"\\r\\n]{1,200}"
+# Only this disposable website: replace exactly one well-formed APP_URL line.
+# Official installers can serialize this setting differently on SQL vs SQLite.
+lines=s.splitlines()
+positions=[i for i,line in enumerate(lines) if line.startswith('APP_URL=')]
+assert len(positions)==1
+i=positions[0]
+assert 10<len(lines[i])<512 and '\\x00' not in lines[i]
+lines[i]='APP_URL="https://127.0.0.1:18519"'
+p.write_text('\n'.join(lines)+'\n')
 PY
 # Keep all traffic local even if the disposable installer saved a fake PAT.
 token="$site/storage/app/private/adops/upgrade/github-read-token"
