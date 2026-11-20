@@ -4,11 +4,17 @@ set -Eeuo pipefail
 [[ "$GITHUB_ACTIONS" == true && "$P08_ISOLATED_INSTALL_TEST" == YES && "$#" == 2 ]] || exit 22
 tmp="$1"; web="$2"
 [[ "$tmp" == "$RUNNER_TEMP/p08-v013-official-chain-sqlite" &&
-   "$web" == "$RUNNER_TEMP/p08-r129-real-issued-r131-r155-sqlite-web" &&
+   "$web" == "$RUNNER_TEMP/p08-r129-real-issued-r131-r155-sqlite-chain" &&
    ! -L "$web" && ! -L "$tmp" && -f "$web/.env" &&
    "$(readlink "$web/current")" == releases/dac7bc1d5410c077f32e522eb5740537f618ef9d ]] || exit 23
 test "$(sha256sum "$web/current/FULL_MANIFEST.json" | cut -d' ' -f1)" = \
   607b3a02a20021c0747d42440497b7e9e3e0fe39040869f475ba22f9f19437e9
+# This site has NEVER moved: previous native backup paths still belong to it.
+# Change only isolated mutable APP_URL, never signed app code or release index.
+grep -Fq 'adops.lanlihong.com' "$web/.env"
+sed -i 's#adops.lanlihong.com#127.0.0.1:18497#g' "$web/.env"
+grep -Fq '127.0.0.1:18497' "$web/.env"
+test "$(readlink "$web/current")" = releases/dac7bc1d5410c077f32e522eb5740537f618ef9d
 test "$(sha256sum "$tmp/v013-update.zip" | cut -d' ' -f1)" = \
   5848cf2c871c61052040a600049745d0e069da336967b6344e83ab7f2ae851be
 python3 "$GITHUB_WORKSPACE/tests/p08-v013-607b-old-client-synthetic-api.py" prepare "$tmp"
