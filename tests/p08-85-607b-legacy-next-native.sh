@@ -269,7 +269,15 @@ P08_TEST_DB_DRIVER="$engine" \
    echo "P08_85_$engine"_POSITIVE_BROWSER=FAIL
    # Only state enums and HTTP codes emitted by the disposable browser test,
    # never private Playwright traces, passwords, paths, tokens or JSON.
-   grep -E '^[[:space:]]*P08_85_LEGACY_BROWSER_(STAGE|GUEST_CODE|CHECK_HTTP|NEXT_HTTP)=[A-Z0-9_]+
+   python3 - "$log" <<'PY'
+import re,sys
+from pathlib import Path
+try: rows=Path(sys.argv[1]).read_text(errors="replace").splitlines()
+except Exception: rows=[]
+for row in rows:
+    m=re.search(r'P08_85_LEGACY_BROWSER_(STAGE|GUEST_CODE|CHECK_HTTP|NEXT_HTTP)=([A-Z0-9_]{2,32})',row)
+    if m: print('P08_85_LEGACY_BROWSER_'+m.group(1)+'='+m.group(2))
+PY
    python3 - "$site" "$issued" "$target" "$events" <<'PY'
 import json,re,sys
 from pathlib import Path
