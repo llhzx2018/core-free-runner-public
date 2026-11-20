@@ -117,7 +117,10 @@ cp "$GITHUB_WORKSPACE/tests/p08-v013-607b-old-owner-click.spec.ts" \
   "$GITHUB_WORKSPACE/target/tests/e2e/v013-607b-old-owner-click.spec.ts"
 (
   cd "$GITHUB_WORKSPACE/target"
-  npx playwright install chromium >/dev/null
+  # Browser binaries are downloaded from the public Playwright CDN, not
+  # from the strictly isolated api.github.com fixture proxy.
+  env -u HTTPS_PROXY -u https_proxy -u HTTP_PROXY -u http_proxy -u ALL_PROXY -u all_proxy \
+    npx playwright install chromium >/dev/null
   P08_TEST_BASE_URL=https://127.0.0.1:18497 \
     npx playwright test tests/e2e/v013-607b-old-owner-click.spec.ts \
       --config playwright.config.ts --workers=1 --reporter=line
