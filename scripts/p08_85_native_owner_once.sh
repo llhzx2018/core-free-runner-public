@@ -133,6 +133,24 @@ for i in $(seq 1 80);do
   sleep 0.2
 done
 kill -0 "$nginxpid"
+status="$(cat "$work/guest-code" 2>/dev/null || true)"
+python3 - "$work/guest.html" "$status" "$engine" <<'PY'
+from pathlib import Path
+import re,sys
+p=Path(sys.argv[1]);status=sys.argv[2];engine=sys.argv[3]
+txt=p.read_text(errors="ignore")[:250000] if p.is_file() else ""
+flags={
+ "INERTIA":'data-page=' in txt,
+ "APP_ROOT":'id="app"' in txt,
+ "LARAVEL":'laravel' in txt.lower(),
+ "LOGIN":'login' in txt.lower() or '登录' in txt,
+ "ERROR":'error' in txt.lower(),
+ "HTML":'<html' in txt.lower(),
+}
+print("P08_85_"+engine+"_GUEST_HTTP="+(status if re.fullmatch(r"\d{3}",status) else "UNKNOWN"))
+print("P08_85_"+engine+"_GUEST_BODY_SIZE_CATEGORY="+("EMPTY" if not txt else "PRESENT"))
+for k,v in flags.items():print("P08_85_"+engine+"_SAFE_GUEST_"+k+"="+("YES" if v else "NO"))
+PY
 grep -Fq 'id="app"' "$work/guest.html" || grep -Fq 'data-page=' "$work/guest.html" || {
   echo "P08_85_$engine"_GUEST_HTTPS=FAIL; exit 45;
 }
