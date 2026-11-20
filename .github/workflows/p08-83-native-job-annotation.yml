@@ -48,6 +48,18 @@ jobs:
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           path: target
+      - name: Checkout GOV-DOC for canonical full-package contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          path: target/.gov-doc-policy
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - name: Node22 for real compiled FULL
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
       - name: Setup PHP 8.4 matching native P08
         uses: shivammathur/setup-php@v2
         with:
@@ -73,16 +85,38 @@ jobs:
             echo "P08_PR83_${{ matrix.kind }}_LOCKED_COMPOSER_INSTALL=FAIL"
             exit 21
           fi
+          if npm ci --no-audit --no-fund >> "$log" 2>&1 &&
+             npm run build >> "$log" 2>&1; then
+            echo "P08_PR83_${{ matrix.kind }}_COMPILED_ASSETS=PASS"
+          else
+            echo "P08_PR83_${{ matrix.kind }}_COMPILED_ASSETS=FAIL"
+            exit 25
+          fi
+          full="$RUNNER_TEMP/p08-pr83-full-${{ matrix.kind }}.zip"
+          site="$RUNNER_TEMP/p08-pr83-site-${{ matrix.kind }}"
+          if python3 scripts/build_full.py --source . --output "$full" --version 0.1.13 --source-sha 77a32d85c24d9a5715c0831932108b8ac21df191 --governance-root .gov-doc-policy >> "$log" 2>&1; then
+            echo "P08_PR83_${{ matrix.kind }}_REAL_BUILT_FULL_WITH_CANONICAL_MANIFEST=PASS"
+          else
+            echo "P08_PR83_${{ matrix.kind }}_REAL_BUILT_FULL_WITH_CANONICAL_MANIFEST=FAIL"
+            exit 26
+          fi
+          mkdir -m 700 "$site"
+          unzip -q "$full" -d "$site"
+          test -f "$site/FULL_MANIFEST.json"
+          mkdir -p "$site/tests/fixtures" "$site/tests/compatibility"
+          cp tests/test_install_sqlite_e2e.php tests/test_install_mysql_e2e.php "$site/tests/"
+          cp tests/fixtures/create_ci_databases.php "$site/tests/fixtures/"
+          cp tests/compatibility/r101_complete_schema.php "$site/tests/compatibility/"
           if [ "${{ matrix.kind }}" = mysql ]; then
-            if php tests/fixtures/create_ci_databases.php >> "$log" 2>&1 &&
-               php tests/test_install_mysql_e2e.php >> "$log" 2>&1; then
+            if php "$site/tests/fixtures/create_ci_databases.php" >> "$log" 2>&1 &&
+               php "$site/tests/test_install_mysql_e2e.php" >> "$log" 2>&1; then
               echo "P08_PR83_MYSQL8_REAL_INSTALL_AND_DIRTY_REFUSAL=PASS"
             else
               echo "P08_PR83_MYSQL8_REAL_INSTALL_AND_DIRTY_REFUSAL=FAIL"
               exit 22
             fi
           else
-            if php tests/test_install_sqlite_e2e.php >> "$log" 2>&1; then
+            if php "$site/tests/test_install_sqlite_e2e.php" >> "$log" 2>&1; then
               echo "P08_PR83_SQLITE_REAL_INSTALL_AND_PRIVATE_DATA=PASS"
             else
               echo "P08_PR83_SQLITE_REAL_INSTALL_AND_PRIVATE_DATA=FAIL"
@@ -94,9 +128,10 @@ jobs:
         if: always()
         shell: bash
         run: |
-          rm -rf -- target "$RUNNER_TEMP/p08-pr83-3db-${{ matrix.kind }}.log"
+          rm -rf -- target "$RUNNER_TEMP/p08-pr83-3db-${{ matrix.kind }}.log" "$RUNNER_TEMP/p08-pr83-full-${{ matrix.kind }}.zip" "$RUNNER_TEMP/p08-pr83-site-${{ matrix.kind }}"
           test ! -e target
           test ! -e "$RUNNER_TEMP/p08-pr83-3db-${{ matrix.kind }}.log"
+          test ! -e "$RUNNER_TEMP/p08-pr83-site-${{ matrix.kind }}"
           echo "P08_PR83_${{ matrix.kind }}_PRIVATE_CLEANUP=PASS"
   isolated-mariadb-full-stack:
     if: github.repository == 'llhzx2018/core-free-runner-public' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'proof/p08-83-native-job-annotation-sanitized-20261120'
@@ -192,8 +227,19 @@ jobs:
           test -f public/build/manifest.json
           run_phase DEV_CHECK bash scripts/dev_check.sh
           run_phase PHPUNIT php vendor/bin/phpunit tests/Feature/WorkspaceInertiaTest.php
-          run_phase NATIVE_DB_CREATE php tests/fixtures/create_ci_databases.php
-          run_phase MARIA_INSTALL php tests/test_install_mysql_e2e.php
+          full="$RUNNER_TEMP/p08-pr83-full-mariadb.zip"
+          site="$RUNNER_TEMP/p08-pr83-site-mariadb"
+          run_phase FULL_BUILD python3 scripts/build_full.py --source . --output "$full" --version 0.1.13 --source-sha 77a32d85c24d9a5715c0831932108b8ac21df191 --governance-root .gov-doc-policy
+          mkdir -m 700 "$site"
+          unzip -q "$full" -d "$site"
+          test -f "$site/FULL_MANIFEST.json"
+          mkdir -p "$site/tests/compatibility" "$site/tests/fixtures"
+          cp tests/test_install_mysql_e2e.php "$site/tests/"
+          cp tests/fixtures/create_ci_databases.php "$site/tests/fixtures/"
+          cp tests/compatibility/r101_complete_schema.php "$site/tests/compatibility/"
+          run_phase NATIVE_DB_CREATE php "$site/tests/fixtures/create_ci_databases.php"
+          run_phase MARIA_INSTALL php "$site/tests/test_install_mysql_e2e.php"
+          echo P08_PR83_MARIA_REAL_EXTRACTED_FULL_INSTALL=PASS
           test -z "$(git status --porcelain --untracked-files=all)"
           echo P08_PR83_MARIADB_COMPLETE_NATIVE_EQUIVALENT=PASS
           echo P08_PR83_EQUIVALENCE_IS_NOT_GITHUB_NATIVE_STATUS=CONFIRMED
@@ -201,7 +247,8 @@ jobs:
         if: always()
         shell: bash
         run: |
-          rm -rf -- target "$RUNNER_TEMP/p08-pr83-mariadb-full-private.log"
+          rm -rf -- target "$RUNNER_TEMP/p08-pr83-mariadb-full-private.log" "$RUNNER_TEMP/p08-pr83-full-mariadb.zip" "$RUNNER_TEMP/p08-pr83-site-mariadb"
           test ! -e target
           test ! -e "$RUNNER_TEMP/p08-pr83-mariadb-full-private.log"
+          test ! -e "$RUNNER_TEMP/p08-pr83-site-mariadb"
           echo P08_PR83_MARIA_PRIVATE_CLEANUP=PASS
