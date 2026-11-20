@@ -1,0 +1,102 @@
+name: P08 pinned dependency locks into private dev branch
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p08-r6-lockfile-capture.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  lockfiles-only:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PRODUCT_SHA: 239ccc0bd8b5c5d113bc82e4ec2f9b55be5c5fac
+      PRODUCT_BRANCH: task/p08-r6-pinned-full-dependencies-20261110
+    steps:
+      - name: Checkout exact private product source (transient)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: 239ccc0bd8b5c5d113bc82e4ec2f9b55be5c5fac
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: candidate
+          fetch-depth: 1
+
+      - name: Verify source and empty target dependency lock slots
+        run: |
+          set -euo pipefail
+          test "$(git -C candidate rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(tr -d '\r\n ' <candidate/VERSION)" = '0.1.0-dev.1'
+          test ! -e candidate/composer.lock
+          test ! -e candidate/package-lock.json
+          echo "P08_R6_LOCK_SOURCE=VERIFIED"
+
+      - name: PHP and Composer v2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_mysql, zip, mbstring, intl, bcmath, dom, fileinfo
+
+      - name: Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Resolve exact new-source dependency locks
+        working-directory: candidate
+        run: |
+          set -euo pipefail
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
+          composer update --no-dev --no-scripts --prefer-dist --no-interaction --no-progress
+          composer install --no-dev --no-scripts --no-interaction --prefer-dist --classmap-authoritative
+          npm install --package-lock-only --ignore-scripts
+          npm ci --no-audit --no-fund
+          npm run build
+          test -s composer.lock
+          test -s package-lock.json
+          test -f public/build/manifest.json
+          echo "P08_R6_LOCKED_BUILD=PASS"
+
+      - name: Write only the two lockfiles to the exact private P08 development branch
+        working-directory: candidate
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          command -v gh
+          expected="$PRODUCT_SHA"
+          actual=$(gh api "repos/llhzx2018/vf-adops/git/ref/heads/$PRODUCT_BRANCH" --jq '.object.sha')
+          test "$actual" = "$expected"
+          for path in composer.lock package-lock.json; do
+            test -s "$path"
+            # Avoid Linux ARG_MAX: composer.lock Base64 is too long for an
+            # individual CLI argument. Stream JSON on stdin, never on argv.
+            pushed=$(
+              python3 -c 'import base64,json,sys; name,branch=sys.argv[1:]; value=base64.b64encode(open(name,"rb").read()).decode(); print(json.dumps({"message":"build(P08): pin "+name+" from isolated Composer/Node source","branch":branch,"content":value}))' "$path" "$PRODUCT_BRANCH" |
+                gh api -X PUT "repos/llhzx2018/vf-adops/contents/$path" --input - --jq '.commit.sha'
+            )
+            test -n "$pushed"
+            actual=$(gh api "repos/llhzx2018/vf-adops/git/ref/heads/$PRODUCT_BRANCH" --jq '.object.sha')
+            test "$actual" = "$pushed"
+            echo "P08_R6_PRIVATE_LOCK_COMMIT=$pushed"
+          done
+          echo "P08_R6_PRIVATE_DEPENDENCY_LOCKS=WRITTEN"
+          echo "PUBLIC_ARTIFACT_CREATED=NO"
+          echo "PRODUCTION_OR_RELEASE_WRITE=NO"
+
+      - name: Remove private checkout after test (including failure)
+        if: always()
+        run: |
+          rm -rf candidate
+          echo "P08_R6_PRIVATE_WORKSPACE_CLEANUP=DONE"
