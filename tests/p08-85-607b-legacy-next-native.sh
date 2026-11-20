@@ -247,16 +247,14 @@ for i in $(seq 1 60); do
 done
 kill -0 "$webpid"
 echo "P08_85_$engine"_WEB_AND_WORKER_ISOLATED_PROXY_ENV=PASS
+# This is a continuous OLD site, not a clean FULL: the existing issued
+# Owner's synthetic GitHub token is a protected preserved fixture. The prior
+# clean FULL runner intentionally created one, but doing so here is invalid.
 token="$site/storage/app/private/adops/upgrade/github-read-token"
-[[ ! -e "$token" && ! -L "$token" ]] || exit 49
-printf 'github_pat_%045d\n' 0 >"$token"
-python3 - "$token" <<'PY'
-from pathlib import Path
-import sys
-p=Path(sys.argv[1])
-p.write_text("github_pat_"+"r"*45+"\n")
-p.chmod(0o600)
-PY
+[[ -f "$token" && ! -L "$token" ]] || exit 49
+[[ "$(sha256sum "$token" | cut -d' ' -f1)" == "$tokenSha" ]] || exit 49
+[[ "$(stat -c %a "$token")" == 600 ]] || exit 49
+echo "P08_85_LEGACY_$engine"_ORIGINAL_OWNER_TOKEN_NOT_REPLACED=PASS
 echo "P08_85_$engine"_LOCAL_SYNTHETIC_CHANNEL_ONLY=READY
 
 # This browser controls the genuine issued v013 Vue/Laravel built-in Owner panel and the independently spawned
