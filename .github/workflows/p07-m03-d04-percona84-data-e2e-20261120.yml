@@ -1,0 +1,149 @@
+name: P07 M03 D04 exact-source Percona8.4 synthetic data tests
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-m03-d04-percona84-data-e2e-20261120.yml'
+permissions:
+  contents: read
+jobs:
+  synthetic-native-data:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      NO_COLOR: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      P07_PRODUCT_SHA: '19bac6f4443266e7f9028f75ada7d79c761bd421'
+      P07_NATIVE_DB_ENGINE: 'MYSQL_8.4'
+      P07_NATIVE_DB_CONTAINER: 'p07-native-mysql8'
+      P07_MYSQL_NATIVE_CI: '1'
+      P07_D04_NATIVE_SSH_CI: '1'
+      P07_D04_COMBINED_CI: '1'
+    steps:
+      - name: Checkout temporary runner workflow
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact private source only temporarily
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 19bac6f4443266e7f9028f75ada7d79c761bd421
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .product
+      - name: Confirm exact identity and start disposable Percona 8.4 source and target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C .product rev-parse HEAD)" = "$P07_PRODUCT_SHA"
+          docker info >/dev/null
+          docker pull percona/percona-server:8.4 >/dev/null
+          for name in p07-native-mysql8-source p07-native-mysql8-target; do
+            docker run -d --name "$name" --network none \
+              -e MYSQL_ROOT_PASSWORD=SYNTHETIC_ci_root_2026 \
+              -e PERCONA_TELEMETRY_DISABLE=1 percona/percona-server:8.4 >/dev/null
+          done
+          for name in p07-native-mysql8-source p07-native-mysql8-target; do
+            ok=0
+            for attempt in $(seq 1 80); do
+              if docker exec -e MYSQL_PWD=SYNTHETIC_ci_root_2026 "$name" \
+                mysql --no-defaults --protocol=tcp --host=127.0.0.1 \
+                --user=root --execute 'SELECT 1' >/dev/null 2>&1; then
+                ok=1; break
+              fi
+              sleep 3
+            done
+            test "$ok" = 1 || { echo P07_D04_PERCONA_START=BLOCKED; exit 21; }
+            ver="$(docker exec -e MYSQL_PWD=SYNTHETIC_ci_root_2026 "$name" \
+              mysql --no-defaults --protocol=tcp --host=127.0.0.1 \
+              --user=root --batch --skip-column-names \
+              --execute 'SELECT @@version, @@version_comment' 2>/dev/null)"
+            case "$ver" in 8.4*Percona*) ;; *) echo P07_D04_PERCONA84_IDENTITY=BLOCKED; exit 22 ;; esac
+            docker exec "$name" mysqldump --version >/dev/null
+          done
+          echo P07_D04_TWO_INDEPENDENT_NATIVE_PERCONA84_DB=PASS
+      - name: Prepare synthetic isolated SSH, SQLite and static source test fixtures
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo apt-get update -qq >/dev/null
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsync openssh-client >/dev/null
+          sudo mkdir -p /home/p07native/htdocs /home/p07ssh/htdocs/static.p07.invalid
+          sudo chown -R "$(id -u):$(id -g)" /home/p07native /home/p07ssh
+          printf TARGET_KEEP > /home/p07ssh/htdocs/static.p07.invalid/index.html
+          key="$RUNNER_TEMP/p07-d04-native-id_ed25519"
+          ssh-keygen -q -t ed25519 -N '' -f "$key"
+          echo "P07_D04_SSH_PRIVATE_KEY=$key" >> "$GITHUB_ENV"
+          docker pull ubuntu:24.04 >/dev/null
+          docker run -d --name p07-d04-ssh-source \
+            -p 127.0.0.1:22287:22 \
+            -v "$key.pub:/tmp/ci-public-key:ro" \
+            ubuntu:24.04 bash -c '
+              set -eu
+              apt-get update -qq >/dev/null
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server rsync python3 >/dev/null
+              mkdir -p /run/sshd /root/.ssh
+              cp /tmp/ci-public-key /root/.ssh/authorized_keys
+              chmod 0700 /root/.ssh
+              chmod 0600 /root/.ssh/authorized_keys
+              exec /usr/sbin/sshd -D -e
+            ' >/dev/null
+          ok=0
+          for attempt in $(seq 1 70); do
+            if ssh -i "$key" -p 22287 -o BatchMode=yes \
+              -o StrictHostKeyChecking=accept-new -o ConnectTimeout=3 \
+              root@127.0.0.1 true >/dev/null 2>&1; then
+              ok=1; break
+            fi
+            sleep 3
+          done
+          test "$ok" = 1 || { echo P07_D04_SSH_SOURCE=BLOCKED; exit 23; }
+          docker exec p07-d04-ssh-source bash -c '
+            set -eu
+            mkdir -p /home/p07ssh/htdocs/static.p07.invalid/assets \
+              /home/p07ssh/htdocs/sqlite.p07.invalid
+            printf SOURCE_PUBLIC_SITE > /home/p07ssh/htdocs/static.p07.invalid/index.html
+            printf "body{color:green}" > /home/p07ssh/htdocs/static.p07.invalid/assets/style.css
+          '
+          docker exec p07-d04-ssh-source python3 -c '
+import sqlite3
+with sqlite3.connect("/home/p07ssh/htdocs/sqlite.p07.invalid/app.sqlite") as db:
+    db.execute("CREATE TABLE measurements (id INTEGER PRIMARY KEY, label TEXT)")
+    db.executemany("INSERT INTO measurements(label) VALUES (?)", [
+        ("old-one",), ("旧站继续运行",)])
+'
+          echo P07_D04_SYNTHETIC_SSH_SQLITE_STATIC=PASS
+      - name: Actual Percona source export, database restore, remote SSH and SQLite tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          for suite in \
+            test_p07_m03_d04_mysql_native_source_export.py \
+            test_p07_m03_d04_native_restore_drill.py \
+            test_p07_m03_d04_real_ssh_transfer.py \
+            test_p07_m03_d04_same_engine_site_integration.py; do
+            log="$RUNNER_TEMP/p07-d04-$suite.log"
+            if (cd .product && python3 -B -m unittest discover -s tests -p "$suite" -q) > "$log" 2>&1; then
+              echo "P07_D04_NATIVE_SUITE_PASS=$suite"
+              grep -E '^Ran [0-9]+ tests' "$log" | tail -n 1 | cut -c1-75 || true
+            else
+              echo "P07_D04_NATIVE_SUITE_FAIL=$suite"
+              grep -E '^ERROR:|^FAIL:|^Ran [0-9]+ tests|^FAILED|P07_TEST_SYNTHETIC_REMOTE_HELPER=' "$log" \
+                | tail -n 15 | cut -c1-190 || true
+              exit 1
+            fi
+          done
+          echo P07_D04_PERCONA84_SQLITE_STATIC_SSH_DATA_PATH=PASS
+          echo P07_D04_TWO_CLOUDPANEL_VMS_AND_TLS=NOT_RUN
+      - name: Clean exact private source, DB containers and synthetic paths
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f p07-native-mysql8-source p07-native-mysql8-target p07-d04-ssh-source >/dev/null 2>&1 || true
+          rm -rf -- .product
+          rm -f -- "$RUNNER_TEMP/p07-d04-native-id_ed25519" "$RUNNER_TEMP/p07-d04-native-id_ed25519.pub"
+          find "$RUNNER_TEMP" -maxdepth 1 -type f -name 'p07-d04-*.log' -delete
+          sudo rm -rf -- /home/p07native /home/p07ssh
+          echo P07_D04_EPHEMERAL_PRIVATE_AND_DATA_CLEANED=YES
