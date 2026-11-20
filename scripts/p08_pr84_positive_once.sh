@@ -233,6 +233,20 @@ export HTTPS_PROXY=http://127.0.0.1:19184
 export https_proxy=http://127.0.0.1:19184
 export NO_PROXY=127.0.0.1,localhost
 export no_proxy=127.0.0.1,localhost
+# The PHP web SAPI was started for the initial guest readiness before
+# the loopback GitHub proxy existed. Restart it with the proxy environment;
+# this is an isolated test process only, never a site service restart.
+kill "$webpid"
+wait "$webpid" >/dev/null 2>&1 || true
+php -d "auto_prepend_file=$work/web-env.php" \
+  -S 127.0.0.1:19519 -t "$site/public" >"$work/php-issuer-proxy.log" 2>&1 &
+webpid="$!"
+for i in $(seq 1 60); do
+  (echo >/dev/tcp/127.0.0.1/19519) >/dev/null 2>&1 && break
+  sleep 0.2
+done
+kill -0 "$webpid"
+echo "P08_PR84_$engine"_WEB_AND_WORKER_ISOLATED_PROXY_ENV=PASS
 token="$site/storage/app/private/adops/upgrade/github-read-token"
 [[ ! -e "$token" && ! -L "$token" ]] || exit 49
 printf 'github_pat_%045d\n' 0 >"$token"
