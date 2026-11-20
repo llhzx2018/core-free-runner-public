@@ -267,7 +267,40 @@ P08_TEST_BASE_URL=https://127.0.0.1:18519 \
 P08_PR84_UNISSUED_POSITIVE=YES P08_ISOLATED_INSTALL_TEST=YES \
 P08_TEST_DB_DRIVER="$engine" \
  npx playwright test tests/e2e/pr84-positive-isolated.spec.ts --workers=1 --reporter=list \
- >>"$log" 2>&1 || { echo "P08_PR84_$engine"_POSITIVE_BROWSER=FAIL; exit 50; }
+ >>"$log" 2>&1 || {
+   echo "P08_PR84_$engine"_POSITIVE_BROWSER=FAIL
+   python3 - "$site" "$issued" "$target" "$events" <<'PY'
+import json,re,sys
+from pathlib import Path
+site=Path(sys.argv[1]);old=sys.argv[2];new=sys.argv[3];events=Path(sys.argv[4])
+root=site/"storage/app/private/adops"
+def safe_info(name):
+    file=root/"owner-next-update"/name
+    if file.is_symlink() or not file.is_file():return {}
+    try:r=json.loads(file.read_bytes()[:8192])
+    except Exception:return {}
+    return r if isinstance(r,dict) else {}
+intent=safe_info("intent.json")
+job=safe_info("status.json")
+allowed={"NONE","PENDING_PREPARE","RUNNING_PREPARE","PENDING_APPLY",
+         "RUNNING_APPLY","PREPARED","SUCCEEDED","NEEDS_RECOVERY"}
+for tag,r in [("INTENT",intent),("JOB",job)]:
+    state=r.get("status","NONE")
+    print("P08_PR84_SAFE_"+tag+"_STATUS="+(state if state in allowed else "INVALID"))
+    fail=r.get("failure_code","")
+    if isinstance(fail,str) and re.fullmatch(r"[A-Z][A-Z0-9_]{5,120}",fail):
+        print("P08_PR84_SAFE_"+tag+"_FAILURE_CODE="+fail)
+p=site/"current"
+link=p.readlink().as_posix() if p.is_symlink() else ""
+print("P08_PR84_SAFE_POINTER="+("ORIGINAL" if link=="releases/"+old
+  else "CANDIDATE" if link=="releases/"+new else "UNKNOWN"))
+try:rows=events.read_text().splitlines()
+except Exception:rows=[]
+for name in ["channel","release","tag","atomic"]:
+    print("P08_PR84_SAFE_PROXY_"+name.upper()+"="+("YES" if name in rows else "NO"))
+PY
+   exit 50
+ }
 cd ..
 [[ "$(readlink "$site/current")" == "releases/$target" ]] || exit 51
 [[ "$(cat "$site/current/VERSION")" == "0.1.14" ]] || exit 52
