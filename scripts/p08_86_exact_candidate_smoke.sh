@@ -59,8 +59,9 @@ with zipfile.ZipFile(full) as z:
     assert m['target_version']=='0.1.14' and m['source_sha']==target
     assert m['data_included'] is False
     assert 'VERSION' in files and z.read('VERSION')==b'0.1.14\n'
-    assert all(not n.startswith(('storage/','tests/','scripts/','.env'))
+    assert all(not n.startswith(('storage/','tests/','scripts/'))
                for n in files)
+    assert '.env' not in files
     assert 'public/p08-owner-first-forward.php' not in files
 with zipfile.ZipFile(atomic) as z:
     m=json.loads(z.read('ATOMIC_MANIFEST.json'))
@@ -70,8 +71,9 @@ with zipfile.ZipFile(atomic) as z:
     assert m['source_full_manifest_sha256']==manifest
     assert m['target_version']=='0.1.14' and m['target_sha']==target
     assert m['schema_changes'] is False
-    assert all(not n.startswith(('storage/','tests/','scripts/','.env'))
+    assert all(not n.startswith(('storage/','tests/','scripts/'))
                for n in files)
+    assert '.env' not in files
     assert 'public/p08-owner-first-forward.php' not in files
 PY
 echo "P08_86_DEV_CANDIDATE_SOURCE_SHA=$source_sha"
