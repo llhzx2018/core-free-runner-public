@@ -1,65 +1,96 @@
-name: P08 PR83 exact R26 materializer isolated diagnostic
+name: P08 PR83 corrected R26 plus whole current dev_check
 on:
   pull_request:
     branches: [main]
-    paths:
-      - .github/workflows/p08-pr83-r26-diagnostic.yml
+    paths: [.github/workflows/p08-pr83-r26-diagnostic.yml]
 permissions:
   contents: read
 jobs:
-  r26-origin:
+  exact-current:
     if: github.repository == 'llhzx2018/core-free-runner-public' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'proof/p08-pr83-r26-exact-failure-20261120'
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
     steps:
-      - name: Checkout ephemeral runner
+      - name: Checkout temporary public runner harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Checkout exact P08 PR83 source
+      - name: Checkout exact private P08 candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-adops
-          ref: 57ec59e3a19b30e29798feb67b388a4f84dcd6df
+          ref: 77a32d85c24d9a5715c0831932108b8ac21df191
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           path: target
-      - name: PHP84 isolated runtime
+      - name: Setup native PHP 8.4 for isolated local tests
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.4'
-          extensions: curl,openssl,sqlite3,posix,fileinfo
+          tools: composer:v2
+          extensions: zip,curl,mbstring,pdo_mysql,pdo_sqlite,sqlite3,openssl,posix,fileinfo,dom,intl
           coverage: none
-      - name: Run unchanged R26 test and emit only safe failure code
+      - name: Verify original R26 test then exact source entire local developer gate
         shell: bash
-        env:
-          PYTHONDONTWRITEBYTECODE: '1'
         run: |
           set -Eeuo pipefail
           set +x
           test "$(id -u)" -ne 0
-          test "$(git -C target rev-parse HEAD)" = 57ec59e3a19b30e29798feb67b388a4f84dcd6df
-          log="$RUNNER_TEMP/p08-pr83-r26-private.log"
+          test "$(git -C target rev-parse HEAD)" = 77a32d85c24d9a5715c0831932108b8ac21df191
+          test "$(cat target/VERSION)" = 0.1.13
+          test -z "$(git -C target status --porcelain --untracked-files=all)"
           umask 077
-          php target/tests/test_atomic_release_materializer.php >"$log" 2>&1 && rc=0 || rc=$?
-          python3 - "$log" "$rc" <<'PY'
+          private="$RUNNER_TEMP/p08-pr83-r26-and-dev-private"
+          mkdir -m 700 "$private"
+          cd target
+          if php tests/test_atomic_release_materializer.php >"$private/r26.log" 2>&1; then
+            echo P08_PR83_R26_OLD_ATOMIC_MATERIALIZER=PASS
+          else
+            echo P08_PR83_R26_OLD_ATOMIC_MATERIALIZER=FAIL
+            python3 - "$private/r26.log" <<'PY'
           import re,sys
           from pathlib import Path
-          ls=Path(sys.argv[1]).read_text(errors='replace').splitlines()
-          print('P08_R26_EXACT_SOURCE_TEST_RC='+sys.argv[2])
-          for line in ls:
-              for marker in re.findall(r'\b(?:R26|R87)_[A-Z0-9_]{4,95}\b',line):
-                  print('P08_R26_FAILURE_CODE='+marker)
-              if re.match(r'^(?:PHP Fatal error: )?Uncaught [A-Za-z\\]+Exception',line):
-                  print('P08_R26_UNCAUGHT_EXCEPTION=YES')
+          for line in Path(sys.argv[1]).read_text(errors='replace').splitlines():
+              for m in re.findall(r'\b(?:R26|R87)_[A-Z0-9_]{4,95}\b',line):
+                  print("P08_PR83_R26_FAILURE_CODE="+m)
           PY
-          test "$(git -C target rev-parse HEAD)" = 57ec59e3a19b30e29798feb67b388a4f84dcd6df
-          if [ "$rc" -eq 0 ]; then echo P08_R26_EXACT_SOURCE=PASS; else echo P08_R26_EXACT_SOURCE=FAIL; fi
-      - name: Always wipe private source and logs
+            exit 21
+          fi
+          if bash -x scripts/dev_check.sh >"$private/all.log" 2>&1; then
+            grep -Fxq 'P08_OWNER_HISTORY_AND_SINGLE_CLICK_LOCAL_REGRESSIONS=PASS' "$private/all.log"
+            grep -Fxq 'R1_LOCAL_SOURCE_TESTS=PASS' "$private/all.log"
+            grep -Fxq 'FULL_RELEASE_READY=NO' "$private/all.log"
+            test -z "$(git status --porcelain --untracked-files=all)"
+            echo P08_PR83_FULL_DEV_CHECK=PASS
+            echo P08_PR83_REQUIRED_FOUR_OWNER_TESTS=PASS
+            echo P08_PR83_RELEASE_READY=NO
+          else
+            echo P08_PR83_FULL_DEV_CHECK=FAIL
+            python3 - "$private/all.log" <<'PY'
+          import re,sys
+          from pathlib import Path
+          lines=Path(sys.argv[1]).read_text(errors='replace').splitlines()
+          last='NOT_RESOLVED'
+          for x in lines:
+              m=re.match(r'^\+ (?:php|python3|bash) ((?:tests|scripts)/[A-Za-z0-9_./-]+\.(?:php|py|sh))(?=\s|$)',x)
+              if m:last=m.group(1)
+              if x.startswith('+ python3 -m unittest discover -s tests -p '):
+                  z=re.search(r'(test_[A-Za-z0-9_]+\.py)',x)
+                  if z:last='unittest/'+z.group(1)
+          print('P08_PR83_LAST_SUITE='+last)
+          for x in lines[-90:]:
+              for code in re.findall(r'\b(?:R26|R87|P08|PAIR)_[A-Z0-9_]{4,90}\b',x):
+                  print('P08_PR83_LAST_SAFE_CODE='+code)
+          PY
+            exit 22
+          fi
+      - name: Always clean private checkout and execution logs
         if: always()
         shell: bash
         run: |
-          rm -rf -- target "$RUNNER_TEMP/p08-pr83-r26-private.log"
+          rm -rf -- target "$RUNNER_TEMP/p08-pr83-r26-and-dev-private"
           test ! -e target
-          test ! -e "$RUNNER_TEMP/p08-pr83-r26-private.log"
-          echo P08_R26_EPHEMERAL_CLEANUP=PASS
+          test ! -e "$RUNNER_TEMP/p08-pr83-r26-and-dev-private"
+          echo P08_PR83_EPHEMERAL_CLEANUP=PASS
