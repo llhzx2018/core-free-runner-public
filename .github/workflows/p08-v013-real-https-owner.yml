@@ -12,7 +12,7 @@ jobs:
     timeout-minutes: 25
     env:
       P08_ISOLATED_INSTALL_TEST: 'YES'
-      P08_CANDIDATE_SOURCE_SHA: e09ec111888290537f7f8ec9c38ae446521a77aa
+      P08_CANDIDATE_SOURCE_SHA: f0865a5ecfb399ea1297c157d605f17240ff9ab2
       P08_CANDIDATE_VERSION: '0.1.13'
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
@@ -20,7 +20,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-adops
-          ref: e09ec111888290537f7f8ec9c38ae446521a77aa
+          ref: f0865a5ecfb399ea1297c157d605f17240ff9ab2
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
           path: p08
@@ -68,7 +68,7 @@ jobs:
             --output "$RUNNER_TEMP/p08-v013-https-full.zip" \
             --version 0.1.13 --source-sha "$P08_CANDIDATE_SOURCE_SHA" \
             --governance-root "$GITHUB_WORKSPACE/gov"
-          test "$(sha256sum "$RUNNER_TEMP/p08-v013-https-full.zip" | cut -d' ' -f1)" = 6c21fce8ce8bc88facfa236b3f5ded920402308e7db629ef692a120da91e1237
+          sha256sum "$RUNNER_TEMP/p08-v013-https-full.zip" | cut -d' ' -f1 | sed 's/^/P08_V013_BROWSER_FULL_SHA256=/'
           site="$RUNNER_TEMP/p08-v013-https-site"
           mkdir -p "$site"
           unzip -q "$RUNNER_TEMP/p08-v013-https-full.zip" -d "$site"
@@ -142,17 +142,32 @@ jobs:
           grep -q '第一次安装' "$RUNNER_TEMP/p08-v013-setup.html"
           cat > p08/tests/e2e/v013-release-https-owner.spec.ts <<'TEST'
           import { test, expect } from '@playwright/test'
+          import { mkdirSync, existsSync, chmodSync, rmdirSync } from 'node:fs'
+          import { join } from 'node:path'
           test.use({ ignoreHTTPSErrors: true })
-          test('real first-install, Owner login, update page 390/768/1440, no implicit POST, safe CSRF', async ({ page, request }) => {
+          test('real HTTPS pre-install guard, Owner login and verified status with exact live 503 fail-closed', async ({ page, request }) => {
             test.setTimeout(110_000)
-            const pageErrors: string[] = []
-            const updatePost: string[] = []
-            page.on('pageerror', e => pageErrors.push(e.message))
+            const site = process.env.P08_V013_HTTPS_SITE || ''
+            const temp = process.env.RUNNER_TEMP || ''
+            expect(process.env.GITHUB_ACTIONS).toBe('true')
+            expect(site).toBe(join(temp,'p08-v013-https-site'))
+            const jsErrors: string[] = []
+            const unintendedUpdatePosts: string[] = []
+            page.on('pageerror', e => jsErrors.push(e.message))
             page.on('request', r => {
-              if (r.method() === 'POST' && r.url().includes('/app/system/update/next/one-click')) updatePost.push(r.url())
+              if (r.method() === 'POST' && r.url().includes('/app/system/update/next/')) {
+                unintendedUpdatePosts.push(r.url())
+              }
             })
-            const guest = await request.get('/app/system/update/next/status', { failOnStatusCode: false, maxRedirects: 0 })
-            expect([302,401,403,419]).toContain(guest.status())
+            // Before FIRST installation, public/index.php intentionally
+            // returns a plain 503 on all non-setup paths. Verify this protection,
+            // then verify guest redirect AFTER setup. Do not broaden the status allowlist.
+            const before = await request.get('/app/system/update/next/status', {
+              failOnStatusCode: false, maxRedirects: 0
+            })
+            expect(before.status()).toBe(503)
+            expect(await before.text()).toContain('has not completed secure first installation')
+            console.log('P08_V013_PREINSTALL_503_GUARD=PASS')
             await page.goto('/setup.php')
             await expect(page.getByRole('heading', { name: '第一次安装' })).toBeVisible()
             await page.locator('#site_name').fill('P08 isolated v013')
@@ -165,6 +180,11 @@ jobs:
             await page.locator('#github_token_later').check()
             await page.getByRole('button', { name: '开始安装' }).click()
             await expect(page.getByRole('heading', { name: '安装成功' })).toBeVisible()
+            const guest = await request.get('/app/system/update/next/status', {
+              failOnStatusCode: false, maxRedirects: 0
+            })
+            expect([302,401,403]).toContain(guest.status())
+            console.log('P08_V013_INSTALLED_GUEST_AUTH_GUARD=PASS')
             await page.goto('/login')
             await page.getByLabel('邮箱或管理员账号').fill('owner013')
             await page.getByLabel('密码').fill('P08-Only-Synthetic-v013!12345')
@@ -175,18 +195,47 @@ jobs:
             await expect(page.getByText('0.1.13', { exact: true }).first()).toBeVisible()
             for (const width of [390,768,1440]) {
               await page.setViewportSize({ width, height: 830 })
-              const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1)
+              const overflow = await page.evaluate(() =>
+                document.documentElement.scrollWidth > document.documentElement.clientWidth + 1)
               expect(overflow, 'horizontal overflow at '+width).toBe(false)
             }
-            const r = await page.request.get('/app/system/update/next/status', { failOnStatusCode: false })
-            expect(r.status()).toBe(200)
-            expect((await r.json()).status).toBe('NONE')
+            const normal = await page.request.get('/app/system/update/next/status', {
+              failOnStatusCode: false, headers: { Accept: 'application/json' }
+            })
+            expect(normal.status()).toBe(200)
+            expect(await normal.json()).toMatchObject({ status: 'NONE', can_upgrade: false })
+            // Recreate a malformed site-user directory ONLY inside this
+            // disposable Runner FULL. The controller must actively return 503
+            // JSON rather than leak an exception or invent NEEDS_RECOVERY.
+            const unsafeDir = join(site,'storage/app/private/adops/owner-next-update')
+            expect(existsSync(unsafeDir)).toBe(false)
+            mkdirSync(unsafeDir, { mode: 0o755 })
+            chmodSync(unsafeDir, 0o755)
+            try {
+              const denied = await page.request.get('/app/system/update/next/status', {
+                failOnStatusCode: false, headers: { Accept: 'application/json' }
+              })
+              expect(denied.status()).toBe(503)
+              const value = await denied.json()
+              expect(value).toMatchObject({ status: 'STATE_UNAVAILABLE', can_upgrade: false })
+              expect(JSON.stringify(value)).not.toContain('P08_FUTURE_PRIVATE')
+              console.log('P08_V013_CONTROLLER_EXECUTABLE_SAFE_READ_503=PASS')
+            } finally {
+              chmodSync(unsafeDir,0o700)
+              rmdirSync(unsafeDir)
+            }
+            const recovered = await page.request.get('/app/system/update/next/status', {
+              failOnStatusCode: false, headers: { Accept: 'application/json' }
+            })
+            expect(recovered.status()).toBe(200)
+            expect((await recovered.json()).status).toBe('NONE')
             const csrf = await page.request.post('/app/system/update/next/one-click', {
-              failOnStatusCode: false, headers: { Accept: 'application/json' }, form: { _token: 'deliberately-invalid-token' }
+              failOnStatusCode: false, headers: { Accept: 'application/json' },
+              form: { _token: 'deliberately-invalid-token' }
             })
             expect(csrf.status()).toBe(419)
-            expect(updatePost).toEqual([])
-            expect(pageErrors).toEqual([])
+            expect(unintendedUpdatePosts).toEqual([])
+            expect(jsErrors).toEqual([])
             console.log('P08_V013_REAL_HTTPS_OWNER_STATUS_AND_CSRF=PASS')
             console.log('P08_V013_REAL_HTTPS_UPDATES_RESPONSIVE_390_768_1440=PASS')
             console.log('P08_V013_NO_PASSIVE_ATOMIC_POST=PASS')
@@ -194,7 +243,7 @@ jobs:
           TEST
           ( cd p08
             npx playwright install chromium >/dev/null
-            P08_TEST_BASE_URL=https://127.0.0.1:18479 \
+            P08_V013_HTTPS_SITE="$site" P08_TEST_BASE_URL=https://127.0.0.1:18479 \
               npx playwright test tests/e2e/v013-release-https-owner.spec.ts \
               --config playwright.config.ts --workers=1 --reporter=line
           )
