@@ -31,6 +31,9 @@ def generate(source: Path, target: Path, zip_sha: str, manifest_blob: str,
     content = source.read_text(encoding="utf-8")
     known = (
       ("BUILD='0.1.0-release141'", "BUILD='0.1.0-release142'"),
+      ('if (manifest.parent/"BUILD_ID").read_text().strip()!="0.1.0-release141": raise ValueError("build")',
+       'if (manifest.parent/"BUILD_ID").read_text().strip()!="0.1.0-release142": raise ValueError("build")'),
+      ('p07-m03-release141.XXXXXXXX','p07-m03-release142.XXXXXXXX'),
       ("RELEASE='p07-m03-v0.1.0-release141-limited-20261119'",
        "RELEASE='p07-m03-v0.1.0-release142-20261120'"),
       ("ZIP_NAME='P07-M03-0.1.0-release141.zip'",
