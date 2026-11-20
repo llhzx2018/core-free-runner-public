@@ -1,0 +1,209 @@
+name: P08 v013 real HTTPS Owner update UI Chromium responsive proof
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/p08-v013-real-https-owner.yml]
+permissions:
+  contents: read
+jobs:
+  real-https-owner:
+    if: github.repository == 'llhzx2018/core-free-runner-public' && github.event.pull_request.head.ref == 'proof/p08-v013-candidate-source-20261119' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      P08_ISOLATED_INSTALL_TEST: 'YES'
+      P08_CANDIDATE_SOURCE_SHA: e09ec111888290537f7f8ec9c38ae446521a77aa
+      P08_CANDIDATE_VERSION: '0.1.13'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Exact private P08 candidate checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: e09ec111888290537f7f8ec9c38ae446521a77aa
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p08
+      - name: Exact GOV-DOC Mode U candidate checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: a6e476ccc54fec29cf5264177cf65675b282d4da
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: gov
+      - name: PHP 8.4
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          extensions: zip,curl,mbstring,pdo_mysql,pdo_sqlite,sqlite3,openssl,posix,dom,intl,fileinfo
+          coverage: none
+      - name: Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build and strictly verify genuine FULL candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C p08 rev-parse HEAD)" = "$P08_CANDIDATE_SOURCE_SHA"
+          cd p08
+          npm ci --no-audit --no-fund
+          npm run build
+          composer install --no-dev --prefer-dist --no-interaction --no-progress --optimize-autoloader
+          git diff --exit-code
+          git diff --cached --exit-code
+          mapfile -t generated < <(git ls-files --others --exclude-standard)
+          for f in "${generated[@]}"; do
+            case "$f" in
+              bootstrap/cache/packages.php|bootstrap/cache/services.php)
+                test -f "$f" && ! test -L "$f" && rm -- "$f"
+                ;;
+              *) echo "P08_BROWSER_UNEXPECTED_UNTRACKED=$f"; exit 28 ;;
+            esac
+          done
+          test -z "$(git status --porcelain --untracked-files=all)"
+          python3 scripts/build_full.py --source "$PWD" \
+            --output "$RUNNER_TEMP/p08-v013-https-full.zip" \
+            --version 0.1.13 --source-sha "$P08_CANDIDATE_SOURCE_SHA" \
+            --governance-root "$GITHUB_WORKSPACE/gov"
+          test "$(sha256sum "$RUNNER_TEMP/p08-v013-https-full.zip" | cut -d' ' -f1)" = 6c21fce8ce8bc88facfa236b3f5ded920402308e7db629ef692a120da91e1237
+          site="$RUNNER_TEMP/p08-v013-https-site"
+          mkdir -p "$site"
+          unzip -q "$RUNNER_TEMP/p08-v013-https-full.zip" -d "$site"
+          mkdir -p "$site/database"
+          touch "$site/database/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.sqlite"
+          chmod 0600 "$site/database/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.sqlite"
+          echo P08_V013_HTTPS_EXACT_FINAL_FULL=PASS
+      - name: Real HTTPS session and responsive Chromium run against extracted ZIP
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          site="$RUNNER_TEMP/p08-v013-https-site"
+          cat > "$RUNNER_TEMP/p08-v013-router.php" <<'PHP'
+          <?php
+          $_SERVER['HTTPS']='on';
+          $_SERVER['SERVER_PORT']=443;
+          $_SERVER['HTTP_HOST']='127.0.0.1:18479';
+          $_SERVER['SERVER_NAME']='127.0.0.1';
+          $root=getenv('P08_V013_HTTPS_SITE');
+          $path=parse_url((string)($_SERVER['REQUEST_URI']??'/'),PHP_URL_PATH);
+          $static=is_string($path)?realpath($root.'/public'.$path):false;
+          if ($static!==false && is_string($static) && $path!=='/'
+              && str_starts_with($static,$root.'/public/')
+              && is_file($static) && !str_ends_with($static,'.php')) return false;
+          if ($path==='/setup.php') {
+            $_SERVER['SCRIPT_NAME']='/setup.php';
+            $_SERVER['PHP_SELF']='/setup.php';
+            require $root.'/public/setup.php';
+          } else {
+            $_SERVER['SCRIPT_NAME']='/index.php';
+            $_SERVER['PHP_SELF']='/index.php';
+            require $root.'/public/index.php';
+          }
+          PHP
+          cat > "$RUNNER_TEMP/p08-v013-tls.py" <<'PY'
+          import http.client,http.server,ssl,sys
+          cert,key=sys.argv[1:3]
+          class Handler(http.server.BaseHTTPRequestHandler):
+              protocol_version='HTTP/1.1'
+              def relay(self):
+                  n=int(self.headers.get('Content-Length','0'))
+                  body=self.rfile.read(n) if n else None
+                  upstream=http.client.HTTPConnection('127.0.0.1',18079,timeout=120)
+                  headers={k:v for k,v in self.headers.items() if k.lower() not in ('connection','transfer-encoding','proxy-connection')}
+                  upstream.request(self.command,self.path,body=body,headers=headers)
+                  r=upstream.getresponse();data=r.read()
+                  self.send_response(r.status)
+                  for k,v in r.getheaders():
+                      if k.lower() not in ('connection','content-length','transfer-encoding','date','server'):
+                          self.send_header(k,v)
+                  self.send_header('Content-Length',str(len(data)))
+                  self.end_headers();self.wfile.write(data);upstream.close()
+              do_GET=do_POST=do_PUT=do_DELETE=relay
+              def log_message(self,*a):pass
+          server=http.server.ThreadingHTTPServer(('127.0.0.1',18479),Handler)
+          ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+          ctx.load_cert_chain(cert,key)
+          server.socket=ctx.wrap_socket(server.socket,server_side=True)
+          server.serve_forever()
+          PY
+          openssl req -x509 -nodes -newkey rsa:2048 -keyout "$RUNNER_TEMP/p08-v013-key.pem" -out "$RUNNER_TEMP/p08-v013-cert.pem" -subj /CN=127.0.0.1 -days 1 >/dev/null 2>&1
+          P08_V013_HTTPS_SITE="$site" php -S 127.0.0.1:18079 -t "$site/public" "$RUNNER_TEMP/p08-v013-router.php" > "$RUNNER_TEMP/p08-v013-php.log" 2>&1 &
+          php_pid=$!
+          python3 "$RUNNER_TEMP/p08-v013-tls.py" "$RUNNER_TEMP/p08-v013-cert.pem" "$RUNNER_TEMP/p08-v013-key.pem" > "$RUNNER_TEMP/p08-v013-edge.log" 2>&1 &
+          tls_pid=$!
+          trap 'kill "$php_pid" "$tls_pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 35); do
+            if curl -kfsS --max-time 4 https://127.0.0.1:18479/setup.php -o "$RUNNER_TEMP/p08-v013-setup.html"; then break; fi
+            sleep 1
+          done
+          grep -q '第一次安装' "$RUNNER_TEMP/p08-v013-setup.html"
+          cat > p08/tests/e2e/v013-release-https-owner.spec.ts <<'TEST'
+          import { test, expect } from '@playwright/test'
+          test.use({ ignoreHTTPSErrors: true })
+          test('real first-install, Owner login, update page 390/768/1440, no implicit POST, safe CSRF', async ({ page, request }) => {
+            test.setTimeout(110_000)
+            const pageErrors: string[] = []
+            const updatePost: string[] = []
+            page.on('pageerror', e => pageErrors.push(e.message))
+            page.on('request', r => {
+              if (r.request?.method?.() === 'POST' && r.url().includes('/app/system/update/next/one-click')) updatePost.push(r.url())
+            })
+            const guest = await request.get('/app/system/update/next/status', { failOnStatusCode: false, maxRedirects: 0 })
+            expect([302,401,403,419]).toContain(guest.status())
+            await page.goto('/setup.php')
+            await expect(page.getByRole('heading', { name: '第一次安装' })).toBeVisible()
+            await page.locator('#site_name').fill('P08 isolated v013')
+            await page.locator('#owner_username').fill('owner013')
+            await page.locator('#owner_email').fill('owner013@isolated.example')
+            await page.locator('#owner_password').fill('P08-Only-Synthetic-v013!12345')
+            await page.locator('#owner_confirm').fill('P08-Only-Synthetic-v013!12345')
+            await page.locator('#db_driver').selectOption('sqlite')
+            await page.locator('#db_database').fill('a'.repeat(32) + '.sqlite')
+            await page.locator('#github_token_later').check()
+            await page.getByRole('button', { name: '开始安装' }).click()
+            await expect(page.getByRole('heading', { name: '安装成功' })).toBeVisible()
+            await page.goto('/login')
+            await page.getByLabel('邮箱或管理员账号').fill('owner013')
+            await page.getByLabel('密码').fill('P08-Only-Synthetic-v013!12345')
+            await page.getByRole('button', { name: '登录', exact: true }).click()
+            await expect(page).toHaveURL(/\/app(?:\?.*)?$/, { timeout: 20000 })
+            await page.getByRole('button', { name: '系统更新' }).click()
+            await expect(page.getByText('当前安装版本')).toBeVisible()
+            await expect(page.getByText('0.1.13', { exact: true }).first()).toBeVisible()
+            for (const width of [390,768,1440]) {
+              await page.setViewportSize({ width, height: 830 })
+              const overflow = await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth + 1)
+              expect(overflow, 'horizontal overflow at '+width).toBe(false)
+            }
+            const r = await page.request.get('/app/system/update/next/status', { failOnStatusCode: false })
+            expect(r.status()).toBe(200)
+            expect((await r.json()).status).toBe('NONE')
+            const csrf = await page.request.post('/app/system/update/next/one-click', {
+              failOnStatusCode: false, headers: { Accept: 'application/json' }, form: { _token: 'deliberately-invalid-token' }
+            })
+            expect(csrf.status()).toBe(419)
+            expect(updatePost).toEqual([])
+            expect(pageErrors).toEqual([])
+            console.log('P08_V013_REAL_HTTPS_OWNER_STATUS_AND_CSRF=PASS')
+            console.log('P08_V013_REAL_HTTPS_UPDATES_RESPONSIVE_390_768_1440=PASS')
+            console.log('P08_V013_NO_PASSIVE_ATOMIC_POST=PASS')
+          })
+          TEST
+          ( cd p08
+            npx playwright install chromium >/dev/null
+            P08_TEST_BASE_URL=https://127.0.0.1:18479 \
+              npx playwright test tests/e2e/v013-release-https-owner.spec.ts \
+              --config playwright.config.ts --workers=1 --reporter=line
+          )
+          echo P08_V013_CANDIDATE_HTTPS_BROWSER=PASS
+      - name: Destroy all private code browser sites and TLS keys
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- p08 gov "$RUNNER_TEMP/p08-v013-https-site" "$RUNNER_TEMP/p08-v013-https-full.zip"
+          rm -f -- "$RUNNER_TEMP"/p08-v013-{router.php,tls.py,php.log,edge.log,key.pem,cert.pem,setup.html}
+          test ! -e p08 && test ! -e gov
+          echo P08_V013_HTTPS_PRIVATE_SOURCE_CLEANUP=PASS
