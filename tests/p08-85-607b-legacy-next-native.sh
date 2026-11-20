@@ -60,6 +60,30 @@ phase NPM npm ci --prefix future --ignore-scripts --no-audit --no-fund
 cd future
 phase CHROMIUM npx playwright install --with-deps chromium
 cd ..
+# The original SQL installer chooses its isolated install URL, unlike the
+# SQLite fixture's loopback HTTPS. Rebind ONLY disposable APP_URL to this test's
+# TLS vhost, modeling normal deploy-time config without changing issued code.
+if [[ "$engine" != sqlite ]]; then
+  python3 - "$site/.env" <<'PY'
+from pathlib import Path
+from urllib.parse import urlsplit
+import sys
+p=Path(sys.argv[1])
+assert p.is_file() and not p.is_symlink(), "P08_TEST_SQL_APP_ENV_INVALID"
+lines=p.read_text().splitlines(keepends=True)
+idx=[i for i,line in enumerate(lines) if line.startswith("APP_URL=")]
+assert len(idx)==1, "P08_TEST_SQL_APP_URL_NOT_UNIQUE"
+i=idx[0]
+old=lines[i].split("=",1)[1].strip().strip('"').strip("'")
+u=urlsplit(old)
+assert u.scheme in {"http","https"} and u.hostname and not u.username and not u.password and not u.fragment, "P08_TEST_SQL_INSTALL_URL_INVALID"
+end="\\n" if lines[i].endswith("\\n") else ""
+lines[i]="APP_URL=https://127.0.0.1:18497"+end
+p.write_text("".join(lines))
+assert p.read_text().splitlines()[i]=="APP_URL=https://127.0.0.1:18497"
+print("P08_TEST_SQL_DEPLOY_APP_URL_TO_ISOLATED_HTTPS=PASS")
+PY
+fi
 python3 - "$site/.env" <<'PY'
 from pathlib import Path
 import sys
