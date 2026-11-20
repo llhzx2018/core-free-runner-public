@@ -62,10 +62,77 @@ fi
 python3 - "$site/.env" <<'PY'
 from pathlib import Path
 import sys
+import re
 p=Path(sys.argv[1]);s=p.read_text()
-assert 'APP_URL="https://adops.lanlihong.com"' in s
-p.write_text(s.replace('APP_URL="https://adops.lanlihong.com"',
-                       'APP_URL="https://127.0.0.1:18519"'))
+# The issued Owner installer uses distinct host fixtures across native DBs.
+# Accept only ONE HTTPS APP_URL and replace it in this disposable root.
+pattern=r'(?m)^APP_URL="https://[^"\\r\\n]{1,200}"
+PY
+# Keep all traffic local even if the disposable installer saved a fake PAT.
+token="$site/storage/app/private/adops/upgrade/github-read-token"
+[[ ! -L "$token" ]] || exit 44
+[[ ! -f "$token" ]] || rm -f -- "$token"
+cp p08/scripts/p08_owner_first_forward_013.php "$site/public/p08-owner-first-forward.php"
+chmod 0600 "$site/public/p08-owner-first-forward.php"
+phase WEB_PHP_LINT php -l "$site/public/p08-owner-first-forward.php"
+openssl req -x509 -nodes -days 1 -newkey rsa:2048 -keyout "$work/cert.key" -out "$work/cert.crt" \
+  -subj '/CN=127.0.0.1' -addext 'subjectAltName=IP:127.0.0.1' >>"$log" 2>&1
+cat > "$work/web-env.php" <<'PHP'
+<?php
+$_SERVER['HTTPS']='on';
+$_SERVER['SERVER_PORT']='443';
+PHP
+php -d "auto_prepend_file=$work/web-env.php" -S 127.0.0.1:19519 -t "$site/public" >"$work/php.log" 2>&1 &
+webpid="$!"
+for i in $(seq 1 70);do (echo >/dev/tcp/127.0.0.1/19519) >/dev/null 2>&1 && break;sleep 0.2;done
+kill -0 "$webpid"
+cat > "$work/nginx.conf" <<EOF
+worker_processes 1;
+pid $work/nginx.pid;
+error_log $work/nginx.log warn;
+events { worker_connections 256; }
+http {
+  include /etc/nginx/mime.types;
+  access_log off;
+  server {
+    listen 127.0.0.1:18519 ssl;
+    server_name 127.0.0.1;
+    ssl_certificate $work/cert.crt;
+    ssl_certificate_key $work/cert.key;
+    location / {
+      proxy_pass http://127.0.0.1:19519;
+      proxy_set_header Host 127.0.0.1:18519;
+      proxy_set_header X-Forwarded-Proto https;
+    }
+  }
+}
+EOF
+nginx -c "$work/nginx.conf" -p "$work" -g 'daemon off;' >"$work/nginx-stdout.log" 2>&1 &
+nginxpid="$!"
+for i in $(seq 1 80);do
+  curl -ksSf --connect-timeout 2 --max-time 2 https://127.0.0.1:18519/p08-owner-first-forward.php \
+    >"$work/guest.html" 2>/dev/null && break
+  sleep 0.2
+done
+kill -0 "$nginxpid"
+grep -Fq '验证管理员身份' "$work/guest.html" || { echo "P08_PR84_$engine"_GUEST_HTTPS=FAIL;exit 45; }
+echo "P08_PR84_$engine"_GUEST_HTTPS=PASS
+cd p08
+P08_TEST_BASE_URL=https://127.0.0.1:18519 \
+P08_013_FIRST_FORWARD_BROWSER=YES P08_ISOLATED_INSTALL_TEST=YES \
+P08_TEST_DB_DRIVER="$engine" \
+  npx playwright test tests/e2e/owner-v013-first-forward.spec.ts --workers=1 --reporter=list \
+  >>"$log" 2>&1 || { echo "P08_PR84_$engine"_OWNER_HTTPS_BROWSER=FAIL;exit 46; }
+cd ..
+echo "P08_PR84_$engine"_REAL_CHROMIUM_OWNER_CSRF_PASSWORD_NO_RELEASE=PASS
+[[ ! -f "$site/storage/app/private/adops/owner-next-update/intent.json" ]] || exit 47
+[[ "$(readlink "$site/current")" == "releases/$issued" ]] || exit 48
+echo "P08_PR84_$engine"_NO_NEW_INTENT_NO_POINTER_CHANGE=PASS
+echo "P08_PR84_$engine"_ISSUED_014_REAL_CLICK=NOT_RUN
+echo "P08_PR84_$engine"_FORMAL_RELEASE=NOT_AUTHORIZED
+
+assert len(re.findall(pattern,s))==1, 'isolated issued URL source ambiguous'
+p.write_text(re.sub(pattern,'APP_URL="https://127.0.0.1:18519"',s))
 PY
 # Keep all traffic local even if the disposable installer saved a fake PAT.
 token="$site/storage/app/private/adops/upgrade/github-read-token"
