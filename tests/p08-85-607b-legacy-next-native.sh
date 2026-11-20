@@ -77,7 +77,7 @@ i=idx[0]
 old=lines[i].split("=",1)[1].strip().strip('"').strip("'")
 u=urlsplit(old)
 assert u.scheme in {"http","https"} and u.hostname and not u.username and not u.password and not u.fragment, "P08_TEST_SQL_INSTALL_URL_INVALID"
-end="\\n" if lines[i].endswith("\\n") else ""
+end=chr(10) if lines[i].endswith(chr(10)) else ""
 lines[i]="APP_URL=https://127.0.0.1:18497"+end
 p.write_text("".join(lines))
 assert p.read_text().splitlines()[i]=="APP_URL=https://127.0.0.1:18497"
