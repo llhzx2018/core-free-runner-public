@@ -1,0 +1,122 @@
+name: P07 M03 D04 Percona84 SQL pre-import guard diagnostic
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-m03-d04-percona-guard-diagnose-20261120.yml'
+permissions:
+  contents: read
+jobs:
+  strict-guard-diagnostic:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      NO_COLOR: '1'
+      P07_NATIVE_DB_ENGINE: MYSQL_8.4
+      P07_MYSQL_NATIVE_CI: '1'
+      P07_NATIVE_DB_CONTAINER: p07-native-mysql8-source
+    steps:
+      - name: Checkout public temporary workflow
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact P07 private source temporarily
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 19bac6f4443266e7f9028f75ada7d79c761bd421
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .product
+      - name: Prepare isolated real Percona 8.4 source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C .product rev-parse HEAD)" = 19bac6f4443266e7f9028f75ada7d79c761bd421
+          docker pull percona/percona-server:8.4 >/dev/null
+          docker run -d --name p07-native-mysql8-source --network none \
+            -e MYSQL_ROOT_PASSWORD=SYNTHETIC_ci_root_2026 \
+            -e PERCONA_TELEMETRY_DISABLE=1 percona/percona-server:8.4 >/dev/null
+          ok=0
+          for i in $(seq 1 65); do
+            if docker exec -e MYSQL_PWD=SYNTHETIC_ci_root_2026 p07-native-mysql8-source \
+              mysql --no-defaults --protocol=tcp --host=127.0.0.1 \
+              --user=root --execute 'SELECT 1' >/dev/null 2>&1; then ok=1; break; fi
+            sleep 2
+          done
+          test "$ok" = 1
+          echo P07_SQL_DIAGNOSTIC_REAL_PERCONA84=PASS
+      - name: Classify real SQL guard rejection without disclosing SQL lines
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          sudo mkdir -p /home/p07native/htdocs
+          sudo chown -R "$(id -u):$(id -g)" /home/p07native
+          (cd .product && python3 -B - <<'PY'
+          import gzip,re,sys,unittest
+          from pathlib import Path
+          from unittest import mock
+          sys.path.insert(0, str(Path("lib").resolve()))
+          sys.path.insert(0, str(Path("tests").resolve()))
+          import test_p07_m03_d04_mysql_native_source_export as t
+          import verify
+          original=t.api.require_source_sql_safe_before_import
+          state={"invoked":0,"categories":set()}
+          def wrapped(path):
+              state["invoked"]+=1
+              known=verify._cross_engine_known_dynamic_guard_lines(path)
+              counts={"HEAD_CONTROL":0,"STACKED_SQL":0,"UNKNOWN_VERSION_GUARD":0,"COMMENT_UNCLOSED":0,"KNOWN_DYNAMIC":len(known)}
+              with gzip.open(path,"rt",encoding="utf-8",errors="strict") as stream:
+                  in_comment=False
+                  for n,raw in enumerate(stream,1):
+                      if n in known: continue
+                      line=raw.strip()
+                      if not line: continue
+                      if in_comment:
+                          if "*/" not in line: continue
+                          line=line.split("*/",1)[1].strip();in_comment=False
+                      if not line or line.startswith(("--","#")): continue
+                      if line==r"/*M!999999\- enable the sandbox mode */": continue
+                      while line.startswith("/*") and not re.match(r"^/\*(?:!|M!)",line,re.I):
+                          if "*/" not in line:
+                              in_comment=True;line="";break
+                          line=line.split("*/",1)[1].strip()
+                      if not line: continue
+                      m=verify._SQL_VERSIONED_HEAD_RE.fullmatch(line)
+                      if m: line=m.group(1).strip()
+                      elif re.match(r"^/\*(?:!|M!)[0-9]{5,6}\s+CREATE\s+TRIGGER\b",line,re.I):
+                          continue
+                      elif re.match(r"^/\*(?:!|M!)",line,re.I):
+                          counts["UNKNOWN_VERSION_GUARD"]+=1;continue
+                      if verify._SQL_SIDE_EFFECT_HEAD_RE.match(line):
+                          counts["HEAD_CONTROL"]+=1
+                          if re.match(r"^SET\s+@@\s*GLOBAL",line,re.I):state["categories"].add("GLOBAL")
+                          elif re.match(r"^SET",line,re.I):state["categories"].add("SET_OTHER")
+                          elif re.match(r"^GRANT",line,re.I):state["categories"].add("GRANT")
+                          elif re.match(r"^(?:PREPARE|EXECUTE|DEALLOCATE)",line,re.I):state["categories"].add("DYNAMIC")
+                          else:state["categories"].add("OTHER_HEAD")
+                      elif re.match(r"^(?:SET|SELECT|INSERT|REPLACE|UPDATE|DELETE|CREATE|ALTER|DROP|GRANT|REVOKE)\b",line,re.I) and verify._sql_line_stacks_commands(line):
+                          counts["STACKED_SQL"]+=1
+                  if in_comment:counts["COMMENT_UNCLOSED"]+=1
+              for k,v in counts.items():print("P07_SQL_GUARD_"+k+"="+str(v))
+              print("P07_SQL_GUARD_CONTROL_CATEGORIES="+",".join(sorted(state["categories"] or {"NONE"})))
+              return original(path)
+          with mock.patch.object(t.api,"require_source_sql_safe_before_import",side_effect=wrapped):
+              suite=unittest.defaultTestLoader.loadTestsFromTestCase(t.NativeSourceDatabaseOnlineExport)
+              with open("/dev/null","w") as sink:
+                  result=unittest.TextTestRunner(stream=sink).run(suite)
+          print("P07_SQL_GUARD_INTERCEPT_COUNT="+str(state["invoked"]))
+          print("P07_SQL_GUARD_TEST_ERRORS="+str(len(result.errors)))
+          print("P07_SQL_GUARD_TEST_FAILURES="+str(len(result.failures)))
+          PY
+          )
+      - name: Destroy all synthetic state and temporary source
+        if: always()
+        shell: bash
+        run: |
+          docker rm -f p07-native-mysql8-source >/dev/null 2>&1 || true
+          sudo rm -rf /home/p07native
+          rm -rf .product
+          echo P07_SQL_GUARD_DIAG_CLEANUP=YES
