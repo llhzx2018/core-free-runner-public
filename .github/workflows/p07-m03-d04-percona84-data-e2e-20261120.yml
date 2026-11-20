@@ -64,6 +64,72 @@ jobs:
             docker exec "$name" mysqldump --version >/dev/null
           done
           echo P07_D04_TWO_INDEPENDENT_NATIVE_PERCONA84_DB=PASS
+      - name: Classify strict SQL guard rejection using fixed labels only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export P07_NATIVE_DB_CONTAINER=p07-native-mysql8-source
+          (cd .product && python3 -B - <<'PY'
+          import gzip,re,sys,unittest
+          from pathlib import Path
+          sys.path.insert(0,str(Path("lib").resolve()))
+          sys.path.insert(0,str(Path("tests").resolve()))
+          import test_p07_m03_d04_mysql_native_source_export as test
+          import verify
+          test.DB="p07_native_snapshot_diagnostic"
+          original=test.online.verify_sql
+          def classified(api,dump):
+              known=verify._cross_engine_known_dynamic_guard_lines(dump)
+              reasons=[]
+              in_comment=False
+              with gzip.open(dump,"rt",encoding="utf-8",errors="strict") as handle:
+                  for number,raw in enumerate(handle,1):
+                      if number in known:
+                          continue
+                      line=raw.strip()
+                      if not line:
+                          continue
+                      if in_comment:
+                          if "*/" not in line:
+                              continue
+                          line=line.split("*/",1)[1].strip()
+                          in_comment=False
+                      if not line or line.startswith(("--","#")):
+                          continue
+                      if line==r"/*M!999999\- enable the sandbox mode */":
+                          continue
+                      while line.startswith("/*") and not re.match(r"^/\*(?:!|M!)",line,re.I):
+                          if "*/" not in line:
+                              in_comment=True;line="";break
+                          line=line.split("*/",1)[1].strip()
+                      if not line:
+                          continue
+                      match=verify._SQL_VERSIONED_HEAD_RE.fullmatch(line)
+                      if match:
+                          line=match.group(1).strip()
+                      elif re.match(r"^/\*(?:!|M!)[0-9]{5,6}\s+CREATE\s+TRIGGER\b",line,re.I):
+                          continue
+                      elif re.match(r"^/\*(?:!|M!)",line,re.I):
+                          reasons.append((number,"UNKNOWN_VERSIONED_SQL"))
+                          continue
+                      if verify._SQL_SIDE_EFFECT_HEAD_RE.match(line):
+                          reasons.append((number,"CONTROL_OR_PRIVILEGED_STATEMENT"))
+                      elif (re.match(r"^(?:SET|SELECT|INSERT|REPLACE|UPDATE|DELETE|CREATE|ALTER|DROP|GRANT|REVOKE)\b",line,re.I)
+                              and verify._sql_line_stacks_commands(line)):
+                          reasons.append((number,"STACKED_SQL_STATEMENT"))
+              if in_comment:
+                  reasons.append((0,"UNFINISHED_COMMENT"))
+              print("P07_D04_SQL_GUARD_REASON_COUNT="+str(len(reasons)))
+              for number,reason in reasons[:8]:
+                  print("P07_D04_SQL_GUARD_REASON="+reason+"@"+str(number))
+              return original(api,dump)
+          test.online.verify_sql=classified
+          suite=unittest.defaultTestLoader.loadTestsFromTestCase(test.NativeSourceDatabaseOnlineExport)
+          with open("/dev/null","w") as devnull:
+              r=unittest.TextTestRunner(stream=devnull).run(suite)
+          print("P07_D04_SQL_GUARD_DIAGNOSTIC_RETAINED="+str(len(r.errors)+len(r.failures)))
+          PY
+          )
       - name: Prepare synthetic isolated SSH, SQLite and static source test fixtures
         shell: bash
         run: |
