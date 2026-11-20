@@ -114,6 +114,28 @@ class Official142PublicDistribution(unittest.TestCase):
             self.assertEqual(canary(),before)
             self.assertTrue((root/"current/components/p07-m03-migration-readiness.sh").is_file())
 
+    def test_real_published_142_clean_full_install_and_idempotence(self):
+        """The exact public142 package must also FULL-install on an empty VPS slot."""
+        with tempfile.TemporaryDirectory(prefix="p07-142-public-clean-") as tmp:
+            root=Path(tmp);env=env_for(root)
+            first=run("bash",str(WRAPPER),"install",env=env)
+            self.assertEqual(first.returncode,0,(first.stdout+first.stderr)[-1600:])
+            self.assertEqual((root/"current/BUILD_ID").read_text().strip(),BUILD)
+            self.assertFalse((root/"previous").exists())
+            self.assertTrue((root/"current/components/p07-m03-migration-readiness.sh").is_file())
+            self.assertEqual(
+                git_blob((root/"current/.runtime-manifest.gitblob").read_bytes()),
+                RUNTIME_BLOB,
+            )
+            version=run(str(root/"bin/vfops"),"--build-id",env=env,timeout=15)
+            self.assertEqual(version.returncode,0,version.stderr[-300:])
+            self.assertEqual(version.stdout.strip(),BUILD)
+            before=(root/"current/.runtime-manifest.gitblob").read_bytes()
+            again=run("bash",str(WRAPPER),"install",env=env)
+            self.assertEqual(again.returncode,0,(again.stdout+again.stderr)[-1600:])
+            self.assertEqual((root/"current/BUILD_ID").read_text().strip(),BUILD)
+            self.assertEqual((root/"current/.runtime-manifest.gitblob").read_bytes(),before)
+
     def test_unknown_backup_refuses_without_moving_it(self):
         with tempfile.TemporaryDirectory(prefix="p07-142-unknown-") as tmp:
             root=Path(tmp);env=env_for(root)
