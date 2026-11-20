@@ -47,7 +47,9 @@ routes = {
     ("/repos/llhzx2018/vf-adops/releases/assets/" + str(asset_id), ""):
         (update, "application/octet-stream", "atomic"),
 }
-test_token = "github_pat_" + "r" * 45
+# Historical source test's original synthetic PAT, deliberately preserved.
+# This is NOT an Owner credential and is never printed or persisted in public logs.
+test_token = "github_pat_" + "Q" * 40
 tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 tls.load_cert_chain(str(certificate), str(key))
 

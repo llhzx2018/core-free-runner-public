@@ -6,7 +6,7 @@ const base=process.env.P08_TEST_BASE_URL||''
 const approved=process.env.GITHUB_ACTIONS==='true'
  && process.env.P08_ISOLATED_INSTALL_TEST==='YES'
  && process.env.P08_85_UNISSUED_POSITIVE==='YES'
- && base==='https://127.0.0.1:18519'
+ && base==='https://127.0.0.1:18497'
 test.skip(!approved,'P08 #85 strictly isolated loopback HTTPS only')
 test.use({ignoreHTTPSErrors:true})
 

@@ -63,16 +63,11 @@ cd ..
 python3 - "$site/.env" <<'PY'
 from pathlib import Path
 import sys
-p=Path(sys.argv[1]);s=p.read_text()
-# Only this disposable website: replace exactly one well-formed APP_URL line.
-# Official installers can serialize this setting differently on SQL vs SQLite.
-lines=s.splitlines()
-positions=[i for i,line in enumerate(lines) if line.startswith('APP_URL=')]
-assert len(positions)==1
-i=positions[0]
-assert 10<len(lines[i])<512 and '\\x00' not in lines[i]
-lines[i]='APP_URL="https://127.0.0.1:18519"'
-p.write_text('\n'.join(lines)+'\n')
+p=Path(sys.argv[1])
+lines=p.read_text().splitlines()
+values=[s.split("=",1)[1].strip().strip('"').strip("'") for s in lines if s.startswith("APP_URL=")]
+assert values==["https://127.0.0.1:18497"],"P08_TEST_ORIGINAL_ISOLATED_APP_URL_NOT_PRESERVED"
+print("P08_85_LEGACY_SAME_ORIGIN_CONFIG=PASS")
 PY
 # The original issued v012→v013 synthetic GitHub token is retained byte-for-byte.
 [[ -f "$token" && ! -L "$token" ]] || exit 44
@@ -99,13 +94,13 @@ http {
   include /etc/nginx/mime.types;
   access_log off;
   server {
-    listen 127.0.0.1:18519 ssl;
+    listen 127.0.0.1:18497 ssl;
     server_name 127.0.0.1;
     ssl_certificate $work/cert.crt;
     ssl_certificate_key $work/cert.key;
     location / {
       proxy_pass http://127.0.0.1:19519;
-      proxy_set_header Host 127.0.0.1:18519;
+      proxy_set_header Host 127.0.0.1:18497;
       proxy_set_header X-Forwarded-Proto https;
     }
   }
@@ -115,7 +110,7 @@ nginx -c "$work/nginx.conf" -p "$work" -g 'daemon off;' >"$work/nginx-stdout.log
 nginxpid="$!"
 for i in $(seq 1 80);do
   curl -ksS --connect-timeout 2 --max-time 2 -L -o "$work/guest.html" -w '%{http_code}' \
-    https://127.0.0.1:18519/login >"$work/guest-code" 2>/dev/null || true
+    https://127.0.0.1:18497/login >"$work/guest-code" 2>/dev/null || true
   [[ "$(cat "$work/guest-code")" == 200 ]] && break
   sleep 0.2
 done
@@ -261,7 +256,7 @@ echo "P08_85_$engine"_LOCAL_SYNTHETIC_CHANNEL_ONLY=READY
 # site-user old-v013 Worker: all exposed metadata is fake, package bytes real.
 cp scripts/p08_85_native_owner.spec.ts future/tests/e2e/p08-85-native-isolated.spec.ts
 cd future
-P08_TEST_BASE_URL=https://127.0.0.1:18519 \
+P08_TEST_BASE_URL=https://127.0.0.1:18497 \
 P08_85_UNISSUED_POSITIVE=YES P08_ISOLATED_INSTALL_TEST=YES \
 P08_TEST_DB_DRIVER="$engine" \
  npx playwright test tests/e2e/p08-85-native-isolated.spec.ts --workers=1 --reporter=list \
