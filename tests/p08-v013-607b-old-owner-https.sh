@@ -29,6 +29,20 @@ cleanup(){
   sudo rm -f /usr/local/share/ca-certificates/p08-v013-607b-local.crt || true
   sudo update-ca-certificates >/dev/null 2>&1 || true
   if [[ "$code" -ne 0 ]]; then
+    # The original PHP persists this stable SAFE code on its private intent;
+    # NEVER echo the private JSON, paths, tokens, DB records or worker logs.
+    php -r '
+    $p=$argv[1]."/storage/app/private/adops/owner-next-update/intent.json";
+    if (!is_link($p) && is_file($p) && filesize($p)<=8192) {
+      $j=json_decode((string)file_get_contents($p),true);
+      if(is_array($j)){
+        foreach(["failure_phase","failure_code","status"] as $k){
+          $v=$j[$k]??"NOT_RECORDED";
+          if(is_string($v)&&preg_match("/^[A-Z][A-Z0-9_]{2,120}$/D",$v))
+            echo "P08_607B_SAFE_".$k."=".$v."\n";
+        }
+      }
+    }' "$web" || true
     echo P08_607B_HTTPS_OLD_CLIENT_MACHINE_GATE=FAIL >&2
   fi
   exit "$code"
