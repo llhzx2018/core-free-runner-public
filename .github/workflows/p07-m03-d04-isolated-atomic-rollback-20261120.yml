@@ -1,0 +1,158 @@
+name: P07-M03-D04 exact-source isolated Atomic install and rollback
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-m03-d04-isolated-atomic-rollback-20261120.yml'
+permissions:
+  contents: read
+jobs:
+  isolated-atomic:
+    if: github.repository == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      P07_PRODUCT_SHA: '19bac6f4443266e7f9028f75ada7d79c761bd421'
+      P07_ALLOW_NONROOT: '1'
+      P07_NO_EXEC: '1'
+      NO_COLOR: '1'
+    steps:
+      - name: Checkout temporary public test workflow without retaining credential
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact private product SHA in temporary workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 19bac6f4443266e7f9028f75ada7d79c761bd421
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .product
+      - name: Verify original release142 and build exact-source unpublished candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C .product rev-parse HEAD)" = "$P07_PRODUCT_SHA"
+          for program in curl tar python3 sha256sum bash mktemp unzip git; do
+            command -v "$program" >/dev/null || exit 11
+          done
+          box="$RUNNER_TEMP/p07-m03-d04-atomic"
+          mkdir -p "$box"
+          curl -fsSL --retry 2 --max-time 90 \
+            'https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m03-v0.1.0-release142-20261120/P07-M03-0.1.0-release142.zip' \
+            -o "$box/official142.zip"
+          printf '%s  %s\n' 'dc6978463e8e73a224e7cccb2bdffe9710bc3bb478076b670703bbb164bda87e' "$box/official142.zip" | sha256sum -c --status
+          python3 -B .product/scripts/p07_m03_trial_from_official.py \
+            --official-zip "$box/official142.zip" --official-build 0.1.0-release142 \
+            --product-root .product --product-sha "$P07_PRODUCT_SHA" \
+            --build 0.1.0-release144-rc1 --output "$box/candidate144.zip" \
+            > "$box/candidate-build.log" 2>&1 || {
+              echo P07_M03_D04_EXACT_SOURCE_CANDIDATE_BUILD=FAIL; exit 1;
+            }
+          grep -Fxq 'P07_M03_TRIAL_BUILD=PASS' "$box/candidate-build.log"
+          python3 - "$box" <<'PY'
+          import sys, zipfile
+          from pathlib import Path
+          box=Path(sys.argv[1])
+          for archive,folder in (("official142.zip","official"),
+                                 ("candidate144.zip","candidate")):
+              with zipfile.ZipFile(box/archive) as z:
+                  assert z.testzip() is None
+                  z.extractall(box/folder)
+              assert (box/folder/"installers/p07-final.sh").is_file()
+          candidate=box/"candidate/dist/p07/0.1.0/overlay"
+          assert (candidate/"lib/migration_native_datadir_guard.py").is_file()
+          assert (candidate/"BUILD_ID").read_text().strip()=="0.1.0-release144-rc1"
+          print("P07_M03_D04_OFFICIAL_ZIP_UNPUBLISHED_ARCHIVE=PASS")
+          PY
+          echo P07_M03_D04_EXACT_SOURCE_ASSET_READY=PASS
+      - name: Real isolated install, upgrade, bad-runtime rejection and no-op idempotence
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          box="$RUNNER_TEMP/p07-m03-d04-atomic"
+          export P07_INSTALL_DIR="$box/active" P07_PREVIOUS_DIR="$box/previous"
+          export P07_BIN_LINK="$box/bin/vfops"
+          export P07_PUBLIC_ROOT="file://$box/official"
+          bash "$box/official/installers/p07-final.sh" > "$box/install142.log" 2>&1 || {
+            echo P07_M03_D04_ISOLATED_142_FRESH_INSTALL=FAIL
+            grep -E '错误|FAILED|失败|不匹配|未通过' "$box/install142.log" | tail -n 8 | cut -c1-145 || true
+            exit 1
+          }
+          test "$(cat "$P07_INSTALL_DIR/BUILD_ID")" = 0.1.0-release142
+          test -L "$P07_BIN_LINK"
+          test ! -e "$P07_PREVIOUS_DIR"
+          echo P07_M03_D04_ISOLATED_142_FRESH_INSTALL=PASS
+          before="$(sha256sum "$P07_INSTALL_DIR/.runtime-manifest.gitblob" | awk '{print $1}')"
+          cp -a "$box/candidate" "$box/corrupt"
+          echo invalid-synthetic-input >> "$box/corrupt/dist/p07/0.1.0/overlay/lib/migration_native_datadir_guard.py"
+          export P07_PUBLIC_ROOT="file://$box/corrupt"
+          if bash "$box/corrupt/installers/p07-final.sh" > "$box/corrupt.log" 2>&1; then
+            echo P07_M03_D04_CORRUPT_RUNTIME_REJECTED=FAIL
+            exit 1
+          fi
+          test "$(cat "$P07_INSTALL_DIR/BUILD_ID")" = 0.1.0-release142
+          test "$(sha256sum "$P07_INSTALL_DIR/.runtime-manifest.gitblob" | awk '{print $1}')" = "$before"
+          test ! -e "$P07_PREVIOUS_DIR"
+          echo P07_M03_D04_CORRUPT_RUNTIME_REJECTED=PASS
+          export P07_PUBLIC_ROOT="file://$box/candidate"
+          bash "$box/candidate/installers/p07-final.sh" > "$box/upgrade144.log" 2>&1 || {
+            echo P07_M03_D04_ISOLATED_ATOMIC_UPGRADE=FAIL
+            grep -E '错误|FAILED|失败|不匹配|未通过' "$box/upgrade144.log" | tail -n 8 | cut -c1-145 || true
+            exit 1
+          }
+          test "$(cat "$P07_INSTALL_DIR/BUILD_ID")" = 0.1.0-release144-rc1
+          test "$(cat "$P07_PREVIOUS_DIR/BUILD_ID")" = 0.1.0-release142
+          test -L "$P07_BIN_LINK"
+          test "$(readlink "$P07_BIN_LINK")" = "$P07_INSTALL_DIR/bin/vfops-user"
+          test -f "$P07_INSTALL_DIR/lib/migration_native_datadir_guard.py"
+          oldsha="$(sha256sum "$P07_PREVIOUS_DIR/.runtime-manifest.gitblob" | awk '{print $1}')"
+          test "$oldsha" = "$before"
+          echo P07_M03_D04_ISOLATED_ATOMIC_UPGRADE=PASS
+          bash "$box/candidate/installers/p07-final.sh" > "$box/idempotent.log" 2>&1
+          test "$(cat "$P07_PREVIOUS_DIR/BUILD_ID")" = 0.1.0-release142
+          test "$(sha256sum "$P07_PREVIOUS_DIR/.runtime-manifest.gitblob" | awk '{print $1}')" = "$before"
+          echo P07_M03_D04_ISOLATED_IDEMPOTENT=PASS
+      - name: Inject actual post-swap installer failure and verify automatic data-free rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          box="$RUNNER_TEMP/p07-m03-d04-atomic"
+          export P07_INSTALL_DIR="$box/fault-active" P07_PREVIOUS_DIR="$box/fault-previous"
+          export P07_BIN_LINK="$box/fault-bin/vfops"
+          export P07_PUBLIC_ROOT="file://$box/official"
+          bash "$box/official/installers/p07-final.sh" > "$box/fault-seed.log" 2>&1
+          test "$(cat "$P07_INSTALL_DIR/BUILD_ID")" = 0.1.0-release142
+          before="$(sha256sum "$P07_INSTALL_DIR/.runtime-manifest.gitblob" | awk '{print $1}')"
+          mkdir "$box/shim"
+          cat > "$box/shim/ln" <<'SH'
+          #!/usr/bin/env bash
+          if [[ "$1" == "-sfn" && "$2" == "$P07_FAULT_BIN_TARGET" && ! -e "$P07_FAULT_MARKER" ]]; then
+            printf '%s\n' 'injected-once' > "$P07_FAULT_MARKER"
+            exit 86
+          fi
+          exec /usr/bin/ln "$@"
+          SH
+          chmod 0700 "$box/shim/ln"
+          export P07_FAULT_MARKER="$box/fault-triggered"
+          export P07_FAULT_BIN_TARGET="$P07_INSTALL_DIR/bin/vfops-user"
+          export P07_PUBLIC_ROOT="file://$box/candidate"
+          if PATH="$box/shim:$PATH" bash "$box/candidate/installers/p07-final.sh" > "$box/injected-failure.log" 2>&1; then
+            echo P07_M03_D04_POST_SWAP_FAULT_ROLLBACK=FAIL_NO_INJECTION
+            exit 1
+          fi
+          test -f "$P07_FAULT_MARKER"
+          test "$(cat "$P07_INSTALL_DIR/BUILD_ID")" = 0.1.0-release142
+          test "$(sha256sum "$P07_INSTALL_DIR/.runtime-manifest.gitblob" | awk '{print $1}')" = "$before"
+          test ! -e "$P07_PREVIOUS_DIR"
+          test -L "$P07_BIN_LINK"
+          test "$(readlink "$P07_BIN_LINK")" = "$P07_INSTALL_DIR/bin/vfops-user"
+          echo P07_M03_D04_POST_SWAP_FAULT_ROLLBACK=PASS
+      - name: Clean all temporary private source, official and candidate bytes
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- .product "$RUNNER_TEMP/p07-m03-d04-atomic"
+          echo P07_M03_D04_PRIVATE_TEMP_AND_PACKAGES_CLEANED=YES
