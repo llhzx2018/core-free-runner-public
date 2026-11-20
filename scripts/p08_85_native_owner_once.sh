@@ -151,7 +151,12 @@ print("P08_85_"+engine+"_GUEST_HTTP="+(status if re.fullmatch(r"\d{3}",status) e
 print("P08_85_"+engine+"_GUEST_BODY_SIZE_CATEGORY="+("EMPTY" if not txt else "PRESENT"))
 for k,v in flags.items():print("P08_85_"+engine+"_SAFE_GUEST_"+k+"="+("YES" if v else "NO"))
 PY
-grep -Fq 'id="app"' "$work/guest.html" || grep -Fq 'data-page=' "$work/guest.html" || {
+# Actual v0.1.13 /login is a Blade page, NOT Inertia HTML.
+# The previous assertion demanded an app root and falsely failed 3/3
+# despite HTTP=200 and a real Login page. Verify real Blade form fields.
+grep -Fq 'class="login-shell"' "$work/guest.html" &&
+grep -Fq 'name="login"' "$work/guest.html" &&
+grep -Fq 'name="password"' "$work/guest.html" || {
   echo "P08_85_$engine"_GUEST_HTTPS=FAIL; exit 45;
 }
 echo "P08_85_$engine"_GUEST_HTTPS=PASS
