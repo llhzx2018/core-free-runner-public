@@ -1,0 +1,189 @@
+name: P07 release102 package closure exact-source proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-release102-package-closure-proof.yml'
+permissions:
+  contents: read
+jobs:
+  verify:
+    if: github.repository == 'llhzx2018/core-free-runner-public' && github.head_ref == 'test/p07-release102-package-closure-20261029' && github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      PRODUCT_SHA: 058fac7c1f476fa0021444fb36fa15c1df4e8f84
+    steps:
+      - name: Require configured private source read capability
+        env:
+          VF_PRIVATE_READ_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          test -n "$VF_PRIVATE_READ_TOKEN" || { echo P07_PRIVATE_READ_UNAVAILABLE; exit 78; }
+      - name: Checkout public distribution baseline
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact P07 release102 candidate transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 058fac7c1f476fa0021444fb36fa15c1df4e8f84
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p07-private
+      - name: Verify exact source and package closure regressions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd p07-private
+          test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(cat BUILD_ID)" = '0.1.0-release102'
+          bash -n bin/vfops
+          bash bin/vfops --help | grep -F 'vfops server-migrate diagnose-sql --migration-id ID --domain DOMAIN'
+          python3 -B -m py_compile lib/server_migration_pull.py lib/sql_diff_evidence.py scripts/p07_candidate_bundle.py
+          export PYTHONPATH="$PWD/lib:$PWD"
+          for test_file in test_sql_diff_evidence.py test_sql_diff_command.py test_cross_engine_sql_format.py test_server_migration_pull.py test_verify.py test_mariadb_owner_policy.py test_secret_scan.py test_p07_bundle_identity.py; do
+            python3 -B -m unittest discover -s tests -p "$test_file" -v
+          done
+          python3 -B scripts/secret_scan.py --root .
+          git diff --exit-code
+          echo P07_RELEASE102_PACKAGE_CLOSURE_EXACT_SOURCE_PASS
+      - name: Stage isolated release102 package from exact source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -B p07-private/scripts/p07_candidate_bundle.py --product-root p07-private --public-root . --output "$RUNNER_TEMP/p07-release102-candidate" --product-sha "$PRODUCT_SHA" --build 0.1.0-release102 --care 0.1.0-rc71
+          test "$(grep -c '  lib/sql_diff_evidence.py' "$RUNNER_TEMP/p07-release102-candidate/dist/p07/0.1.0/overlay/RUNTIME.gitblob")" = 1
+          test "$(grep -c '  tests/test_sql_diff_evidence.py' "$RUNNER_TEMP/p07-release102-candidate/dist/p07/0.1.0/overlay/MANIFEST.gitblob")" = 1
+          echo P07_RELEASE102_ISOLATED_PACKAGE_PASS
+      - name: Isolated release101 to release102 install upgrade and rollback gates
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          base="$PWD"
+          candidate="$RUNNER_TEMP/p07-release102-candidate"
+          root="$RUNNER_TEMP/p07-release102-install-gate"
+          mkdir -p "$root"
+          export P07_ALLOW_NONROOT=1 P07_NO_EXEC=1 P07_TOOLBOX_PARENT=1
+          export P07_PREVIOUS_DIR="$root/previous" P07_BIN_LINK="$root/vfops"
+          export P07_INSTALL_DIR="$root/installed"
+          export P07_PUBLIC_ROOT="file://$base"
+          echo PRESERVE_EXTERNAL_VFOPS_STATE > "$root/external-state"
+          # A genuine release101 installed runtime is the upgrade baseline.
+          bash "$base/installers/p07-final.sh" > "$root/old-install.log" 2>&1
+          test "$("$root/vfops" --build-id)" = 0.1.0-release101
+          test -f "$root/installed/.runtime-manifest.gitblob"
+          echo P07_RELEASE101_ISOLATED_BASELINE_PASS
+          # Failure AFTER the runtime directory swap must automatically restore release101.
+          touch "$root/not-a-directory"
+          if P07_PUBLIC_ROOT="file://$candidate" P07_BIN_LINK="$root/not-a-directory/vfops" bash "$candidate/installers/p07-final.sh" > "$root/injected-failure.log" 2>&1; then
+            echo P07_FAILURE_INJECTION_NOT_REJECTED >&2
+            exit 1
+          fi
+          test "$("$root/vfops" --build-id)" = 0.1.0-release101
+          test "$(cat "$root/installed/BUILD_ID")" = 0.1.0-release101
+          test ! -e "$root/installed.new"
+          test ! -e "$root/previous"
+          echo P07_RELEASE102_FAILURE_ATOMIC_ROLLBACK_PASS
+          # Successful upgrade must preserve the previous release and external state.
+          P07_PUBLIC_ROOT="file://$candidate" bash "$candidate/installers/p07-final.sh" > "$root/upgrade.log" 2>&1
+          test "$("$root/vfops" --build-id)" = 0.1.0-release102
+          test "$(cat "$root/previous/BUILD_ID")" = 0.1.0-release101
+          test -f "$root/installed/lib/sql_diff_evidence.py"
+          test "$(cat "$root/external-state")" = PRESERVE_EXTERNAL_VFOPS_STATE
+          echo P07_RELEASE101_TO_RELEASE102_ISOLATED_UPGRADE_PASS
+          # Repeating the same exact release must short-circuit, not destroy rollback.
+          P07_PUBLIC_ROOT="file://$candidate" bash "$candidate/installers/p07-final.sh" > "$root/repeat.log" 2>&1
+          grep -Fq '已是当前版本，无需下载或重复安装' "$root/repeat.log"
+          test "$(cat "$root/previous/BUILD_ID")" = 0.1.0-release101
+          echo P07_RELEASE102_IDEMPOTENT_REPEAT_PASS
+          # A tampered distribution must be refused before touching the installation.
+          cp -a "$candidate" "$root/corrupt-distribution"
+          printf '#tampered\n' >> "$root/corrupt-distribution/dist/p07/0.1.0/overlay/lib/sql_diff_evidence.py"
+          rm -rf "$root/clean-install"
+          if P07_PUBLIC_ROOT="file://$root/corrupt-distribution" P07_INSTALL_DIR="$root/clean-install" P07_PREVIOUS_DIR="$root/clean-previous" P07_BIN_LINK="$root/clean-vfops" bash "$candidate/installers/p07-final.sh" > "$root/corrupt.log" 2>&1; then
+            echo P07_TAMPERED_DISTRIBUTION_WAS_ACCEPTED >&2
+            exit 1
+          fi
+          test ! -e "$root/clean-install"
+          test "$("$root/vfops" --build-id)" = 0.1.0-release102
+          echo P07_RELEASE102_TAMPER_FAIL_CLOSED_PASS
+          # Fresh install with the untampered candidate, isolated to a new path.
+          P07_PUBLIC_ROOT="file://$candidate" P07_INSTALL_DIR="$root/fresh" P07_PREVIOUS_DIR="$root/fresh-previous" P07_BIN_LINK="$root/fresh-vfops" bash "$candidate/installers/p07-final.sh" > "$root/fresh.log" 2>&1
+          test "$("$root/fresh-vfops" --build-id)" = 0.1.0-release102
+          test ! -e "$root/fresh-previous"
+          test -f "$root/fresh/lib/sql_diff_evidence.py"
+          echo P07_RELEASE102_FRESH_ISOLATED_INSTALL_PASS
+          # Recovery uses the retained immutable release101 tree, not a re-migration.
+          mv "$root/installed" "$root/replaced-102"
+          mv "$root/previous" "$root/installed"
+          test "$("$root/vfops" --build-id)" = 0.1.0-release101
+          test "$(cat "$root/external-state")" = PRESERVE_EXTERNAL_VFOPS_STATE
+          echo P07_RELEASE102_TO_RELEASE101_RECOVERY_PASS
+      - name: Stage release102 public distribution candidate as a draft PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          test -n "$GH_TOKEN" || { echo P07_RELEASE_WRITE_CAPABILITY_MISSING; exit 78; }
+          candidate="$RUNNER_TEMP/p07-release102-candidate"
+          test -f "$candidate/candidate_attestation.json"
+          git fetch origin main
+          test "$(git rev-parse origin/main)" = 672ae979f28dce8f05ba36d7bb056394e3f49e81 || { echo P07_PUBLIC_MAIN_MOVED; exit 78; }
+          git switch -c release/p07-release102-distribution-20261029 origin/main
+          cp -a "$candidate/dist/p07/0.1.0/overlay/." dist/p07/0.1.0/overlay/
+          cp -a "$candidate/installers/." installers/
+          cp -a "$candidate/packages/p07-system-care/0.1.0-rc71" packages/p07-system-care/
+          cp "$candidate/candidate_attestation.json" experiments/p07-release102-attestation.json
+          python3 - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          a=json.loads(Path('experiments/p07-release102-attestation.json').read_text())
+          assert a['status']=='FORMAL_STAGING_NOT_PUBLISHED'
+          assert a['product_source_sha']=='058fac7c1f476fa0021444fb36fa15c1df4e8f84'
+          assert a['product_build']=='0.1.0-release102'
+          assert a['system_care_build']=='0.1.0-rc71'
+          def blob(p):
+              data=p.read_bytes()
+              return hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+          root=Path('dist/p07/0.1.0/overlay')
+          def check_manifest(root,name):
+              paths=set()
+              for line in (root/name).read_text().splitlines():
+                  sha,path=line.split('  ',1)
+                  assert path not in paths and '..' not in Path(path).parts
+                  paths.add(path)
+                  assert blob(root/path)==sha,path
+              return paths
+          runtime=check_manifest(root,'RUNTIME.gitblob')
+          full=check_manifest(root,'MANIFEST.gitblob')
+          care=Path('packages/p07-system-care/0.1.0-rc71')
+          check_manifest(care,'MANIFEST.gitblob')
+          assert len(runtime)==45 and len(full)==98,(len(runtime),len(full))
+          assert runtime <= full
+          assert 'lib/sql_diff_evidence.py' in runtime
+          assert {'tests/test_sql_diff_command.py','tests/test_sql_diff_evidence.py'} <= full
+          assert blob(root/'RUNTIME.gitblob')==a['runtime_manifest_blob']
+          assert blob(root/'MANIFEST.gitblob')==a['overlay_manifest_blob']
+          assert blob(care/'MANIFEST.gitblob')==a['system_care_manifest_blob']
+          assert blob(Path('installers/p07-final.sh'))==a['final_installer_blob']
+          assert a['final_installer_blob'] in Path('installers/p07.sh').read_text()
+          assert not any(a['negative'].values())
+          print('P07_RELEASE102_PUBLIC_STAGING_PREFLIGHT_PASS')
+          PY
+          bash -n installers/p07.sh installers/p07-final.sh installers/p07-toolbox.sh installers/p07-system-care.sh
+          git add dist/p07/0.1.0/overlay installers/p07.sh installers/p07-final.sh installers/p07-toolbox.sh installers/p07-system-care.sh packages/p07-system-care/0.1.0-rc71 experiments/p07-release102-attestation.json
+          test -n "$(git diff --cached --name-only)"
+          git -c user.name='VF Release Runner' -c user.email='vf-release-runner@users.noreply.github.com' commit -m 'chore(p07): stage release102 exact-source public distribution'
+          gh auth setup-git
+          git push origin HEAD:refs/heads/release/p07-release102-distribution-20261029
+          gh pr create -R llhzx2018/core-free-runner-public --head release/p07-release102-distribution-20261029 --base main --draft --title 'P07 release102 verified distribution candidate' --body 'Exact source 058fac7c1f476fa0021444fb36fa15c1df4e8f84, targeted 190 tests, installed release101 upgrade, fail-closed, clean install and rollback PASS (#40882652910). Public distribution PR only; no migration or Production writes.'
+          echo P07_RELEASE102_PUBLIC_DISTRIBUTION_DRAFT_CREATED
+      - name: Remove isolated candidate and private source
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- "$RUNNER_TEMP/p07-release102-candidate" "$RUNNER_TEMP/p07-release102-install-gate"
+          if [ -d p07-private ]; then rm -rf -- p07-private; fi
+          echo P07_PRIVATE_AND_ISOLATED_FIXTURES_CLEANUP_DONE
