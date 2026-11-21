@@ -97,6 +97,17 @@ test('issued v014 in-app normal one-click → native backup → 014 same-site re
   await page.getByRole('button',{name:'系统更新'}).click()
   await expect(page.getByRole('region',{name:'系统更新工作区'}))
     .toContainText('当前版本 0.1.15',{timeout:30000})
+  // Verify actual NEW v015 visible UI (the source of the Owner complaint),
+  // not only the old v014 screen before the explicit click.
+  for(const width of [390,768,1440]){
+    await page.setViewportSize({width,height:860})
+    expect(await page.evaluate(()=>document.documentElement.scrollWidth
+      <= document.documentElement.clientWidth+1)).toBe(true)
+    await expect(page.getByRole('region',{name:'系统更新工作区'}))
+      .toContainText('当前版本 0.1.15')
+    await expect(page.getByText('升级成功',{exact:true})).toHaveCount(0)
+  }
+  console.log('P08_85_ISSUED_V014_TO_NEW_V015_THREE_VIEWPORTS_NO_FALSE_SUCCESS=PASS')
   const replay=await page.context().request.post('/app/system/update/next/one-click',{
     form:{_token:'repeat-old-intent'},failOnStatusCode:false,maxRedirects:0,
     headers:{Accept:'application/json'},
