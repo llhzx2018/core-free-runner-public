@@ -63,7 +63,7 @@ if (($result['status']??null)!=='OFFICIAL_NEXT_VERIFIED_NOT_STAGED'
       !=='e8b949d46f6adba0221c6a258c2e844891379494f7ed5b8dcb5903689e4fe51f') {
     throw new RuntimeException('P08_V015_ONLINE_OLD_CLIENT_REAL_CHANNEL_MISMATCH');
 }
-echo "P08_V015_OLD_SHIPPED_V013_PHP_REAL_OFFICIAL_CHANNEL_RELEASE_TAG_SHA=PASS\n";
+echo "P08_V015_OLD_SHIPPED_V014_PHP_REAL_OFFICIAL_CHANNEL_RELEASE_TAG_SHA=PASS\n";
 $gate->verifyArchive($result,$zip);
 echo "P08_V015_OLD_SHIPPED_PHP_REAL_REMOTE_ATOMIC_ARCHIVE_VERIFY=PASS\n";
 $alreadyCurrent=[
@@ -91,12 +91,12 @@ echo "P08_V015_OLD_PHP_FORGED_CURRENT_SOURCE_REJECTED=PASS\n";
 
 
 // Negative: a previous issued CLEAN v013 FULL is NOT the original
-// issued Atomic-origin. The LIVE old gateway MUST reject it.
+// valid v0.1.14 source manifest. The LIVE old gateway MUST reject it.
 $clean=$installed;
 $clean['source_full_manifest_sha256']='c7ea39bba377507c335031801a7f1d193de0ddd04715547abdb067928ef7cd5d';
 try {
     $gate->check($token,$clean);
-    throw new RuntimeException('P08_V015_UNSUPPORTED_CLEAN_012_WAS_ACCEPTED');
+    throw new RuntimeException('P08_V015_UNSUPPORTED_V013_ORIGIN_WAS_ACCEPTED');
 } catch (\RuntimeException $e) {
     if ($e->getMessage()!=='P08_NEXT_SOURCE_OR_SCHEMA_UNSUPPORTED')throw $e;
 }
