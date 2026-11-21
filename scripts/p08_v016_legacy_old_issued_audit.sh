@@ -6,7 +6,7 @@ set +x
 engine="$1"
 [[ "$engine" =~ ^(sqlite|mysql|mariadb)$ ]] || exit 3
 old=369fcb0aa8fef71b0a2b79c2b7a6c473d2527c3e
-target=6a210390d67923dd35f3cc18297d32f6ebef8131
+target=e28dcbb0a28ad7e8308746881a81b1c739c86b01
 old_zip_sha=538d161339849214999eb6f85da40623a149fc9cf1b592c9e5907f751c434f73
 [[ "$(git -C target rev-parse HEAD)" == "$target" ]] || exit 3
 root="$RUNNER_TEMP/p08-v016-legacy-issued-$engine"
