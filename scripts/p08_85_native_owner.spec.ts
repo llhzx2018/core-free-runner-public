@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test'
 
-/** P08 #85: issued v0.1.13 authentic Laravel/Vue Owner page and worker.
- * ONLY synthetic localhost publisher v0.1.14; not a Release/Production proof. */
+/** P08 #85: issued v0.1.14 authentic Laravel/Vue Owner page and worker.
+ * ONLY synthetic localhost publisher v0.1.15; not a Release/Production proof. */
 const base=process.env.P08_TEST_BASE_URL||''
 const approved=process.env.GITHUB_ACTIONS==='true'
  && process.env.P08_ISOLATED_INSTALL_TEST==='YES'
@@ -10,7 +10,7 @@ const approved=process.env.GITHUB_ACTIONS==='true'
 test.skip(!approved,'P08 #85 strictly isolated loopback HTTPS only')
 test.use({ignoreHTTPSErrors:true})
 
-test('issued v013 in-app normal one-click → native backup → 014 same-site readback',async({page,request})=>{
+test('issued v014 in-app normal one-click → native backup → 014 same-site readback',async({page,request})=>{
   test.setTimeout(180000)
   const errors:string[]=[]
   page.on('pageerror',e=>errors.push(e.message))
@@ -35,7 +35,7 @@ test('issued v013 in-app normal one-click → native backup → 014 same-site re
   await page.getByRole('button',{name:'系统更新'}).click()
   const panel=page.getByRole('region',{name:'系统更新工作区'})
   await expect(panel).toBeVisible()
-  await expect(panel).toContainText('当前版本 0.1.13')
+  await expect(panel).toContainText('当前版本 0.1.14')
   await expect(page.getByRole('region',{name:'官方更新与升级'})).toBeVisible()
   await expect(page.getByRole('button',{name:'检查官方更新',exact:true})).toBeEnabled()
   await expect(page.getByRole('button',{name:/一键安全升级到/})).toHaveCount(0)
@@ -59,15 +59,15 @@ test('issued v013 in-app normal one-click → native backup → 014 same-site re
   const check=await checkResponse
   expect(check.status()).toBe(200)
   expect(await check.json()).toMatchObject({
-    status:'OFFICIAL_NEXT_VERIFIED_NOT_STAGED',target_version:'0.1.14',
+    status:'OFFICIAL_NEXT_VERIFIED_NOT_STAGED',target_version:'0.1.15',
     can_install:false,
   })
-  await expect(page.getByRole('button',{name:'一键安全升级到 0.1.14'})).toBeEnabled()
+  await expect(page.getByRole('button',{name:'一键安全升级到 0.1.15'})).toBeEnabled()
   console.log('P08_85_REAL_ISSUED_OWNER_NEXT_CHANNEL_CHECK=PASS')
 
   const accepted=page.waitForResponse(r=>r.url().endsWith('/app/system/update/next/one-click')
       && r.request().method()==='POST')
-  await page.getByRole('button',{name:'一键安全升级到 0.1.14'}).click()
+  await page.getByRole('button',{name:'一键安全升级到 0.1.15'}).click()
   const response=await accepted
   expect(response.status()).toBe(202)
   const receipt=await response.json() as {status:string;preparation_id:string;worker_dispatch:string}
@@ -83,20 +83,20 @@ test('issued v013 in-app normal one-click → native backup → 014 same-site re
     const s=await state.json() as {status?:string;preparation_id?:string;target_version?:string}
     if(s.preparation_id!==receipt.preparation_id)return 'UNKNOWN_GENERATION'
     if(s.status==='NEEDS_RECOVERY')return 'BLOCKED_RECOVERY'
-    return s.status==='SUCCEEDED'&&s.target_version==='0.1.14'
+    return s.status==='SUCCEEDED'&&s.target_version==='0.1.15'
       ? 'SUCCEEDED':'WAIT'
   },{timeout:120000,intervals:[1000,2000,3000]}).toBe('SUCCEEDED')
   const runtime=await page.context().request.get('/app/system/update/status',{
     failOnStatusCode:false,timeout:10000})
   expect(runtime.status()).toBe(200)
-  expect(await runtime.json()).toMatchObject({version:'0.1.14'})
+  expect(await runtime.json()).toMatchObject({version:'0.1.15'})
   console.log('P08_85_ISSUED_PHP_REAL_WORKER_BACKUP_NATIVE_ATOMIC=PASS')
 
   // Same Owner client remains an authenticated dashboard after pointer switch.
   await page.reload()
   await page.getByRole('button',{name:'系统更新'}).click()
   await expect(page.getByRole('region',{name:'系统更新工作区'}))
-    .toContainText('当前版本 0.1.14',{timeout:30000})
+    .toContainText('当前版本 0.1.15',{timeout:30000})
   const replay=await page.context().request.post('/app/system/update/next/one-click',{
     form:{_token:'repeat-old-intent'},failOnStatusCode:false,maxRedirects:0,
     headers:{Accept:'application/json'},
