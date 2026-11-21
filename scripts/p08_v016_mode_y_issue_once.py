@@ -14,7 +14,7 @@ import zipfile
 REPO="llhzx2018/vf-adops"
 SHA="ed96b18627cd0a63b1da20a1fd8c9b6c1808f159"
 FUNC="67b3b98477f93028007c44e648a0b759991c8f19"
-GOV="80ab251e15e63fc01a4e587e93054b0f6d0179a5"
+GOV="bdd46247791a0db81f2fc04379f33470957dd50f"
 OLD="369fcb0aa8fef71b0a2b79c2b7a6c473d2527c3e"
 OLD_RELEASE=453401976
 OLD_FULL=(774232524,"538d161339849214999eb6f85da40623a149fc9cf1b592c9e5907f751c434f73")
@@ -84,7 +84,25 @@ def main():
     need(cmd(["git","-C","gov","rev-parse","HEAD"])==GOV,"GOV_CHECKOUT")
     need((Path("target")/"VERSION").read_text().strip()=="0.1.16","VERSION")
     need("## RP-07Y" in (Path("target")/"docs/authority/ACCEPTANCE_MATRIX.md").read_text(),"PROJECT_AUTHORITY")
-    need("| skill-release | V3.24 |" in (Path("gov")/"CURRENT.md").read_text(),"GOV_AUTHORITY")
+    # GOV V3.25 is a P01-only additive Mode Z rule; it explicitly inherits
+    # the original P08 Mode Y from the immutable V3.24 skill and case. Do
+    # not weaken any P08 native/browser/asset gate because CURRENT advanced.
+    gcurrent=(Path("gov")/"CURRENT.md").read_text(encoding="utf8")
+    gskill=(Path("gov")/"skills/skill-release/V3.25/SKILL.md").read_text(encoding="utf8")
+    need("| skill-release | V3.25 |" in gcurrent
+         and "P08 v0.1.16 · OWNER-AUTHORIZED FORMAL RELEASE Mode Y" in gcurrent,
+         "CURRENT_V325_P08_MODE_Y_NOT_EFFECTIVE")
+    need("Inherits V3.24" in gskill and "# skill-release V3.24" in gskill
+         and "## Mode Y · ONE CASE P08 v0.1.16" in gskill,
+         "V325_DOES_NOT_INHERIT_P08_MODE_Y")
+    for path,blob in {
+      "skills/skill-release/V3.24/SKILL.md":"b43eae3cf3d14118fc6065776e2ca52657b8aeb4",
+      "governance/release/cases/P08_ADOPS_V016_PR94_PR97_MEDIA_SAFE_BRIDGE_FORMAL_RELEASE_20261121.md":"98c6d2f7e0d600fa30de762e7f270d7f586834ea",
+      "skills/skill-release/V3.25/SKILL.md":"8959065af99ee8f7945e5f459096e330966c2cbd",
+    }.items():
+        need(cmd(["git","-C","gov","hash-object",path])==blob,
+             "GOV_RULE_BLOB_DRIFT_"+path.rsplit("/",1)[-1])
+    print("P08_V016_MODE_Y_GOV_V325_INHERITS_EXACT_V324_RULES=PASS")
     verified_run(NATIVE_RUN,NATIVE_HEAD,6)
     verified_run(BROWSER_RUN,BROWSER_HEAD,2)
     verified_run(PACKAGE_RUN,PACKAGE_HEAD,1)
