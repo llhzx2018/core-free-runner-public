@@ -39,7 +39,7 @@ test('real extracted v015/v016 Owner login/status browser safety and responsive 
   await page.getByRole('button', {name:'登录',exact:true}).click()
   await expect(page).toHaveURL(/\/app(?:\?.*)?$/, {timeout:20000})
   await page.getByRole('button', {name:'系统更新'}).click()
-  await expect(page.getByRole('heading', {name:'检查与升级'})).toBeVisible()
+  await expect(page.getByRole('heading', {name:'系统更新', exact:true})).toBeVisible()
   await expect(page.getByRole('region', {name:'系统更新工作区'}))
     .toContainText('当前版本 '+installed)
   expect(mutation, 'Page entry must never auto-check or apply an update').toEqual([])
