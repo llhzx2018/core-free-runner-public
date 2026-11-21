@@ -6,7 +6,7 @@ set +x
 engine="$1"
 [[ "$engine" =~ ^(sqlite|mysql|mariadb)$ ]] || exit 3
 old=369fcb0aa8fef71b0a2b79c2b7a6c473d2527c3e
-target=c80161cfe6509c9c515f1b65d2e044b835ac4ca9
+target=fe99c4bcdbe8075824072ebf092c66d2ea55247c
 old_zip_sha=538d161339849214999eb6f85da40623a149fc9cf1b592c9e5907f751c434f73
 [[ "$(git -C target rev-parse HEAD)" == "$target" ]] || exit 3
 root="$RUNNER_TEMP/p08-v016-legacy-issued-$engine"
@@ -85,7 +85,8 @@ grep -Fxq 'P08_V016_BRIDGE_OWNER_AUTH_REFUSED' "$root/negative-err" || {
 }
 [[ "$(readlink "$site/current")" == "$old_pointer" ]] || exit 45
 [[ "$old_image_hash" == "$(sha256sum "$site/storage/app/private/adops/landing-assets/00000000-0000-4000-8000-000000000001.png" | cut -d' ' -f1)" ]] || exit 46
-[[ ! -d "$site/storage/app/private/adops/legacy-media-bridge" ]] || exit 47
+scope="$(printf '%s' "$site" | sha256sum | cut -c1-16)"
+[[ ! -d "$HOME/.p08-v016-legacy-media-bridge-$scope" ]] || exit 47
 echo "P08_V016_BRIDGE_$engine"_INVALID_OWNER_NO_MUTATION=PASS
 
 owner_password='Synthetic-Owner-Only-12345!'
@@ -122,7 +123,10 @@ for m in records:
     db=json.loads((m.parent/'manifest.json').read_text())
     dbfile=m.parent/db['file']
     assert dbfile.is_file() and db['sha256']==sha(dbfile) and db['bytes']==dbfile.stat().st_size
-    stage=private/'legacy-media-bridge'/('stage-'+m.parent.name)
+    # Independent restore MUST be outside the running site root and 0700.
+    home=Path.home()
+    scope=hashlib.sha256(str(site).encode()).hexdigest()[:16]
+    stage=home/f'.p08-v016-legacy-media-bridge-{scope}'/('stage-'+m.parent.name)
     assert stage.is_dir() and sha(stage/'config/github-read-token')==sha(token)
     assert sha(stage/'private/landing-assets/00000000-0000-4000-8000-000000000001.png')==sha(media)
     fresh+=1
