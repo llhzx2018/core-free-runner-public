@@ -70,7 +70,25 @@ $_SERVER['HTTPS']='on';
 $_SERVER['SERVER_PORT']='443';
 $_SERVER['HTTP_X_FORWARDED_PROTO']='https';
 PHP
-php -d "auto_prepend_file=$tmp/prepend.php" -S 127.0.0.1:19495 -t "$site/public" "$site/public/index.php" > "$tmp/php.log" 2>&1 &
+# PHP's -S router is invoked for every request; using Laravel index.php as
+# router swallows /build/assets/*.js and *.css as HTML, preventing Inertia mount.
+# Serve only recognized, existing static files via the built-in static handler.
+cat > "$tmp/router.php" <<'PHP'
+<?php
+$root = realpath($_SERVER['DOCUMENT_ROOT']);
+$path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
+$candidate = ($root !== false && is_string($path))
+    ? realpath($root.'/'.ltrim(rawurldecode($path), '/')) : false;
+$extension = $candidate ? strtolower(pathinfo($candidate, PATHINFO_EXTENSION)) : '';
+if ($root !== false && $candidate !== false
+    && str_starts_with($candidate, $root.DIRECTORY_SEPARATOR)
+    && is_file($candidate)
+    && in_array($extension, ['js','mjs','css','png','jpg','jpeg','webp','gif','svg','ico','woff','woff2','ttf','map'], true)) {
+    return false;
+}
+require $root.'/index.php';
+PHP
+php -d "auto_prepend_file=$tmp/prepend.php" -S 127.0.0.1:19495 -t "$site/public" "$tmp/router.php" > "$tmp/php.log" 2>&1 &
 PHP_PID="$!"
 for n in $(seq 1 45); do
   (echo > /dev/tcp/127.0.0.1/19495) >/dev/null 2>&1 && break || sleep 0.2
