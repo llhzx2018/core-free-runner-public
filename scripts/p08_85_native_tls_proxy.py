@@ -27,7 +27,7 @@ if (fixture != tmp / "p08-85-native-fixture"
         or any(not x.is_file() or not str(x.resolve()).startswith(str(tmp)+"/")
                for x in (certificate, key))):
     raise SystemExit("P08_85_PROXY_SCOPE_INVALID")
-version = "0.1.14"
+version = "0.1.15"
 asset_id = 84552114
 tag = "v" + version
 channel = fixture / "channel.json"
