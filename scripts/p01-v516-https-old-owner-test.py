@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.parse
 import urllib.request
 
 
@@ -52,7 +53,7 @@ def main() -> None:
 
         def start_https(site: Path):
             process, upstream = original_start(site)
-            u = urllib.request.urlparse(upstream)
+            u = urllib.parse.urlparse(upstream)
             upstream_port = u.port
             assert upstream_port is not None
 
