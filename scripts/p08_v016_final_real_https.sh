@@ -131,5 +131,6 @@ test ! -e target/tests/e2e/p08_v016_final_owner_https.spec.ts
 cp scripts/p08_v016_final_owner_https.spec.ts target/tests/e2e/p08_v016_final_owner_https.spec.ts
 export P08_TEST_BASE_URL=https://127.0.0.1:18495
 export P08_HTTPS_VERSION="$version"
+export P08_HTTPS_SITE_ROOT="$site"
 (cd target && npx playwright test tests/e2e/p08_v016_final_owner_https.spec.ts --workers=1 --reporter=list)
 echo "P08_V016_FINAL_HTTPS_AUTH_AND_SAFETY_$edition=PASS"
