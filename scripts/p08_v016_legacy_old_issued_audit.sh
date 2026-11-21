@@ -200,7 +200,7 @@ if(count($files)<2)exit(81);
 $id=basename(dirname(end($files)));
 $restore=$cfg;
 if($cfg["driver"]==="sqlite"){
-  $restore["database"]=$s."/database/".str_repeat("b",32).".sqlite";
+  $restore["database"]=$s."/database/".bin2hex(random_bytes(16)).".sqlite";
 }else {
   $restore["database"]="p08_ci_016_restore_empty";
 }
