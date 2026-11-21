@@ -69,140 +69,28 @@ python3 -B target/scripts/build_atomic.py \
 unzip -tqq "$root/update.zip"
 mkdir -m 700 "$root/target-full"
 unzip -q "$full" -d "$root/target-full"
-# The authentic v015 first-install E2E test deliberately writes one
-# synthetic landing page and revision. BEFORE removing those disposable
-# fixture-only rows, prove empty-media bridge FAILS CLOSED when DB has rows.
-wrong_source_owner='Synthetic-Owner-Only-12345!'
-if [[ "$engine" == sqlite ]]; then wrong_source_owner='Synthetic-SQLite-Owner-12345!'; fi
+# Authentic old E2E first-install writes disposable synthetic landing rows.
+# Assert real empty-media bridge REJECTS these rows before preparing any backup.
+case_owner='Synthetic-Owner-Only-12345!'
+if [[ "$engine" == sqlite ]]; then case_owner='Synthetic-SQLite-Owner-12345!'; fi
 set +e
-printf '%s\n' "$wrong_source_owner" |
+printf '%s\n' "$case_owner" |
  php "$root/target-full/src/Upgrade/LegacyMediaUpgradeBridgeCli.php" \
-  --isolated-apply "$site" "$full" "$root/update.zip" CONFIRM_MEDIA_SAFE_V015_TO_V016 \
-   > "$root/nonempty-db-neg-out" 2> "$root/nonempty-db-neg-err"
-neg_rc=$?
+ --isolated-apply "$site" "$full" "$root/update.zip" CONFIRM_MEDIA_SAFE_V015_TO_V016 \
+ > "$root/dirty-db-neg-out" 2> "$root/dirty-db-neg-err"
+denied=$?
 set -e
-[[ "$neg_rc" -eq 2 ]] || exit 50
-grep -Fxq 'P08_V016_BRIDGE_EMPTY_SITE_DB_NOT_EMPTY' "$root/nonempty-db-neg-err" || {
-  grep -E '^P08_V016_BRIDGE_[A-Z_]+
-echo "P08_V016_BRIDGE_$engine"_OLD_ISSUED_MEDIA_TOKEN_AUDIT=PASS
-old_pointer="$(readlink "$site/current")"
-[[ ! -e "$site/storage/app/private/adops/landing-assets" && ! -L "$site/storage/app/private/adops/landing-assets" ]] || exit 41
-before_token="$(sha256sum "$site/storage/app/private/adops/upgrade/github-read-token" | cut -d' ' -f1)"
-before_owner="$(sha256sum "$site/storage/app/private/adops/installation/installed.json" | cut -d' ' -f1)"
-before_env="$(sha256sum "$site/.env" | cut -d ' ' -f1)"
-set +e
-printf 'wrong-synthetic-password\n' | php "$root/target-full/src/Upgrade/LegacyMediaUpgradeBridgeCli.php" \
- --apply "$site" "$full" "$root/update.zip" CONFIRM_MEDIA_SAFE_V015_TO_V016 \
- > "$root/negative-out" 2> "$root/negative-err"
-rc=$?
-set -e
-[[ "$rc" -eq 2 ]] || { echo 'P08_V016_BRIDGE_NEGATIVE_NONBLOCKING=FAIL'; exit 43; }
-grep -Fxq 'P08_V016_BRIDGE_OWNER_AUTH_REFUSED' "$root/negative-err" || {
-  grep -E '^P08_V016_BRIDGE_[A-Z_]+$' "$root/negative-err" || true
-  echo "P08_V016_BRIDGE_$engine"_OWNER_REFUSAL=FAIL
-  exit 44
-}
-[[ "$(readlink "$site/current")" == "$old_pointer" ]] || exit 45
-[[ ! -e "$site/storage/app/private/adops/landing-assets" && ! -L "$site/storage/app/private/adops/landing-assets" ]] || exit 46
-[[ "$before_token" == "$(sha256sum "$site/storage/app/private/adops/upgrade/github-read-token" | cut -d' ' -f1)" ]] || exit 46
-[[ "$before_owner" == "$(sha256sum "$site/storage/app/private/adops/installation/installed.json" | cut -d' ' -f1)" ]] || exit 46
-scope="$(printf '%s' "$site" | sha256sum | cut -c1-16)"
-[[ ! -d "$HOME/.p08-v016-legacy-media-bridge-$scope" ]] || exit 47
-echo "P08_V016_BRIDGE_$engine"_INVALID_OWNER_NO_MUTATION=PASS
-
-owner_password='Synthetic-Owner-Only-12345!'
-if [[ "$engine" == sqlite ]]; then owner_password='Synthetic-SQLite-Owner-12345!'; fi
-printf '%s\n' "$owner_password" | php "$root/target-full/src/Upgrade/LegacyMediaUpgradeBridgeCli.php" \
- --isolated-apply "$site" "$full" "$root/update.zip" CONFIRM_MEDIA_SAFE_V015_TO_V016
-[[ "$(readlink "$site/current")" == "releases/$target" ]] || {
-  echo "P08_V016_BRIDGE_$engine"_FINAL_POINTER_MISMATCH=FAIL
-  exit 48
-}
-[[ ! -e "$site/storage/app/private/adops/landing-assets" && ! -L "$site/storage/app/private/adops/landing-assets" ]] || exit 49
-[[ "$before_token" == "$(sha256sum "$site/storage/app/private/adops/upgrade/github-read-token" | cut -d' ' -f1)" ]] || exit 49
-[[ "$before_owner" == "$(sha256sum "$site/storage/app/private/adops/installation/installed.json" | cut -d' ' -f1)" ]] || exit 49
-[[ "$before_env" == "$(sha256sum "$site/.env" | cut -d ' ' -f1)" ]] || exit 49
-python3 - "$site" <<'PY'
-import sys,json,hashlib
-from pathlib import Path
-site=Path(sys.argv[1]);private=site/'storage/app/private/adops'
-assert not (private/'landing-assets').exists()
-token=private/'upgrade/github-read-token'
-assert token.is_file()
-records=list((private/'recovery').glob('*/files-manifest.json'))
-assert len(records)>=2
-def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
-complete=0
-for m in records:
-    o=json.loads(m.read_text())
-    entries={item['path']:item for item in o['files']}
-    names=['config/github-read-token','config/.env','config/installed.json']
-    if not all(k in entries for k in names): continue
-    assert not any(k.startswith('private/landing-assets/') for k in entries)
-    for k in names:
-        original=token if k=='config/github-read-token' else (site/'.env' if k=='config/.env' else private/'installation/installed.json')
-        saved=m.parent/'payload'/k
-        assert saved.is_file() and entries[k]['sha256']==sha(saved)==sha(original)
-        assert saved.stat().st_size==entries[k]['bytes']
-    db=json.loads((m.parent/'manifest.json').read_text())
-    saved=m.parent/db['file']
-    assert saved.is_file() and db['sha256']==sha(saved) and db['bytes']==saved.stat().st_size
-    scope=hashlib.sha256(str(site).encode()).hexdigest()[:16]
-    stage=Path.home()/f'.p08-v016-legacy-media-bridge-{scope}'/('stage-'+m.parent.name)
-    assert stage.is_dir() and sha(stage/'config/github-read-token')==sha(token)
-    assert sha(stage/'config/.env')==sha(site/'.env')
-    assert sha(stage/'config/installed.json')==sha(private/'installation/installed.json')
-    assert not (stage/'private/landing-assets').exists()
-    complete+=1
-assert complete>=2,'two fresh real DB + private Token/Owner backups required'
-assert not (private/'maintenance/maintenance.json').exists()
-print('P08_EMPTY_MEDIA_TWO_DB_OWNER_TOKEN_BACKUPS_AND_INDEPENDENT_STAGE=PASS')
-PY
-# Fresh-stage native DB restore is independent of the running site database:
-# compare Owner count and landing tables in restored isolated DB to originals.
-php -r '
-$s=$argv[1];$e=$argv[2];
-require_once $s."/current/vendor/autoload.php";
-$cfg=(new \VF\AdOps\Upgrade\InstalledDatabaseConfig())->read($s);
-$files=glob($s."/storage/app/private/adops/recovery/*/files-manifest.json");
-if(count($files)<2)exit(81);
-$id=basename(dirname(end($files)));
-$restore=$cfg;
-if($cfg["driver"]==="sqlite"){
-  $restore["database"]=$s."/database/".str_repeat("b",32).".sqlite";
-}else {
-  $restore["database"]="p08_ci_016_restore_empty";
-}
-if($cfg["driver"]!=="sqlite"){
-  $p=new PDO("mysql:host=".$cfg["host"].";port=".$cfg["port"].";charset=utf8mb4",$cfg["username"],$cfg["password"]);
-  $p->exec("CREATE DATABASE ".$restore["database"]);
-  $p=null;
-}
-(new \VF\AdOps\Recovery\DatabaseSnapshot())->restoreToEmpty($s,$id,$restore);
-$pdo=function($data){return $data["driver"]==="sqlite"
-  ?new PDO("sqlite:".$data["database"])
-  :new PDO("mysql:host=".$data["host"].";port=".$data["port"].";dbname=".$data["database"].";charset=utf8mb4",$data["username"],$data["password"]);};
-$a=$pdo($cfg);$b=$pdo($restore);
-foreach(["users","landing_pages","landing_revisions","landing_assets"] as $table){
- $x=(int)$a->query("SELECT COUNT(*) FROM ".$table)->fetchColumn();
- $y=(int)$b->query("SELECT COUNT(*) FROM ".$table)->fetchColumn();
- if($x!==$y||($table==="users"&&$x!==1)||($table!=="users"&&$x!==0))exit(82);
-}
-echo "P08_EMPTY_MEDIA_REAL_NATIVE_DB_INDEPENDENT_RESTORE_OWNER_ZERO_ASSETS=PASS\n";
-' "$site" "$engine"
-
-echo "P08_V016_BRIDGE_$engine"_ORIGINAL_015_TO_CANDIDATE_016_NATIVE_ATOMIC=PASS
-
- "$root/nonempty-db-neg-err" || true
-  echo P08_EMPTY_MEDIA_NONEMPTY_DB_NEGATIVE=FAIL
+[[ "$denied" -eq 2 ]] || { echo P08_EMPTY_MEDIA_DIRTY_DB_ALLOWED=FAIL; exit 50; }
+grep -Fxq 'P08_V016_BRIDGE_EMPTY_SITE_DB_NOT_EMPTY' "$root/dirty-db-neg-err" || {
+  echo P08_EMPTY_MEDIA_DB_DENIAL_WRONG_CLASS=FAIL
   exit 51
 }
 [[ "$(readlink "$site/current")" == "releases/$old" ]] || exit 52
 echo P08_EMPTY_MEDIA_NONEMPTY_DB_FAILS_CLOSED=PASS
 
-# Align synthetic installer-E2E fixture to the actual Owner READ-ONLY audit:
-# 1 Owner, zero landing pages/revisions/assets, ABSENT landing-assets directory.
-# Disposable ephemeral CI site only; no Production operation.
+# ONLY in disposable synthetic runner fixture: remove sample landing rows
+# created by old installer E2E so site matches user's observed zero-row
+# v015 MySQL audit. User/Token/.env/other data remain unchanged.
 php -r '
 $site=$argv[1];$old=$argv[2];
 require_once $site."/releases/".$old."/vendor/autoload.php";
@@ -213,8 +101,9 @@ $pdo=$cfg["driver"]==="sqlite"
 $pdo->setAttribute(PDO::ATTR_ERRMODE,PDO::ERRMODE_EXCEPTION);
 $pdo->beginTransaction();
 try{
- foreach(["landing_assets","landing_revisions","landing_pages"] as $table)
+ foreach(["landing_assets","landing_revisions","landing_pages"] as $table){
   $pdo->exec("DELETE FROM ".$table);
+ }
  $pdo->commit();
 }catch(Throwable $e){$pdo->rollBack();exit(53);}
 foreach(["users","landing_assets","landing_revisions","landing_pages"] as $table){
@@ -222,7 +111,7 @@ foreach(["users","landing_assets","landing_revisions","landing_pages"] as $table
  if(($table==="users"&&$n!==1)||($table!=="users"&&$n!==0))exit(54);
 }
 ' "$site" "$old"
-[[ ! -e "$site/storage/app/private/adops/landing-assets" ]] || exit 55
+[[ ! -e "$site/storage/app/private/adops/landing-assets" && ! -L "$site/storage/app/private/adops/landing-assets" ]] || exit 55
 echo P08_EMPTY_MEDIA_REAL_AUDIT_ZERO_DB_FIXTURE_PARITY=PASS
 php "$root/target-full/src/Upgrade/LegacyMediaUpgradeBridgeCli.php" \
  --audit "$site" "$full" "$root/update.zip"
