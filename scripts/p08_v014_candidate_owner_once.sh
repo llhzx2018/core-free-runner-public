@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# P08 #85: genuine issued v0.1.13 normal Owner Vue + Laravel one-click to disposable v0.1.14.
+# P08 #85: genuine issued v0.1.14 normal Owner Vue + Laravel one-click to disposable v0.1.15.
 set -Eeuo pipefail
 set +x
 [[ "$GITHUB_ACTIONS" == true && "$P08_ISOLATED_INSTALL_TEST" == YES && "$(id -u)" != 0 ]] || exit 3
 engine="$1"
 [[ "$engine" =~ ^(sqlite|mysql|mariadb)$ ]] || exit 3
-head=6fae792864a594465e4b3224bd6d73abde976f12
-issued=8b385fecd132a02ac79f5b67e670783e98997c3e
-zipsha=f8075f065d1413c984f80ef7531242cfc894bf272e90f6d89282074f6617c1ec
-[[ "$(git -C p08 rev-parse HEAD)" == "$head" && "$(cat p08/VERSION)" == 0.1.14 ]] || exit 3
+head=369fcb0aa8fef71b0a2b79c2b7a6c473d2527c3e
+issued=6fae792864a594465e4b3224bd6d73abde976f12
+zipsha=2b8023a1c67213dbebb8f7047f27debbccc0f00fb210d10aeb3dc703076a811b
+[[ "$(git -C p08 rev-parse HEAD)" == "$head" && "$(cat p08/VERSION)" == 0.1.15 ]] || exit 3
 work="$RUNNER_TEMP/p08-85-browser-$engine"
 site="$RUNNER_TEMP/p08-85-site-$engine"
 [[ ! -e "$work" && ! -e "$site" ]] || exit 3
@@ -38,7 +38,7 @@ phase(){
   fi
 }
 phase PHP_LINT php -l p08/app/Http/Controllers/OwnerFutureUpdateController.php
-phase VERSION_GATE php -r 'exit(version_compare("0.1.13","0.1.4",">=")?0:1);'
+phase VERSION_GATE php -r 'exit(version_compare("0.1.14","0.1.4",">=")?0:1);'
 grep -Fq 'FutureOwnerUpdatePanel' p08/resources/js/modules/updates/UpdatePanel.vue
 grep -Fq "/app/system/update/next/one-click" p08/routes/web.php ||   grep -Fq "name('adops.update.next.one-click')" p08/routes/web.php
 echo "P08_85_$engine"_ISSUED_NORMAL_OWNER_UI_WIRED=PASS
@@ -48,15 +48,15 @@ phase NPM npm ci --prefix p08 --ignore-scripts --no-audit --no-fund
 cd p08
 phase CHROMIUM npx playwright install --with-deps chromium
 cd ..
-phase REAL_OFFICIAL_FULL gh release download v0.1.13 -R llhzx2018/vf-adops -p VF_AdOps_V0.1.13_FULL.zip -D "$work"
-archive="$work/VF_AdOps_V0.1.13_FULL.zip"
+phase REAL_OFFICIAL_FULL gh release download v0.1.14 -R llhzx2018/vf-adops -p VF_AdOps_V0.1.14_FULL.zip -D "$work"
+archive="$work/VF_AdOps_V0.1.14_FULL.zip"
 printf '%s  %s\n' "$zipsha" "$archive" | sha256sum -c --status || exit 42
 phase REAL_FULL_EXTRACT unzip -q "$archive" -d "$site"
 unzip -p "$archive" FULL_MANIFEST.json > "$work/issued-manifest.json"
 python3 - "$work/issued-manifest.json" "$issued" <<'PY'
 import json,sys
 m=json.load(open(sys.argv[1]))
-assert m["source_sha"]==sys.argv[2] and m["target_version"]=="0.1.13"
+assert m["source_sha"]==sys.argv[2] and m["target_version"]=="0.1.14"
 assert m["project_id"]=="P08" and m["type"]=="CLEAN_FULL_ONLY"
 PY
 echo "P08_85_$engine"_PUBLISHED_SHA256_MANIFEST=PASS
@@ -151,7 +151,7 @@ print("P08_85_"+engine+"_GUEST_HTTP="+(status if re.fullmatch(r"\d{3}",status) e
 print("P08_85_"+engine+"_GUEST_BODY_SIZE_CATEGORY="+("EMPTY" if not txt else "PRESENT"))
 for k,v in flags.items():print("P08_85_"+engine+"_SAFE_GUEST_"+k+"="+("YES" if v else "NO"))
 PY
-# Actual v0.1.13 /login is a Blade page, NOT Inertia HTML.
+# Actual v0.1.14 /login is a Blade page, NOT Inertia HTML.
 # The previous assertion demanded an app root and falsely failed 3/3
 # despite HTTP=200 and a real Login page. Verify real Blade form fields.
 grep -Fq 'class="login-shell"' "$work/guest.html" &&
@@ -169,44 +169,44 @@ unzip -p "$archive" FULL_MANIFEST.json >"$work/013-issued-manifest.json"
 source_manifest_sha="$(sha256sum "$work/013-issued-manifest.json" | cut -d' ' -f1)"
 for pass in first second; do
   phase BUILD_TEMP_FULL python3 -B p08/scripts/build_full.py \
-    --source p08 --output "$work/014-full-$pass.zip" --version 0.1.14 \
+    --source p08 --output "$work/014-full-$pass.zip" --version 0.1.15 \
     --source-sha "$target" --governance-root gov
   phase BUILD_TEMP_ATOMIC python3 -B p08/scripts/build_atomic.py \
     --source p08 --output "$work/014-update-$pass.zip" \
-    --source-version 0.1.13 --source-sha "$issued" \
+    --source-version 0.1.14 --source-sha "$issued" \
     --source-full-manifest-sha256 "$source_manifest_sha" \
     --previous-full-manifest "$work/013-issued-manifest.json" \
-    --target-version 0.1.14 --target-sha "$target"
+    --target-version 0.1.15 --target-sha "$target"
 done
 cmp "$work/014-full-first.zip" "$work/014-full-second.zip"
 cmp "$work/014-update-first.zip" "$work/014-update-second.zip"
 mv "$work/014-full-first.zip" "$work/014-full.zip"
 mv "$work/014-update-first.zip" "$work/014-update.zip"
 rm -- "$work/014-full-second.zip" "$work/014-update-second.zip"
-echo "P08_V014_CANDIDATE_$engine"_DOUBLE_BUILD_SAME_SOURCE=PASS
+echo "P08_V015_CANDIDATE_$engine"_DOUBLE_BUILD_SAME_SOURCE=PASS
 fixture="$RUNNER_TEMP/p08-85-native-fixture"
 mkdir -m 700 "$fixture"
-mv "$work/014-update.zip" "$fixture/VF_AdOps_V0.1.14_UPDATE.zip"
-mv "$work/014-full.zip" "$fixture/VF_AdOps_V0.1.14_FULL.zip"
+mv "$work/014-update.zip" "$fixture/VF_AdOps_V0.1.15_UPDATE.zip"
+mv "$work/014-full.zip" "$fixture/VF_AdOps_V0.1.15_FULL.zip"
 python3 - "$fixture" "$issued" "$source_manifest_sha" "$target" <<'PY'
 import hashlib,json,sys
 from pathlib import Path
 folder=Path(sys.argv[1])
 old,manifest,target=sys.argv[2:]
-version="0.1.14"
+version="0.1.15"
 def asset(id,name):
     file=folder/name
     return {"id":id,"name":name,"size":file.stat().st_size,
             "sha256":hashlib.sha256(file.read_bytes()).hexdigest()}
-atomic=asset(84552114,"VF_AdOps_V0.1.14_UPDATE.zip")
-full=asset(84552115,"VF_AdOps_V0.1.14_FULL.zip")
+atomic=asset(84552114,"VF_AdOps_V0.1.15_UPDATE.zip")
+full=asset(84552115,"VF_AdOps_V0.1.15_FULL.zip")
 channel={
  "schema_version":"1.0","project_id":"P08","component_id":"APP",
  "project_slug":"vf-adops","repository":"llhzx2018/vf-adops",
  "enabled":True,"update_type":"ATOMIC","channel":"stable",
  "backup_required":True,"rollback_supported":True,
  "production_auto_apply":False,"signature_required":False,
- "signature_algorithm":None,"from_versions":["0.1.13"],
+ "signature_algorithm":None,"from_versions":["0.1.14"],
  "target_version":version,"source_sha":old,
  "source_full_manifest_sha256":manifest,
  "schema_from":"1.1","schema_to":"1.1",
@@ -325,7 +325,7 @@ PY
  }
 cd ..
 [[ "$(readlink "$site/current")" == "releases/$target" ]] || exit 51
-[[ "$(cat "$site/current/VERSION")" == "0.1.14" ]] || exit 52
+[[ "$(cat "$site/current/VERSION")" == "0.1.15" ]] || exit 52
 [[ ! -f "$site/storage/app/private/adops/maintenance/maintenance.json" ]] || exit 53
 python3 - "$site" "$target" <<'PY'
 import json,sys
