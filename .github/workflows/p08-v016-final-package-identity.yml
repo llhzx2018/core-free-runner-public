@@ -1,0 +1,120 @@
+name: P08 v016 final exact source full update deterministic preissue packages
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/p08-v016-final-package-identity.yml]
+permissions:
+  contents: read
+jobs:
+  final-real-packages:
+    if: github.repository == 'llhzx2018/core-free-runner-public' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'proof/p08-v016-final-packaging-20261121'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CI: 'true'
+      P08_ISOLATED_INSTALL_TEST: 'YES'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Checkout disposable package auditor
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Checkout exact final P08 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: ed96b18627cd0a63b1da20a1fd8c9b6c1808f159
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: target
+      - name: Checkout effective V3.24 one-case governance
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: 80ab251e15e63fc01a4e587e93054b0f6d0179a5
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: gov
+      - name: PHP8.4 Composer
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          extensions: zip,curl,mbstring,pdo_mysql,pdo_sqlite,sqlite3,openssl,posix,dom,intl,fileinfo,bcmath
+          coverage: none
+      - name: Node 22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Actual origin official bytes and deterministic final FULL plus UPDATE
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(id -u)" -ne 0
+          test "$(git -C target rev-parse HEAD)" = ed96b18627cd0a63b1da20a1fd8c9b6c1808f159
+          test "$(cat target/VERSION)" = 0.1.16
+          test "$(git -C gov rev-parse HEAD)" = 80ab251e15e63fc01a4e587e93054b0f6d0179a5
+          grep -Fq '| skill-release | V3.24 |' gov/CURRENT.md
+          npm ci --prefix target --ignore-scripts --no-fund --no-audit
+          npm run build --prefix target
+          composer --working-dir=target install --no-dev --no-scripts --prefer-dist --no-interaction --no-progress --optimize-autoloader
+          python3 -B target/scripts/check_stack_contract.py --phase full --root target
+          ( cd target && git diff --exit-code && test -z "$(git status --porcelain --untracked-files=all)" )
+          d="$RUNNER_TEMP/p08-v016-final-packages"
+          mkdir -m 700 "$d"
+          gh release download v0.1.15 -R llhzx2018/vf-adops -p VF_AdOps_V0.1.15_FULL.zip -D "$d" >/dev/null
+          printf '%s  %s\n' 538d161339849214999eb6f85da40623a149fc9cf1b592c9e5907f751c434f73 "$d/VF_AdOps_V0.1.15_FULL.zip" | sha256sum -c --status
+          unzip -p "$d/VF_AdOps_V0.1.15_FULL.zip" FULL_MANIFEST.json > "$d/old-manifest.json"
+          oldsha="$(sha256sum "$d/old-manifest.json" | cut -d' ' -f1)"
+          python3 - "$d/old-manifest.json" <<'PY'
+          import sys,json
+          m=json.load(open(sys.argv[1]))
+          assert m['project_id']=='P08' and m['type']=='CLEAN_FULL_ONLY'
+          assert m['target_version']=='0.1.15'
+          assert m['source_sha']=='369fcb0aa8fef71b0a2b79c2b7a6c473d2527c3e'
+          PY
+          for cycle in first second; do
+            python3 -B target/scripts/build_full.py --source "$GITHUB_WORKSPACE/target" --output "$d/full-$cycle.zip" --version 0.1.16 --source-sha ed96b18627cd0a63b1da20a1fd8c9b6c1808f159 --governance-root "$GITHUB_WORKSPACE/gov"
+            python3 -B target/scripts/build_atomic.py --source target --output "$d/update-$cycle.zip" --source-version 0.1.15 --source-sha 369fcb0aa8fef71b0a2b79c2b7a6c473d2527c3e --source-full-manifest-sha256 "$oldsha" --previous-full-manifest "$d/old-manifest.json" --target-version 0.1.16 --target-sha ed96b18627cd0a63b1da20a1fd8c9b6c1808f159
+          done
+          cmp "$d/full-first.zip" "$d/full-second.zip"
+          cmp "$d/update-first.zip" "$d/update-second.zip"
+          unzip -tqq "$d/full-first.zip"
+          unzip -tqq "$d/update-first.zip"
+          python3 - "$d/full-first.zip" "$d/update-first.zip" "$oldsha" <<'PY'
+          import json,sys,zipfile,stat,re
+          full,upd,oldsha=sys.argv[1:]
+          for path,kind in [(full,'CLEAN_FULL_ONLY'),(upd,'P08_ATOMIC_CODE_ONLY_V1')]:
+            with zipfile.ZipFile(path) as z:
+              names=z.namelist()
+              assert names and len(names)==len(set(names))
+              for n in names:
+                assert not n.startswith('/') and '..' not in n.split('/')
+                assert not any(n.endswith(t) for t in ('/.env','/github-read-token'))
+                assert not n.startswith('storage/app/private/adops/landing-assets/')
+              name='FULL_MANIFEST.json' if kind=='CLEAN_FULL_ONLY' else 'ATOMIC_MANIFEST.json'
+              m=json.loads(z.read(name))
+              assert m['type']==kind
+              assert m['target_version']=='0.1.16'
+              assert m['target_sha']=='ed96b18627cd0a63b1da20a1fd8c9b6c1808f159' if kind!='CLEAN_FULL_ONLY' else m['source_sha']=='ed96b18627cd0a63b1da20a1fd8c9b6c1808f159'
+              if kind!='CLEAN_FULL_ONLY':
+                assert m['source_sha']=='369fcb0aa8fef71b0a2b79c2b7a6c473d2527c3e'
+                assert m['source_full_manifest_sha256']==oldsha
+                assert m['schema_changes'] is False
+          print('P08_V016_FINAL_REAL_FULL_UPDATE_SOURCE_AND_ORIGIN_MANIFEST=PASS')
+          PY
+          echo P08_V016_FINAL_DOUBLE_BUILT_FULL_UPDATE_BINARY_IDENTICAL=PASS
+          echo "P08_V016_FINAL_FULL_SHA256=$(sha256sum "$d/full-first.zip" | cut -d' ' -f1)"
+          echo "P08_V016_FINAL_UPDATE_SHA256=$(sha256sum "$d/update-first.zip" | cut -d' ' -f1)"
+          echo P08_V016_FINAL_PACKAGE_PREISSUE_ONLY_NO_PUBLISH=PASS
+      - name: Always remove preissue private binaries and source
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- target gov "$RUNNER_TEMP/p08-v016-final-packages"
+          test ! -e target && test ! -e gov
+          echo P08_V016_FINAL_BINARY_AND_SOURCE_CLEANUP=PASS
