@@ -87,3 +87,49 @@ grep -Fxq 'P08_V016_BRIDGE_OWNER_AUTH_REFUSED' "$root/negative-err" || {
 [[ "$old_image_hash" == "$(sha256sum "$site/storage/app/private/adops/landing-assets/00000000-0000-4000-8000-000000000001.png" | cut -d' ' -f1)" ]] || exit 46
 [[ ! -d "$site/storage/app/private/adops/legacy-media-bridge" ]] || exit 47
 echo "P08_V016_BRIDGE_$engine"_INVALID_OWNER_NO_MUTATION=PASS
+
+owner_password='Synthetic-Owner-Only-12345!'
+if [[ "$engine" == sqlite ]]; then owner_password='Synthetic-SQLite-Owner-12345!'; fi
+printf '%s\n' "$owner_password" | php "$root/target-full/src/Upgrade/LegacyMediaUpgradeBridgeCli.php" \
+ --isolated-apply "$site" "$full" "$root/update.zip" CONFIRM_MEDIA_SAFE_V015_TO_V016
+[[ "$(readlink "$site/current")" == "releases/$target" ]] || {
+  echo "P08_V016_BRIDGE_$engine"_FINAL_POINTER_MISMATCH=FAIL
+  exit 48
+}
+[[ "$old_image_hash" == "$(sha256sum "$site/storage/app/private/adops/landing-assets/00000000-0000-4000-8000-000000000001.png" | cut -d' ' -f1)" ]] || exit 49
+python3 - "$site" <<'PY'
+import sys,json,hashlib
+from pathlib import Path
+site=Path(sys.argv[1])
+private=site/'storage/app/private/adops'
+media=private/'landing-assets/00000000-0000-4000-8000-000000000001.png'
+token=private/'upgrade/github-read-token'
+recovery=private/'recovery'
+records=list(recovery.glob('*/files-manifest.json'))
+assert len(records)>=2,'fresh+previous snapshots required'
+def sha(p):return hashlib.sha256(p.read_bytes()).hexdigest()
+fresh=0
+for m in records:
+    o=json.loads(m.read_text())
+    entries={item['path']:item for item in o['files']}
+    names=['private/landing-assets/00000000-0000-4000-8000-000000000001.png','config/github-read-token','config/.env','config/installed.json']
+    if not all(k in entries for k in names):continue
+    for k in names:
+        actual=media if k.startswith('private/') else (token if k.endswith('github-read-token') else (site/'.env' if k=='config/.env' else private/'installation/installed.json'))
+        payload=m.parent/'payload'/k
+        assert payload.is_file() and entries[k]['sha256']==sha(payload)==sha(actual)
+        assert entries[k]['bytes']==payload.stat().st_size
+    db=json.loads((m.parent/'manifest.json').read_text())
+    dbfile=m.parent/db['file']
+    assert dbfile.is_file() and db['sha256']==sha(dbfile) and db['bytes']==dbfile.stat().st_size
+    stage=private/'legacy-media-bridge'/('stage-'+m.parent.name)
+    assert stage.is_dir() and sha(stage/'config/github-read-token')==sha(token)
+    assert sha(stage/'private/landing-assets/00000000-0000-4000-8000-000000000001.png')==sha(media)
+    fresh+=1
+assert fresh>=2,'pre + final independent restore staging required'
+assert not (private/'maintenance/maintenance.json').exists()
+print('P08_V016_BRIDGE_FRESH_NONEMPTY_MEDIA_TOKEN_NATIVE_DB_BACKUP=PASS')
+print('P08_V016_BRIDGE_INDEPENDENT_MEDIA_TOKEN_RESTORE_STAGING=PASS')
+PY
+echo "P08_V016_BRIDGE_$engine"_ORIGINAL_015_TO_CANDIDATE_016_NATIVE_ATOMIC=PASS
+
