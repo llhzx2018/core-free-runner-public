@@ -212,7 +212,7 @@ $cfg=(new \VF\AdOps\Upgrade\InstalledDatabaseConfig())->read($s);
 $files=glob($s."/storage/app/private/adops/recovery/*/files-manifest.json");
 $id=basename(dirname(end($files)));
 $restore=$cfg;
-if($cfg["driver"]==="sqlite"){$restore["database"]=$s."/database/".str_repeat("b",32).".sqlite";}
+if($cfg["driver"]==="sqlite"){$restore["database"]=$s."/database/".bin2hex(random_bytes(16)).".sqlite";}
 else {
  $restore["database"]="p08_ci_016_fault_restore_empty";
  $p=new PDO("mysql:host=".$cfg["host"].";port=".$cfg["port"].";charset=utf8mb4",$cfg["username"],$cfg["password"]);
