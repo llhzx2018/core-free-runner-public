@@ -1,0 +1,90 @@
+name: TEMP P07 M05 tool lock and official upgrade proof
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/temp-p07-m05-toolbox-lock.yml', 'harness/p07-m05-toolbox-lock/**']
+permissions:
+  contents: read
+jobs:
+  proof:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'maintenance/p07-m05-toolbox-lock-free-proof-20261122'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      TARGET_VERSION: '0.1.0'
+      TARGET_REPO: 'llhzx2018/vf-server-ops'
+      TARGET_SHA: '62c8e36b563a4c8d176659198fb08fffa864ea33'
+      TARGET_TREE: 'bc13a68057856528fd7dc5bc861687c8018bedb6'
+      PRODUCT_BASE: 'e654bae6668deee5b758a553da16a8a28b601642'
+      PYTHONDONTWRITEBYTECODE: '1'
+      NO_COLOR: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Audit lane identity
+        run: python3 -B scripts/ephemeral_lane_spec.py audit-rendered --spec harness/p07-m05-toolbox-lock/lane.json --input .github/workflows/temp-p07-m05-toolbox-lock.yml
+      - name: Check out exact product transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: .p07-private-product
+      - name: Check out source rules transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .p07-private-governance
+      - name: Run exact-source architecture, security and related initialization tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          product="$GITHUB_WORKSPACE/.p07-private-product"
+          gov="$GITHUB_WORKSPACE/.p07-private-governance"
+          [[ "$(git -C "$product" rev-parse HEAD)" == "$TARGET_SHA" ]]
+          [[ "$(git -C "$product" rev-parse 'HEAD^{tree}')" == "$TARGET_TREE" ]]
+          cd "$product"
+          check() {
+            local marker="$1"; shift
+            if "$@" >"$RUNNER_TEMP/p07-m05-lock-private.log" 2>&1; then echo "$marker=PASS"; else echo "$marker=FAIL"; exit 1; fi
+          }
+          check M05_ARCHITECTURE python3 -B .github/checks/architecture_gate.py --manifest .github/checks/code_architecture.json --gov-root "$gov" --git-root . --base-sha "$PRODUCT_BASE" --head-sha "$TARGET_SHA"
+          check M05_SECRET_SCAN python3 -B scripts/secret_scan.py --root .
+          check M05_UX python3 -B scripts/check_p07_terminal_ux.py --base-ref "$PRODUCT_BASE"
+          check M05_REGRESSION python3 -B -m unittest -q tests.test_p07_m05_dirty_host_guard tests.test_p07_m05_host_write_gate tests.test_p07_m05_isolated_module
+      - name: Reproduce the official-package block and prove the narrow repair
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          stage="$RUNNER_TEMP/p07-m05-lock"
+          mkdir -m 700 "$stage"
+          api=https://api.github.com/repos/llhzx2018/core-free-runner-public
+          curl --proto '=https' -fsSL --retry 2 --max-time 45 -H 'Accept: application/octet-stream' "$api/releases/assets/764031136" -o "$stage/official.zip"
+          curl --proto '=https' -fsSL --retry 2 --max-time 30 -H 'Accept: application/vnd.github.raw+json' "$api/contents/installers/p07-m05-atomic.py?ref=35e3fbcb1e8c40042558f9f163e4215570074793" -o "$stage/atomic.py"
+          expected=17e47121ac27f31162d93a72aa0b1dbea602ea01
+          [[ "$(git hash-object "$stage/atomic.py")" == "$expected" ]]
+          product="$GITHUB_WORKSPACE/.p07-private-product"
+          python3 -B "harness/p07-m05-toolbox-lock/build_lock_candidate.py" "$stage/official.zip" "$product" "$stage/fixed.zip" "$stage/atomic.py" >"$stage/build.log"
+          printf '%s  %s\n' '7f0831229b0c0e334e20177b9c721473b792fa0d4ae46ab8b179ab164f8a118c' "$stage/fixed.zip" | sha256sum -c
+          if sudo python3 -B "harness/p07-m05-toolbox-lock/verify_lock_candidate.py" "$stage/atomic.py" "$stage/official.zip" "$stage/fixed.zip" >"$stage/verify.log" 2>&1; then
+            sed -n '/^M05_[A-Z_]*PASSED$/p' "$stage/verify.log"
+          else
+            echo M05_OFFICIAL_UPGRADE_VERIFICATION=FAIL
+            exit 1
+          fi
+      - name: Clean private sources and candidate bytes
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- .p07-private-product .p07-private-governance "$RUNNER_TEMP/p07-m05-lock"
+          rm -f -- "$RUNNER_TEMP/p07-m05-lock-private.log"
