@@ -19,7 +19,7 @@ class PublicSingleEntryTests(unittest.TestCase):
     def fixture(self, directory):
         root = Path(directory)
         for name in (*public_contract.DOCUMENTS, public_contract.TOOLBOX,
-                     "installers/p07-m03-release142-atomic.sh"):
+                     "installers/p07-m03-release144-atomic.sh"):
             target = root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(ROOT / name, target)
@@ -71,7 +71,7 @@ class PublicSingleEntryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.fixture(tmp)
             self.update(root, public_contract.TOOLBOX,
-                        'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release142"',
+                        'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release144"',
                         'VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release143"')
             with self.assertRaisesRegex(public_contract.PublicInstallContractError,
                                         "目标构建与实际安装器版本"):
@@ -80,8 +80,8 @@ class PublicSingleEntryTests(unittest.TestCase):
     def test_old_zip_hash_removed_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = self.fixture(tmp)
-            self.update(root, "installers/p07-m03-release142-atomic.sh",
-                        "ZIP_SHA256='dc6978463e8e73a224e7cccb2bdffe9710bc3bb478076b670703bbb164bda87e'",
+            self.update(root, "installers/p07-m03-release144-atomic.sh",
+                        "ZIP_SHA256='eeddddad32814542d620e13ec46d9567e377af6ef4639cb17e78d26acc05af5d'",
                         "ZIP_SHA256='UNKNOWN'")
             with self.assertRaisesRegex(public_contract.PublicInstallContractError,
                                         "ZIP SHA256"):
