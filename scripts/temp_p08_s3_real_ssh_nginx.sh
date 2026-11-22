@@ -35,7 +35,7 @@ command -v ssh-keygen >/dev/null
 SETUP_STAGE=APT_PACKAGES
 sudo apt-get update -qq > "$ROOT/apt.log" 2>&1
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server nginx >> "$ROOT/apt.log" 2>&1
-sudo systemctl stop ssh nginx >/dev/null 2>&1 || true
+sudo systemctl stop ssh.socket ssh.service nginx.service >/dev/null 2>&1 || true
 SETUP_STAGE=GENERATE_SSH_FIXTURE
 sudo useradd --create-home --shell /bin/bash "$USER_NAME"
 CREATED_USER=1
@@ -68,8 +68,20 @@ StrictModes yes
 LogLevel ERROR
 EOF
 SETUP_STAGE=START_REAL_SSHD
-sudo /usr/sbin/sshd -f "$ROOT/sshd.conf" -E "$ROOT/sshd.log"
-test -s "$ROOT/sshd.pid"
+sudo chown root:root "$ROOT/host_key" "$ROOT/sshd.conf"
+sudo chmod 0600 "$ROOT/host_key"
+sudo chmod 0644 "$ROOT/sshd.conf"
+if ! sudo /usr/sbin/sshd -t -f "$ROOT/sshd.conf" > "$ROOT/sshd-preflight.log" 2>&1; then
+  echo "P08_S3_SSHD_NATIVE_CONFIG=INVALID"
+  exit 1
+fi
+if ! sudo /usr/sbin/sshd -f "$ROOT/sshd.conf" -E "$ROOT/sshd.log"; then
+  if grep -qi 'Address already in use' "$ROOT/sshd.log"; then echo P08_S3_SSHD_FAIL=PORT_22_BUSY;
+  elif grep -qi 'host key' "$ROOT/sshd.log"; then echo P08_S3_SSHD_FAIL=HOST_KEY;
+  else echo P08_S3_SSHD_FAIL=SERVICE_START; fi
+  exit 1
+fi
+if ! test -s "$ROOT/sshd.pid"; then echo "P08_S3_SSHD_FAIL=PID_MISSING"; exit 1; fi
 SETUP_STAGE=TRUSTED_TLS_FIXTURE
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -subj "/CN=$HOST" -addext "subjectAltName=DNS:$HOST" \
