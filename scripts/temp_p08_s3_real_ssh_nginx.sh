@@ -9,6 +9,7 @@ SLUG="lp-preview"
 ROOT="$(mktemp -d "${RUNNER_TEMP:-/tmp}/p08-ssh-nginx-XXXXXXXX")"
 SITE="/home/$USER_NAME/vf-adops-static/$SLUG"
 CREATED_USER=0
+SETUP_STAGE=INIT
 cleanup() {
   set +e
   if test -f "$ROOT/nginx.pid"; then sudo nginx -s stop -c "$ROOT/nginx.conf" >/dev/null 2>&1; fi
@@ -18,7 +19,12 @@ cleanup() {
   rm -rf -- "$ROOT"
   echo "P08_S3_TRANSIENT_SSH_NGINX_CLEANUP=PASS"
 }
-trap cleanup EXIT
+on_exit() {
+  code=$?
+  if test "$code" -ne 0; then echo "P08_S3_TRANSPORT_SETUP_FAILED_STAGE=$SETUP_STAGE"; fi
+  cleanup
+}
+trap on_exit EXIT
 if id "$USER_NAME" >/dev/null 2>&1; then echo "P08_S3_TEST_USER_COLLISION=BLOCKED"; exit 2; fi
 if test "${P08_ISOLATED_SSH_TEST:-}" != "YES"; then echo "P08_S3_NON_DISPOSABLE_ENV=BLOCKED"; exit 2; fi
 if test "${P08_SOURCE_SHA:-}" != "00a62c8c8e991c10344255511efc6d45174c1e1c"; then echo "P08_S3_PINNED_SOURCE_DRIFT=BLOCKED"; exit 2; fi
@@ -26,9 +32,11 @@ test -s "$GITHUB_WORKSPACE/private-p08/vendor/autoload.php"
 test "$(git -C "$GITHUB_WORKSPACE/private-p08" rev-parse HEAD)" = "$P08_SOURCE_SHA"
 command -v openssl >/dev/null
 command -v ssh-keygen >/dev/null
+SETUP_STAGE=APT_PACKAGES
 sudo apt-get update -qq > "$ROOT/apt.log" 2>&1
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq openssh-server nginx >> "$ROOT/apt.log" 2>&1
 sudo systemctl stop ssh nginx >/dev/null 2>&1 || true
+SETUP_STAGE=GENERATE_SSH_FIXTURE
 sudo useradd --create-home --shell /bin/bash "$USER_NAME"
 CREATED_USER=1
 sudo usermod -p "$(openssl passwd -6 'synthetic-not-used-2026')" "$USER_NAME"
@@ -59,8 +67,10 @@ AuthorizedKeysFile .ssh/authorized_keys
 StrictModes yes
 LogLevel ERROR
 EOF
+SETUP_STAGE=START_REAL_SSHD
 sudo /usr/sbin/sshd -f "$ROOT/sshd.conf" -E "$ROOT/sshd.log"
 test -s "$ROOT/sshd.pid"
+SETUP_STAGE=TRUSTED_TLS_FIXTURE
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -subj "/CN=$HOST" -addext "subjectAltName=DNS:$HOST" \
   -keyout "$ROOT/tls.key" -out "$ROOT/tls.crt" >/dev/null 2>&1
@@ -85,6 +95,7 @@ http {
   }
 }
 EOF
+SETUP_STAGE=START_REAL_NGINX
 sudo nginx -t -c "$ROOT/nginx.conf" >/dev/null 2>&1
 sudo nginx -c "$ROOT/nginx.conf"
 test -s "$ROOT/nginx.pid"
@@ -93,6 +104,7 @@ echo "P08_S3_NATIVE_OPENSSH_AND_NGINX_LISTENERS=PASS"
 export P08_TEST_APP_ROOT="$GITHUB_WORKSPACE/private-p08" P08_TEST_HOST="$HOST"
 export P08_TEST_USERNAME="$USER_NAME" P08_TEST_SLUG="$SLUG" P08_TEST_ROOT="$ROOT"
 export P08_TEST_SSH_PIN_FILE="$ROOT/host_pin" P08_TEST_SSH_IDENTITY_FILE="$ROOT/owner_key"
+SETUP_STAGE=GATEWAY_REAL_SSH_TLS
 php "$GITHUB_WORKSPACE/public-harness/scripts/temp_p08_s3_real_ssh_nginx.php" > "$ROOT/php-test.log" 2>&1 || {
   grep '^P08_S3_TRANSPORT_' "$ROOT/php-test.log" | tail -n 12 || true
   echo "P08_S3_NATIVE_SSH_NGINX_TLS=FAIL"
