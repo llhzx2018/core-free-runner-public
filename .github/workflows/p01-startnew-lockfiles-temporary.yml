@@ -1,143 +1,152 @@
-name: TEMP P01 StartNew locked dependencies into private dev branch
+name: TEMP P01 StartNew locked source & UX inventory three-engine gate
 on:
   pull_request:
     branches: [main]
     paths:
       - .github/workflows/p01-startnew-lockfiles-temporary.yml
-
 permissions:
   contents: read
-  actions: read
-
 jobs:
-  pin-exact-locks:
+  s1-exact-source:
     if: >-
       github.repository == 'llhzx2018/core-free-runner-public' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'test/p01-startnew-lockfiles-20261122'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [sqlite, mysql, mariadb]
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic_startnew
+          MYSQL_DATABASE: p01_startnew
+        ports: [3306:3306]
+        options: >-
+          --health-cmd="mysqladmin ping --silent -h 127.0.0.1 -uroot -psynthetic_startnew"
+          --health-interval=10s --health-timeout=5s --health-retries=20
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: synthetic_startnew
+          MARIADB_DATABASE: p01_startnew
+        ports: [3307:3306]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=20
     env:
       APP_ENV: testing
       APP_DEBUG: 'false'
       APP_URL: http://localhost
-      DB_CONNECTION: sqlite
-      DB_DATABASE: ':memory:'
-      SESSION_DRIVER: array
+      DB_CONNECTION: ${{ matrix.engine == 'sqlite' && 'sqlite' || 'mysql' }}
+      DB_HOST: 127.0.0.1
+      DB_PORT: ${{ matrix.engine == 'mariadb' && '3307' || '3306' }}
+      DB_DATABASE: ${{ matrix.engine == 'sqlite' && ':memory:' || 'p01_startnew' }}
+      DB_USERNAME: root
+      DB_PASSWORD: synthetic_startnew
       CACHE_STORE: array
+      QUEUE_CONNECTION: sync
+      SESSION_DRIVER: array
     steps:
-      - name: Checkout temporary public orchestration
+      - name: Checkout public orchestration
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-      - name: Checkout exact private development source without persisted credentials
+      - name: Checkout exact private development SHA transiently
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-startnew
-          ref: f472617bd1d99a20b83f5974b564d27aa580f9bd
+          ref: fe5221862e3ae497233372a5468b28712efebcc1
           path: target
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
-      - name: Retrieve only exact known successful machine dependency locks
-        uses: actions/download-artifact@v4
-        with:
-          name: p01-startnew-r02-locks-mysql
-          repository: llhzx2018/core-free-runner-public
-          run-id: 44983856053
-          github-token: ${{ github.token }}
-          path: target
-      - name: PHP and Composer
+      - name: Prepare PHP8.4
         uses: shivammathur/setup-php@v2
         with:
           php-version: '8.4'
           tools: composer:v2
           extensions: mbstring, pdo_sqlite, sqlite3, pdo_mysql, dom, xml, curl, zip, openssl
           coverage: none
-      - name: Node22
+      - name: Prepare Node22
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '22'
-      - name: Regenerate and verify exact dependency locks (no write credentials)
+      - name: All S1 source and negative guards bound to exact Git SHA
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = fe5221862e3ae497233372a5468b28712efebcc1
+          (
+            cd target
+            test "$(cat VERSION)" = 0.1.0-dev
+            python3 scripts/check_bootstrap.py
+            python3 scripts/check_visual_identity.py
+            python3 scripts/check_delivery_plan.py
+            python3 scripts/check_dependency_lock.py
+            python3 scripts/check_legacy_ui_inventory.py
+            python3 -m unittest discover -s tests -p 'test_*.py' -v
+            php tests/evolution/test_second_module.php
+            find app bootstrap config database routes tests -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          ) > "$RUNNER_TEMP/p01-s1-static.log" 2>&1 || {
+            echo P01_S1_SOURCE_AND_DENIAL=FAIL
+            grep -E 'FAIL|Error|Exception|AssertionError' "$RUNNER_TEMP/p01-s1-static.log" | tail -n 18 || true
+            exit 1
+          }
+          echo P01_S1_SOURCE_AND_DENIAL=PASS
+      - name: Install pinned Composer and npm assets without version resolution
         shell: bash
         working-directory: target
         run: |
           set -Eeuo pipefail
-          test "$(git rev-parse HEAD)" = f472617bd1d99a20b83f5974b564d27aa580f9bd
-          test "$(sha256sum composer.lock | cut -d' ' -f1)" = c0c95088c16d30a099b6fc41c435b59a7415d635ba3390ada885cdfd4431037e
-          test "$(sha256sum package-lock.json | cut -d' ' -f1)" = ad33a20da97b629c069ce6e0525db8b9ed228ec613164ec2bc3fd0504f74c58f
-          if ! composer install --no-interaction --no-progress --prefer-dist >"$RUNNER_TEMP/p01-lock-build.log" 2>&1; then
-            echo P01_LOCK_COMPOSER_INSTALL=FAIL
-            grep -Ei 'error|problem|failed|cannot|could not' "$RUNNER_TEMP/p01-lock-build.log" | tail -n 12 || true
+          (
+            composer install --no-interaction --no-progress --prefer-dist
+            npm ci --no-audit --no-fund
+            npm run typecheck
+            npm run build
+          ) > "$RUNNER_TEMP/p01-s1-build.log" 2>&1 || {
+            echo P01_S1_PINNED_STACK=FAIL
+            grep -Ei 'error|failed|cannot|could not|problem' "$RUNNER_TEMP/p01-s1-build.log" | tail -n 18 || true
             exit 1
-          fi
-          if ! npm ci --no-audit --no-fund >>"$RUNNER_TEMP/p01-lock-build.log" 2>&1; then
-            echo P01_LOCK_NPM_CI=FAIL
-            grep -Ei 'npm err|error|failed|cannot|could not' "$RUNNER_TEMP/p01-lock-build.log" | tail -n 12 || true
-            exit 1
-          fi
-          npm run typecheck >>"$RUNNER_TEMP/p01-lock-build.log" 2>&1
-          npm run build >>"$RUNNER_TEMP/p01-lock-build.log" 2>&1
-          cp .env.example .env
-          php artisan key:generate --force >>"$RUNNER_TEMP/p01-lock-build.log" 2>&1
-          if ! php artisan test >>"$RUNNER_TEMP/p01-lock-build.log" 2>&1; then
-            echo P01_LOCK_LARAVEL_TEST=FAIL
-            grep -Ei 'error|failed|exception|sqlstate' "$RUNNER_TEMP/p01-lock-build.log" | tail -n 14 || true
-            exit 1
-          fi
-          test -s composer.lock
-          test -s package-lock.json
-          sha256sum composer.lock package-lock.json
-          echo P01_LOCKFILES_REPEATABLE_DEPENDENCY_TEST=PASS
-      - name: Commit only two verified lockfiles to existing dev branch
-        working-directory: target
+          }
+          echo P01_S1_PINNED_STACK=PASS
+      - name: Native independent engine migration and synthetic M01 writes
         shell: bash
-        env:
-          WF_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        working-directory: target
         run: |
           set -Eeuo pipefail
-          set +x
-          if [ -z "$WF_WRITE_TOKEN" ]; then
-            echo LOCKFILE_BRANCH_WRITE=BLOCKED_MISSING_REGISTERED_WRITE_CAPABILITY
-            exit 1
-          fi
-          cat >"$RUNNER_TEMP/p01-askpass.sh" <<'ASKPASS'
-          #!/bin/sh
-          case "$1" in
-            *Username*) printf 'x-access-token';;
-            *Password*) printf '%s' "$WF_WRITE_TOKEN";;
-            *) exit 1;;
-          esac
-          ASKPASS
-          chmod 700 "$RUNNER_TEMP/p01-askpass.sh"
-          export GIT_ASKPASS="$RUNNER_TEMP/p01-askpass.sh"
-          export GIT_TERMINAL_PROMPT=0
-          ACTUAL="$(git ls-remote origin refs/heads/feat/p01-new-laravel-foundation | cut -f1)"
-          test "$ACTUAL" = f472617bd1d99a20b83f5974b564d27aa580f9bd || {
-            echo LOCKFILE_BRANCH_WRITE=STOP_HEAD_CHANGED_OR_PERMISSION
-            exit 1
-          }
-          git add -- composer.lock package-lock.json
-          EXPECTED="$(printf 'composer.lock\npackage-lock.json')"
-          ACTUAL_FILES="$(git diff --cached --name-only)"
-          test "$ACTUAL_FILES" = "$EXPECTED" || {
-            echo LOCKFILE_BRANCH_WRITE=STOP_UNEXPECTED_FILES
+          (
+            cp .env.example .env
+            php artisan key:generate --force
+            if [ "$DB_CONNECTION" = sqlite ]; then
+              touch database/runner.sqlite
+              export DB_DATABASE="$(pwd)/database/runner.sqlite"
+            fi
+            php artisan migrate:fresh --force
+            php artisan tinker --execute='
+              $cat = \App\Modules\Navigation\Domain\Category::query()->create(["title"=>"Synthetic"]);
+              $url = "https://example.org/a?ref=A%2FB&b=Z%2B1";
+              $link = \App\Modules\Navigation\Domain\Link::query()->create(["title"=>"Synthetic","url"=>$url,"category_id"=>$cat->id]);
+              if ($link->fresh()->url !== $url) throw new \RuntimeException("changed URL");
+              if ($link->fresh()->visibility !== "private") throw new \RuntimeException("private default");
+              $link->delete();
+              if (! $link->trashed()) throw new \RuntimeException("soft delete");
+            '
+            php artisan test
+          ) > "$RUNNER_TEMP/p01-s1-native.log" 2>&1 || {
+            echo P01_S1_NATIVE=FAIL
+            grep -Ei 'error|failed|exception|sqlstate|not found' "$RUNNER_TEMP/p01-s1-native.log" | tail -n 18 || true
             exit 1
           }
-          git -c user.name='VF Dependency Lock Validation' -c user.email='github-actions[bot]@users.noreply.github.com' commit -m 'build(S1-R02): add real verified Composer and npm lockfiles'
-          NEW_SHA="$(git rev-parse HEAD)"
-          git push origin HEAD:refs/heads/feat/p01-new-laravel-foundation >"$RUNNER_TEMP/p01-write.log" 2>&1 || {
-            echo LOCKFILE_BRANCH_WRITE=BLOCKED_SCOPE_OR_FAST_FORWARD
-            exit 1
-          }
-          test -n "$NEW_SHA"
-          echo "P01_LOCKFILES_COMMITTED_SHA=$NEW_SHA"
-          echo LOCKFILE_BRANCH_WRITE=PASS
-      - name: Always erase private checkout and transient credentials
+          echo "P01_S1_NATIVE=PASS ENGINE=${{ matrix.engine }}"
+      - name: Always clean transient private files and logs
         if: always()
         shell: bash
         run: |
           set -Eeuo pipefail
           rm -rf -- target
-          rm -f "$RUNNER_TEMP/p01-lock-build.log" "$RUNNER_TEMP/p01-write.log" "$RUNNER_TEMP/p01-askpass.sh"
+          rm -f "$RUNNER_TEMP/p01-s1-static.log" "$RUNNER_TEMP/p01-s1-build.log" "$RUNNER_TEMP/p01-s1-native.log"
           test ! -e target
-          echo P01_LOCKFILE_PRIVATE_CLEANUP=PASS
+          echo P01_S1_PRIVATE_CLEANUP=PASS
