@@ -113,6 +113,27 @@ sudo nginx -c "$ROOT/nginx.conf"
 test -s "$ROOT/nginx.pid"
 test -s "$ROOT/sshd.pid"
 echo "P08_S3_NATIVE_OPENSSH_AND_NGINX_LISTENERS=PASS"
+printf '%s %s\n' "$HOST" "$(cat "$ROOT/host_pin")" > "$ROOT/known_hosts"
+chmod 0600 "$ROOT/known_hosts"
+SETUP_STAGE=REAL_SSH_PINNED_KEY_AUTH
+if ! ssh -F /dev/null -T -p 22 -i "$ROOT/owner_key" \
+  -o BatchMode=yes -o StrictHostKeyChecking=yes \
+  -o UserKnownHostsFile="$ROOT/known_hosts" -o GlobalKnownHostsFile=/dev/null \
+  -o HostKeyAlias="$HOST" -o HostName=127.0.0.1 \
+  -o HostKeyAlgorithms=ssh-ed25519 -o IdentitiesOnly=yes \
+  -o IdentityAgent=none -o ForwardAgent=no \
+  -o ClearAllForwardings=yes -o ProxyCommand=none -o ProxyJump=none \
+  -o ConnectionAttempts=1 -o ConnectTimeout=5 \
+  "$USER_NAME@$HOST" 'printf P08_SYNTHETIC_SSH_AUTH_OK' \
+  > "$ROOT/ssh-preflight.log" 2>&1; then
+  echo "P08_S3_TRANSPORT_SSH_AUTH=FAIL"
+  exit 1
+fi
+if ! grep -qx 'P08_SYNTHETIC_SSH_AUTH_OK' "$ROOT/ssh-preflight.log"; then
+  echo "P08_S3_TRANSPORT_SSH_STDOUT=UNVERIFIED"
+  exit 1
+fi
+echo "P08_S3_TRANSPORT_SSH_AUTH=PASS"
 export P08_TEST_APP_ROOT="$GITHUB_WORKSPACE/private-p08" P08_TEST_HOST="$HOST"
 export P08_TEST_USERNAME="$USER_NAME" P08_TEST_SLUG="$SLUG" P08_TEST_ROOT="$ROOT"
 export P08_TEST_SSH_PIN_FILE="$ROOT/host_pin" P08_TEST_SSH_IDENTITY_FILE="$ROOT/owner_key"
