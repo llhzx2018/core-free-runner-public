@@ -7,7 +7,7 @@ umask 077
 [[ "$(id -u)" != 0 && "$RUNNER_TEMP" == /home/runner/work/_temp ]] || exit 2
 source_dir="$GITHUB_WORKSPACE/source"
 site="$RUNNER_TEMP/p08-s1-verified-full-sqlite"
-[[ "$(git -C "$source_dir" rev-parse HEAD)" == d0c88a5a638e2dcd843c78e234b250139c1a86d6 ]] || exit 2
+[[ "$(git -C "$source_dir" rev-parse HEAD)" == dcdf58c4814b7e930b5d53365bd44aa3bfc5cd08 ]] || exit 2
 [[ -f "$site/FULL_MANIFEST.json" && -f "$site/storage/app/private/adops/installation/installed.json" ]] || exit 2
 work="$RUNNER_TEMP/p08-s1-https"
 [[ ! -e "$work" ]] || exit 3
@@ -81,6 +81,7 @@ grep -Fq 'name="_token"' "$work/login.html" || exit 5
 status=$(curl -k -sS -o /dev/null -w '%{http_code}' https://127.0.0.1:18488/app)
 [[ "$status" == 302 ]] || exit 5
 cd "$source_dir"
+export P08_TEST_INSTALLED_SITE="$site"
 export P08_TEST_BASE_URL=https://127.0.0.1:18488
 npx playwright test tests/e2e/owner-workspace.spec.ts --workers=1 --reporter=list
 echo P08_S1_R04_LOCAL_REAL_HTTPS_CHROMIUM_WORKSPACE=PASS
