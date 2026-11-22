@@ -178,16 +178,17 @@ class Official142PublicDistribution(unittest.TestCase):
             self.assertFalse((root/"bin/vfops").exists())
 
 
-    def test_release145_public_entry_and_real_144_upgrade(self):
-        wrapper = ROOT / "installers/p07-m03-release145-atomic.sh"
-        previous_wrapper = ROOT / "installers/p07-m03-release144-atomic.sh"
+    def test_release146_public_entry_and_real_145_upgrade(self):
+        wrapper = ROOT / "installers/p07-m03-release146-atomic.sh"
+        older_wrapper = ROOT / "installers/p07-m03-release144-atomic.sh"
+        previous_wrapper = ROOT / "installers/p07-m03-release145-atomic.sh"
         toolbox = TOOLBOX.read_text(encoding="utf-8")
-        stable_version = "0.1.0-release145"
-        previous_version = "0.1.0-release144"
+        stable_version = "0.1.0-release146"
+        previous_version = "0.1.0-release145"
         self.assertIn(f'VF_SERVER_OPS_BUILD_EXPECTED="{stable_version}"', toolbox)
         self.assertIn(f'VF_SERVER_OPS_INSTALLER_BLOB="{git_blob(wrapper.read_bytes())}"', toolbox)
-        self.assertIn("installers/p07-m03-release145-atomic.sh", toolbox)
-        with tempfile.TemporaryDirectory(prefix="p07-145-public-") as temp:
+        self.assertIn("installers/p07-m03-release146-atomic.sh", toolbox)
+        with tempfile.TemporaryDirectory(prefix="p07-146-public-") as temp:
             root = Path(temp)
             env = env_for(root)
             canaries = {}
@@ -198,6 +199,7 @@ class Official142PublicDistribution(unittest.TestCase):
             for entry, version in (
                 (OLD141, OLD_BUILD),
                 (WRAPPER, BUILD),
+                (older_wrapper, "0.1.0-release144"),
                 (previous_wrapper, previous_version),
             ):
                 applied = run("bash", str(entry), "install", env=env)
@@ -228,7 +230,7 @@ class Official142PublicDistribution(unittest.TestCase):
                 input="y\n", env=env, text=True, capture_output=True, timeout=240,
             )
             self.assertEqual(upgrade.returncode, 0, (upgrade.stdout + upgrade.stderr)[-1600:])
-            self.assertIn("已核验旧正式版 0.1.0-release144", upgrade.stdout)
+            self.assertIn("已核验旧正式版 0.1.0-release145", upgrade.stdout)
             self.assertEqual((root / "current/BUILD_ID").read_text().strip(), stable_version)
             self.assertEqual((root / "previous/BUILD_ID").read_text().strip(), previous_version)
             self.assertEqual(
@@ -236,6 +238,10 @@ class Official142PublicDistribution(unittest.TestCase):
             )
             self.assertEqual(
                 (root / "previous.preserved-0.1.0-release142/BUILD_ID").read_text().strip(), BUILD
+            )
+            self.assertEqual(
+                (root / "previous.preserved-0.1.0-release144/BUILD_ID").read_text().strip(),
+                "0.1.0-release144",
             )
             current = (root / "current/.runtime-manifest.gitblob").read_bytes()
             self.assertIn(f'VF_SERVER_OPS_MANIFEST_BLOB="{git_blob(current)}"', toolbox)
