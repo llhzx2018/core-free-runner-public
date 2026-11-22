@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -197,11 +199,37 @@ class Official142PublicDistribution(unittest.TestCase):
                 (OLD141, OLD_BUILD),
                 (WRAPPER, BUILD),
                 (previous_wrapper, previous_version),
-                (wrapper, stable_version),
             ):
                 applied = run("bash", str(entry), "install", env=env)
                 self.assertEqual(applied.returncode, 0, (applied.stdout + applied.stderr)[-1600:])
                 self.assertEqual((root / "current/BUILD_ID").read_text().strip(), version)
+            helpers = []
+            for name in ("p07_git_blob_sha1", "m03_verified_current", "ensure_server_ops_current"):
+                match = re.search(rf"(?ms)^{name}\(\) \{{\n.*?^\}}$", toolbox)
+                self.assertIsNotNone(match, name)
+                helpers.append(match.group().replace("/opt/vf-server-ops", str(root / "current")))
+            pins = "\n".join(re.findall(r"(?m)^(?:VF_SERVER_OPS|M03_)[A-Z0-9_]*=.*$", toolbox))
+            harness = root / "toolbox-upgrade.sh"
+            harness.write_text(
+                "set -euo pipefail\nC_RED='' C_RESET=''\n" + pins + "\n" +
+                'say() { printf "%s\\n" "$*"; }\n' +
+                'curl() { [[ "$1" == -fsSL && "$2" == "$VF_SERVER_OPS_INSTALLER" && "$3" == -o ]]; '
+                'cp -- "$P07_TEST_WRAPPER" "$4"; }\n' +
+                "\n".join(helpers) + "\nensure_server_ops_current\n",
+                encoding="utf-8",
+            )
+            env["PATH"] = str(root / "bin") + os.pathsep + env["PATH"]
+            env["P07_TEST_WRAPPER"] = str(wrapper)
+            noninteractive = run("bash", str(harness), env=env)
+            self.assertEqual(noninteractive.returncode, 7, noninteractive.stderr)
+            self.assertEqual((root / "current/BUILD_ID").read_text().strip(), previous_version)
+            upgrade = subprocess.run(
+                ["script", "-qec", "bash " + shlex.quote(str(harness)), "/dev/null"],
+                input="y\n", env=env, text=True, capture_output=True, timeout=240,
+            )
+            self.assertEqual(upgrade.returncode, 0, (upgrade.stdout + upgrade.stderr)[-1600:])
+            self.assertIn("已核验旧正式版 0.1.0-release144", upgrade.stdout)
+            self.assertEqual((root / "current/BUILD_ID").read_text().strip(), stable_version)
             self.assertEqual((root / "previous/BUILD_ID").read_text().strip(), previous_version)
             self.assertEqual(
                 (root / "previous.preserved-0.1.0-release141/BUILD_ID").read_text().strip(), OLD_BUILD

@@ -484,7 +484,7 @@ ensure_server_ops_current() {
   if m03_verified_current; then
     prior="$(cat /opt/vf-server-ops/BUILD_ID)"
     if [[ "$prior" == "$VF_SERVER_OPS_BUILD_EXPECTED" ]]; then return 0; fi
-    [[ "$prior" == "$M03_OFFICIAL142_BUILD" || "$prior" == "$M03_OFFICIAL141_BUILD" || "$prior" == "$M03_OFFICIAL140_BUILD" || "$prior" == "$M03_PREVIOUS_BUILD" || "$prior" == "$M03_LEGACY138_BUILD" || "$prior" == "$M03_LEGACY137_BUILD" || "$prior" == "$M03_BOOTSTRAP_BUILD" || "$prior" == "$M03_LEGACY135_BUILD" || "$prior" == "$M03_LEGACY115_BUILD" ]] || return 13
+    [[ "$prior" == "$M03_OFFICIAL144_BUILD" || "$prior" == "$M03_OFFICIAL142_BUILD" || "$prior" == "$M03_OFFICIAL141_BUILD" || "$prior" == "$M03_OFFICIAL140_BUILD" || "$prior" == "$M03_PREVIOUS_BUILD" || "$prior" == "$M03_LEGACY138_BUILD" || "$prior" == "$M03_LEGACY137_BUILD" || "$prior" == "$M03_BOOTSTRAP_BUILD" || "$prior" == "$M03_LEGACY135_BUILD" || "$prior" == "$M03_LEGACY115_BUILD" ]] || return 13
     say "P07-M03 网站与数据：已核验旧正式版 $prior，新版本 $VF_SERVER_OPS_BUILD_EXPECTED。"
     say '仅升级本模块程序；保留上一个正式运行时用于回滚，不操作网站、数据库或 DNS。'
     if [[ ! -t 0 || ! -t 1 ]]; then
