@@ -90,17 +90,19 @@ class PublicSingleEntryTests(unittest.TestCase):
                                         "ZIP SHA256"):
                 public_contract.validate(root)
 
-    def test_m05_ux11_recognizes_ux10_and_requires_interactive_upgrade(self):
+    def test_m05_ux12_recognizes_ux11_and_requires_interactive_upgrade(self):
         toolbox = (ROOT / public_contract.TOOLBOX).read_text(encoding="utf-8")
-        self.assertIn('M05_BUILD_EXPECTED="0.1.0-m05-ux11-toolbox-lock"', toolbox)
-        self.assertIn('M05_PREVIOUS_OFFICIAL_BUILD="0.1.0-m05-ux10-bootstrap-ux-failstop"', toolbox)
-        self.assertIn('M05_BUNDLE_SHA256="7f0831229b0c0e334e20177b9c721473b792fa0d4ae46ab8b179ab164f8a118c"', toolbox)
-        self.assertIn("p07-m05-v0.1.0-ux11-toolbox-lock-20261122/P07-M05-0.1.0-m05-ux11-toolbox-lock.zip", toolbox)
+        self.assertIn('M05_BUILD_EXPECTED="0.1.0-m05-ux12-apt-failstop"', toolbox)
+        self.assertIn('M05_PREVIOUS_OFFICIAL_BUILD="0.1.0-m05-ux11-toolbox-lock"', toolbox)
+        self.assertIn('M05_BUNDLE_SHA256="424ff9b90d9ce1c5d2b8de9773fb3350d959d8a5f030580e568918a7bc66d279"', toolbox)
+        self.assertIn("p07-m05-v0.1.0-ux12-apt-failstop-20261122/P07-M05-0.1.0-m05-ux12-apt-failstop.zip", toolbox)
+        self.assertIn('M05_UPGRADE_FROM17="0.1.0-m05-ux10-bootstrap-ux-failstop"', toolbox)
+        self.assertIn('"releases/$M05_UPGRADE_FROM17")', toolbox)
         pins = "\n".join(re.findall(r"(?m)^M05_[A-Z0-9_]+=.*$", toolbox))
         ensure = re.search(r"(?ms)^ensure_m05_current\(\) \{\n.*?^\}$", toolbox)
         self.assertIsNotNone(ensure)
         with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "current").symlink_to("releases/0.1.0-m05-ux10-bootstrap-ux-failstop")
+            (Path(tmp) / "current").symlink_to("releases/0.1.0-m05-ux11-toolbox-lock")
             script = "\n".join((
                 "set -euo pipefail",
                 pins,
@@ -116,11 +118,11 @@ class PublicSingleEntryTests(unittest.TestCase):
                 capture_output=True, env={**os.environ, "P07_TEST_ROOT": tmp}, timeout=10,
             )
             self.assertEqual(run.returncode, 7, run.stderr)
-            self.assertIn("发现官方旧版 0.1.0-m05-ux10-bootstrap-ux-failstop", run.stdout)
+            self.assertIn("发现官方旧版 0.1.0-m05-ux11-toolbox-lock", run.stdout)
             self.assertIn("请在交互式 SSH 中确认升级", run.stdout)
             self.assertNotIn("unexpected download", run.stdout)
             self.assertEqual((Path(tmp) / "current").readlink(),
-                             Path("releases/0.1.0-m05-ux10-bootstrap-ux-failstop"))
+                             Path("releases/0.1.0-m05-ux11-toolbox-lock"))
 
     def test_public_toolbox_missing_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
