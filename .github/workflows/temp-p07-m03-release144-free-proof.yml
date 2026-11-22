@@ -1,0 +1,127 @@
+name: TEMP P07 M03 D04 free release preflight
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p07-m03-release144-free-proof.yml'
+      - 'harness/p07-m03-release144-free-proof/**'
+permissions:
+  contents: read
+jobs:
+  proof:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'maintenance/p07-m03-release144-free-proof-20261122'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_VERSION: '0.1.0'
+      TARGET_REPO: 'llhzx2018/vf-server-ops'
+      TARGET_SHA: '9010a6379f409d22888b3681e3561696f482660a'
+      TARGET_TREE: '968666e1813a64171f883b128be513ca2e7de95e'
+      PRODUCT_BASE: 'dcf1104bd958c66fca5785dda58c44249d807e73'
+      PYTHONDONTWRITEBYTECODE: '1'
+      NO_COLOR: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Audit immutable lane identity before private checkout
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -B scripts/ephemeral_lane_spec.py audit-rendered --spec harness/p07-m03-release144-free-proof/lane.json --input .github/workflows/temp-p07-m03-release144-free-proof.yml
+      - name: Checkout exact product transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 0
+          persist-credentials: false
+          path: .p07-private-product
+      - name: Checkout live GOV-DOC transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .p07-private-governance
+      - name: Verify private authority and actual Git diff with sanitized results
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          product="$GITHUB_WORKSPACE/.p07-private-product"
+          gov="$GITHUB_WORKSPACE/.p07-private-governance"
+          test "$(git -C "$product" rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C "$product" rev-parse 'HEAD^{tree}')" = "$TARGET_TREE"
+          git -C "$product" merge-base --is-ancestor "$PRODUCT_BASE" HEAD
+          cd "$product"
+          run_private() {
+            local check="$1"; shift
+            if "$@" > "$RUNNER_TEMP/p07-private-proof.log" 2>&1; then
+              printf '%s=PASS\n' "$check"
+            else
+              printf '%s=FAIL\n' "$check"
+              exit 1
+            fi
+          }
+          run_private P07_GOV_AUTHORITY python3 -B .github/checks/check_gov_doc_ci.py \
+            --project-root . --gov-root "$gov" --project-id P07 --profile cli \
+            --workflow .github/workflows/ci.yml --require-git
+          run_private P07_ACTUAL_GIT_ARCHITECTURE python3 -B .github/checks/architecture_gate.py \
+            --manifest .github/checks/code_architecture.json --gov-root "$gov" --git-root . \
+            --base-sha "$PRODUCT_BASE" --head-sha "$TARGET_SHA"
+          run_private P07_TRACKED_SECRET_SCAN python3 -B scripts/secret_scan.py --root .
+          printf 'P07_GOV_SOURCE=%s\n' "$(git -C "$gov" rev-parse HEAD)"
+      - name: Rebuild tested migration candidate and rehearse release installation
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          product="$GITHUB_WORKSPACE/.p07-private-product"
+          stage="$RUNNER_TEMP/p07-release144-proof"
+          mkdir -m 700 "$stage"
+          download() {
+            local url="$1" asset="$2" out="$3" sha="$4"
+            if curl --proto '=https' -fsSL --retry 1 --connect-timeout 8 --max-time 40 "$url" -o "$out" &&
+               printf '%s  %s\n' "$sha" "$out" | sha256sum -c --status -; then return 0; fi
+            curl --proto '=https' -fsSL --retry 1 --connect-timeout 8 --max-time 45 \
+              -H 'Accept: application/octet-stream' "$asset" -o "$out"
+            printf '%s  %s\n' "$sha" "$out" | sha256sum -c --status -
+          }
+          download \
+            'https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m03-v0.1.0-release142-20261120/P07-M03-0.1.0-release142.zip' \
+            'https://api.github.com/repos/llhzx2018/core-free-runner-public/releases/assets/769843045' \
+            "$stage/official142.zip" dc6978463e8e73a224e7cccb2bdffe9710bc3bb478076b670703bbb164bda87e
+          cp "harness/p07-m03-release144-free-proof/"*.py "$stage/"
+          cp installers/p07-m03-release142-atomic.sh "$stage/public-release142-wrapper-reference.sh"
+          if ! python3 -B "$product/scripts/p07_m03_trial_from_official.py" \
+            --official-zip "$stage/official142.zip" --official-build 0.1.0-release142 \
+            --product-root "$product" --product-sha "$TARGET_SHA" \
+            --build 0.1.0-release144-rc4 --output "$stage/rc4-bootstrap-final-proof.zip" \
+            > "$RUNNER_TEMP/p07-private-candidate.log" 2>&1; then
+            echo P07_EXACT_CANDIDATE_BUILD=FAIL
+            exit 1
+          fi
+          printf '%s  %s\n' de1d1bbd2c3b09c8d3d031fb24944da35ab8e27b8e557ae0c43cb3a2cbedfd7e \
+            "$stage/rc4-bootstrap-final-proof.zip" | sha256sum -c --status -
+          echo P07_EXACT_CANDIDATE_BUILD=PASS
+          if P07_REHEARSAL_STAGE="$stage" bash "harness/p07-m03-release144-free-proof/run-release144-rehearsal.sh" > "$RUNNER_TEMP/p07-private-rehearsal.log" 2>&1; then
+            awk '/^P07_[A-Z0-9_]+=(PASS|[a-f0-9]{64})$/' "$RUNNER_TEMP/p07-private-rehearsal.log"
+          else
+            awk '/^P07_[A-Z0-9_]+=PASS$/' "$RUNNER_TEMP/p07-private-rehearsal.log"
+            echo P07_LOCAL_RELEASE_REHEARSAL=FAIL
+            exit 1
+          fi
+          echo P07_FREE_RELEASE_PREFLIGHT=PASS
+      - name: Clean transient private sources and work
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- .p07-private-product .p07-private-governance "$RUNNER_TEMP/p07-release144-proof"
+          rm -f -- "$RUNNER_TEMP/p07-private-proof.log" "$RUNNER_TEMP/p07-private-candidate.log" "$RUNNER_TEMP/p07-private-rehearsal.log"
