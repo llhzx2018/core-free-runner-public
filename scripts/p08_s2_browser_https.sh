@@ -7,7 +7,7 @@ umask 077
 [[ "$(id -u)" != 0 && "$RUNNER_TEMP" == /home/runner/work/_temp ]] || exit 2
 source_dir="$GITHUB_WORKSPACE/source"
 site="$RUNNER_TEMP/p08-s2-verified-full-sqlite"
-[[ "$(git -C "$source_dir" rev-parse HEAD)" == e8478d4ee3a1bdedbb94f7d04b24cc0a9805ef73 ]] || exit 2
+[[ "$(git -C "$source_dir" rev-parse HEAD)" == daa7740db4a8abdecc06d8e43b0f131552308265 ]] || exit 2
 [[ -f "$site/FULL_MANIFEST.json" && -f "$site/storage/app/private/adops/installation/installed.json" ]] || exit 2
 work="$RUNNER_TEMP/p08-s2-https"
 [[ ! -e "$work" ]] || exit 3
