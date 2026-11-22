@@ -16,7 +16,7 @@ before, original = read_archive(base, baseline_sha)
 assert before == "0.1.0-m05-ux11-toolbox-lock"
 build = "0.1.0-m05-ux12-apt-failstop"
 payload = dict(original)
-guards = ("bin/vfops-init-ui", "lib/m05-system-update.sh")
+guards = ("bin/vfops-init-ui",)
 manifest_name = helpers["MANIFEST"]
 for guard in guards:
     payload[guard] = (source / guard).read_bytes()
