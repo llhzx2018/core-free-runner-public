@@ -166,7 +166,7 @@ jobs:
             exit 1
           fi
           echo P07_FORMAL144_DELIVERY_GATE=PASS
-      - name: Create and verify both release drafts then publish and re-download
+      - name: Verify both existing drafts and finish publication by exact release IDs
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
@@ -174,92 +174,67 @@ jobs:
           set -Eeuo pipefail
           set +x
           stage="$RUNNER_TEMP/p07-release144-proof"
-          product=llhzx2018/vf-server-ops
-          public=llhzx2018/core-free-runner-public
           tag=p07-m03-v0.1.0-release144-20261122
           zip=P07-M03-0.1.0-release144.zip
-          read -r zip_sha checksum_name < "$stage/SHA256SUMS"
-          test "$checksum_name" = "$zip"
-          test "$zip_sha" = eeddddad32814542d620e13ec46d9567e377af6ef4639cb17e78d26acc05af5d
+          zip_sha=eeddddad32814542d620e13ec46d9567e377af6ef4639cb17e78d26acc05af5d
+          sum_sha=fa89cb7e85815a75b0065d3e5714f8951d16cd0df522df2093bd84ed70bf6ba1
           (cd "$stage" && sha256sum -c SHA256SUMS)
-          sum_sha="$(sha256sum "$stage/SHA256SUMS" | cut -d' ' -f1)"
-          size="$(wc -c < "$stage/$zip")"
+          test "$(sha256sum "$stage/$zip" | cut -d' ' -f1)" = "$zip_sha"
+          test "$(sha256sum "$stage/SHA256SUMS" | cut -d' ' -f1)" = "$sum_sha"
           test -n "$GH_TOKEN" || { echo P07_FORMAL144_RELEASE_WRITE_AUTH=BLOCKED; exit 78; }
+          product=llhzx2018/vf-server-ops
+          public=llhzx2018/core-free-runner-public
+          public_target=28ac6820a32f8524fd8509b26ef3a44f0b959a9a
           test "$(gh api "repos/$product/git/ref/heads/main" --jq .object.sha)" = "$TARGET_SHA"
-          public_sha="$(gh api "repos/$public/git/ref/heads/main" --jq .object.sha)"
-          [[ "$public_sha" =~ ^[a-f0-9]{40}$ ]]
-          release_record() {
-            gh api --paginate "repos/$1/releases?per_page=100" \
-              | jq -cs --arg tag "$tag" '[.[][]|select(.tag_name==$tag)] | if length==0 then empty elif length==1 then .[0] else error("duplicate tag") end'
+          repos=("$product" "$public")
+          ids=(454321802 454321826)
+          zip_ids=(778474634 778474753)
+          sum_ids=(778474635 778474752)
+          targets=("$TARGET_SHA" "$public_target")
+          verify() {
+            local idx="$1" file="$2"
+            jq -e --arg tag "$tag" --arg target "${targets[$idx]}" --arg zip "$zip" \
+              --arg zip_sha "sha256:$zip_sha" --arg sum_sha "sha256:$sum_sha" \
+              --argjson zip_id "${zip_ids[$idx]}" --argjson sum_id "${sum_ids[$idx]}" \
+              --argjson id "${ids[$idx]}" '
+              .id==$id and .tag_name==$tag and .prerelease==false and .target_commitish==$target
+              and (.assets|length)==2
+              and any(.assets[]; .id==$zip_id and .name==$zip and .digest==$zip_sha and .size==692121)
+              and any(.assets[]; .id==$sum_id and .name=="SHA256SUMS" and .digest==$sum_sha and .size==95)
+            ' "$file" >/dev/null
           }
-          verify_record() {
-            local record="$1" wanted="$2"
-            jq -e --arg zip "$zip" --arg zip_sha "sha256:$zip_sha" --arg sum_sha "sha256:$sum_sha" \
-              --arg wanted "$wanted" --argjson size "$size" '
-                .prerelease==false and .target_commitish==$wanted and (.assets|length)==2
-                and any(.assets[]; .name==$zip and .digest==$zip_sha and .size==$size)
-                and any(.assets[]; .name=="SHA256SUMS" and .digest==$sum_sha)
-              ' <<< "$record" >/dev/null
-          }
-          for repo in "$product" "$public"; do
-            test "$(gh api "repos/$repo" --jq .permissions.push)" = true
-            test -z "$(release_record "$repo")" || { echo P07_FORMAL144_RELEASE_SLOT_OCCUPIED; exit 78; }
-            if gh api "repos/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then
-              echo P07_FORMAL144_TAG_SLOT_OCCUPIED
-              exit 78
+          for idx in 0 1; do
+            repo="${repos[$idx]}"
+            gh api "repos/$repo/releases/${ids[$idx]}" > "$stage/record-$idx.json"
+            verify "$idx" "$stage/record-$idx.json"
+            if jq -e '.draft==false' "$stage/record-$idx.json" >/dev/null; then
+              test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha)" = "${targets[$idx]}"
             fi
+            echo "P07_FORMAL144_EXISTING_ARTIFACTS_VERIFIED=$repo"
           done
-          cat > "$stage/notes.md" <<'NOTES'
-          P07-M03 网站与数据 / P07-M03-D04 服务器迁移 release144
-          
-          新接收机支持单站迁入，或按实时清单筛选、安全分批迁入。
-          已有站点、数据库和历史迁移任务有独立保护。
-          本次新批次可在满足确认和备份条件时从接收机撤回。
-          正式安装只升级 M03 模块。实际迁移、停站和 DNS 由用户分别决定。
-          NOTES
-          for repo in "$product" "$public"; do
-            expected="$TARGET_SHA"
-            if [[ "$repo" == "$public" ]]; then expected="$public_sha"; fi
-            gh release create "$tag" "$stage/$zip" "$stage/SHA256SUMS" \
-              --repo "$repo" --target "$expected" --draft \
-              --title 'P07-M03 网站与数据 release144' --notes-file "$stage/notes.md" \
-              > "$stage/last-release-operation.log" 2>&1 || { echo P07_FORMAL144_DRAFT_CREATION=BLOCKED; exit 78; }
-            record="$(release_record "$repo")"
-            verify_record "$record" "$expected"
-            test "$(jq -r .draft <<< "$record")" = true
-            echo "P07_FORMAL144_DRAFT_VERIFIED=$repo"
-          done
-          test "$(gh api "repos/$product/git/ref/heads/main" --jq .object.sha)" = "$TARGET_SHA"
-          for repo in "$product" "$public"; do
-            gh release edit "$tag" --repo "$repo" --draft=false \
-              > "$stage/last-release-operation.log" 2>&1 || { echo P07_FORMAL144_PUBLISH=BLOCKED; exit 78; }
-          done
-          for repo in "$product" "$public"; do
-            expected="$TARGET_SHA"
-            if [[ "$repo" == "$public" ]]; then expected="$public_sha"; fi
-            record="$(release_record "$repo")"
-            verify_record "$record" "$expected"
-            test "$(jq -r .draft <<< "$record")" = false
-            test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha)" = "$expected"
-            remote="$stage/remote-$(basename "$repo")"
+          for idx in 0 1; do
+            repo="${repos[$idx]}"
+            if jq -e '.draft==true' "$stage/record-$idx.json" >/dev/null; then
+              gh api -X PATCH "repos/$repo/releases/${ids[$idx]}" -F draft=false > "$stage/record-$idx.json"
+            fi
+            verify "$idx" "$stage/record-$idx.json"
+            jq -e '.draft==false' "$stage/record-$idx.json" >/dev/null
+            test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha)" = "${targets[$idx]}"
+            remote="$stage/remote-$idx"
             mkdir "$remote"
-            gh release download "$tag" --repo "$repo" --dir "$remote" \
-              > "$stage/last-release-operation.log" 2>&1 || { echo P07_FORMAL144_RELEASE_READBACK=BLOCKED; exit 78; }
+            gh release download "$tag" --repo "$repo" --dir "$remote"
             (cd "$remote" && sha256sum -c SHA256SUMS)
             cmp -s "$stage/$zip" "$remote/$zip"
-            echo "P07_FORMAL144_RELEASE_READBACK=PASS:$repo"
+            echo "P07_FORMAL144_OFFICIAL_REMOTE_READBACK=PASS:$repo"
           done
-          asset="$(release_record "$public" | jq -r --arg name "$zip" '.assets[]|select(.name==$name)|.id')"
-          [[ "$asset" =~ ^[0-9]+$ ]]
-          anonymous="$stage/anonymous-release144.zip"
+          anonymous="$stage/anonymous.zip"
           if ! curl --proto '=https' -fsSL --connect-timeout 8 --max-time 35 \
             "https://github.com/$public/releases/download/$tag/$zip" -o "$anonymous"; then
             curl --proto '=https' -fsSL --connect-timeout 8 --max-time 40 \
-              -H 'Accept: application/octet-stream' "https://api.github.com/repos/$public/releases/assets/$asset" -o "$anonymous"
+              -H 'Accept: application/octet-stream' "https://api.github.com/repos/$public/releases/assets/${zip_ids[1]}" -o "$anonymous"
           fi
           cmp -s "$stage/$zip" "$anonymous"
-          echo "P07_FORMAL144_ANONYMOUS_ASSET_ID=$asset"
-          echo 'P07_FORMAL144_ANONYMOUS_RELEASE_READBACK=PASS'
+          echo "P07_FORMAL144_ANONYMOUS_RELEASE_READBACK=PASS"
       - name: Clean transient private sources and work
         if: always()
         shell: bash
