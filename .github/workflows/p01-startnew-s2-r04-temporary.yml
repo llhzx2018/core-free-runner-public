@@ -1,0 +1,149 @@
+name: TEMP P01 S2 R04 exact source preflight browser and PHP tests
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/p01-startnew-s2-r04-temporary.yml
+permissions:
+  contents: read
+jobs:
+  exact-source-r04:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'test/p01-startnew-s2-r04-20261122'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    env:
+      APP_ENV: testing
+      APP_DEBUG: 'false'
+      APP_URL: http://127.0.0.1:18741
+      DB_CONNECTION: sqlite
+      DB_DATABASE: ':memory:'
+      CACHE_STORE: array
+      SESSION_DRIVER: array
+      QUEUE_CONNECTION: sync
+    steps:
+      - name: Public runner temporary workflow checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Private exact-source transient checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-startnew
+          ref: ae27e68265649667213be66d408a960a7a8ffdf5
+          path: target
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - name: Prepare PHP 8.4
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          extensions: pdo_sqlite, sqlite3, pdo_mysql, mbstring, dom, xml, zip, openssl, fileinfo, curl
+          coverage: none
+      - name: Prepare Node22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Locked dependencies and Laravel+TypeScript+Vite
+        shell: bash
+        working-directory: target
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = ae27e68265649667213be66d408a960a7a8ffdf5
+          (
+            composer install --no-interaction --no-progress --prefer-dist
+            npm ci --no-audit --no-fund
+            npm run typecheck
+            npm run build
+            cp .env.example .env
+            php artisan key:generate --force
+            php artisan test
+          ) > "$RUNNER_TEMP/p01-r04-build.log" 2>&1 || {
+            echo P01_R04_BUILD_TESTS=FAIL
+            grep -Ei 'error|failed|cannot|Could not|exception|AssertionError|PHP Fatal' "$RUNNER_TEMP/p01-r04-build.log" | tail -n 25 || true
+            exit 1
+          }
+          echo P01_R04_BUILD_TESTS=PASS
+      - name: Install temporary isolated Playwright browser
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          npm install --prefix "$RUNNER_TEMP/p01-browser" playwright@1.56.1 --no-audit --no-fund >/dev/null
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/p01-browsers"
+          "$RUNNER_TEMP/p01-browser/node_modules/.bin/playwright" install chromium >/dev/null
+      - name: Browser smoke with EMPTY application key and absent database
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          export PW_MODULE="$RUNNER_TEMP/p01-browser/node_modules/playwright"
+          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/p01-browsers"
+          cd target
+          # Force a completely unclaimed/new source runtime. No marker and no database.
+          rm -f storage/app/private/vf-startnew/installed.json
+          APP_KEY='' APP_ENV=local DB_DATABASE=/tmp/p01-r04-not-created.sqlite SESSION_DRIVER=file php -S 127.0.0.1:18741 -t public public/index.php >"$RUNNER_TEMP/p01-r04-server.log" 2>&1 &
+          srv=$!
+          trap 'kill "$srv" 2>/dev/null || true' EXIT
+          for n in $(seq 1 50); do
+            if curl -fsS http://127.0.0.1:18741/setup -o "$RUNNER_TEMP/p01-r04-get.html"; then break; fi
+            sleep .3
+          done
+          if ! grep -q 'vf-setup' "$RUNNER_TEMP/p01-r04-get.html"; then
+            echo P01_R04_SESSIONLESS_BOOTSTRAP=FAIL
+            tail -n 20 "$RUNNER_TEMP/p01-r04-server.log" | sed 's/[A-Za-z0-9_\\/-]*\.env/ENV_REDACTED/g' || true
+            exit 1
+          fi
+          echo P01_R04_SESSIONLESS_NO_KEY=PASS
+          node >"$RUNNER_TEMP/p01-r04-browser.log" 2>&1 <<'NODE'
+          'use strict';
+          const assert=require('node:assert/strict');
+          const {chromium}=require(process.env.PW_MODULE);
+          const origin='http://127.0.0.1:18741';
+          (async()=>{
+           const browser=await chromium.launch({headless:true,args:['--no-sandbox']});
+           try {
+            for(const width of [390,768,1440]){
+             const page=await browser.newPage({viewport:{width,height:860},locale:'zh-CN'});
+             const response=await page.goto(origin+'/setup',{waitUntil:'networkidle'});
+             assert.equal(response.status(),200,'setup GET '+width);
+             await page.getByRole('heading',{name:'建立全新的个人起点'}).waitFor();
+             const visible=await page.locator('.vf-installer-checks li').count();
+             assert.ok(visible>=10,'preflight shows checks at '+width);
+             assert.equal(await page.locator('button:has-text("继续填写信息")').isEnabled(),true,'first-step ready '+width);
+             let geo=await page.evaluate(()=>({scroll:document.documentElement.scrollWidth,inner:window.innerWidth}));
+             assert.ok(geo.scroll<=geo.inner+2,'setup first-step horizontal overflow '+JSON.stringify(geo));
+             await page.getByRole('button',{name:'继续填写信息'}).click();
+             await page.getByLabel('管理员邮箱').fill('owner@example.com');
+             await page.locator('input[type=radio][value=mysql]').check();
+             assert.equal(await page.locator('#setup-host').isVisible(),true);
+             await page.getByLabel('GitHub 只读 Token').fill('synthetic-not-real-and-not-sent');
+             assert.equal(await page.getByRole('button',{name:'开始安装'}).isDisabled(),true,'R04 must be fail closed');
+             geo=await page.evaluate(()=>({scroll:document.documentElement.scrollWidth,inner:window.innerWidth}));
+             assert.ok(geo.scroll<=geo.inner+2,'setup form horizontal overflow '+JSON.stringify(geo));
+             console.log('P01_R04_BROWSER_WIDTH_PASS='+width+'; PREFLIGHT='+visible+'; INSTALL_ACTION_DISABLED=1');
+             await page.close();
+            }
+            const r=await fetch(origin+'/login',{redirect:'manual'});
+            assert.equal(r.status,302,'unclaimed login redirect');
+            assert.equal(r.headers.get('location')?.endsWith('/setup'),true);
+            const p=await fetch(origin+'/setup',{method:'POST',redirect:'manual'});
+            assert.equal(p.status,405,'no R04 write route');
+            console.log('P01_R04_UNCLAIMED_REDIRECT_AND_POST_DENIAL=PASS');
+           } finally {await browser.close();}
+          })().catch(e=>{console.log('P01_R04_BROWSER=FAIL '+e.stack?.slice(0,400));process.exitCode=1});
+          NODE
+          grep '^P01_R04_' "$RUNNER_TEMP/p01-r04-browser.log"
+          test ! -e /tmp/p01-r04-not-created.sqlite
+          test ! -e storage/app/private/vf-startnew/installed.json
+          echo P01_R04_NO_DB_NO_MARKER_GET_AND_POST=PASS
+      - name: Always erase transient source browser and logs
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf target "$RUNNER_TEMP/p01-browser" "$RUNNER_TEMP/p01-browsers"
+          rm -f "$RUNNER_TEMP/p01-r04-build.log" "$RUNNER_TEMP/p01-r04-server.log" "$RUNNER_TEMP/p01-r04-get.html" "$RUNNER_TEMP/p01-r04-browser.log"
+          test ! -e target
+          echo P01_R04_PRIVATE_CLEANUP=PASS
