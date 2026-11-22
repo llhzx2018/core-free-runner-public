@@ -48,8 +48,8 @@ class Official141PublicDistribution(unittest.TestCase):
         self.assertIn('M03_OFFICIAL140_BUILD="0.1.0-release140"', toolbox)
         self.assertIn('M03_OFFICIAL140_MANIFEST_BLOB="239bd543e4f64449ca498c1d67ccb7471abbee66"', toolbox)
         self.assertIn('M03_PREVIOUS_BUILD="0.1.0-release139"', toolbox)
-        self.assertIn('VF_SERVER_OPS_MANIFEST_BLOB="cc3d90839bf71ea9139f5fc0d1c6cb12403b58e0"', toolbox)
-        self.assertIn('VF_SERVER_OPS_INSTALLER_BLOB="1f10b7ce1d87b4b806cdd78455bfdbcf17276876"', toolbox)
+        self.assertIn('VF_SERVER_OPS_MANIFEST_BLOB="5dd59de44fa024add3e6317b6dc8617fb92df91f"', toolbox)
+        self.assertIn('VF_SERVER_OPS_INSTALLER_BLOB="a938bfd7737284d29362481e0160b5441c0a2082"', toolbox)
         self.assertIn("installers/p07-m03-release144-atomic.sh", toolbox)
         for key, value in (
             ("BUILD", BUILD),
