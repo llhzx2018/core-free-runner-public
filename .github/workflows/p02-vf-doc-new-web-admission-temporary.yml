@@ -1,0 +1,411 @@
+name: TEMP P02 vf-doc final GOV new-web admission and exact Clean FULL package
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/p02-vf-doc-new-web-admission-temporary.yml
+permissions:
+  contents: read
+jobs:
+  frozen-frontend:
+    if: false # Frontend source unchanged since prior 8/8 proof; no duplicate frozen install
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-doc
+          ref: fe47f82688ba4127dc244ab004a9a59f0fa3d3fb
+          path: target
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with: {version: '10.20.0', run_install: false}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: {node-version: '22'}
+      - name: Validate exact source and machine-issued locks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = fe47f82688ba4127dc244ab004a9a59f0fa3d3fb
+          test "$(sha256sum target/composer.lock | cut -d' ' -f1)" = 875e0f095c3fd70c878c0b5835eee6f7ba460f44a0267773faf2b3e605ddf9b1
+          test "$(sha256sum target/pnpm-lock.yaml | cut -d' ' -f1)" = 28e02cba708e0ec4dd9769a8dd68ee4bc0cc28533a247c6b711b5e435e4cc585
+          echo P02_EXACT_LOCK_IDENTITY=PASS
+      - name: Strict frozen pnpm / TypeScript / Vitest / Vite build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if (cd target && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm run test:frontend && pnpm run build && git diff --exit-code -- pnpm-lock.yaml) >"$RUNNER_TEMP/p02-frontend.log" 2>&1; then
+            echo P02_FROZEN_FRONTEND=PASS
+          else
+            echo P02_STAGE5_FRONTEND=FAIL
+            grep -Eo 'error TS[0-9]{4}' "$RUNNER_TEMP/p02-frontend.log" | sort -u | head -8 || true
+            exit 1
+          fi
+      - name: Always clear private source and logs
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- target
+          rm -f -- "$RUNNER_TEMP/p02-frontend.log"
+          test ! -e target && echo P02_PRIVATE_CLEAN=PASS
+
+  frozen-php-three-db:
+    if: false # PHP and data code unchanged since native six-engine PASS 45010144129
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.3', '8.4']
+        db: [sqlite, mysql, mariadb]
+    services:
+      mysql:
+        image: mysql:8.4
+        env: {MYSQL_ROOT_PASSWORD: vfdoc_lock_synthetic_only, MYSQL_DATABASE: vfdoc_ci}
+        ports: ['3306:3306']
+        options: --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pvfdoc_lock_synthetic_only" --health-interval=10s --health-timeout=5s --health-retries=18
+      mariadb:
+        image: mariadb:11.8
+        env: {MARIADB_ROOT_PASSWORD: vfdoc_lock_synthetic_only, MARIADB_DATABASE: vfdoc_ci}
+        ports: ['3307:3306']
+        options: --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=10s --health-timeout=5s --health-retries=18
+    env:
+      APP_ENV: testing
+      APP_DEBUG: 'false'
+      APP_URL: http://localhost
+      APP_ALLOWED_HOSTS: localhost
+      DB_CONNECTION: ${{ matrix.db }}
+      DB_DATABASE: ${{ matrix.db == 'sqlite' && ':memory:' || 'vfdoc_ci' }}
+      DB_HOST: 127.0.0.1
+      DB_PORT: ${{ matrix.db == 'mariadb' && '3307' || '3306' }}
+      DB_USERNAME: root
+      DB_PASSWORD: vfdoc_lock_synthetic_only
+      CACHE_STORE: array
+      SESSION_DRIVER: array
+      QUEUE_CONNECTION: sync
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-doc
+          ref: fe47f82688ba4127dc244ab004a9a59f0fa3d3fb
+          path: target
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring,pdo_sqlite,sqlite3,pdo_mysql,dom,xml,zip
+          tools: composer:v2
+          coverage: none
+      - name: Check exact product + real Composer lock identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = fe47f82688ba4127dc244ab004a9a59f0fa3d3fb
+          test "$(sha256sum target/composer.lock | cut -d' ' -f1)" = 875e0f095c3fd70c878c0b5835eee6f7ba460f44a0267773faf2b3e605ddf9b1
+          echo P02_COMPOSER_LOCK_IDENTITY=PASS
+      - name: Strict frozen Composer install, M01 guards, new DB migrations and tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if (
+            cd target
+            composer install --no-interaction --prefer-dist --no-progress --no-audit
+            composer validate --strict
+            python3 -B scripts/check_bootstrap.py
+            python3 -B scripts/check_source_contract.py
+            python3 -m unittest discover -s tests -p test_bootstrap.py
+            python3 -m unittest discover -s tests/guards -p 'test_*.py'
+            python3 -m unittest discover -s tests/evolution -p test_second_module.py
+            cp .env.example .env
+            php artisan key:generate --force
+            php artisan migrate --force
+            find app routes database/migrations -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+            find public -maxdepth 1 -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+            php -l tests/e2e/atomic_upgrade_probe.php >/dev/null
+            composer test
+            git diff --exit-code -- composer.lock
+          ) >"$RUNNER_TEMP/p02-frozen-php.log" 2>&1; then
+            echo P02_STAGE5_BACKUP_NATIVE=PASS
+          else
+            echo P02_STAGE5_BACKUP_NATIVE=FAIL
+            grep -Eo 'Tests: [0-9]+ failed, [0-9]+ passed' "$RUNNER_TEMP/p02-frozen-php.log" | tail -1 || true
+            grep -Eo '(MaterialEditorAndHistoryTest|MaterialAttachmentSecurityTest|MaterialNewFormatTransferTest|WorkspaceOrganizationTest)\.php:[0-9]+' "$RUNNER_TEMP/p02-frozen-php.log" | sort -u | head -10 || true
+            if grep -q 'SQLSTATE' "$RUNNER_TEMP/p02-frozen-php.log"; then echo P02_STAGE3_SQLSTATE_FAILURE=YES; fi
+            if grep -q 'SQLSTATE' "$RUNNER_TEMP/p02-frozen-php.log"; then echo P02_DB_SQLSTATE=FAIL; fi
+            exit 1
+          fi
+      - name: Always clear private source and logs
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- target
+          rm -f -- "$RUNNER_TEMP/p02-frozen-php.log"
+          test ! -e target && echo P02_PRIVATE_CLEAN=PASS
+
+  extracted-full-recovery:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'test/p02-vf-doc-new-web-admission-20261122'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    services:
+      mysql:
+        image: mysql:8.4
+        env: {MYSQL_ROOT_PASSWORD: vfdoc_lock_synthetic_only, MYSQL_DATABASE: vfdoc_ci}
+        ports: ['3306:3306']
+        options: --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pvfdoc_lock_synthetic_only" --health-interval=10s --health-timeout=5s --health-retries=18
+      mariadb:
+        image: mariadb:11.8
+        env: {MARIADB_ROOT_PASSWORD: vfdoc_lock_synthetic_only, MARIADB_DATABASE: vfdoc_ci}
+        ports: ['3307:3306']
+        options: --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=10s --health-timeout=5s --health-retries=18
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-doc
+          ref: fe47f82688ba4127dc244ab004a9a59f0fa3d3fb
+          path: target
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          path: shared-gov-doc
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring,pdo_sqlite,sqlite3,pdo_mysql,dom,xml,zip,curl,fileinfo
+          tools: composer:v2
+          coverage: none
+      - uses: pnpm/action-setup@v4
+        with: {version: '10.20.0', run_install: false}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: {node-version: '22'}
+      - name: Execute true GOV-DOC new-Web repository admission on exact source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = fe47f82688ba4127dc244ab004a9a59f0fa3d3fb
+          python3 -B target/scripts/check_bootstrap.py
+          python3 -B target/scripts/check_source_contract.py
+          if python3 -B shared-gov-doc/governance/agent/validate_repository_entry.py --gov-root shared-gov-doc --new-web-root target >"$RUNNER_TEMP/p02-gov-admission.log" 2>&1; then
+            echo P02_GOV_NEW_WEB_ROOT=STRUCTURAL_PASS
+          else
+            echo P02_GOV_NEW_WEB_ROOT=FAIL
+            python3 - "$RUNNER_TEMP/p02-gov-admission.log" <<'PY'
+          import json,sys
+          try:
+              obj=json.load(open(sys.argv[1],encoding='utf-8'))
+              print("P02_GOV_ADMISSION_ERRORS="+",".join(str(x)[:80] for x in obj.get("errors",[])[:16]))
+          except Exception:
+              print("P02_GOV_ADMISSION_REPORT_NOT_JSON")
+          PY
+            exit 1
+          fi
+      - name: Build Clean FULL from exact private commit and locks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = fe47f82688ba4127dc244ab004a9a59f0fa3d3fb
+          mkdir -p "$RUNNER_TEMP/vfdoc-full-lab"
+          if bash target/scripts/build-clean-full.sh "$RUNNER_TEMP/vfdoc-full-lab/full.zip" >"$RUNNER_TEMP/vfdoc-full-build.log" 2>&1; then
+            echo P02_STAGE5_ACTUAL_FULL_BUILD=PASS
+            unzip -tqq "$RUNNER_TEMP/vfdoc-full-lab/full.zip"
+            echo "P02_STAGE5_FULL_SHA256=$(sha256sum "$RUNNER_TEMP/vfdoc-full-lab/full.zip" | cut -d' ' -f1)"
+          else
+            echo P02_STAGE5_ACTUAL_FULL_BUILD=FAIL
+            grep -E 'P02_FULL_[A-Z_]+(=PASS|MISSING)' "$RUNNER_TEMP/vfdoc-full-build.log" || true
+            grep -Eo 'COMPOSER_FROZEN_BUILD_FAIL|PNPM_FROZEN_BUILD_FAIL|VITE_BUILD_FAIL|PACKAGE_PRIVATE_OR_BUILD_INPUT_LEAK|MISSING_REQUIRED_SOURCE|OUTPUT_MUST_BE_ABSOLUTE_ZIP|REFUSE_OVERWRITE_PACKAGE' "$RUNNER_TEMP/vfdoc-full-build.log" | tail -1 || true
+            exit 1
+          fi
+      - name: Validate actual ZIP against shared task delivery structure gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 - "$RUNNER_TEMP/p02-delivery-receipt.json" "$RUNNER_TEMP/vfdoc-full-lab/full.zip" <<'PY'
+          import json,hashlib,sys,pathlib
+          output,artifact=sys.argv[1:]
+          receipt={
+              "schema":"vf.public-authority.task-delivery-check.v1",
+              "project":"P02","source":"fe47f82688ba4127dc244ab004a9a59f0fa3d3fb",
+              "project_authority":{
+                  "agents":"AGENTS.md","current":"docs/authority/CURRENT.md",
+                  "acceptance":"docs/authority/ACCEPTANCE_MATRIX.md",
+                  "applicability":"docs/authority/ACCEPTANCE_MATRIX.md"
+              },
+              "acceptance_markers":["CLEAN_FULL_3DB","FINAL_PACKAGE / OWNER_ACCEPTANCE"],
+              "required_domains":["INSTALL","SECURITY","TESTING","GIT"],
+              "task_capabilities":["full_package","candidate","source_change","installer"],
+              "delivery":{
+                  "profile":"web_full_zip","artifact":"full.zip",
+                  "sha256":hashlib.sha256(pathlib.Path(artifact).read_bytes()).hexdigest(),
+                  "entrypoint":"public/setup.php",
+                  "requires_git":False,"requires_manual_source_copy":False
+              }
+          }
+          pathlib.Path(output).write_text(json.dumps(receipt),encoding="utf-8")
+          PY
+          if python3 -B shared-gov-doc/governance/public-authority/tools/task_delivery_contract_lint.py \
+            --receipt "$RUNNER_TEMP/p02-delivery-receipt.json" \
+            --project-root "$PWD/target" \
+            --artifact-root "$RUNNER_TEMP/vfdoc-full-lab" \
+            --public-router shared-gov-doc/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json \
+            >"$RUNNER_TEMP/p02-delivery-gate.log" 2>&1; then
+            echo P02_GOV_FULL_TASK_DELIVERY=STRUCTURAL_PASS
+          else
+            echo P02_GOV_FULL_TASK_DELIVERY=FAIL
+            grep -Eo 'INVALID_[A-Z_]+|MISSING_[A-Z_:]+|UNSAFE_[A-Z_]+|REQUIRED_[A-Z_]+|SOURCE_[A-Z_]+' "$RUNNER_TEMP/p02-delivery-gate.log" | head -8 || true
+            exit 1
+          fi
+      - name: Install extracted FULL on three isolated new databases and reject existing data
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          base="$RUNNER_TEMP/vfdoc-full-lab"
+          pids=""
+          trap 'for p in $pids; do kill "$p" 2>/dev/null || true; done' EXIT
+          php -r '$x=new PDO("mysql:host=127.0.0.1;port=3306;charset=utf8mb4","root","vfdoc_lock_synthetic_only");$x->exec("CREATE DATABASE ".chr(96)."vfdoc-ci".chr(96));' >"$base/hyphen-mysql.log" 2>&1
+          php -r '$x=new PDO("mysql:host=127.0.0.1;port=3307;charset=utf8mb4","root","vfdoc_lock_synthetic_only");$x->exec("CREATE DATABASE ".chr(96)."vfdoc-ci".chr(96));' >"$base/hyphen-mariadb.log" 2>&1
+          echo P02_STAGE5_REAL_HYPHEN_DB_CREATED=PASS
+          for engine in sqlite mysql mariadb; do
+            case "$engine" in
+              sqlite) port=8131; dirty=8141; dbport=3306;;
+              mysql) port=8132; dirty=8142; dbport=3306;;
+              mariadb) port=8133; dirty=8143; dbport=3307;;
+            esac
+            mkdir -p "$base/$engine" "$base/dirty-$engine"
+            unzip -q "$base/full.zip" -d "$base/$engine"
+            unzip -q "$base/full.zip" -d "$base/dirty-$engine"
+            for suffix in "$engine" "dirty-$engine"; do
+              site="$base/$suffix"
+              printf '%s\n' '<?php' '$p=parse_url($_SERVER["REQUEST_URI"],PHP_URL_PATH);' 'if(is_file(__DIR__."/public".$p))return false;' 'require __DIR__."/public/index.php";' >"$site/router.php"
+            done
+            php -S "127.0.0.1:$port" -t "$base/$engine/public" "$base/$engine/router.php" >"$base/server-$engine.log" 2>&1 &
+            pids="$pids $!"
+            for n in $(seq 1 40); do
+              if curl -fsS -o /dev/null "http://127.0.0.1:$port/setup.php"; then break; fi
+              sleep 1
+            done
+            if python3 target/tests/e2e/full_install_probe.py --root "$base/$engine" --base "http://127.0.0.1:$port" --engine "$engine" --db-port "$dbport" --db-name "vfdoc-ci" --mode clean >"$base/clean-$engine.log" 2>&1; then
+              echo "P02_STAGE5_CLEAN_FULL_$engine=PASS"
+            else
+              echo "P02_STAGE5_CLEAN_FULL_$engine=FAIL"
+              grep -E 'P02_STAGE5_ACTUAL_FULL_INSTALL=FAIL stage=[a-z-]+' "$base/clean-$engine.log" | tail -1 || true
+              exit 1
+            fi
+            if php target/tests/e2e/full_recovery_probe.php "$base/$engine" >"$base/restore-$engine.log" 2>&1; then
+              echo "P02_STAGE5_EXTRACTED_RESTORE_$engine=PASS"
+            else
+              echo "P02_STAGE5_EXTRACTED_RESTORE_$engine=FAIL"
+              grep -Eo 'P02_STAGE5_[A-Z_]+=(PASS|FAIL)' "$base/restore-$engine.log" | tail -4 || true
+              exit 1
+            fi
+            # Source artifacts come from two genuine extracted Clean FULL
+            # copies with synthetic future VERSION only; no official Release.
+            # The builder includes locked vendor and compiled assets.
+            if test ! -e "$base/atomic-new-v1.zip"; then
+              mkdir -p "$base/new-full-v1" "$base/new-full-v2"
+              unzip -q "$base/full.zip" -d "$base/new-full-v1"
+              unzip -q "$base/full.zip" -d "$base/new-full-v2"
+              printf '%s\n' '0.1.1' >"$base/new-full-v1/VERSION"
+              printf '%s\n' '0.1.2' >"$base/new-full-v2/VERSION"
+              printf '%s\n' '<?php // proof-v1' >"$base/new-full-v1/app/AtomicProofFixture.php"
+              printf '%s\n' '<?php // proof-v2' >"$base/new-full-v2/app/AtomicProofFixture.php"
+              if ! python3 target/scripts/build_new_atomic.py --full-dir "$base/new-full-v1" --from-version 0.1.0 --output "$base/atomic-new-v1.zip" >"$base/atomic-build-v1.log" 2>&1; then
+                grep -Eo 'P02_ATOMIC_BUILD=FAIL [A-Z_]+' "$base/atomic-build-v1.log" | head -1 || true
+                python3 -c 'import re,sys,pathlib; t=open(sys.argv[1]).read(); m=re.search(r"FORBIDDEN_NONHIDDEN_RUNTIME_FILE: ([^\\n]+)",t); p=m.group(1) if m else ""; print("P02_BUILDER_SCOPE="+p.split("/")[0]+" EXT="+pathlib.Path(p).suffix.lower())' "$base/atomic-build-v1.log"
+                exit 1
+              fi
+              if ! python3 target/scripts/build_new_atomic.py --full-dir "$base/new-full-v2" --from-version 0.1.1 --output "$base/atomic-new-v2.zip" >"$base/atomic-build-v2.log" 2>&1; then
+                grep -Eo 'P02_ATOMIC_BUILD=FAIL [A-Z_]+' "$base/atomic-build-v2.log" | head -1 || true
+                exit 1
+              fi
+              echo P02_STAGE5_FULL_DERIVED_ATOMIC_BUILDER=PASS
+            fi
+            export VF_DOC_ATOMIC_PACKAGE_1="$base/atomic-new-v1.zip"
+            export VF_DOC_ATOMIC_PACKAGE_2="$base/atomic-new-v2.zip"
+            if php target/tests/e2e/atomic_upgrade_probe.php "$base/$engine" success >"$base/atomic-success-$engine.log" 2>&1; then
+              echo "P02_STAGE5_ACTUAL_ATOMIC_$engine=PASS"
+            else
+              echo "P02_STAGE5_ACTUAL_ATOMIC_$engine=FAIL"
+              grep -Eo 'P02_STAGE5_[A-Z_]+=(PASS|FAIL)' "$base/atomic-success-$engine.log" | tail -5 || true
+              exit 1
+            fi
+            # Force-kill only the disposable PHP child immediately after the
+            # first live file rename; OS lock disappears but journal remains.
+            set +e
+            php target/tests/e2e/atomic_upgrade_probe.php "$base/$engine" kill >"$base/atomic-kill-$engine.log" 2>&1
+            killed="$?"
+            set -e
+            if test "$killed" -ne 137 || ! grep -q P02_STAGE5_HARD_KILL_INJECTED=NOW "$base/atomic-kill-$engine.log"; then
+              echo "P02_STAGE5_HARD_KILL_$engine=FAIL"
+              exit 1
+            fi
+            echo "P02_STAGE5_HARD_KILL_$engine=PASS"
+            if python3 target/tests/e2e/atomic_rescue_http_probe.py --base "http://127.0.0.1:$port" >"$base/atomic-http-$engine.log" 2>&1; then
+              echo "P02_STAGE5_OWNER_HTTP_RESCUE_$engine=PASS"
+            else
+              echo "P02_STAGE5_OWNER_HTTP_RESCUE_$engine=FAIL"
+              exit 1
+            fi
+            if php target/tests/e2e/atomic_upgrade_probe.php "$base/$engine" verify >"$base/atomic-verify-$engine.log" 2>&1; then
+              echo "P02_STAGE5_SIGKILL_DATA_PRESERVED_$engine=PASS"
+            else
+              echo "P02_STAGE5_SIGKILL_DATA_PRESERVED_$engine=FAIL"
+              exit 1
+            fi
+            if python3 target/tests/e2e/portability_http_probe.py --root "$base/$engine" >"$base/portability-$engine.log" 2>&1; then
+              echo "P02_STAGE7_PORTABILITY_$engine=PASS"
+            else
+              echo "P02_STAGE7_PORTABILITY_$engine=FAIL"
+              grep -Eo 'P02_STAGE7_[A-Z_]+=(PASS|FAIL)' "$base/portability-$engine.log" | tail -6 || true
+              exit 1
+            fi
+            if test "$engine" = sqlite; then
+              mkdir -p "$base/dirty-$engine/storage/app/private"
+              python3 - "$base/dirty-$engine/storage/app/private/vf-doc.sqlite" <<'PY'
+          import sqlite3,sys
+          conn=sqlite3.connect(sys.argv[1])
+          conn.execute("CREATE TABLE unrelated_user_data (id INTEGER)")
+          conn.commit()
+          conn.close()
+          PY
+            fi
+            php -S "127.0.0.1:$dirty" -t "$base/dirty-$engine/public" "$base/dirty-$engine/router.php" >"$base/dirty-server-$engine.log" 2>&1 &
+            pids="$pids $!"
+            for n in $(seq 1 40); do
+              if curl -fsS -o /dev/null "http://127.0.0.1:$dirty/setup.php"; then break; fi
+              sleep 1
+            done
+            if python3 target/tests/e2e/full_install_probe.py --root "$base/dirty-$engine" --base "http://127.0.0.1:$dirty" --engine "$engine" --db-port "$dbport" --db-name "vfdoc-ci" --mode dirty >"$base/dirty-$engine.log" 2>&1; then
+              echo "P02_STAGE5_DIRTY_DB_$engine=PASS"
+            else
+              echo "P02_STAGE5_DIRTY_DB_$engine=FAIL"
+              exit 1
+            fi
+          done
+          echo P02_STAGE5_FULL_THREE_ENGINE=PASS
+      - name: Always erase private source, FULL and synthetic data
+        shell: bash
+        if: always()
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- target shared-gov-doc "$RUNNER_TEMP/vfdoc-full-lab" "$RUNNER_TEMP/vfdoc-setup-pw-unused" "$RUNNER_TEMP/vfdoc-chromium"
+          rm -f "$RUNNER_TEMP/vfdoc-setup-pw-unused.log"
+          rm -f -- "$RUNNER_TEMP/vfdoc-full-build.log" "$RUNNER_TEMP/p02-gov-admission.log" "$RUNNER_TEMP/p02-delivery-receipt.json" "$RUNNER_TEMP/p02-delivery-gate.log"
+          test ! -e target && test ! -e "$RUNNER_TEMP/vfdoc-full-lab"
+          echo P02_STAGE5_PRIVATE_CLEAN=PASS
