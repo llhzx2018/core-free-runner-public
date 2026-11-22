@@ -54,10 +54,10 @@ class P07Official139(unittest.TestCase):
         self.assertIn("releases/assets/762286729", wrapper)
         # Historical release139 ZIP and wrapper remain immutable.
         # Historical 139 ZIP/wrapper stay immutable; current Toolbox now targets 142.
-        self.assertIn('VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release144"', toolbox)
+        self.assertIn('VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release145"', toolbox)
         self.assertIn('M03_OFFICIAL140_BUILD="0.1.0-release140"', toolbox)
         self.assertIn('M03_PREVIOUS_BUILD="0.1.0-release139"', toolbox)
-        self.assertIn("installers/p07-m03-release144-atomic.sh", toolbox)
+        self.assertIn("installers/p07-m03-release145-atomic.sh", toolbox)
         self.assertIn('M03_LEGACY138_BUILD="0.1.0-release138"', toolbox)
         self.assertIn('M03_LEGACY137_BUILD="0.1.0-release137"', toolbox)
         self.assertIn('M03_BOOTSTRAP_BUILD="0.1.0-release136"', toolbox)

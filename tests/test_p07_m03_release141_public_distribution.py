@@ -42,15 +42,15 @@ class Official141PublicDistribution(unittest.TestCase):
     def test_current_pin_and_exact_reusable_prior_and_legacy_trust(self) -> None:
         toolbox = TOOLBOX.read_text(encoding="utf-8")
         wrapper = WRAPPER.read_text(encoding="utf-8")
-        self.assertIn('VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release144"', toolbox)
+        self.assertIn('VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release145"', toolbox)
         self.assertIn('M03_OFFICIAL141_BUILD="0.1.0-release141"', toolbox)
         self.assertIn('M03_OFFICIAL141_MANIFEST_BLOB="6a3a949064ffb8fe1df56e7bc555173b5ca9cf3b"', toolbox)
         self.assertIn('M03_OFFICIAL140_BUILD="0.1.0-release140"', toolbox)
         self.assertIn('M03_OFFICIAL140_MANIFEST_BLOB="239bd543e4f64449ca498c1d67ccb7471abbee66"', toolbox)
         self.assertIn('M03_PREVIOUS_BUILD="0.1.0-release139"', toolbox)
-        self.assertIn('VF_SERVER_OPS_MANIFEST_BLOB="5dd59de44fa024add3e6317b6dc8617fb92df91f"', toolbox)
-        self.assertIn('VF_SERVER_OPS_INSTALLER_BLOB="a938bfd7737284d29362481e0160b5441c0a2082"', toolbox)
-        self.assertIn("installers/p07-m03-release144-atomic.sh", toolbox)
+        self.assertIn('VF_SERVER_OPS_MANIFEST_BLOB="db2eb38ef136af4a7d140a3753ff4592b9b64c9f"', toolbox)
+        self.assertIn('VF_SERVER_OPS_INSTALLER_BLOB="7e1d51f77148f6893a0402d2938b06114fd33fb0"', toolbox)
+        self.assertIn("installers/p07-m03-release145-atomic.sh", toolbox)
         for key, value in (
             ("BUILD", BUILD),
             ("RELEASE", RELEASE),
