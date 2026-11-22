@@ -44,6 +44,32 @@ def summary(path: Path) -> int:
                 else "PHP_ERROR"
             ),
         }
+        # Purely semantic, bounded diagnostics: no raw message content is logged.
+        # Cache-Control token set is an allowlist of standard non-sensitive directives.
+        lowered = source.lower()
+        result["signals"] = {
+            "missing_session_errors": "session is missing expected" in lowered or "session does not have" in lowered,
+            "session_error_bag": "session" in lowered and "error" in lowered,
+            "assert_true_failed": "failed asserting that false is true" in lowered,
+            "assert_false_failed": "failed asserting that true is false" in lowered,
+            "cache_no_store": "no-store" in lowered,
+            "cache_no_cache": "no-cache" in lowered,
+            "cache_private": "private" in lowered,
+            "cache_max_age_zero": "max-age=0" in lowered,
+            "security_header": "content-security-policy" in lowered,
+            "expected_history_error": "history_id" in lowered,
+            "actual_vps_error": "vps" in lowered,
+            "actual_confirmation_error": "confirmation" in lowered,
+        }
+        result["diff_safe"] = [
+            value for line in source.splitlines()
+            if line.startswith(("+", "-")) and not line.startswith(("++", "--"))
+            for value in [line[1:].strip().strip("'\\"")]
+            if value and re.fullmatch(
+                r"(?:private|no-cache|no-store|max-age=0|noindex|nofollow|noarchive|,|;|\\s)+",
+                value.lower(),
+            )
+        ][:4]
         if statuses:
             result.update(expected_http=int(statuses[1]), received_http=int(statuses[2]))
         if numbers:
