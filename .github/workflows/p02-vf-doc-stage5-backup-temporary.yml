@@ -1,0 +1,155 @@
+name: TEMP P02 vf-doc Stage5 new-only backup integrity exact-source
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/p02-vf-doc-stage5-backup-temporary.yml
+permissions:
+  contents: read
+jobs:
+  frozen-frontend:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'test/p02-vf-doc-stage5-backup-20261122'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-doc
+          ref: 0808967c65c5be28b8bea71b3097a4a354281c54
+          path: target
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with: {version: '10.20.0', run_install: false}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: {node-version: '22'}
+      - name: Validate exact source and machine-issued locks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = 0808967c65c5be28b8bea71b3097a4a354281c54
+          test "$(sha256sum target/composer.lock | cut -d' ' -f1)" = 875e0f095c3fd70c878c0b5835eee6f7ba460f44a0267773faf2b3e605ddf9b1
+          test "$(sha256sum target/pnpm-lock.yaml | cut -d' ' -f1)" = 28e02cba708e0ec4dd9769a8dd68ee4bc0cc28533a247c6b711b5e435e4cc585
+          echo P02_EXACT_LOCK_IDENTITY=PASS
+      - name: Strict frozen pnpm / TypeScript / Vitest / Vite build
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if (cd target && pnpm install --frozen-lockfile && pnpm run typecheck && pnpm run test:frontend && pnpm run build && git diff --exit-code -- pnpm-lock.yaml) >"$RUNNER_TEMP/p02-frontend.log" 2>&1; then
+            echo P02_FROZEN_FRONTEND=PASS
+          else
+            echo P02_STAGE5_FRONTEND=FAIL
+            grep -Eo 'error TS[0-9]{4}' "$RUNNER_TEMP/p02-frontend.log" | sort -u | head -8 || true
+            exit 1
+          fi
+      - name: Always clear private source and logs
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- target
+          rm -f -- "$RUNNER_TEMP/p02-frontend.log"
+          test ! -e target && echo P02_PRIVATE_CLEAN=PASS
+
+  frozen-php-three-db:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'test/p02-vf-doc-stage5-backup-20261122'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ['8.3', '8.4']
+        db: [sqlite, mysql, mariadb]
+    services:
+      mysql:
+        image: mysql:8.4
+        env: {MYSQL_ROOT_PASSWORD: vfdoc_lock_synthetic_only, MYSQL_DATABASE: vfdoc_ci}
+        ports: ['3306:3306']
+        options: --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pvfdoc_lock_synthetic_only" --health-interval=10s --health-timeout=5s --health-retries=18
+      mariadb:
+        image: mariadb:11.8
+        env: {MARIADB_ROOT_PASSWORD: vfdoc_lock_synthetic_only, MARIADB_DATABASE: vfdoc_ci}
+        ports: ['3307:3306']
+        options: --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=10s --health-timeout=5s --health-retries=18
+    env:
+      APP_ENV: testing
+      APP_DEBUG: 'false'
+      APP_URL: http://localhost
+      APP_ALLOWED_HOSTS: localhost
+      DB_CONNECTION: ${{ matrix.db }}
+      DB_DATABASE: ${{ matrix.db == 'sqlite' && ':memory:' || 'vfdoc_ci' }}
+      DB_HOST: 127.0.0.1
+      DB_PORT: ${{ matrix.db == 'mariadb' && '3307' || '3306' }}
+      DB_USERNAME: root
+      DB_PASSWORD: vfdoc_lock_synthetic_only
+      CACHE_STORE: array
+      SESSION_DRIVER: array
+      QUEUE_CONNECTION: sync
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-doc
+          ref: 0808967c65c5be28b8bea71b3097a4a354281c54
+          path: target
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring,pdo_sqlite,sqlite3,pdo_mysql,dom,xml,zip
+          tools: composer:v2
+          coverage: none
+      - name: Check exact product + real Composer lock identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = 0808967c65c5be28b8bea71b3097a4a354281c54
+          test "$(sha256sum target/composer.lock | cut -d' ' -f1)" = 875e0f095c3fd70c878c0b5835eee6f7ba460f44a0267773faf2b3e605ddf9b1
+          echo P02_COMPOSER_LOCK_IDENTITY=PASS
+      - name: Strict frozen Composer install, M01 guards, new DB migrations and tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if (
+            cd target
+            composer install --no-interaction --prefer-dist --no-progress --no-audit
+            composer validate --strict
+            python3 -B scripts/check_bootstrap.py
+            python3 -B scripts/check_source_contract.py
+            python3 -m unittest discover -s tests -p test_bootstrap.py
+            python3 -m unittest discover -s tests/guards -p 'test_*.py'
+            python3 -m unittest discover -s tests/evolution -p test_second_module.py
+            cp .env.example .env
+            php artisan key:generate --force
+            php artisan migrate --force
+            find app routes database/migrations -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+            composer test
+            git diff --exit-code -- composer.lock
+          ) >"$RUNNER_TEMP/p02-frozen-php.log" 2>&1; then
+            echo P02_STAGE5_BACKUP_NATIVE=PASS
+          else
+            echo P02_STAGE5_BACKUP_NATIVE=FAIL
+            grep -Eo 'Tests: [0-9]+ failed, [0-9]+ passed' "$RUNNER_TEMP/p02-frozen-php.log" | tail -1 || true
+            grep -Eo '(MaterialEditorAndHistoryTest|MaterialAttachmentSecurityTest|MaterialNewFormatTransferTest|WorkspaceOrganizationTest)\.php:[0-9]+' "$RUNNER_TEMP/p02-frozen-php.log" | sort -u | head -10 || true
+            if grep -q 'SQLSTATE' "$RUNNER_TEMP/p02-frozen-php.log"; then echo P02_STAGE3_SQLSTATE_FAILURE=YES; fi
+            if grep -q 'SQLSTATE' "$RUNNER_TEMP/p02-frozen-php.log"; then echo P02_DB_SQLSTATE=FAIL; fi
+            exit 1
+          fi
+      - name: Always clear private source and logs
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- target
+          rm -f -- "$RUNNER_TEMP/p02-frozen-php.log"
+          test ! -e target && echo P02_PRIVATE_CLEAN=PASS
