@@ -1,0 +1,138 @@
+name: TEMP P02 vf-doc Stage1 exact-source test
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/p02-vf-doc-stage1-temporary.yml]
+permissions:
+  contents: read
+jobs:
+  php:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix: {engine: [sqlite, mysql, mariadb]}
+    services:
+      mysql:
+        image: mysql:8.4
+        env: {MYSQL_ROOT_PASSWORD: synthetic_m01, MYSQL_DATABASE: vfdoc_ci}
+        ports: ['3306:3306']
+        options: --health-cmd="mysqladmin ping -h127.0.0.1 -uroot -psynthetic_m01" --health-interval=10s --health-timeout=5s --health-retries=18
+      mariadb:
+        image: mariadb:11.8
+        env: {MARIADB_ROOT_PASSWORD: synthetic_m01, MARIADB_DATABASE: vfdoc_ci}
+        ports: ['3307:3306']
+        options: --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=10s --health-timeout=5s --health-retries=18
+    env:
+      APP_ENV: testing
+      APP_DEBUG: 'false'
+      APP_URL: http://localhost
+      APP_ALLOWED_HOSTS: localhost
+      DB_CONNECTION: ${{ matrix.engine }}
+      DB_DATABASE: ${{ matrix.engine == 'sqlite' && ':memory:' || 'vfdoc_ci' }}
+      DB_HOST: 127.0.0.1
+      DB_PORT: ${{ matrix.engine == 'mariadb' && '3307' || '3306' }}
+      DB_USERNAME: root
+      DB_PASSWORD: synthetic_m01
+      CACHE_STORE: array
+      SESSION_DRIVER: array
+      QUEUE_CONNECTION: sync
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-doc
+          ref: 7c056937465c1aa28aa217f15dbebf7a4468e402
+          path: target
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, pdo_sqlite, sqlite3, pdo_mysql, dom, xml, zip
+          tools: composer:v2
+          coverage: none
+      - name: Verify source identity, guards and PHP syntax
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = 7c056937465c1aa28aa217f15dbebf7a4468e402
+          if (cd target &&
+              python3 -B scripts/check_bootstrap.py &&
+              python3 -B scripts/check_source_contract.py &&
+              python3 -m unittest discover -s tests -p test_bootstrap.py &&
+              python3 -m unittest discover -s tests/guards -p 'test_*.py' &&
+              python3 -m unittest discover -s tests/evolution -p test_second_module.py &&
+              find app routes config database/migrations -name '*.php' -type f -print0 | xargs -0 -n1 php -l) >"$RUNNER_TEMP/p02-guards.log" 2>&1; then
+            echo P02_GUARDS=PASS
+          else
+            echo P02_GUARDS=FAIL
+            exit 1
+          fi
+      - name: Fresh real engine migrations + PHP feature tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if (cd target &&
+              composer update --no-interaction --prefer-dist --no-progress --no-audit &&
+              cp .env.example .env &&
+              php artisan key:generate --force &&
+              php artisan migrate --force &&
+              composer test) >"$RUNNER_TEMP/p02-php.log" 2>&1; then
+            echo P02_NATIVE_PHP=PASS
+          else
+            if grep -q SQLSTATE "$RUNNER_TEMP/p02-php.log"; then echo P02_DB_SQLSTATE=FAIL
+            elif grep -q 'Your requirements could not be resolved' "$RUNNER_TEMP/p02-php.log"; then echo P02_COMPOSER_RESOLUTION=FAIL
+            else echo P02_PHP_TEST=FAIL; fi
+            exit 1
+          fi
+      - name: Always clean private source
+        if: always()
+        shell: bash
+        run: |
+          rm -rf target
+          rm -f "$RUNNER_TEMP/p02-guards.log" "$RUNNER_TEMP/p02-php.log"
+          test ! -e target && echo P02_PRIVATE_CLEAN=PASS
+
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with: {persist-credentials: false}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-doc
+          ref: 7c056937465c1aa28aa217f15dbebf7a4468e402
+          path: target
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with: {version: '10.20.0', run_install: false}
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with: {node-version: '22'}
+      - name: pnpm dependencies, Vue typecheck, Vitest, Vite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = 7c056937465c1aa28aa217f15dbebf7a4468e402
+          if (cd target && pnpm install --no-frozen-lockfile &&
+              pnpm run typecheck && pnpm run test:frontend && pnpm run build) >"$RUNNER_TEMP/p02-ui.log" 2>&1; then
+            echo P02_FRONTEND=PASS
+          else
+            if grep -q ERR_PNPM "$RUNNER_TEMP/p02-ui.log"; then echo P02_PNPM_RESOLUTION=FAIL
+            elif grep -Eq 'error TS[0-9]{4}' "$RUNNER_TEMP/p02-ui.log"; then
+              echo P02_TYPESCRIPT=FAIL
+              grep -Eo 'TS[0-9]{4}' "$RUNNER_TEMP/p02-ui.log" | sort -u | tr '\n' ' '
+              echo
+            else echo P02_FRONTEND=FAIL; fi
+            exit 1
+          fi
+      - name: Always clean private source
+        if: always()
+        shell: bash
+        run: |
+          rm -rf target
+          rm -f "$RUNNER_TEMP/p02-ui.log"
+          test ! -e target && echo P02_PRIVATE_CLEAN=PASS
