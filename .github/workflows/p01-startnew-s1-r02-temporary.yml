@@ -1,0 +1,162 @@
+name: TEMP P01 StartNew S1-R02 exact source machine
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/p01-startnew-s1-r02-temporary.yml
+
+permissions:
+  contents: read
+
+jobs:
+  p01-new-source:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'test/p01-startnew-m01-20261122'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [sqlite, mysql, mariadb]
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic_p01_new
+          MYSQL_DATABASE: p01_new_test
+        ports: [3306:3306]
+        options: >-
+          --health-cmd="mysqladmin ping --silent -h 127.0.0.1 -uroot -psynthetic_p01_new"
+          --health-interval=10s --health-timeout=5s --health-retries=20
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: synthetic_p01_new
+          MARIADB_DATABASE: p01_new_test
+        ports: [3307:3306]
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s --health-timeout=5s --health-retries=20
+    env:
+      APP_ENV: testing
+      APP_DEBUG: 'false'
+      APP_URL: http://localhost
+      DB_CONNECTION: ${{ matrix.engine == 'sqlite' && 'sqlite' || 'mysql' }}
+      DB_HOST: 127.0.0.1
+      DB_PORT: ${{ matrix.engine == 'mariadb' && '3307' || '3306' }}
+      DB_DATABASE: ${{ matrix.engine == 'sqlite' && 'database/runner.sqlite' || 'p01_new_test' }}
+      DB_USERNAME: root
+      DB_PASSWORD: synthetic_p01_new
+      SESSION_DRIVER: array
+      CACHE_STORE: array
+      QUEUE_CONNECTION: sync
+    steps:
+      - name: Checkout public runner orchestration only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Transient exact private source checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-startnew
+          ref: e9b5cef527966128b37973c1c26f035f62946c3a
+          path: target
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - name: PHP8.4 Composer and native drivers
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, pdo_mysql, pdo_sqlite, sqlite3, dom, xml, curl, zip, openssl
+          tools: composer:v2
+          coverage: none
+      - name: Node22
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Exact source and static/negative checks
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C target rev-parse HEAD)" = e9b5cef527966128b37973c1c26f035f62946c3a
+          test "$(cat target/VERSION)" = 0.1.0-dev
+          (
+            cd target
+            python3 scripts/check_bootstrap.py
+            python3 scripts/check_visual_identity.py
+            python3 scripts/check_delivery_plan.py
+            python3 -m unittest discover -s tests -p 'test_*.py' -v
+            php tests/evolution/test_second_module.php
+            find app bootstrap config database routes tests -type f -name '*.php' -print0 | xargs -0 -n1 php -l >/dev/null
+          ) > "$RUNNER_TEMP/p01-static.log" 2>&1 || {
+            echo P01_R02_STATIC=FAIL
+            grep -E 'FAIL|Error|Exception|Parse error' "$RUNNER_TEMP/p01-static.log" | tail -n 12 || true
+            exit 1
+          }
+          echo P01_R02_STATIC=PASS
+      - name: Real dependency resolution and source frontend build
+        working-directory: target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          if ! (composer update --no-interaction --prefer-dist --no-progress --no-audit &&
+                npm install --no-audit --no-fund &&
+                npm run typecheck &&
+                npm run build) > "$RUNNER_TEMP/p01-build.log" 2>&1; then
+            echo P01_R02_DEPENDENCY_BUILD=FAIL
+            grep -E 'ERROR|Error|error TS|could not be resolved|does not exist|No matching|Problem|failed' "$RUNNER_TEMP/p01-build.log" | tail -n 18 || true
+            exit 1
+          fi
+          echo P01_R02_DEPENDENCY_BUILD=PASS
+          test -s composer.lock
+          test -s package-lock.json
+          sha256sum composer.lock package-lock.json
+      - name: Engine migration, real data writes, native feature tests
+        working-directory: target
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          (
+            cp .env.example .env
+            php artisan key:generate --force
+            if [ "$DB_CONNECTION" = sqlite ]; then
+              touch database/runner.sqlite
+              export DB_DATABASE="$(pwd)/database/runner.sqlite"
+            fi
+            php artisan migrate:fresh --force
+            php artisan tinker --execute='
+              $category = \App\Modules\Navigation\Domain\Category::query()->create(["title" => "Synthetic"]);
+              $url = "https://example.org/?a=A%2FB&b=Z%2B1";
+              $link = \App\Modules\Navigation\Domain\Link::query()->create(["title" => "Synthetic", "url" => $url, "category_id" => $category->id]);
+              if ($link->fresh()->url !== $url) throw new \RuntimeException("url changed");
+              if ($link->fresh()->visibility !== "private") throw new \RuntimeException("public default");
+              $link->delete();
+              if (! $link->trashed()) throw new \RuntimeException("soft delete");
+            '
+            php artisan test
+          ) > "$RUNNER_TEMP/p01-native.log" 2>&1 || {
+            echo P01_R02_NATIVE_DB_TEST=FAIL
+            grep -E 'FAIL|Error|Exception|SQLSTATE|not found|failed' "$RUNNER_TEMP/p01-native.log" | tail -n 18 || true
+            exit 1
+          }
+          echo "P01_R02_NATIVE_DB_TEST=PASS ENGINE=${{ matrix.engine }}"
+      - name: Save generated dependency lockfiles only
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p01-startnew-r02-locks-${{ matrix.engine }}
+          path: |
+            target/composer.lock
+            target/package-lock.json
+          retention-days: 1
+      - name: Always remove private checkout, synthetic DB and logs
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- target
+          rm -f "$RUNNER_TEMP/p01-static.log" "$RUNNER_TEMP/p01-build.log" "$RUNNER_TEMP/p01-native.log"
+          test ! -e target
+          echo P01_R02_PRIVATE_CLEANUP=PASS
