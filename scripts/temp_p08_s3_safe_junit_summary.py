@@ -64,9 +64,9 @@ def summary(path: Path) -> int:
         result["diff_safe"] = [
             value for line in source.splitlines()
             if line.startswith(("+", "-")) and not line.startswith(("++", "--"))
-            for value in [line[1:].strip().strip("'\\"")]
+            for value in [line[1:].strip().strip(chr(39)).strip(chr(34))]
             if value and re.fullmatch(
-                r"(?:private|no-cache|no-store|max-age=0|noindex|nofollow|noarchive|,|;|\\s)+",
+                r"(?:private|no-cache|no-store|max-age=0|noindex|nofollow|noarchive|[ ,;])+",
                 value.lower(),
             )
         ][:4]
