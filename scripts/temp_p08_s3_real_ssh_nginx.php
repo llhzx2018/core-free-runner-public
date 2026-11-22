@@ -23,6 +23,18 @@ putenv('DB_CONNECTION=sqlite');
 putenv('DB_DATABASE=:memory:');
 putenv('SESSION_DRIVER=array');
 putenv('CACHE_STORE=array');
+// Public logs expose only coarse synthetic failure categories, never SSH keys or stderr.
+set_exception_handler(static function (Throwable $error): void {
+    $message=(string)$error->getMessage();
+    $category=match (true) {
+        $message==='VPS_SSH_REMOTE_DENIED_OR_FAILED' => 'REAL_SSH_AUTH_OR_EXEC',
+        str_starts_with($message,'VPS_') => 'VPS_POLICY_OR_GATEWAY',
+        str_contains($message,'SYNTHETIC_') => 'SYNTHETIC_FIXTURE',
+        default => 'PHP_BOOTSTRAP_OTHER',
+    };
+    echo "P08_S3_TRANSPORT_EARLY_EXCEPTION=".$category."\n";
+    exit(1);
+});
 require $appRoot.'/vendor/autoload.php';
 $app = require $appRoot.'/bootstrap/app.php';
 $app->make(\Illuminate\Contracts\Console\Kernel::class)->bootstrap();
@@ -65,6 +77,7 @@ $config=[
 ];
 $remote = new OpenSshRemoteExecutor($policy);
 $gateway = new VpsAtomicGateway($remote,$policy);
+$lastStep='REAL_SSH_INITIAL_STATUS_NONE';
 $check($gateway->status($config) === null,'REAL_SSH_INITIAL_STATUS_NONE');
 $check(str_starts_with($config['host_key'],'ssh-ed25519 '),'REAL_ED25519_KEY_PIN');
 
