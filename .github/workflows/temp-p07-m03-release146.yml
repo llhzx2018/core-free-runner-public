@@ -1,4 +1,4 @@
-name: TEMP P07 M03 release146 receiver setup proof
+name: TEMP P07 M03 release146 verified receiver setup release
 on:
   pull_request:
     branches: [main]
@@ -19,7 +19,7 @@ jobs:
     env:
       TARGET_VERSION: '0.1.0'
       TARGET_REPO: 'llhzx2018/vf-server-ops'
-      TARGET_SHA: 'eb3271ae767524d43e94c9a18569763be266c939'
+      TARGET_SHA: 'e654bae6668deee5b758a553da16a8a28b601642'
       TARGET_TREE: '5b5e6e82073501fc44f536b50f5efaf465965302'
       TARGET_BASE: 'c0b2b119c1163383b455a1a24c0f6392e59b0c9e'
       EXPECTED_ZIP_SHA: '7b3e46c651c5ce3597e4ab535fbdc734023fc1b706fe85189a344ee600514321'
@@ -117,6 +117,146 @@ jobs:
             exit 1
           fi
           sed -n '/^P07_146_[A-Z0-9_]*=PASS$/p' "$RUNNER_TEMP/p07-146-upgrade.log"
+      - name: Verify the final ZIP against the project delivery contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          stage="$RUNNER_TEMP/p07-146-proof/result"
+          product="$GITHUB_WORKSPACE/.p07-private-product"
+          gov="$GITHUB_WORKSPACE/.p07-private-governance"
+          python3 -B - "$stage/task-delivery.json" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          receipt = {
+              "schema": "vf.public-authority.task-delivery-check.v1",
+              "project": "P07",
+              "source": os.environ["TARGET_SHA"],
+              "project_authority": {
+                  "agents": "AGENTS.md",
+                  "current": "docs/authority/CURRENT.md",
+                  "acceptance": "docs/authority/ACCEPTANCE_MATRIX.md",
+                  "applicability": "docs/authority/PUBLIC_AUTHORITY_APPLICABILITY.md",
+              },
+              "acceptance_markers": ["P07-M03 网站与数据", "逐站安全分批迁入"],
+              "task_capabilities": ["installer", "release", "atomic", "migration", "release_source", "ui_change"],
+              "required_domains": ["INSTALL", "SECURITY", "TESTING", "UPGRADE", "DATA_SCHEMA", "GIT", "UA_UI"],
+              "delivery": {
+                  "profile": "static_bundle_zip",
+                  "entrypoint": "installers/p07-final.sh",
+                  "artifact": "P07-M03-0.1.0-release146.zip",
+                  "sha256": os.environ["EXPECTED_ZIP_SHA"],
+                  "requires_git": False,
+                  "requires_manual_source_copy": False,
+              },
+          }
+          Path(sys.argv[1]).write_text(json.dumps(receipt), encoding="utf-8")
+          PY
+          if ! python3 -B "$gov/governance/public-authority/tools/task_delivery_contract_lint.py" \
+            --phase delivery --receipt "$stage/task-delivery.json" --project-root "$product" \
+            --artifact-root "$stage" \
+            --public-router "$gov/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json" \
+            > "$RUNNER_TEMP/p07-146-private.log" 2>&1; then
+            echo P07_146_DELIVERY_CONTRACT=FAIL
+            exit 1
+          fi
+          echo P07_146_DELIVERY_CONTRACT=PASS
+      - name: Verify the exact release drafts, publish and re-download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          stage="$RUNNER_TEMP/p07-146-proof/result"
+          product=llhzx2018/vf-server-ops
+          public=llhzx2018/core-free-runner-public
+          tag=p07-m03-v0.1.0-release146-20261122
+          zip=P07-M03-0.1.0-release146.zip
+          (cd "$stage" && sha256sum -c SHA256SUMS)
+          zip_sha="$(sha256sum "$stage/$zip" | cut -d' ' -f1)"
+          sum_sha="$(sha256sum "$stage/SHA256SUMS" | cut -d' ' -f1)"
+          size="$(wc -c < "$stage/$zip")"
+          test "$zip_sha" = "$EXPECTED_ZIP_SHA"
+          test -n "$GH_TOKEN"
+          test "$(gh api "repos/$product/git/ref/heads/main" --jq .object.sha)" = "$TARGET_SHA"
+          public_sha="$(gh api "repos/$public/git/ref/heads/main" --jq .object.sha)"
+          [[ "$public_sha" == 'e77ed2fb85e325959b37dab5f0a5ec846817dc5d' ]]
+          record() {
+            gh api --paginate "repos/$1/releases?per_page=100" |
+              jq -cs --arg tag "$tag" '[.[][]|select(.tag_name==$tag)]|if length==0 then empty elif length==1 then .[0] else error("duplicate tag") end'
+          }
+          verify() {
+            jq -e --arg tag "$tag" --arg wanted "$2" --arg zip "$zip" --arg zip_sha "sha256:$zip_sha" \
+              --arg sum_sha "sha256:$sum_sha" --argjson size "$size" '
+                .tag_name==$tag and .target_commitish==$wanted and .prerelease==false and
+                (.assets|length)==2 and
+                any(.assets[]; .name==$zip and .size==$size and .digest==$zip_sha) and
+                any(.assets[]; .name=="SHA256SUMS" and .digest==$sum_sha)
+              ' <<< "$1" >/dev/null
+          }
+          cat > "$stage/notes.md" <<'NOTES'
+          P07-M03 网站与数据更新
+
+          新服务器还没检测到 CloudPanel 时，复制入口会提示回工具箱选 5「新服务器初始化」。
+          本包独立更新网站与数据模块。实际迁移、停站及 DNS 切换由用户操作。
+          NOTES
+          repos=("$product" "$public")
+          targets=("$TARGET_SHA" "$public_sha")
+          for idx in 0 1; do
+            repo="${repos[$idx]}"
+            expected="${targets[$idx]}"
+            test "$(gh api "repos/$repo" --jq .permissions.push)" = true
+            release="$(record "$repo")"
+            if [[ -z "$release" ]]; then
+              if gh api "repos/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then exit 78; fi
+              gh release create "$tag" "$stage/$zip" "$stage/SHA256SUMS" --repo "$repo" \
+                --target "$expected" --draft --title 'P07-M03 网站与数据 release146' \
+                --notes-file "$stage/notes.md" > "$stage/release-operation.log" 2>&1 ||
+                  { echo P07_146_DRAFT_CREATION=FAIL; exit 78; }
+            fi
+            for wait_seconds in 0 2 4 6 8; do
+              if (( wait_seconds > 0 )); then sleep "$wait_seconds"; fi
+              release="$(record "$repo")"
+              if [[ -n "$release" ]] && verify "$release" "$expected"; then break; fi
+            done
+            if [[ -z "$release" ]] || ! verify "$release" "$expected"; then
+              echo "P07_146_DRAFT_VERIFICATION=FAIL:$repo"
+              exit 78
+            fi
+            printf 'P07_146_RELEASE_ASSETS_VERIFIED=%s\n' "$repo"
+          done
+          test "$(gh api "repos/$product/git/ref/heads/main" --jq .object.sha)" = "$TARGET_SHA"
+          for idx in 0 1; do
+            repo="${repos[$idx]}"
+            expected="${targets[$idx]}"
+            release="$(record "$repo")"
+            verify "$release" "$expected"
+            release_id="$(jq -r .id <<< "$release")"
+            if jq -e .draft <<< "$release" >/dev/null; then
+              release="$(gh api -X PATCH "repos/$repo/releases/$release_id" -F draft=false)"
+            fi
+            verify "$release" "$expected"
+            jq -e '.draft==false' <<< "$release" >/dev/null
+            test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha)" = "$expected"
+            remote="$stage/remote-$idx"
+            mkdir "$remote"
+            gh release download "$tag" --repo "$repo" --dir "$remote" > "$stage/release-operation.log" 2>&1
+            (cd "$remote" && sha256sum -c SHA256SUMS)
+            cmp -s "$stage/$zip" "$remote/$zip"
+            printf 'P07_146_REMOTE_READBACK=PASS:%s\n' "$repo"
+          done
+          asset="$(record "$public" | jq -r --arg name "$zip" '.assets[]|select(.name==$name)|.id')"
+          [[ "$asset" =~ ^[0-9]+$ ]]
+          anonymous="$stage/anonymous.zip"
+          if ! curl --proto '=https' -fsSL --connect-timeout 8 --max-time 35 \
+            "https://github.com/$public/releases/download/$tag/$zip" -o "$anonymous"; then
+            curl --proto '=https' -fsSL --connect-timeout 8 --max-time 40 \
+              -H 'Accept: application/octet-stream' "https://api.github.com/repos/$public/releases/assets/$asset" -o "$anonymous"
+          fi
+          cmp -s "$stage/$zip" "$anonymous"
+          echo "P07_146_ANONYMOUS_ASSET_ID=$asset"
+          echo P07_146_ANONYMOUS_RELEASE_READBACK=PASS
       - name: Clean temporary private work
         if: always()
         shell: bash
