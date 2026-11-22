@@ -176,14 +176,16 @@ class Official142PublicDistribution(unittest.TestCase):
             self.assertFalse((root/"bin/vfops").exists())
 
 
-    def test_release144_public_entry_and_real_142_upgrade(self):
-        wrapper = ROOT / "installers/p07-m03-release144-atomic.sh"
+    def test_release145_public_entry_and_real_144_upgrade(self):
+        wrapper = ROOT / "installers/p07-m03-release145-atomic.sh"
+        previous_wrapper = ROOT / "installers/p07-m03-release144-atomic.sh"
         toolbox = TOOLBOX.read_text(encoding="utf-8")
-        stable_version = "0.1.0-release144"
+        stable_version = "0.1.0-release145"
+        previous_version = "0.1.0-release144"
         self.assertIn(f'VF_SERVER_OPS_BUILD_EXPECTED="{stable_version}"', toolbox)
         self.assertIn(f'VF_SERVER_OPS_INSTALLER_BLOB="{git_blob(wrapper.read_bytes())}"', toolbox)
-        self.assertIn("installers/p07-m03-release144-atomic.sh", toolbox)
-        with tempfile.TemporaryDirectory(prefix="p07-144-public-") as temp:
+        self.assertIn("installers/p07-m03-release145-atomic.sh", toolbox)
+        with tempfile.TemporaryDirectory(prefix="p07-145-public-") as temp:
             root = Path(temp)
             env = env_for(root)
             canaries = {}
@@ -194,14 +196,18 @@ class Official142PublicDistribution(unittest.TestCase):
             for entry, version in (
                 (OLD141, OLD_BUILD),
                 (WRAPPER, BUILD),
+                (previous_wrapper, previous_version),
                 (wrapper, stable_version),
             ):
                 applied = run("bash", str(entry), "install", env=env)
                 self.assertEqual(applied.returncode, 0, (applied.stdout + applied.stderr)[-1600:])
                 self.assertEqual((root / "current/BUILD_ID").read_text().strip(), version)
-            self.assertEqual((root / "previous/BUILD_ID").read_text().strip(), BUILD)
+            self.assertEqual((root / "previous/BUILD_ID").read_text().strip(), previous_version)
             self.assertEqual(
                 (root / "previous.preserved-0.1.0-release141/BUILD_ID").read_text().strip(), OLD_BUILD
+            )
+            self.assertEqual(
+                (root / "previous.preserved-0.1.0-release142/BUILD_ID").read_text().strip(), BUILD
             )
             current = (root / "current/.runtime-manifest.gitblob").read_bytes()
             self.assertIn(f'VF_SERVER_OPS_MANIFEST_BLOB="{git_blob(current)}"', toolbox)
