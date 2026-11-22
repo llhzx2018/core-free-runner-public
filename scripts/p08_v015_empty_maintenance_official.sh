@@ -71,7 +71,40 @@ chmod 600 "$private/upgrade/github-read-token"
 initial_token="$(sha256sum "$private/upgrade/github-read-token" | cut -d' ' -f1)"
 initial_owner="$(sha256sum "$private/installation/installed.json" | cut -d' ' -f1)"
 initial_env="$(sha256sum "$site/.env" | cut -d' ' -f1)"
-bridge="$GITHUB_WORKSPACE/target/src/Upgrade/LegacyMediaUpgradeBridgeCli.php"
+# Test the *actual extracted final maintenance ZIP file*, not development source.
+zip="$t/VF_P08_015_MYSQL_EMPTY_MEDIA_ONCE_20261122.zip"
+rebuild="$t/rebuild-twice.zip"
+python3 -B scripts/p08_pr99_onefile_package.py --source "$GITHUB_WORKSPACE/target" --output "$zip"
+python3 -B scripts/p08_pr99_onefile_package.py --source "$GITHUB_WORKSPACE/target" --output "$rebuild"
+cmp -s "$zip" "$rebuild" || { echo P08_PR99_DETERMINISTIC_REBUILD=FAIL; exit 15; }
+python3 -B scripts/p08_pr99_onefile_package.py --source "$GITHUB_WORKSPACE/target" --verify "$zip"
+unzip -tqq "$zip"
+bridge="$base/P08_015_EmptyMedia_Once.php"
+unzip -p "$zip" P08_015_EmptyMedia_Once.php > "$bridge"
+chmod 600 "$bridge"
+[[ "$(sha256sum "$bridge" | cut -d' ' -f1)" == "$(sha256sum "$GITHUB_WORKSPACE/target/src/Upgrade/LegacyMediaUpgradeBridgeCli.php" | cut -d' ' -f1)" ]] || exit 15
+[[ "$(stat -c '%a' "$bridge")" == 600 && "$(stat -c '%a' "$base")" == 700 ]] || exit 15
+# Deliberate negative: make an altered PHP entry inside an otherwise valid ZIP.
+python3 - "$zip" "$t/forged.zip" <<'PY'
+import sys,zipfile
+src,dst=sys.argv[1:3]
+with zipfile.ZipFile(src) as zin,zipfile.ZipFile(dst,'w') as zout:
+ for info in zin.infolist():
+  body=zin.read(info.filename)
+  if info.filename=='P08_015_EmptyMedia_Once.php':body+=b'\n# FORGED PAYLOAD\n'
+  zout.writestr(info,body)
+PY
+if python3 -B scripts/p08_pr99_onefile_package.py --source "$GITHUB_WORKSPACE/target" --verify "$t/forged.zip" > "$t/forged.out" 2>&1; then
+ echo P08_PR99_FORGED_ZIP_ACCEPTED=FAIL; exit 16
+fi
+echo P08_PR99_EXTRACTED_EXACT_ONEPHP_ZIP_AND_FORGED_DENIAL=PASS
+set +e
+php "$bridge" --maintenance-audit "$RUNNER_TEMP/untrusted-unrelated-site" "$full" "$update" "$base/official-full" > "$t/wrong-site.out" 2> "$t/wrong-site.err"
+wrongsite=$?
+set -e
+[[ "$wrongsite" -eq 2 ]] || exit 16
+grep -Fxq 'P08_EMPTY_MAINTENANCE_OTHER_SITE_REFUSED' "$t/wrong-site.err" || exit 16
+echo P08_PR99_WRONG_SITE_DENIED_BEFORE_BACKUP=PASS
 php -l "$bridge" > "$t/lint.log"
 php "$bridge" --maintenance-audit "$site" "$full" "$update" "$base/official-full" > "$t/audit.log"
 grep -Fxq 'P08_V016_BRIDGE_OLD_AND_BUNDLE=STRUCTURAL_PASS_NOT_RELEASE_AUTHORITY' "$t/audit.log"
