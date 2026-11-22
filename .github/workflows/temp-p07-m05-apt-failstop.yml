@@ -17,7 +17,7 @@ jobs:
     env:
       TARGET_VERSION: '0.1.0'
       TARGET_REPO: 'llhzx2018/vf-server-ops'
-      TARGET_SHA: 'a4a36b08db5b49716913ff2532ce91768395ec90'
+      TARGET_SHA: 'fd113376cf8e44c6a3bc00fbe47f34c2a354726a'
       TARGET_TREE: 'e771c7319dfcbfdc6ed79a87c072d2439e38e8bd'
       PRODUCT_BASE: 'a3b9018e9c4633fda684372b879bb8537aceb23b'
       EXPECTED_ZIP_SHA: '424ff9b90d9ce1c5d2b8de9773fb3350d959d8a5f030580e568918a7bc66d279'
@@ -118,7 +118,7 @@ jobs:
               },
               "acceptance_markers": ["P07-M05 新服务器初始化", "脏主机识别开发验收"],
               "task_capabilities": ["installer", "release", "atomic", "release_source"],
-              "required_domains": ["INSTALL", "SECURITY", "TESTING", "UPGRADE", "GIT"],
+              "required_domains": ["INSTALL", "SECURITY", "TESTING", "UPGRADE", "GIT", "DATA_SCHEMA", "UA_UI"],
               "delivery": {
                   "profile": "static_bundle_zip",
                   "entrypoint": "p07-m05/bin/vfops-init-entry",
@@ -139,6 +139,102 @@ jobs:
             exit 1
           fi
           echo M05_UX12_DELIVERY_CONTRACT=PASS
+      - name: Verify the exact release drafts, publish and re-download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          stage="$RUNNER_TEMP/p07-m05-apt"
+          product=llhzx2018/vf-server-ops
+          public=llhzx2018/core-free-runner-public
+          tag=p07-m05-v0.1.0-ux12-apt-failstop-20261122
+          zip=P07-M05-0.1.0-m05-ux12-apt-failstop.zip
+          (cd "$stage" && sha256sum -c SHA256SUMS)
+          zip_sha="$(sha256sum "$stage/$zip" | cut -d' ' -f1)"
+          sum_sha="$(sha256sum "$stage/SHA256SUMS" | cut -d' ' -f1)"
+          size="$(wc -c < "$stage/$zip")"
+          test "$zip_sha" = "$EXPECTED_ZIP_SHA"
+          test -n "$GH_TOKEN"
+          test "$(gh api "repos/$product/git/ref/heads/main" --jq .object.sha)" = "$TARGET_SHA"
+          public_sha="$(gh api "repos/$public/git/ref/heads/main" --jq .object.sha)"
+          [[ "$public_sha" == '08710b6c6cd5e92c82c9a8feb8733cf65142df47' ]]
+          record() {
+            gh api --paginate "repos/$1/releases?per_page=100" |
+              jq -cs --arg tag "$tag" '[.[][]|select(.tag_name==$tag)]|if length==0 then empty elif length==1 then .[0] else error("duplicate tag") end'
+          }
+          verify() {
+            jq -e --arg tag "$tag" --arg wanted "$2" --arg zip "$zip" --arg zip_sha "sha256:$zip_sha" \
+              --arg sum_sha "sha256:$sum_sha" --argjson size "$size" '
+                .tag_name==$tag and .target_commitish==$wanted and .prerelease==false and
+                (.assets|length)==2 and
+                any(.assets[]; .name==$zip and .size==$size and .digest==$zip_sha) and
+                any(.assets[]; .name=="SHA256SUMS" and .digest==$sum_sha)
+              ' <<< "$1" >/dev/null
+          }
+          cat > "$stage/notes.md" <<'NOTES'
+          P07-M05 新服务器初始化更新
+
+          系统更新失败时停止初始化。软件包正被其他任务占用时，显示等待并重试的提示。
+          本包独立更新新服务器初始化。安装 CloudPanel 仍需要用户选择并确认。
+          NOTES
+          repos=("$product" "$public")
+          targets=("$TARGET_SHA" "$public_sha")
+          for idx in 0 1; do
+            repo="${repos[$idx]}"
+            expected="${targets[$idx]}"
+            test "$(gh api "repos/$repo" --jq .permissions.push)" = true
+            release="$(record "$repo")"
+            if [[ -z "$release" ]]; then
+              if gh api "repos/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then exit 78; fi
+              gh release create "$tag" "$stage/$zip" "$stage/SHA256SUMS" --repo "$repo" \
+                --target "$expected" --draft --title 'P07-M05 新服务器初始化 UX12' \
+                --notes-file "$stage/notes.md" > "$stage/release-operation.log" 2>&1 ||
+                  { echo M05_UX12_DRAFT_CREATION=FAIL; exit 78; }
+            fi
+            for wait_seconds in 0 2 4 6 8; do
+              if (( wait_seconds > 0 )); then sleep "$wait_seconds"; fi
+              release="$(record "$repo")"
+              if [[ -n "$release" ]] && verify "$release" "$expected"; then break; fi
+            done
+            if [[ -z "$release" ]] || ! verify "$release" "$expected"; then
+              echo "M05_UX12_DRAFT_VERIFICATION=FAIL:$repo"
+              exit 78
+            fi
+            printf 'M05_UX12_RELEASE_ASSETS_VERIFIED=%s\n' "$repo"
+          done
+          test "$(gh api "repos/$product/git/ref/heads/main" --jq .object.sha)" = "$TARGET_SHA"
+          for idx in 0 1; do
+            repo="${repos[$idx]}"
+            expected="${targets[$idx]}"
+            release="$(record "$repo")"
+            verify "$release" "$expected"
+            release_id="$(jq -r .id <<< "$release")"
+            if jq -e .draft <<< "$release" >/dev/null; then
+              release="$(gh api -X PATCH "repos/$repo/releases/$release_id" -F draft=false)"
+            fi
+            verify "$release" "$expected"
+            jq -e '.draft==false' <<< "$release" >/dev/null
+            test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha)" = "$expected"
+            remote="$stage/remote-$idx"
+            mkdir "$remote"
+            gh release download "$tag" --repo "$repo" --dir "$remote" > "$stage/release-operation.log" 2>&1
+            (cd "$remote" && sha256sum -c SHA256SUMS)
+            cmp -s "$stage/$zip" "$remote/$zip"
+            printf 'M05_UX12_REMOTE_READBACK=PASS:%s\n' "$repo"
+          done
+          asset="$(record "$public" | jq -r --arg name "$zip" '.assets[]|select(.name==$name)|.id')"
+          [[ "$asset" =~ ^[0-9]+$ ]]
+          anonymous="$stage/anonymous.zip"
+          if ! curl --proto '=https' -fsSL --connect-timeout 8 --max-time 35 \
+            "https://github.com/$public/releases/download/$tag/$zip" -o "$anonymous"; then
+            curl --proto '=https' -fsSL --connect-timeout 8 --max-time 40 \
+              -H 'Accept: application/octet-stream' "https://api.github.com/repos/$public/releases/assets/$asset" -o "$anonymous"
+          fi
+          cmp -s "$stage/$zip" "$anonymous"
+          echo "M05_UX12_ANONYMOUS_ASSET_ID=$asset"
+          echo M05_UX12_ANONYMOUS_RELEASE_READBACK=PASS
       - name: Clean private sources and candidate bytes
         if: always()
         shell: bash
