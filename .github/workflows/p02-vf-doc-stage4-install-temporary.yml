@@ -8,7 +8,10 @@ permissions:
   contents: read
 jobs:
   frozen-frontend:
-    if: false # Existing 7-job source unchanged; this debug run targets the actual FULL artifact only
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'test/p02-vf-doc-stage4-install-20261122'
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -54,7 +57,10 @@ jobs:
           test ! -e target && echo P02_PRIVATE_CLEAN=PASS
 
   frozen-php-three-db:
-    if: false # Existing 7-job source unchanged; this debug run targets the actual FULL artifact only
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'test/p02-vf-doc-stage4-install-20261122'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     strategy:
@@ -147,159 +153,3 @@ jobs:
           rm -rf -- target
           rm -f -- "$RUNNER_TEMP/p02-frozen-php.log"
           test ! -e target && echo P02_PRIVATE_CLEAN=PASS
-
-  full-installer-test:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 55
-    services:
-      mysql:
-        image: mysql:8.4
-        env: {MYSQL_ROOT_PASSWORD: vfdoc_lock_synthetic_only, MYSQL_DATABASE: vfdoc_ci}
-        ports: ['3306:3306']
-        options: --health-cmd="mysqladmin ping -h 127.0.0.1 -uroot -pvfdoc_lock_synthetic_only" --health-interval=10s --health-timeout=5s --health-retries=18
-      mariadb:
-        image: mariadb:11.8
-        env: {MARIADB_ROOT_PASSWORD: vfdoc_lock_synthetic_only, MARIADB_DATABASE: vfdoc_ci}
-        ports: ['3307:3306']
-        options: --health-cmd="healthcheck.sh --connect --innodb_initialized" --health-interval=10s --health-timeout=5s --health-retries=18
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with: {persist-credentials: false}
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: llhzx2018/vf-doc
-          ref: 656159c42f25031d86ea2248d9c404fbdec86f9c
-          path: target
-          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-          persist-credentials: false
-      - uses: shivammathur/setup-php@v2
-        with:
-          php-version: '8.4'
-          extensions: mbstring,pdo_sqlite,sqlite3,pdo_mysql,dom,xml,zip,curl,fileinfo
-          tools: composer:v2
-          coverage: none
-      - uses: pnpm/action-setup@v4
-        with: {version: '10.20.0', run_install: false}
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with: {node-version: '22'}
-      - name: Build Clean FULL from exact private commit and locks
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          test "$(git -C target rev-parse HEAD)" = 656159c42f25031d86ea2248d9c404fbdec86f9c
-          mkdir -p "$RUNNER_TEMP/vfdoc-full-lab"
-          if bash target/scripts/build-clean-full.sh "$RUNNER_TEMP/vfdoc-full-lab/full.zip" >"$RUNNER_TEMP/vfdoc-full-build.log" 2>&1; then
-            echo P02_STAGE4_ACTUAL_FULL_BUILD=PASS
-            unzip -tqq "$RUNNER_TEMP/vfdoc-full-lab/full.zip"
-            echo "P02_STAGE4_FULL_SHA256=$(sha256sum "$RUNNER_TEMP/vfdoc-full-lab/full.zip" | cut -d' ' -f1)"
-          else
-            echo P02_STAGE4_ACTUAL_FULL_BUILD=FAIL
-            grep -E 'P02_FULL_[A-Z_]+(=PASS|MISSING)' "$RUNNER_TEMP/vfdoc-full-build.log" || true
-            grep -Eo 'COMPOSER_FROZEN_BUILD_FAIL|PNPM_FROZEN_BUILD_FAIL|VITE_BUILD_FAIL|PACKAGE_PRIVATE_OR_BUILD_INPUT_LEAK|MISSING_REQUIRED_SOURCE|OUTPUT_MUST_BE_ABSOLUTE_ZIP|REFUSE_OVERWRITE_PACKAGE' "$RUNNER_TEMP/vfdoc-full-build.log" | tail -1 || true
-            exit 1
-          fi
-      - name: Browser-check genuine first-install page without pressing install
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          base="$RUNNER_TEMP/vfdoc-full-lab"
-          if (
-            npm install --prefix "$RUNNER_TEMP/vfdoc-setup-pw" --no-save --no-fund --no-audit playwright@1.55.1
-            PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/vfdoc-chromium" "$RUNNER_TEMP/vfdoc-setup-pw/node_modules/.bin/playwright" install chromium --with-deps
-          ) >"$RUNNER_TEMP/vfdoc-setup-pw.log" 2>&1; then
-            echo P02_STAGE4_CHROMIUM_ENGINE=PASS
-          else
-            echo P02_STAGE4_CHROMIUM_ENGINE=FAIL
-            exit 1
-          fi
-          mkdir -p "$base/setup-browser"
-          unzip -q "$base/full.zip" -d "$base/setup-browser"
-          site="$base/setup-browser"
-          printf '%s\n' '<?php' '$p=parse_url($_SERVER["REQUEST_URI"],PHP_URL_PATH);' 'if(is_file(__DIR__."/public".$p))return false;' 'require __DIR__."/public/index.php";' >"$site/router.php"
-          php -S 127.0.0.1:8129 -t "$site/public" "$site/router.php" >"$base/setup-browser-server.log" 2>&1 &
-          pid="$!"
-          trap 'kill "$pid" 2>/dev/null || true' EXIT
-          for n in $(seq 1 40); do
-            if curl -fsS -o /dev/null http://127.0.0.1:8129/setup.php; then break; fi
-            sleep 1
-          done
-          export PLAYWRIGHT_MODULE_PATH="$RUNNER_TEMP/vfdoc-setup-pw/node_modules/playwright"
-          export PLAYWRIGHT_BROWSERS_PATH="$RUNNER_TEMP/vfdoc-chromium"
-          export P02_FULL_EXTRACT_ROOT="$site"
-          export P02_FULL_BASE_URL="http://127.0.0.1:8129"
-          if node target/tests/e2e/setup_browser.cjs >"$base/setup-browser-test.log" 2>&1; then
-            echo P02_STAGE4_INSTALLER_BROWSER=PASS
-          else
-            echo P02_STAGE4_INSTALLER_BROWSER=FAIL
-            exit 1
-          fi
-      - name: Install extracted FULL on three isolated new databases and reject existing data
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          base="$RUNNER_TEMP/vfdoc-full-lab"
-          pids=""
-          trap 'for p in $pids; do kill "$p" 2>/dev/null || true; done' EXIT
-          php -r '$x=new PDO("mysql:host=127.0.0.1;port=3306;charset=utf8mb4","root","vfdoc_lock_synthetic_only");$x->exec("CREATE DATABASE ".chr(96)."vfdoc-ci".chr(96));' >"$base/hyphen-mysql.log" 2>&1
-          php -r '$x=new PDO("mysql:host=127.0.0.1;port=3307;charset=utf8mb4","root","vfdoc_lock_synthetic_only");$x->exec("CREATE DATABASE ".chr(96)."vfdoc-ci".chr(96));' >"$base/hyphen-mariadb.log" 2>&1
-          echo P02_STAGE4_REAL_HYPHEN_DB_CREATED=PASS
-          for engine in sqlite mysql mariadb; do
-            case "$engine" in
-              sqlite) port=8131; dirty=8141; dbport=3306;;
-              mysql) port=8132; dirty=8142; dbport=3306;;
-              mariadb) port=8133; dirty=8143; dbport=3307;;
-            esac
-            mkdir -p "$base/$engine" "$base/dirty-$engine"
-            unzip -q "$base/full.zip" -d "$base/$engine"
-            unzip -q "$base/full.zip" -d "$base/dirty-$engine"
-            for suffix in "$engine" "dirty-$engine"; do
-              site="$base/$suffix"
-              printf '%s\n' '<?php' '$p=parse_url($_SERVER["REQUEST_URI"],PHP_URL_PATH);' 'if(is_file(__DIR__."/public".$p))return false;' 'require __DIR__."/public/index.php";' >"$site/router.php"
-            done
-            php -S "127.0.0.1:$port" -t "$base/$engine/public" "$base/$engine/router.php" >"$base/server-$engine.log" 2>&1 &
-            pids="$pids $!"
-            for n in $(seq 1 40); do
-              if curl -fsS -o /dev/null "http://127.0.0.1:$port/setup.php"; then break; fi
-              sleep 1
-            done
-            if python3 target/tests/e2e/full_install_probe.py --root "$base/$engine" --base "http://127.0.0.1:$port" --engine "$engine" --db-port "$dbport" --db-name "vfdoc-ci" --mode clean >"$base/clean-$engine.log" 2>&1; then
-              echo "P02_STAGE4_CLEAN_FULL_$engine=PASS"
-            else
-              echo "P02_STAGE4_CLEAN_FULL_$engine=FAIL"
-              grep -E 'P02_STAGE4_ACTUAL_FULL_INSTALL=FAIL stage=[a-z-]+' "$base/clean-$engine.log" | tail -1 || true
-              exit 1
-            fi
-            if test "$engine" = sqlite; then
-              mkdir -p "$base/dirty-$engine/storage/app/private"
-              python3 - "$base/dirty-$engine/storage/app/private/vf-doc.sqlite" <<'PY'
-          import sqlite3,sys
-          conn=sqlite3.connect(sys.argv[1])
-          conn.execute("CREATE TABLE unrelated_user_data (id INTEGER)")
-          conn.commit()
-          conn.close()
-          PY
-            fi
-            php -S "127.0.0.1:$dirty" -t "$base/dirty-$engine/public" "$base/dirty-$engine/router.php" >"$base/dirty-server-$engine.log" 2>&1 &
-            pids="$pids $!"
-            for n in $(seq 1 40); do
-              if curl -fsS -o /dev/null "http://127.0.0.1:$dirty/setup.php"; then break; fi
-              sleep 1
-            done
-            if python3 target/tests/e2e/full_install_probe.py --root "$base/dirty-$engine" --base "http://127.0.0.1:$dirty" --engine "$engine" --db-port "$dbport" --db-name "vfdoc-ci" --mode dirty >"$base/dirty-$engine.log" 2>&1; then
-              echo "P02_STAGE4_DIRTY_DB_$engine=PASS"
-            else
-              echo "P02_STAGE4_DIRTY_DB_$engine=FAIL"
-              exit 1
-            fi
-          done
-          echo P02_STAGE4_FULL_THREE_ENGINE=PASS
-      - name: Always erase private source, FULL and synthetic data
-        shell: bash
-        if: always()
-        run: |
-          set -Eeuo pipefail
-          rm -rf -- target "$RUNNER_TEMP/vfdoc-full-lab" "$RUNNER_TEMP/vfdoc-setup-pw" "$RUNNER_TEMP/vfdoc-chromium"
-          rm -f "$RUNNER_TEMP/vfdoc-setup-pw.log"
-          rm -f -- "$RUNNER_TEMP/vfdoc-full-build.log"
-          test ! -e target && test ! -e "$RUNNER_TEMP/vfdoc-full-lab"
-          echo P02_STAGE4_PRIVATE_CLEAN=PASS
