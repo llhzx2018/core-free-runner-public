@@ -98,6 +98,51 @@ if python3 -B scripts/p08_pr99_onefile_package.py --source "$GITHUB_WORKSPACE/ta
  echo P08_PR99_FORGED_ZIP_ACCEPTED=FAIL; exit 16
 fi
 echo P08_PR99_EXTRACTED_EXACT_ONEPHP_ZIP_AND_FORGED_DENIAL=PASS
+
+# Shared Public Authority structural delivery lint on this exact, already-built
+# executable archive. It is a generic ZIP profile, not a fake Atomic/FULL.
+cat > "$t/receipt.json" <<'JSON'
+{
+ "schema":"vf.public-authority.task-delivery-check.v1",
+ "project":"P08",
+ "source":"349f4c0d46a8350c18cb36b6c8b0c60d2c096c6b",
+ "project_authority":{
+   "agents":"AGENTS.md",
+   "current":"docs/authority/CURRENT.md",
+   "acceptance":"docs/authority/ACCEPTANCE_MATRIX.md",
+   "applicability":"docs/authority/PUBLIC_AUTHORITY_APPLICABILITY.md"
+ },
+ "acceptance_markers":["## RP-07AA","PR #99"],
+ "required_domains":["INSTALL","SECURITY","TESTING","UPGRADE","DATA_SCHEMA","API_PROVIDER","OBSERVABILITY","GIT"],
+ "task_capabilities":["release","auth","existing_install_transition","backup","credentials","production_runtime","release_source"],
+ "delivery":{
+   "profile":"static_bundle_zip",
+   "kind":"STANDALONE_PHP_ONEFILE_MAINTENANCE_NOT_ATOMIC",
+   "artifact":"VF_P08_015_MYSQL_EMPTY_MEDIA_ONCE_20261122.zip",
+   "entrypoint":"P08_015_EmptyMedia_Once.php",
+   "requires_git":false,
+   "requires_manual_source_copy":false
+ }
+}
+JSON
+python3 - "$t/receipt.json" "$zip" <<'PY'
+import hashlib,json,sys
+p,zip=sys.argv[1:3]
+d=json.load(open(p))
+d['delivery']['sha256']=hashlib.sha256(open(zip,'rb').read()).hexdigest()
+with open(p,'w') as out:json.dump(d,out)
+PY
+for phase in resolve delivery; do
+  python3 -B "$GITHUB_WORKSPACE/gov/governance/public-authority/tools/task_delivery_contract_lint.py" \
+   --phase "$phase" --receipt "$t/receipt.json" --project-root "$GITHUB_WORKSPACE/target" \
+   --artifact-root "$t" \
+   --public-router "$GITHUB_WORKSPACE/gov/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json" \
+   > "$t/lint-$phase.log" || { echo P08_PR99_DELIVERY_CONTRACT_LINT=BLOCKED; exit 19; }
+  grep -q 'RULES_RESOLVED=YES' "$t/lint-$phase.log" || exit 19
+done
+grep -Fxq 'CONTRACT_CHECK=STRUCTURAL_PASS' "$t/lint-delivery.log" || exit 19
+echo P08_PR99_FINAL_REAL_ARCHIVE_SHARED_DELIVERY_STRUCTURAL=PASS
+
 set +e
 php "$bridge" --maintenance-audit "$RUNNER_TEMP/untrusted-unrelated-site" "$full" "$update" "$base/official-full" > "$t/wrong-site.out" 2> "$t/wrong-site.err"
 wrongsite=$?
