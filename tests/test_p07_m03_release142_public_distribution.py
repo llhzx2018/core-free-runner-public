@@ -44,19 +44,17 @@ def run(*args:str, env:dict[str,str]|None=None, timeout:int=240)->subprocess.Com
 
 
 class Official142PublicDistribution(unittest.TestCase):
-    def test_exact_live_public_pins_and_old_versions_remain_trusted(self):
+    def test_exact_release142_remains_verified_for_upgrade(self):
         toolbox=TOOLBOX.read_text(encoding="utf-8")
         wrapper=WRAPPER.read_text(encoding="utf-8")
         self.assertEqual(git_blob(WRAPPER.read_bytes()),WRAPPER_BLOB)
         for token in (
-            f'VF_SERVER_OPS_BUILD_EXPECTED="{BUILD}"',
-            f'VF_SERVER_OPS_MANIFEST_BLOB="{RUNTIME_BLOB}"',
-            f'VF_SERVER_OPS_INSTALLER_BLOB="{WRAPPER_BLOB}"',
+            f'M03_OFFICIAL142_BUILD="{BUILD}"',
+            f'M03_OFFICIAL142_MANIFEST_BLOB="{RUNTIME_BLOB}"',
             'M03_OFFICIAL141_BUILD="0.1.0-release141"',
             'M03_OFFICIAL141_MANIFEST_BLOB="6a3a949064ffb8fe1df56e7bc555173b5ca9cf3b"',
             'M03_OFFICIAL140_BUILD="0.1.0-release140"',
             'M03_PREVIOUS_BUILD="0.1.0-release139"',
-            "installers/p07-m03-release142-atomic.sh",
         ):
             self.assertIn(token,toolbox)
         for token in (
@@ -176,6 +174,44 @@ class Official142PublicDistribution(unittest.TestCase):
             self.assertFalse((root/"current").exists())
             self.assertFalse((root/"previous").exists())
             self.assertFalse((root/"bin/vfops").exists())
+
+
+    def test_release144_public_entry_and_real_142_upgrade(self):
+        wrapper = ROOT / "installers/p07-m03-release144-atomic.sh"
+        toolbox = TOOLBOX.read_text(encoding="utf-8")
+        stable_version = "0.1.0-release144"
+        self.assertIn(f'VF_SERVER_OPS_BUILD_EXPECTED="{stable_version}"', toolbox)
+        self.assertIn(f'VF_SERVER_OPS_INSTALLER_BLOB="{git_blob(wrapper.read_bytes())}"', toolbox)
+        self.assertIn("installers/p07-m03-release144-atomic.sh", toolbox)
+        with tempfile.TemporaryDirectory(prefix="p07-144-public-") as temp:
+            root = Path(temp)
+            env = env_for(root)
+            canaries = {}
+            for module in ("m01", "m02", "m04", "m05", "website", "database", "dns"):
+                marker = root / f"keep-{module}"
+                marker.write_bytes(f"preserved {module}\n".encode())
+                canaries[marker] = marker.read_bytes()
+            for entry, version in (
+                (OLD141, OLD_BUILD),
+                (WRAPPER, BUILD),
+                (wrapper, stable_version),
+            ):
+                applied = run("bash", str(entry), "install", env=env)
+                self.assertEqual(applied.returncode, 0, (applied.stdout + applied.stderr)[-1600:])
+                self.assertEqual((root / "current/BUILD_ID").read_text().strip(), version)
+            self.assertEqual((root / "previous/BUILD_ID").read_text().strip(), BUILD)
+            self.assertEqual(
+                (root / "previous.preserved-0.1.0-release141/BUILD_ID").read_text().strip(), OLD_BUILD
+            )
+            current = (root / "current/.runtime-manifest.gitblob").read_bytes()
+            self.assertIn(f'VF_SERVER_OPS_MANIFEST_BLOB="{git_blob(current)}"', toolbox)
+            self.assertTrue((root / "current/lib/migration_safe_batch_cli.py").is_file())
+            self.assertTrue((root / "current/lib/migration_batch_withdraw.py").is_file())
+            again = run("bash", str(wrapper), "install", env=env)
+            self.assertEqual(again.returncode, 0, (again.stdout + again.stderr)[-1600:])
+            self.assertEqual((root / "current/.runtime-manifest.gitblob").read_bytes(), current)
+            for marker, value in canaries.items():
+                self.assertEqual(marker.read_bytes(), value)
 
 
 if __name__=="__main__":
