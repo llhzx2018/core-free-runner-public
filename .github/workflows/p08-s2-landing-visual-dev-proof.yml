@@ -1,0 +1,172 @@
+name: P08 S2 target-only HTTPS browser replay after E2E fixture contract correction
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/p08-s2-platform-dev-proof.yml
+      - scripts/p08_s2_browser_https.sh
+permissions:
+  contents: read
+jobs:
+  native-and-ui:
+    if: ${{ github.repository == 'llhzx2018/core-free-runner-public' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'proof/p08-s2-base-platform-native-20261122' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - kind: sqlite
+            image: mysql:8.4
+            health: mysqladmin ping --silent
+    services:
+      db:
+        image: ${{ matrix.image }}
+        env:
+          MYSQL_ROOT_PASSWORD: p08-s2-synthetic-only
+          MYSQL_ROOT_HOST: '%'
+          MARIADB_ROOT_PASSWORD: p08-s2-synthetic-only
+          MARIADB_ROOT_HOST: '%'
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="${{ matrix.health }}"
+          --health-interval=10s
+          --health-timeout=6s
+          --health-retries=20
+    env:
+      GITHUB_ACTIONS: 'true'
+      CI: 'true'
+      P08_ISOLATED_INSTALL_TEST: YES
+      P08_TEST_DB_DRIVER: ${{ matrix.kind }}
+      P08_TEST_DB_HOST: 127.0.0.1
+      P08_TEST_DB_USER: root
+      P08_TEST_DB_PASSWORD: p08-s2-synthetic-only
+      P08_TEST_DB_CLEAN: p08_ci_s1_clean
+      P08_TEST_DB_DIRTY: p08_ci_s1_dirty
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Checkout public-safe temporary harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Transient checkout exact private P08 S2 candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: e8478d4ee3a1bdedbb94f7d04b24cc0a9805ef73
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: source
+      - name: Checkout exact GOV-DOC source for real FULL structural delivery
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: e57edc475b44df7d682c857703dabc3d75fc8193
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: gov
+      - name: PHP 8.4 and locked Composer
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          extensions: pdo_mysql,pdo_sqlite,sqlite3,zip,curl,mbstring,intl,bcmath,dom,fileinfo,posix
+          coverage: none
+      - name: Node22 for Vue test and build
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Verify exact source and install locked dependencies
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          [[ "$(id -u)" -ne 0 ]]
+          [[ "$(git -C source rev-parse HEAD)" == e8478d4ee3a1bdedbb94f7d04b24cc0a9805ef73 ]]
+          [[ "$(cat source/VERSION)" == 0.1.16 ]]
+          cd source
+          test -s composer.lock
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
+          composer install --no-dev --no-scripts --prefer-dist --no-interaction --no-progress --optimize-autoloader
+          php -l app/Http/Controllers/WorkspaceController.php
+          php -l src/Upgrade/LegacyMediaUpgradeBridgeCli.php
+          php tests/test_recovery_landing_assets_snapshot.php
+          php tests/test_atomic_upgrade_arm.php
+          php tests/test_landing_block_order.php
+          echo P08_S2_NATIVE_PRIVATE_BACKUP_AND_ARM_NEGATIVE_GATES=PASS
+      - name: Build exact source frontend assets; typecheck and Vitest SQLite job
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          cd source
+          npm ci --ignore-scripts --no-audit --no-fund
+          if [[ "$P08_TEST_DB_DRIVER" == sqlite ]]; then
+            npm run typecheck
+            npm run test:unit
+          fi
+          npm run build
+          test -s public/build/manifest.json
+          echo P08_S2_R09_VUE_TYPECHECK_VITEST_AND_VITE=PASS
+      - name: Build and verify actual extracted Clean FULL from exact source
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          root="$GITHUB_WORKSPACE"
+          target="$RUNNER_TEMP/p08-s2-$P08_TEST_DB_DRIVER.zip"
+          site="$RUNNER_TEMP/p08-s2-verified-full-$P08_TEST_DB_DRIVER"
+          [[ ! -e "$site" && ! -e "$target" ]]
+          python3 -B source/scripts/build_full.py \
+            --source "$root/source" \
+            --output "$target" \
+            --version 0.1.16 \
+            --source-sha e8478d4ee3a1bdedbb94f7d04b24cc0a9805ef73 \
+            --governance-root "$root/gov"
+          unzip -tqq "$target"
+          mkdir -m 0700 "$site"
+          unzip -q "$target" -d "$site"
+          [[ -f "$site/FULL_MANIFEST.json" && -s "$site/public/build/manifest.json" ]]
+          mkdir -p "$site/tests/compatibility"
+          cp source/tests/test_install_mysql_e2e.php source/tests/test_install_sqlite_e2e.php source/tests/test_landing_block_order.php "$site/tests/"
+          cp source/tests/compatibility/r101_complete_schema.php "$site/tests/compatibility/"
+          echo P08_S2_EXACT_SOURCE_REAL_FULL_EXTRACTED_NOT_BARE_CHECKOUT=PASS
+      - name: Prepare disposable native MySQL or MariaDB databases
+        if: ${{ matrix.kind != 'sqlite' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd source
+          php tests/fixtures/create_ci_databases.php
+      - name: Original native installer, dirty DB/reinstall/Token and one Owner
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          cd "$RUNNER_TEMP/p08-s2-verified-full-$P08_TEST_DB_DRIVER"
+          if [[ "$P08_TEST_DB_DRIVER" == sqlite ]]; then
+            php tests/test_install_sqlite_e2e.php
+          else
+            php tests/test_install_mysql_e2e.php
+          fi
+          php tests/test_landing_block_order.php
+          echo P08_S2_R09_NATIVE_INSTALL_VISUAL_BLOCK_PERSISTENCE=PASS
+      - name: Install isolated Chromium, Nginx and run live HTTPS workspace
+        if: ${{ matrix.kind == 'sqlite' }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          timeout 420 sudo apt-get -qq update
+          timeout 420 sudo DEBIAN_FRONTEND=noninteractive apt-get -qq install -y nginx
+          cd source
+          npx playwright install chromium --with-deps
+          cd "$GITHUB_WORKSPACE"
+          bash scripts/p08_s2_browser_https.sh
+      - name: Erase all transient private checkout and browser workspace
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- source gov "$RUNNER_TEMP/p08-s2-https"
+          rm -rf -- "$RUNNER_TEMP/p08-s2-verified-full-$P08_TEST_DB_DRIVER" "$RUNNER_TEMP/p08-s2-$P08_TEST_DB_DRIVER.zip"
+          echo P08_S2_PRIVATE_SOURCE_AND_FIXTURE_CLEANUP=PASS
