@@ -1,4 +1,4 @@
-name: TEMP P07 M03 D04 free release preflight
+name: TEMP P07 M03 D04 free verified formal release
 on:
   pull_request:
     branches: [main]
@@ -19,7 +19,7 @@ jobs:
     env:
       TARGET_VERSION: '0.1.0'
       TARGET_REPO: 'llhzx2018/vf-server-ops'
-      TARGET_SHA: '9010a6379f409d22888b3681e3561696f482660a'
+      TARGET_SHA: '547ada1cd51f59026b879376e958fc387e88271a'
       TARGET_TREE: '968666e1813a64171f883b128be513ca2e7de95e'
       PRODUCT_BASE: 'dcf1104bd958c66fca5785dda58c44249d807e73'
       PYTHONDONTWRITEBYTECODE: '1'
@@ -119,6 +119,147 @@ jobs:
             exit 1
           fi
           echo P07_FREE_RELEASE_PREFLIGHT=PASS
+      - name: Verify the real final ZIP delivery contract before release writes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          stage="$RUNNER_TEMP/p07-release144-proof"
+          product="$GITHUB_WORKSPACE/.p07-private-product"
+          gov="$GITHUB_WORKSPACE/.p07-private-governance"
+          zip=P07-M03-0.1.0-release144.zip
+          sha=eeddddad32814542d620e13ec46d9567e377af6ef4639cb17e78d26acc05af5d
+          python3 -B "$stage/rehearse-release144-identity.py" \
+            --rc "$stage/rc4-bootstrap-final-proof.zip" --out "$stage/$zip" \
+            > "$RUNNER_TEMP/p07-private-candidate.log" 2>&1
+          printf '%s  %s\n' "$sha" "$zip" > "$stage/SHA256SUMS"
+          (cd "$stage" && sha256sum -c SHA256SUMS)
+          python3 -B - "$TARGET_SHA" "$zip" "$sha" "$stage/task-delivery.json" <<'PY'
+          import json
+          from pathlib import Path
+          import sys
+          product, archive, sha, output = sys.argv[1:]
+          receipt = {
+              "schema": "vf.public-authority.task-delivery-check.v1",
+              "project": "P07",
+              "source": product,
+              "project_authority": {
+                  "agents": "AGENTS.md",
+                  "current": "docs/authority/CURRENT.md",
+                  "acceptance": "docs/authority/ACCEPTANCE_MATRIX.md",
+                  "applicability": "docs/authority/PUBLIC_AUTHORITY_APPLICABILITY.md",
+              },
+              "acceptance_markers": ["P07-M03 网站与数据", "逐站安全分批迁入"],
+              "task_capabilities": ["installer", "release", "atomic", "migration", "release_source", "ui_change"],
+              "required_domains": ["INSTALL", "SECURITY", "TESTING", "UPGRADE", "DATA_SCHEMA", "GIT", "UA_UI"],
+              "delivery": {"profile": "static_bundle_zip", "entrypoint": "installers/p07-final.sh",
+                           "artifact": archive, "sha256": sha, "requires_git": False, "requires_manual_source_copy": False},
+          }
+          Path(output).write_text(json.dumps(receipt), encoding="utf-8")
+          PY
+          if ! python3 -B "$gov/governance/public-authority/tools/task_delivery_contract_lint.py" \
+            --phase delivery --receipt "$stage/task-delivery.json" --project-root "$product" \
+            --artifact-root "$stage" \
+            --public-router "$gov/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json" \
+            > "$RUNNER_TEMP/p07-private-proof.log" 2>&1; then
+            echo P07_FORMAL144_DELIVERY_GATE=BLOCKED
+            exit 1
+          fi
+          echo P07_FORMAL144_DELIVERY_GATE=PASS
+      - name: Create and verify both release drafts then publish and re-download
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          stage="$RUNNER_TEMP/p07-release144-proof"
+          product=llhzx2018/vf-server-ops
+          public=llhzx2018/core-free-runner-public
+          tag=p07-m03-v0.1.0-release144-20261122
+          zip=P07-M03-0.1.0-release144.zip
+          read -r zip_sha checksum_name < "$stage/SHA256SUMS"
+          test "$checksum_name" = "$zip"
+          test "$zip_sha" = eeddddad32814542d620e13ec46d9567e377af6ef4639cb17e78d26acc05af5d
+          (cd "$stage" && sha256sum -c SHA256SUMS)
+          sum_sha="$(sha256sum "$stage/SHA256SUMS" | cut -d' ' -f1)"
+          size="$(wc -c < "$stage/$zip")"
+          test -n "$GH_TOKEN" || { echo P07_FORMAL144_RELEASE_WRITE_AUTH=BLOCKED; exit 78; }
+          test "$(gh api "repos/$product/git/ref/heads/main" --jq .object.sha)" = "$TARGET_SHA"
+          public_sha="$(gh api "repos/$public/git/ref/heads/main" --jq .object.sha)"
+          [[ "$public_sha" =~ ^[a-f0-9]{40}$ ]]
+          release_record() {
+            gh api --paginate "repos/$1/releases?per_page=100" \
+              | jq -cs --arg tag "$tag" '[.[][]|select(.tag_name==$tag)] | if length==0 then empty elif length==1 then .[0] else error("duplicate tag") end'
+          }
+          verify_record() {
+            local record="$1" wanted="$2"
+            jq -e --arg zip "$zip" --arg zip_sha "sha256:$zip_sha" --arg sum_sha "sha256:$sum_sha" \
+              --arg wanted "$wanted" --argjson size "$size" '
+                .prerelease==false and .target_commitish==$wanted and (.assets|length)==2
+                and any(.assets[]; .name==$zip and .digest==$zip_sha and .size==$size)
+                and any(.assets[]; .name=="SHA256SUMS" and .digest==$sum_sha)
+              ' <<< "$record" >/dev/null
+          }
+          for repo in "$product" "$public"; do
+            test "$(gh api "repos/$repo" --jq .permissions.push)" = true
+            test -z "$(release_record "$repo")" || { echo P07_FORMAL144_RELEASE_SLOT_OCCUPIED; exit 78; }
+            if gh api "repos/$repo/git/ref/tags/$tag" >/dev/null 2>&1; then
+              echo P07_FORMAL144_TAG_SLOT_OCCUPIED
+              exit 78
+            fi
+          done
+          cat > "$stage/notes.md" <<'NOTES'
+          P07-M03 网站与数据 / P07-M03-D04 服务器迁移 release144
+          
+          新接收机支持单站迁入，或按实时清单筛选、安全分批迁入。
+          已有站点、数据库和历史迁移任务有独立保护。
+          本次新批次可在满足确认和备份条件时从接收机撤回。
+          正式安装只升级 M03 模块。实际迁移、停站和 DNS 由用户分别决定。
+          NOTES
+          for repo in "$product" "$public"; do
+            expected="$TARGET_SHA"
+            if [[ "$repo" == "$public" ]]; then expected="$public_sha"; fi
+            gh release create "$tag" "$stage/$zip" "$stage/SHA256SUMS" \
+              --repo "$repo" --target "$expected" --draft \
+              --title 'P07-M03 网站与数据 release144' --notes-file "$stage/notes.md" \
+              > "$stage/last-release-operation.log" 2>&1 || { echo P07_FORMAL144_DRAFT_CREATION=BLOCKED; exit 78; }
+            record="$(release_record "$repo")"
+            verify_record "$record" "$expected"
+            test "$(jq -r .draft <<< "$record")" = true
+            echo "P07_FORMAL144_DRAFT_VERIFIED=$repo"
+          done
+          test "$(gh api "repos/$product/git/ref/heads/main" --jq .object.sha)" = "$TARGET_SHA"
+          for repo in "$product" "$public"; do
+            gh release edit "$tag" --repo "$repo" --draft=false \
+              > "$stage/last-release-operation.log" 2>&1 || { echo P07_FORMAL144_PUBLISH=BLOCKED; exit 78; }
+          done
+          for repo in "$product" "$public"; do
+            expected="$TARGET_SHA"
+            if [[ "$repo" == "$public" ]]; then expected="$public_sha"; fi
+            record="$(release_record "$repo")"
+            verify_record "$record" "$expected"
+            test "$(jq -r .draft <<< "$record")" = false
+            test "$(gh api "repos/$repo/git/ref/tags/$tag" --jq .object.sha)" = "$expected"
+            remote="$stage/remote-$(basename "$repo")"
+            mkdir "$remote"
+            gh release download "$tag" --repo "$repo" --dir "$remote" \
+              > "$stage/last-release-operation.log" 2>&1 || { echo P07_FORMAL144_RELEASE_READBACK=BLOCKED; exit 78; }
+            (cd "$remote" && sha256sum -c SHA256SUMS)
+            cmp -s "$stage/$zip" "$remote/$zip"
+            echo "P07_FORMAL144_RELEASE_READBACK=PASS:$repo"
+          done
+          asset="$(release_record "$public" | jq -r --arg name "$zip" '.assets[]|select(.name==$name)|.id')"
+          [[ "$asset" =~ ^[0-9]+$ ]]
+          anonymous="$stage/anonymous-release144.zip"
+          if ! curl --proto '=https' -fsSL --connect-timeout 8 --max-time 35 \
+            "https://github.com/$public/releases/download/$tag/$zip" -o "$anonymous"; then
+            curl --proto '=https' -fsSL --connect-timeout 8 --max-time 40 \
+              -H 'Accept: application/octet-stream' "https://api.github.com/repos/$public/releases/assets/$asset" -o "$anonymous"
+          fi
+          cmp -s "$stage/$zip" "$anonymous"
+          echo "P07_FORMAL144_ANONYMOUS_ASSET_ID=$asset"
+          echo 'P07_FORMAL144_ANONYMOUS_RELEASE_READBACK=PASS'
       - name: Clean transient private sources and work
         if: always()
         shell: bash
