@@ -1,0 +1,147 @@
+name: TEMP P07 M05 verified APT fail-stop release
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/temp-p07-m05-apt-failstop.yml', 'harness/p07-m05-apt-failstop/**']
+permissions:
+  contents: read
+jobs:
+  proof:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'maintenance/p07-m05-apt-failstop-free-proof-20261122'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      TARGET_VERSION: '0.1.0'
+      TARGET_REPO: 'llhzx2018/vf-server-ops'
+      TARGET_SHA: 'f332ed32148231099b609dfa0fa27e1ee7730acb'
+      TARGET_TREE: '6a463fc60429df608b4d570c65a0a20834c352b0'
+      PRODUCT_BASE: 'a3b9018e9c4633fda684372b879bb8537aceb23b'
+      EXPECTED_ZIP_SHA: 'ac16c08826cc55f08e84ac5b00ab6709055fa371b9a095a496af33f5eebfcb37'
+      PYTHONDONTWRITEBYTECODE: '1'
+      NO_COLOR: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Audit lane identity
+        run: python3 -B scripts/ephemeral_lane_spec.py audit-rendered --spec harness/p07-m05-apt-failstop/lane.json --input .github/workflows/temp-p07-m05-apt-failstop.yml
+      - name: Check out exact product transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: .p07-private-product
+      - name: Check out source rules transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .p07-private-governance
+      - name: Run exact-source architecture, security and related initialization tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          product="$GITHUB_WORKSPACE/.p07-private-product"
+          gov="$GITHUB_WORKSPACE/.p07-private-governance"
+          [[ "$(git -C "$product" rev-parse HEAD)" == "$TARGET_SHA" ]]
+          [[ "$(git -C "$product" rev-parse 'HEAD^{tree}')" == "$TARGET_TREE" ]]
+          cd "$product"
+          check() {
+            local marker="$1"; shift
+            if "$@" >"$RUNNER_TEMP/p07-m05-apt-private.log" 2>&1; then echo "$marker=PASS"; else echo "$marker=FAIL"; exit 1; fi
+          }
+          check M05_ARCHITECTURE python3 -B .github/checks/architecture_gate.py --manifest .github/checks/code_architecture.json --gov-root "$gov" --git-root . --base-sha "$PRODUCT_BASE" --head-sha "$TARGET_SHA"
+          check M05_SECRET_SCAN python3 -B scripts/secret_scan.py --root .
+          check M05_UX python3 -B scripts/check_p07_terminal_ux.py --base-ref "$PRODUCT_BASE"
+          check M05_REGRESSION python3 -B -m unittest -q tests.test_p07_m05_dirty_host_guard tests.test_p07_m05_host_write_gate tests.test_p07_m05_isolated_module
+      - name: Verify the candidate installed through the official upgrade engine
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          stage="$RUNNER_TEMP/p07-m05-apt"
+          mkdir -m 700 "$stage"
+          repo=llhzx2018/core-free-runner-public
+          tag=p07-m05-v0.1.0-ux11-toolbox-lock-20261122
+          asset=P07-M05-0.1.0-m05-ux11-toolbox-lock.zip
+          if ! curl --proto '=https' -fsSL --retry 1 --max-time 30 "https://github.com/$repo/releases/download/$tag/$asset" -o "$stage/official.zip"; then
+            gh api -H 'Accept: application/octet-stream' "repos/$repo/releases/assets/779419480" >"$stage/official.zip"
+          fi
+          ref=35e3fbcb1e8c40042558f9f163e4215570074793
+          if ! curl --proto '=https' -fsSL --retry 1 --max-time 20 "https://raw.githubusercontent.com/$repo/$ref/installers/p07-m05-atomic.py" -o "$stage/atomic.py"; then
+            gh api -H 'Accept: application/vnd.github.raw+json' "repos/$repo/contents/installers/p07-m05-atomic.py?ref=$ref" >"$stage/atomic.py"
+          fi
+          expected=17e47121ac27f31162d93a72aa0b1dbea602ea01
+          [[ "$(git hash-object "$stage/atomic.py")" == "$expected" ]]
+          product="$GITHUB_WORKSPACE/.p07-private-product"
+          python3 -B "harness/p07-m05-apt-failstop/build_apt_candidate.py" "$stage/official.zip" "$product" "$stage/fixed.zip" "$stage/atomic.py" >"$stage/build.log"
+          printf '%s  %s\n' 'ac16c08826cc55f08e84ac5b00ab6709055fa371b9a095a496af33f5eebfcb37' "$stage/fixed.zip" | sha256sum -c
+          if sudo python3 -B "harness/p07-m05-apt-failstop/verify_apt_candidate.py" "$stage/atomic.py" "$stage/official.zip" "$stage/fixed.zip" "$product/tests/test_p07_m05_host_write_gate.py" >"$stage/verify.log" 2>&1; then
+            sed -n '/^M05_[A-Z_]*PASSED$/p' "$stage/verify.log"
+          else
+            echo M05_OFFICIAL_UPGRADE_VERIFICATION=FAIL
+            exit 1
+          fi
+      - name: Verify the final ZIP against the project delivery contract
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          stage="$RUNNER_TEMP/p07-m05-apt"
+          product="$GITHUB_WORKSPACE/.p07-private-product"
+          gov="$GITHUB_WORKSPACE/.p07-private-governance"
+          mv -- "$stage/fixed.zip" "$stage/P07-M05-0.1.0-m05-ux12-apt-failstop.zip"
+          printf '%s  %s\n' "$EXPECTED_ZIP_SHA" "P07-M05-0.1.0-m05-ux12-apt-failstop.zip" > "$stage/SHA256SUMS"
+          (cd "$stage" && sha256sum -c SHA256SUMS)
+          python3 -B - "$stage/task-delivery.json" <<'PY'
+          import json, os, sys
+          from pathlib import Path
+          receipt = {
+              "schema": "vf.public-authority.task-delivery-check.v1",
+              "project": "P07",
+              "source": os.environ["TARGET_SHA"],
+              "project_authority": {
+                  "agents": "AGENTS.md",
+                  "current": "docs/authority/CURRENT.md",
+                  "acceptance": "docs/authority/ACCEPTANCE_MATRIX.md",
+                  "applicability": "docs/authority/PUBLIC_AUTHORITY_APPLICABILITY.md",
+              },
+              "acceptance_markers": ["P07-M05 新服务器初始化", "脏主机识别开发验收"],
+              "task_capabilities": ["installer", "release", "atomic", "release_source"],
+              "required_domains": ["INSTALL", "SECURITY", "TESTING", "UPGRADE", "GIT"],
+              "delivery": {
+                  "profile": "static_bundle_zip",
+                  "entrypoint": "p07-m05/bin/vfops-init-entry",
+                  "artifact": "P07-M05-0.1.0-m05-ux12-apt-failstop.zip",
+                  "sha256": os.environ["EXPECTED_ZIP_SHA"],
+                  "requires_git": False,
+                  "requires_manual_source_copy": False,
+              },
+          }
+          Path(sys.argv[1]).write_text(json.dumps(receipt), encoding="utf-8")
+          PY
+          if ! python3 -B "$gov/governance/public-authority/tools/task_delivery_contract_lint.py" \
+            --phase delivery --receipt "$stage/task-delivery.json" --project-root "$product" \
+            --artifact-root "$stage" \
+            --public-router "$gov/governance/public-authority/VF_PUBLIC_AUTHORITY_APPLICABILITY_ROUTER_V1.0.json" \
+            > "$RUNNER_TEMP/p07-m05-apt-private.log" 2>&1; then
+            echo M05_UX12_DELIVERY_CONTRACT=FAIL
+            exit 1
+          fi
+          echo M05_UX12_DELIVERY_CONTRACT=PASS
+      - name: Clean private sources and candidate bytes
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- .p07-private-product .p07-private-governance "$RUNNER_TEMP/p07-m05-apt"
+          rm -f -- "$RUNNER_TEMP/p07-m05-apt-private.log"
