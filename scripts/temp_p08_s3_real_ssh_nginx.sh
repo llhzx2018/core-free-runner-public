@@ -39,6 +39,8 @@ sudo systemctl stop ssh.socket ssh.service nginx.service >/dev/null 2>&1 || true
 SETUP_STAGE=GENERATE_SSH_FIXTURE
 sudo useradd --create-home --shell /bin/bash "$USER_NAME"
 CREATED_USER=1
+# Only the transient synthetic home is made traversable for real Nginx www-data.
+sudo chmod 0755 "/home/$USER_NAME"
 sudo usermod -p "$(openssl passwd -6 'synthetic-not-used-2026')" "$USER_NAME"
 sudo install -d -o "$USER_NAME" -g "$USER_NAME" -m 0700 "/home/$USER_NAME/.ssh"
 sudo install -d -o "$USER_NAME" -g "$USER_NAME" -m 0755 "/home/$USER_NAME/vf-adops-static" "$SITE" "$SITE/releases" "$SITE/.staging"
