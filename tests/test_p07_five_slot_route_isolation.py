@@ -119,9 +119,9 @@ class FiveIndependentToolboxSlots(unittest.TestCase):
     def test_owner_trial_readonly_stable_build_unchanged(self):
         src=SOURCE.read_text(encoding="utf-8")
         self.assertIn('VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release146"',src)
-        self.assertIn('M03_OWNER_TRIAL_BUILD="0.1.0-release147-rc1"',src)
-        self.assertIn('M03_OWNER_TRIAL_ROOT="/opt/vf-server-ops-ownertrial147"',src)
-        self.assertIn('M03_OWNER_TRIAL_BIN="/usr/local/bin/vfops-rc147"',src)
+        self.assertIn('M03_OWNER_TRIAL_BUILD="0.1.0-release147-rc2"',src)
+        self.assertIn('M03_OWNER_TRIAL_ROOT="/opt/vf-server-ops-ownertrial147rc2"',src)
+        self.assertIn('M03_OWNER_TRIAL_BIN="/usr/local/bin/vfops-rc147rc2"',src)
         self.assertIn('M03_OWNER_TRIAL_MANIFEST_BLOB=',src)
 
     def test_owner_trial_write_confirmation_required(self):
@@ -158,11 +158,32 @@ class FiveIndependentToolboxSlots(unittest.TestCase):
         self.assertIn('M03_OWNER_TRIAL_INSTALLER_BLOB',body)
         self.assertIn('拒绝覆盖，请保留现场',body)
         self.assertIn('试用包安装失败，请保留现场；正式版不变',body)
-        wrapper=(SOURCE.parent/"p07-m03-ownertrial147-atomic.sh").read_text()
+        wrapper=(SOURCE.parent/"p07-m03-ownertrial147rc2-atomic.sh").read_text()
         self.assertIn('P07_INSTALL_DIR:-',wrapper)
-        self.assertIn('/opt/vf-server-ops-ownertrial147',wrapper)
+        self.assertIn('/opt/vf-server-ops-ownertrial147rc2',wrapper)
         self.assertIn('P07_TOOLBOX_PARENT:-0',wrapper)
         self.assertNotIn('P07_INSTALL_DIR:-/opt/vf-server-ops}',wrapper)
+
+    def test_unsafe_rc1_new_installs_are_revoked_without_deleting_old_runtime(self):
+        retired=(SOURCE.parent/"p07-m03-ownertrial147-atomic.sh").read_text()
+        self.assertIn("已停止分发",retired)
+        self.assertIn("exit 13",retired.split("MODULE='P07-M03'")[0])
+        self.assertNotIn("rm -rf",retired.split("MODULE='P07-M03'")[0])
+        src=SOURCE.read_text(encoding="utf-8")
+        self.assertNotIn('M03_OWNER_TRIAL_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-m03-ownertrial147-atomic.sh"',src)
+
+    def test_rc2_is_new_root_and_keeps_rc1_field_evidence(self):
+        src=SOURCE.read_text(encoding="utf-8")
+        self.assertIn("旧 147-rc1 曾在全选22站",src)
+        self.assertIn("原来的失败任务和旧试用目录均保留",src)
+        self.assertIn('M03_OWNER_TRIAL_BIN="/usr/local/bin/vfops-rc147rc2"',src)
+        self.assertNotIn('M03_OWNER_TRIAL_ROOT="/opt/vf-server-ops-ownertrial147"',src)
+        wrapper=(SOURCE.parent/"p07-m03-ownertrial147rc2-atomic.sh").read_text()
+        self.assertIn("0.1.0-release147-rc2",wrapper)
+        self.assertIn("/opt/vf-server-ops-ownertrial147rc2",wrapper)
+        self.assertIn("/usr/local/bin/vfops-rc147rc2",wrapper)
+        self.assertIn("P07_TOOLBOX_PARENT:-0",wrapper)
+        self.assertIn("09406d27e47ad2f1946cc129e9492fc009b30e278b0ae65df56775a145244c0d",wrapper)
 
     def test_owner_trial_no_color_non_tty_and_zero_loading(self):
         src=SOURCE.read_text(encoding="utf-8")
