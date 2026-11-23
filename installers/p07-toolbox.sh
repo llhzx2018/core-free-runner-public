@@ -86,6 +86,14 @@ M03_LEGACY135_BUILD="0.1.0-release135"
 M03_LEGACY135_MANIFEST_BLOB="f57e114e0ef23f73a1ec12ba864d8f2e67a5bd30"
 M03_LEGACY115_BUILD="0.1.0-release115"
 M03_LEGACY115_MANIFEST_BLOB="4acbaca22aac0da681b34376e2cc86d876593181"
+# This is explicitly NOT the stable M03 pin. Owner must choose option 2
+# inside module 3 and confirm. The trial uses its own root/executable.
+M03_OWNER_TRIAL_BUILD="0.1.0-release147-rc1"
+M03_OWNER_TRIAL_MANIFEST_BLOB="08a57fdd41b1258cbfdb87e881a0e987353dd589"
+M03_OWNER_TRIAL_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-m03-ownertrial147-atomic.sh"
+M03_OWNER_TRIAL_INSTALLER_BLOB="ff7538b0f591aa9bffb0b6e2b86e1ba134ddea07"
+M03_OWNER_TRIAL_ROOT="/opt/vf-server-ops-ownertrial147"
+M03_OWNER_TRIAL_BIN="/usr/local/bin/vfops-rc147"
 M03_ROLLBACK_INSTALLER_REF="main"
 M03_ROLLBACK_INSTALLER_BLOB="48fca0b7ac6fa3358912ef1f3a146d37a20b99c2"
 M03_ROLLBACK_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${M03_ROLLBACK_INSTALLER_REF}/installers/p07-m03-restore-previous.sh"
@@ -786,13 +794,101 @@ run_server_ops_owner143_trial() {
   /usr/local/bin/vfops-rc143
 }
 
-run_server_ops() {
-  # P07-M03 网站与数据: one selected module, one verified stable entry.
-  # Legacy one-off trials have their own historical evidence and are not
-  # selectable through the ordinary toolbox menu or migration flow.
+m03_verified_owner_trial() {
+  # Authenticate EVERY trial runtime file before executing its CLI, not merely
+  # the name, BUILD_ID or a self-provided manifest. Stable M03 is untouched.
+  local root="$M03_OWNER_TRIAL_ROOT" expected name actual count=0
+  [[ -d "$root" && ! -L "$root" && ! -L "$root/lib" &&
+     ! -L "$root/bin" && -f "$root/BUILD_ID" && ! -L "$root/BUILD_ID" &&
+     -f "$root/.runtime-manifest.gitblob" &&
+     ! -L "$root/.runtime-manifest.gitblob" &&
+     -L "$M03_OWNER_TRIAL_BIN" ]] || return 1
+  [[ "$(readlink "$M03_OWNER_TRIAL_BIN")" == "$root/bin/vfops-user" ]] || return 1
+  [[ "$(cat "$root/BUILD_ID")" == "$M03_OWNER_TRIAL_BUILD" ]] || return 1
+  [[ "$(p07_git_blob_sha1 "$root/.runtime-manifest.gitblob" 2>/dev/null || true)" == "$M03_OWNER_TRIAL_MANIFEST_BLOB" ]] || return 1
+  declare -A seen=()
+  while read -r expected name; do
+    [[ "$expected" =~ ^[a-f0-9]{40}$ &&
+       "$name" =~ ^(bin|lib|components)/[A-Za-z0-9_./-]+$ || "$name" == BUILD_ID ]] || return 1
+    [[ "$name" != /* && "$name" != *../* && "$name" != */.. && "$name" != '..' ]] || return 1
+    [[ ! -v seen[$name] ]] || return 1
+    seen[$name]=1
+    [[ -f "$root/$name" && ! -L "$root/$name" ]] || return 1
+    actual="$(p07_git_blob_sha1 "$root/$name" 2>/dev/null || true)"
+    [[ "$actual" == "$expected" ]] || return 1
+    count=$((count+1))
+    (( count <= 240 )) || return 1
+  done < "$root/.runtime-manifest.gitblob"
+  (( count >= 50 )) && [[ -v seen[bin/vfops-user] && -v seen[BUILD_ID] ]] || return 1
+  [[ "$(NO_COLOR=1 "$M03_OWNER_TRIAL_BIN" --build-id 2>/dev/null || true)" == "$M03_OWNER_TRIAL_BUILD" ]]
+}
+
+run_m03_owner_trial() {
   screen_clear
-  ensure_server_ops_current || return $?
-  vfops
+  show_header
+  say "P07-M03 网站与数据 / D04 服务器迁移 · 人工试用版"
+  say "版本：$M03_OWNER_TRIAL_BUILD（尚未完成独立双机迁移验收）"
+  say '仅用于隔离空白测试接收机。不要重跑已有的 22 站失败任务。'
+  say '本试用程序安装在独立目录，不替换当前 release146；不自动迁移或改 DNS。'
+  local answer='' file='' rc=0
+  if m03_verified_owner_trial; then
+    say '已校验隔离试用版安装，无须重新下载。'
+  else
+    if [[ -e "$M03_OWNER_TRIAL_ROOT" || -L "$M03_OWNER_TRIAL_ROOT" ||
+          -e "$M03_OWNER_TRIAL_BIN" || -L "$M03_OWNER_TRIAL_BIN" ]]; then
+      say '已有试用目录或命令未通过完整文件校验，拒绝覆盖，请保留现场。' >&2
+      return 13
+    fi
+    [[ -t 0 && -t 1 ]] || { say '人工试用安装必须在交互式 SSH 终端确认。'; return 7; }
+    printf '只安装隔离人工试用版，不迁移网站。继续？[y/N]：'
+    read -r answer || answer=''
+    [[ "$answer" =~ ^[Yy]$ ]] || { say '已取消；正式版不变。'; return 7; }
+    for tool in curl sha1sum mktemp bash; do
+      command -v "$tool" >/dev/null 2>&1 || { say "缺少 $tool，未安装。" >&2; return 3; }
+    done
+    file="$(mktemp -t p07-m03-ownertrial-installer.XXXXXXXX)" || return 13
+    chmod 0600 "$file"
+    if ! curl --proto '=https' --tlsv1.2 -fsSL --retry 1 --max-time 90 \
+        "$M03_OWNER_TRIAL_INSTALLER_URL" -o "$file"; then
+      rm -f -- "$file"; say '试用安装器下载失败，正式版不变。' >&2; return 4
+    fi
+    if [[ "$(p07_git_blob_sha1 "$file" 2>/dev/null || true)" != "$M03_OWNER_TRIAL_INSTALLER_BLOB" ]] ||
+       ! bash -n "$file"; then
+      rm -f -- "$file"; say '试用安装器身份/语法验证失败，拒绝运行。' >&2; return 6
+    fi
+    set +e
+    P07_INSTALL_DIR="$M03_OWNER_TRIAL_ROOT" \
+    P07_PREVIOUS_DIR="$M03_OWNER_TRIAL_ROOT.previous" \
+    P07_BIN_LINK="$M03_OWNER_TRIAL_BIN" \
+    P07_TOOLBOX_PARENT=1 P07_NO_EXEC=1 bash "$file" install
+    rc=$?
+    set -e
+    rm -f -- "$file"
+    [[ $rc -eq 0 ]] || { say '试用包安装失败，请保留现场；正式版不变。' >&2; return "$rc"; }
+    m03_verified_owner_trial || { say '试用版安装后身份未通过验证。' >&2; return 13; }
+    say '隔离人工试用版安装完成，正式版本没有替换。'
+  fi
+  say '运行试用菜单由你手动选择；检测到已有网站/数据库/历史任务应直接停止，不执行迁入。'
+  "$M03_OWNER_TRIAL_BIN"
+}
+
+run_server_ops() {
+  screen_clear
+  show_header
+  say 'P07-M03 网站与数据'
+  say "  1. 打开正式版（当前 $VF_SERVER_OPS_BUILD_EXPECTED）"
+  say "  2. 人工试用迁移版（$M03_OWNER_TRIAL_BUILD，独立安装）"
+  say '  0. 返回'
+  say '未选择前不会下载安装；试用版不自动迁移。'
+  local selection=''
+  printf '请选择 [0-2]：'
+  read -r selection || return 0
+  case "$selection" in
+    1) ensure_server_ops_current || return $?; vfops ;;
+    2) run_m03_owner_trial ;;
+    0) return 0 ;;
+    *) say '无效选择，未修改服务器。'; return 7 ;;
+  esac
 }
 
 
