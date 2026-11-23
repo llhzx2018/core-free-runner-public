@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 22
     env:
-      SOURCE_SHA: 'd9bf9e78bb436437c2cc5cf4ef99d2d6bd91371f'
+      SOURCE_SHA: '6179ceb71a05d7bb99c8d13facc951120e69015d'
       SOURCE_BASE: 'fd113376cf8e44c6a3bc00fbe47f34c2a354726a'
       PYTHONDONTWRITEBYTECODE: '1'
       NO_COLOR: '1'
@@ -77,76 +77,82 @@ jobs:
                       print("OFFICIAL146_BASELINE_"+name.split("/")[-1]+"="+
                             ("MATCH" if official==baseline else "DIFFERENT"))
           PY
-      - name: Run safe local Percona 8.4 read-only SQL catalog probe
+      - name: Read active governance in transient runner workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: .p07-governance
+      - name: Verify official146-to-unpublished-147rc genuine candidate archive
         shell: bash
         run: |
           set -Eeuo pipefail
           set +x
-          sudo -n apt-get update -qq >/dev/null
-          sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq default-mysql-client >/dev/null
-          docker pull -q percona/percona-server:8.4.11 >/dev/null
-          name="p07-native-catalog-$GITHUB_RUN_ID"
-          password='p07-only-synthetic-local-8_4'
-          docker run -d --rm --name "$name" -e MYSQL_ROOT_PASSWORD="$password" \
-            -p 127.0.0.1:33306:3306 percona/percona-server:8.4.11 >/dev/null
-          ready=0
-          for i in $(seq 1 75); do
-            if MYSQL_PWD="$password" mysql --no-defaults --protocol=tcp --host=127.0.0.1 \
-              --port=33306 --user=root --connect-timeout=2 --batch --skip-column-names \
-              --execute 'SELECT 1' >/dev/null 2>&1; then ready=1; break; fi
-            sleep 2
-          done
-          [[ "$ready" -eq 1 ]] || { echo PERCONA_SERVER_START=FAIL; exit 1; }
-          MYSQL_PWD="$password" mysql --no-defaults --protocol=tcp --host=127.0.0.1 \
-              --port=33306 --user=root --execute 'CREATE DATABASE p07_synthetic_occupied' >/dev/null
-          fixture="$RUNNER_TEMP/clpctl-fixture"
-          cat > "$fixture" <<'SH'
-          #!/usr/bin/env bash
-          [[ "$1" == "db:show:master-credentials" ]] || exit 13
-          cat <<'TABLE'
-          +-----------+------------------------------+
-          | Name      | Value                        |
-          +-----------+------------------------------+
-          | Host      | 127.0.0.1                    |
-          | User Name | root                         |
-          | Password  | p07-only-synthetic-local-8_4 |
-          | Port      | 33306                        |
-          +-----------+------------------------------+
-          TABLE
-          SH
-          chmod 700 "$fixture"
-          sudo -n env P07_PRODUCT="$GITHUB_WORKSPACE/.p07-private-product" P07_CLPCTL="$fixture" \
-            /usr/bin/python3 -B - <<'PY'
-          import os, pathlib, sys
-          from unittest import mock
-          sys.path.insert(0,str(pathlib.Path(os.environ["P07_PRODUCT"])/"lib"))
-          import migration_cloudpanel_sql_probe as probe
-          import migration_safe_batch_io as io
-          assert os.geteuid()==0
-          fixture=os.environ["P07_CLPCTL"]
-          def which(name):
-              if name=="clpctl": return fixture
-              if name in ("mysql","mariadb"): return "/usr/bin/mysql"
-              return None
-          os.environ["MYSQL_PWD"]="wrong-inherited-secret-is-ignored"
-          with mock.patch.object(probe.shutil,"which",side_effect=which):
-              live=io.live_sql_database_names()
-              assert live is not None, "LIVE_SQL_CATALOG_UNVERIFIED"
-              assert {"information_schema","mysql","p07_synthetic_occupied"}.issubset(live), "OCCUPIED_DATABASE_MISSING"
-              datadir=probe.readonly_sql_from_cloudpanel("SELECT @@datadir","/usr/bin/mysql")
-              assert datadir is not None and datadir.startswith("/"), "LIVE_SQL_DATADIR_UNVERIFIED"
-          print("REAL_PERCONA84_METADATA_SQL=PASS")
-          print("REAL_CLOUDPANEL_FORMAT_FIXTURE=PASS")
-          print("REAL_DB_OCCUPANCY_DETECTION=PASS")
-          print("LIVE_CLOUDPANEL_INSTALL=NOT_RUN")
-          print("DUAL_CLOUDPANEL_MIGRATION=NOT_RUN")
+          product="$GITHUB_WORKSPACE/.p07-private-product"
+          cd "$product"
+          python3 -B -m unittest -q tests.test_p07_m03_trial_builder_142 tests.test_p07_m03_trial_builder_146
+          echo RELEASE146_CANDIDATE_TESTS=PASS
+          python3 -B scripts/p07_m03_trial_from_official.py \
+            --official-zip "$RUNNER_TEMP/p07-release146.zip" --product-root "$product" \
+            --output "$RUNNER_TEMP/p07-release147-rc1.zip" --product-sha "$SOURCE_SHA" \
+            --build 0.1.0-release147-rc1 --official-build 0.1.0-release146
+          python3 -B - "$RUNNER_TEMP/p07-release146.zip" "$RUNNER_TEMP/p07-release147-rc1.zip" "$product" <<'PY'
+          import hashlib, pathlib, subprocess, sys, zipfile
+          oldpath,newpath,product=map(pathlib.Path,sys.argv[1:])
+          pfx="dist/p07/0.1.0/overlay/"
+          patches={
+              "components/p07-m03-safe-batch-ui.sh",
+              "lib/migration_safe_batch_io.py",
+              "lib/migration_native_datadir_guard.py",
+              "lib/migration_cloudpanel_sql_probe.py",
+          }
+          blob=lambda data: hashlib.sha1(b"blob "+str(len(data)).encode()+b"\0"+data).hexdigest()
+          with zipfile.ZipFile(oldpath) as old,zipfile.ZipFile(newpath) as new:
+              orig={row.split("  ",1)[1]:row.split("  ",1)[0]
+                    for row in old.read(pfx+"RUNTIME.gitblob").decode().splitlines()}
+              latest={row.split("  ",1)[1]:row.split("  ",1)[0]
+                      for row in new.read(pfx+"RUNTIME.gitblob").decode().splitlines()}
+              assert set(latest)-set(orig)==patches-set(orig)
+              assert set(orig)-set(latest)==set()
+              for name in latest:
+                  raw=new.read(pfx+name)
+                  assert blob(raw)==latest[name]
+                  if name in patches:
+                      assert raw==(product/name).read_bytes()
+                  elif name!="BUILD_ID":
+                      assert latest[name]==orig[name]
+              assert new.read(pfx+"BUILD_ID")==b"0.1.0-release147-rc1\n"
+              orig_installer=old.read("installers/p07-final.sh")
+              new_installer=new.read("installers/p07-final.sh")
+              assert orig_installer!=new_installer
+              assert new_installer.count(b'EXPECTED_BUILD_ID="0.1.0-release147-rc1"')==1
+              assert new_installer.count(b'RUNTIME_MANIFEST_BLOB="'+blob(new.read(pfx+"RUNTIME.gitblob")).encode()+b'"')==1
+              subprocess.run(["bash","-n"],input=new_installer,check=True)
+          print("GENUINE146_TO_147RC_PACKAGE=PASS")
+          print("UNCHANGED_146_RUNTIME_PRESERVED=PASS")
+          print("EXACT_FOUR_PATCH_FILES=PASS")
+          print("CANDIDATE_ONLY_NOT_PUBLISHED=YES")
           PY
+          python3 -B .github/checks/architecture_gate.py \
+            --manifest .github/checks/code_architecture.json \
+            --gov-root "$GITHUB_WORKSPACE/.p07-governance" \
+            --git-root . --base-sha "$SOURCE_BASE" --head-sha "$SOURCE_SHA" \
+            > "$RUNNER_TEMP/p07-archive-scope.log"
+          echo ARCHITECTURE=PASS
+          python3 -B scripts/check_p07_modules.py > "$RUNNER_TEMP/p07-module-scope.log"
+          echo MODULE_ISOLATION=PASS
+          python3 -B scripts/secret_scan.py --root . > "$RUNNER_TEMP/p07-secret-scope.log"
+          echo SECRET_SCAN=PASS
       - name: Always clean synthetic database container and private checkout
         if: always()
         shell: bash
         run: |
           set +e
           docker ps -aq --filter "name=p07-native-catalog-$GITHUB_RUN_ID" | xargs -r docker rm -f >/dev/null 2>&1
-          rm -rf -- "$GITHUB_WORKSPACE/.p07-private-product"
-          rm -f -- "$RUNNER_TEMP/p07-release146.zip" "$RUNNER_TEMP/clpctl-fixture"
+          rm -rf -- "$GITHUB_WORKSPACE/.p07-private-product" "$GITHUB_WORKSPACE/.p07-governance"
+          rm -f -- "$RUNNER_TEMP/p07-release146.zip" "$RUNNER_TEMP/p07-release147-rc1.zip" \
+            "$RUNNER_TEMP/p07-archive-scope.log" "$RUNNER_TEMP/p07-module-scope.log" \
+            "$RUNNER_TEMP/p07-secret-scope.log" "$RUNNER_TEMP/clpctl-fixture"
           echo EPHEMERAL_PRIVATE_CLEANUP=COMPLETE
