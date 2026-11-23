@@ -50,7 +50,7 @@ cat "$ROOT/owner_key.pub" | sudo tee "/home/$USER_NAME/.ssh/authorized_keys" >/d
 sudo chown "$USER_NAME:$USER_NAME" "/home/$USER_NAME/.ssh/authorized_keys"
 sudo chmod 0600 "/home/$USER_NAME/.ssh/authorized_keys"
 ssh-keygen -q -t ed25519 -N '' -f "$ROOT/host_key"
-ssh-keygen -y -f "$ROOT/host_key" > "$ROOT/host_pin"
+ssh-keygen -y -f "$ROOT/host_key" | awk 'NF >= 2 {print $1 " " $2}' > "$ROOT/host_pin"
 sudo mkdir -p /run/sshd
 cat > "$ROOT/sshd.conf" <<EOF
 Port 22
