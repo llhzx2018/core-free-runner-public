@@ -117,9 +117,14 @@ $httpsBytes=static function (string $path) use ($hostname): string {
         CURLOPT_TIMEOUT=>7,
     ]);
     $payload=curl_exec($curl);
-    $status=curl_getinfo($curl,CURLINFO_HTTP_CODE);
+    $status=(int)curl_getinfo($curl,CURLINFO_HTTP_CODE);
+    $curlCode=curl_errno($curl);
     curl_close($curl);
-    if (!is_string($payload) || $status!==200) throw new RuntimeException('SYNTHETIC_HTTPS_READBACK_UNAVAILABLE');
+    if (!is_string($payload) || $status!==200) {
+        echo "P08_S3_TRANSPORT_HTTPS_HTTP_STATUS=".$status."\n";
+        echo "P08_S3_TRANSPORT_HTTPS_CURL_CODE=".$curlCode."\n";
+        throw new RuntimeException('SYNTHETIC_HTTPS_READBACK_UNAVAILABLE');
+    }
     return $payload;
 };
 try {
@@ -136,7 +141,10 @@ try {
         $independentLinkA==='releases/'.$a['bundle_sha256'] ? 'A' : 'OTHER')."\n";
     $check($independentStatusA===$a['bundle_sha256'],'FIRST_REAL_SSH_POINTER');
     $lastStep='FIRST_DIRECT_NGINX_HTTPS';
-    $check($httpsBytes('index.html')===$htmlA,'FIRST_NGINX_HTTPS_EXACT_HTML');
+    $nginxIndex=$httpsBytes('index.html');
+    echo "P08_S3_TRANSPORT_FIRST_NGINX_EXACT_SHA=".(
+        hash_equals(hash('sha256',$htmlA),hash('sha256',$nginxIndex)) ? 'YES':'NO')."\n";
+    $check($nginxIndex===$htmlA,'FIRST_NGINX_HTTPS_EXACT_HTML');
     $lastStep='FIRST_LARAVEL_HTTP_FACADE_VERIFY';
     echo "P08_S3_TRANSPORT_FIRST_GATEWAY_TLS=START\n";
     $check($gateway->verify($config,$a['bundle_sha256'],$a['files']['index.html']['sha256']),'FIRST_STRICT_TLS_GATEWAY_VERIFY');
