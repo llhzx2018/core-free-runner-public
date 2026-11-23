@@ -105,6 +105,75 @@ class FiveIndependentToolboxSlots(unittest.TestCase):
         self.assertNotIn('ensure_server_ops_current',trial)
         self.assertNotIn('VF_SERVER_OPS_INSTALLER',trial)
         self.assertNotIn('P07_INSTALL_DIR="/opt/vf-server-ops"',trial)
+    def test_owner_trial_main_menu_five_slots_unchanged(self):
+        src = SOURCE.read_text(encoding="utf-8")
+        menu = body_of(src, "show_menu")
+        for title in ("网络代理节点", "服务器性能检测", "网站与数据",
+                      "服务器维护与安全", "新服务器初始化"):
+            self.assertIn(title,menu)
+        self.assertIn("功能：5 项",menu)
+        route=body_of(src,"main_menu")
+        self.assertEqual(route.count("run_server_ops"),1)
+        self.assertEqual(route.count("run_m03_owner_trial"),1)
+
+    def test_owner_trial_readonly_stable_build_unchanged(self):
+        src=SOURCE.read_text(encoding="utf-8")
+        self.assertIn('VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release146"',src)
+        self.assertIn('M03_OWNER_TRIAL_BUILD="0.1.0-release147-rc1"',src)
+        self.assertIn('M03_OWNER_TRIAL_ROOT="/opt/vf-server-ops-ownertrial147"',src)
+        self.assertIn('M03_OWNER_TRIAL_BIN="/usr/local/bin/vfops-rc147"',src)
+        self.assertIn('M03_OWNER_TRIAL_MANIFEST_BLOB=',src)
+
+    def test_owner_trial_write_confirmation_required(self):
+        src=SOURCE.read_text(encoding="utf-8")
+        body=body_of(src,"run_m03_owner_trial")
+        self.assertIn('[[ -t 0 && -t 1 ]]',body)
+        self.assertIn('read -r answer',body)
+        self.assertIn('[[ "$answer" =~ ^[Yy]$ ]]',body)
+        self.assertIn('P07_TOOLBOX_PARENT=1 P07_NO_EXEC=1',body)
+
+    def test_owner_trial_cancel_eof_invalid_no_write(self):
+        src=SOURCE.read_text(encoding="utf-8")
+        route=body_of(src,"main_menu")
+        self.assertIn('read -r m03_choice || return 0',route)
+        self.assertIn('0) continue ;;',route)
+        self.assertIn("无效选择，未修改服务器",route)
+        body=body_of(src,"run_m03_owner_trial")
+        self.assertIn("已取消；正式版不变",body)
+        self.assertLess(body.index('read -r answer'),body.index('curl --proto'))
+
+    def test_owner_trial_success_must_verify_full_runtime(self):
+        src=SOURCE.read_text(encoding="utf-8")
+        body=body_of(src,"run_m03_owner_trial")
+        self.assertIn('m03_verified_owner_trial ||',body)
+        self.assertIn('已校验隔离试用版安装',body)
+        verified=body_of(src,"m03_verified_owner_trial")
+        self.assertIn('M03_OWNER_TRIAL_MANIFEST_BLOB',verified)
+        self.assertIn('p07_git_blob_sha1',verified)
+        self.assertIn('bin/vfops-user',verified)
+
+    def test_owner_trial_failure_block_preserves_stable(self):
+        src=SOURCE.read_text(encoding="utf-8")
+        body=body_of(src,"run_m03_owner_trial")
+        self.assertIn('M03_OWNER_TRIAL_INSTALLER_BLOB',body)
+        self.assertIn('拒绝覆盖，请保留现场',body)
+        self.assertIn('试用包安装失败，请保留现场；正式版不变',body)
+        wrapper=(SOURCE.parent/"p07-m03-ownertrial147-atomic.sh").read_text()
+        self.assertIn('P07_INSTALL_DIR:-',wrapper)
+        self.assertIn('/opt/vf-server-ops-ownertrial147',wrapper)
+        self.assertIn('P07_TOOLBOX_PARENT:-0',wrapper)
+        self.assertNotIn('P07_INSTALL_DIR:-/opt/vf-server-ops}',wrapper)
+
+    def test_owner_trial_no_color_non_tty_and_zero_loading(self):
+        src=SOURCE.read_text(encoding="utf-8")
+        route=body_of(src,"main_menu")
+        self.assertIn("只在选定操作后下载安装",route)
+        body=body_of(src,"run_m03_owner_trial")
+        self.assertIn("交互式 SSH 终端确认",body)
+        self.assertIn('[[ -t 0 && -t 1 ]]',body)
+        self.assertIn('NO_COLOR=1',body_of(src,"m03_verified_owner_trial"))
+        self.assertIn("C_RESET=''",src)
+
     def test_main_entry_does_not_install_all_modules_on_start(self):
         source = SOURCE.read_text(encoding="utf-8")
         startup = source[:source.index("main_menu() {")]
