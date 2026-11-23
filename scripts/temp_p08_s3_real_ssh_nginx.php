@@ -201,6 +201,23 @@ try {
         $e instanceof Error => 'PHP_RUNTIME',
         default => 'OTHER_EXCEPTION',
     };
+    // Numeric transport codes only. NEVER emit exception messages, paths,
+    // remote hostnames, stack frames, request headers or credential material.
+    $ctx=method_exists($e,'getHandlerContext') ? $e->getHandlerContext() : [];
+    $curlNo=is_array($ctx) ? ($ctx['errno'] ?? null) : null;
+    if (is_int($curlNo) && $curlNo >= 0 && $curlNo <= 100) {
+        echo "P08_S3_TRANSPORT_GUZZLE_CURL_ERRNO=".$curlNo."\n";
+    }
+    if ($e instanceof \GuzzleHttp\Exception\RequestException) {
+        $r=$e->getResponse();
+        if ($r!==null) echo "P08_S3_TRANSPORT_GUZZLE_HTTP_STATUS=".$r->getStatusCode()."\n";
+    }
+    $short=(new \ReflectionClass($e))->getShortName();
+    if (in_array($short,['ConnectException','RequestException','ClientException','ServerException','TooManyRedirectsException'],true)) {
+        echo "P08_S3_TRANSPORT_GUZZLE_EXCEPTION_TYPE=".$short."\n";
+    }
+    echo "P08_S3_TRANSPORT_PHP_CURL_CA_OVERRIDE=".
+        (ini_get('curl.cainfo')!=='' ? 'SET' : 'DEFAULT')."\n";
     echo "P08_S3_TRANSPORT_FAILED_STEP=".$lastStep."\n";
     echo "P08_S3_TRANSPORT_EXCEPTION_CLASS=".$type."\n";
     exit(1);
