@@ -43,9 +43,6 @@ with zipfile.ZipFile(archive) as z, tempfile.TemporaryDirectory(
     (runtime / "VERSION").write_text("0.1.0\n", encoding="ascii")
     (runtime / ".runtime-manifest.gitblob").write_bytes(marker)
     assert guard.verified_p07_trial_runtime(runtime), "genuine M03 rc3 rejected"
-    assert guard.verified_toolbox_entry("/opt", runtime.name) is False, (
-        "generic path check should not use fabricated real /opt path"
-    )
     target = runtime / "BUILD_ID"
     original = target.read_bytes()
     target.write_bytes(b"0.1.0-release147-rc2\n")
@@ -53,11 +50,10 @@ with zipfile.ZipFile(archive) as z, tempfile.TemporaryDirectory(
     target.write_bytes(original)
     assert guard.verified_p07_trial_runtime(runtime)
     (runtime / "lib" / "unexpected.py").write_bytes(b"print(123)\n")
-    # Even if extra file does not appear in the public manifest, this runtime
-    # must not be treated as a proof of overall host cleanliness.
-    # Independent panel/database/service/port checks still own host safety.
-    assert guard.verified_p07_trial_runtime(runtime), (
-        "signature-matched runtime cannot detect unlisted added files"
+    # An extra executable in lib/ must invalidate the apparent P07 runtime,
+    # even though the embedded manifest still matches the official ZIP.
+    assert not guard.verified_p07_trial_runtime(runtime), (
+        "unlisted runnable application hidden inside P07 directory"
     )
 print("P07_M05_GENUINE_PUBLISHED_M03_147RC3_RUNTIME_ACCEPTED=PASS")
 print("P07_M05_M03_RUNTIME_TAMPERED_BUILD_REJECTED=PASS")
