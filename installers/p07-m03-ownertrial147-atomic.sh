@@ -2,6 +2,12 @@
 # P07-M03 网站与数据 / D04 服务器迁移：Owner试用 147rc1。SHA256+Git blob 双重校验，仅试用程序隔离安装。
 # Only this module's runtime path changes; databases, websites, DNS and other modules stay untouched.
 set -Eeuo pipefail
+# Historical security stop: release147-rc1 let a 22-site multi-copy start
+# before the receiver's missing historical task evidence was reconciled.
+# Preserve this source in Git history; reject all NEW installs from mutable
+# public main. Never remove an already installed trial/old migration receipt.
+printf '%s\n' 'P07-M03 147-rc1 已停止分发：曾发生22站部分迁入失败；请不要重试迁入或清理旧任务。改用工具箱内新版事故保护入口。' >&2
+exit 13
 MODULE='P07-M03'
 BUILD='0.1.0-release147-rc1'
 RELEASE='p07-m03-v0.1.0-release147-rc1-ownertrial-20261123'
