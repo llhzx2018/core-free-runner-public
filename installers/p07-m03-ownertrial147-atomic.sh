@@ -105,9 +105,9 @@ bash -n "$tmp/files/installers/p07-final.sh" || deny INSTALLER_REJECTED
 # versioned rotation; then the signed installer can retain current140 as
 # .previous. Do not erase, overwrite, assume ownership, or process unknown
 # recoveries. All paths are module runtime paths, not website/data snapshots.
-m03_root="${P07_INSTALL_DIR:-/opt/vf-server-ops}"
-m03_previous="${P07_PREVIOUS_DIR:-/opt/vf-server-ops.previous}"
-m03_bin="${P07_BIN_LINK:-/usr/local/bin/vfops}"
+m03_root="${P07_INSTALL_DIR:-/opt/vf-server-ops-ownertrial147}"
+m03_previous="${P07_PREVIOUS_DIR:-/opt/vf-server-ops-ownertrial147.previous}"
+m03_bin="${P07_BIN_LINK:-/usr/local/bin/vfops-rc147}"
 m03_lock="$m03_root.upgrade.lock"
 for tool in flock mv readlink; do command -v "$tool" >/dev/null 2>&1 || deny APPLY_FAILED; done
 [[ -d "$(dirname "$m03_root")" && ! -L "$(dirname "$m03_root")" &&
