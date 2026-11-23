@@ -175,7 +175,7 @@ class FiveIndependentToolboxSlots(unittest.TestCase):
     def test_rc3_new_root_preserves_old_rc1_and_rc2_field_evidence(self):
         src=SOURCE.read_text(encoding="utf-8")
         self.assertIn("旧 147-rc1 曾在全选22站",src)
-        self.assertIn("原来的失败任务和旧试用目录均保留",src)
+        self.assertIn("原失败任务和旧试用版全部保留",src)
         self.assertIn('M03_OWNER_TRIAL_BIN="/usr/local/bin/vfops-rc147rc3"',src)
         self.assertNotIn('M03_OWNER_TRIAL_ROOT="/opt/vf-server-ops-ownertrial147"',src)
         wrapper=(SOURCE.parent/"p07-m03-ownertrial147rc3-atomic.sh").read_text()
