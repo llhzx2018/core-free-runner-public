@@ -15,7 +15,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.head_ref == 'test/p07-m05-provider-neutral-proof-20261123'
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: 15
     env:
       TARGET_VERSION: '0.1.0'
       TARGET_REPO: 'llhzx2018/vf-server-ops'
@@ -83,11 +83,72 @@ jobs:
           printf '.gov-doc-policy/\n' >> .git/info/exclude
           python3 -B .github/checks/architecture_gate.py --manifest .github/checks/code_architecture.json --gov-root .gov-doc-policy --git-root . --base-sha fd113376cf8e44c6a3bc00fbe47f34c2a354726a --head-sha "$TARGET_SHA"
           echo 'P07_M05_BOOTSTRAP_REAL_GOV_CHECKOUT_AND_ARCH_GATES=PASS'
+      - name: Reproduce the unmodified remaining native bootstrap test steps
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd private-src
+          mkdir -p "$RUNNER_TEMP/p07-bootstrap-steps"
+          python3 -B - "$RUNNER_TEMP/p07-bootstrap-steps" <<'PY'
+          import sys
+          from pathlib import Path
+          root=Path(sys.argv[1])
+          rows=Path(".github/workflows/ci.yml").read_text().splitlines()
+          start=rows.index("  bootstrap:")
+          end=rows.index("  safe-batch-candidate:")
+          rows=rows[start:end]
+          ignore={
+            "Architecture adapter positive and negative fixtures",
+            "GOV-DOC public-authority bridge positive and negative tests",
+            "Block untrusted fork from private GOV-DOC access",
+            "Checkout canonical GOV-DOC (read-only; trusted refs only)",
+            "Verify current shared domains against P07 project scope",
+            "Read development build identity",
+            "Checkout current public P07 distribution for release114 legacy comparison",
+            "Assemble release114 candidate locally and check complete exact bytes",
+            "Prove release113 to release114 isolated upgrade, corrupt-download rejection and previous copy",
+          }
+          count=0
+          for i,line in enumerate(rows):
+            if not line.startswith("      - name: "):
+              continue
+            name=line[14:]
+            if name in ignore:
+              continue
+            j=i+1
+            while j<len(rows) and not rows[j].startswith("      - name: "):
+              row=rows[j]
+              if row.startswith("        run: "):
+                value=row[13:]
+                if value=="|":
+                  k=j+1
+                  commands=[]
+                  while k<len(rows) and rows[k].startswith("          "):
+                    commands.append(rows[k][10:])
+                    k+=1
+                  value=chr(10).join(commands)
+                (root / f"{count:03d}.sh").write_text("set -Eeuo pipefail"+chr(10)+value+chr(10))
+                count+=1
+                break
+              j+=1
+          assert count>=35, count
+          print(f"P07_NATIVE_BOOTSTRAP_FOLLOWING_STEPS={count}")
+          PY
+          for script in "$RUNNER_TEMP"/p07-bootstrap-steps/*.sh; do
+            printf 'P07_BOOTSTRAP_RUNNING=%s\n' "${script##*/}"
+            if ! timeout 220 bash "$script" >"$RUNNER_TEMP/bootstrap-current-step.log" 2>&1; then
+              echo 'P07_BOOTSTRAP_FOLLOWING_STEPS=FAIL'
+              tail -n 55 "$RUNNER_TEMP/bootstrap-current-step.log" | sed -E 's/[a-zA-Z0-9_-]{60,}/[REDACTED]/g'
+              exit 1
+            fi
+          done
+          echo 'P07_NATIVE_BOOTSTRAP_FOLLOWING_STEPS=PASS'
       - name: Remove transient private source and candidate
         if: always()
         shell: bash
         run: |
           rm -rf -- private-src
-          rm -f -- "$RUNNER_TEMP/p07-m05-checkout.sh"
+          rm -f -- "$RUNNER_TEMP/p07-m05-checkout.sh" "$RUNNER_TEMP/bootstrap-current-step.log"
+          rm -rf -- "$RUNNER_TEMP/p07-bootstrap-steps"
           echo "TARGETED_MARIADB_DIAGNOSTIC_CLEANUP=COMPLETE"
           echo 'EPHEMERAL_PRIVATE_CLEANUP=COMPLETE'
