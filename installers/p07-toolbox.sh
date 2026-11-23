@@ -88,12 +88,12 @@ M03_LEGACY115_BUILD="0.1.0-release115"
 M03_LEGACY115_MANIFEST_BLOB="4acbaca22aac0da681b34376e2cc86d876593181"
 # This is explicitly NOT the stable M03 pin. Owner must choose option 2
 # inside module 3 and confirm. The trial uses its own root/executable.
-M03_OWNER_TRIAL_BUILD="0.1.0-release147-rc2"
-M03_OWNER_TRIAL_MANIFEST_BLOB="667030be8a7e4dd1b557690c66858e8b5cbb42ba"
-M03_OWNER_TRIAL_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-m03-ownertrial147rc2-atomic.sh"
-M03_OWNER_TRIAL_INSTALLER_BLOB="6be219491287f186a83cfa09edf258a948c80f4e"
-M03_OWNER_TRIAL_ROOT="/opt/vf-server-ops-ownertrial147rc2"
-M03_OWNER_TRIAL_BIN="/usr/local/bin/vfops-rc147rc2"
+M03_OWNER_TRIAL_BUILD="0.1.0-release147-rc3"
+M03_OWNER_TRIAL_MANIFEST_BLOB="06c79cf8595de625cc84d6a849d9e88fe01c4520"
+M03_OWNER_TRIAL_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-m03-ownertrial147rc3-atomic.sh"
+M03_OWNER_TRIAL_INSTALLER_BLOB="8ac6da95d808ea9aeb9f6f8b8a54a04fcdad4bcc"
+M03_OWNER_TRIAL_ROOT="/opt/vf-server-ops-ownertrial147rc3"
+M03_OWNER_TRIAL_BIN="/usr/local/bin/vfops-rc147rc3"
 M03_ROLLBACK_INSTALLER_REF="main"
 M03_ROLLBACK_INSTALLER_BLOB="48fca0b7ac6fa3358912ef1f3a146d37a20b99c2"
 M03_ROLLBACK_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${M03_ROLLBACK_INSTALLER_REF}/installers/p07-m03-restore-previous.sh"
@@ -827,10 +827,11 @@ run_m03_owner_trial() {
   screen_clear
   show_header
   say "P07-M03 网站与数据 / D04 服务器迁移 · 人工试用版"
-  say "版本：$M03_OWNER_TRIAL_BUILD（事故保护版，尚未完成独立双机迁移验收）"
+  say "版本：$M03_OWNER_TRIAL_BUILD（失败续迁只读核查版，真实迁移尚未验收）"
   say '旧 147-rc1 曾在全选22站时出现部分复制失败；请勿再用旧版重试。'
-  say '本版本装在新目录，原来的失败任务和旧试用目录均保留供只读检查。'
-  say '已有失败任务的接收机暂不迁移；先查看迁移进度。不要重跑旧任务。'
+  say '新版本安装在独立目录，原失败任务和旧试用版全部保留。'
+  say '已有失败任务的接收机先进入服务器迁移→4「继续未完成迁移（只读核查）」。'
+  say '这一步不连旧服务器，不复制、导入或恢复数据库。'
   say '本试用程序安装在独立目录，不替换当前 release146；不自动迁移或改 DNS。'
   local answer='' file='' rc=0
   if m03_verified_owner_trial; then
@@ -1469,7 +1470,7 @@ main_menu() {
         show_header
         say 'P07-M03 网站与数据'
         say "  1. 进入正式版（$VF_SERVER_OPS_BUILD_EXPECTED）"
-        say "  2. 事故保护试用版（$M03_OWNER_TRIAL_BUILD；与正式版及旧试用版隔离）"
+        say "  2. 失败续迁核查试用版（$M03_OWNER_TRIAL_BUILD；独立安装）"
         say '  0. 返回'
         say '只在选定操作后下载安装；试用版没有完成迁移验收。'
         printf '请选择 [0-2]：'
