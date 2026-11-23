@@ -70,40 +70,41 @@ class FiveIndependentToolboxSlots(unittest.TestCase):
                       "网站与数据", "服务器维护与安全", "新服务器初始化"):
             self.assertIn(title, body_of(source, "show_menu"))
 
-    def test_m03_stable_route_and_explicit_owner_trial_are_separated(self):
+    def test_m03_default_route_is_stable_only_not_historical_trial(self):
         source = SOURCE.read_text(encoding="utf-8")
         fragment = body_of(source, "run_server_ops")
-        self.assertIn('1) ensure_server_ops_current || return $?; vfops ;;',fragment)
-        self.assertIn('2) run_m03_owner_trial ;;',fragment)
-        self.assertIn('0) return 0 ;;',fragment)
-        self.assertIn("请选择 [0-2]",fragment)
-        self.assertNotIn("run_m03_owner_trial\n",fragment.split('case "$selection" in')[0])
+        self.assertIn("ensure_server_ops_current || return $?",fragment)
+        self.assertIn("\n  vfops\n",fragment)
         for historical in ("run_server_ops_owner124_trial",
                            "run_server_ops_owner143_trial",
                            "release124","release143"):
             self.assertNotIn(historical,fragment)
-        trial = body_of(source, "run_m03_owner_trial")
-        self.assertIn('m03_verified_owner_trial',trial)
-        self.assertIn('P07_INSTALL_DIR="$M03_OWNER_TRIAL_ROOT"',trial)
-        self.assertIn('P07_BIN_LINK="$M03_OWNER_TRIAL_BIN"',trial)
-        self.assertIn('P07_TOOLBOX_PARENT=1',trial)
-        self.assertIn('bash "$file" install',trial)
-        self.assertNotIn('VF_SERVER_OPS_INSTALLER',trial)
-        self.assertNotIn('ensure_server_ops_current',trial)
-        self.assertNotIn('vfops\n',trial)
+        self.assertNotIn("read -r",fragment)
+        self.assertNotIn("请选择 [0-3]",fragment)
 
-    def test_trial_install_must_be_opt_in_and_cannot_replace_stable(self):
+    def test_m03_owner_trial_only_on_explicit_selected_branch(self):
         source = SOURCE.read_text(encoding="utf-8")
+        menu = body_of(source,"main_menu")
+        self.assertEqual(menu.count("run_server_ops"),1)
+        self.assertEqual(menu.count("run_m03_owner_trial"),1)
+        self.assertIn('read -r m03_choice',menu)
+        self.assertIn('case "$m03_choice" in',menu)
+        self.assertIn('1)\n            set +e\n            run_server_ops',menu)
+        self.assertIn('2)\n            set +e\n            run_m03_owner_trial',menu)
+        self.assertIn('0) continue ;;',menu)
         trial = body_of(source,"run_m03_owner_trial")
+        self.assertIn('m03_verified_owner_trial',trial)
         self.assertIn('[[ -t 0 && -t 1 ]]',trial)
         self.assertIn('read -r answer',trial)
         self.assertIn('[[ "$answer" =~ ^[Yy]$ ]]',trial)
+        self.assertIn('P07_INSTALL_DIR="$M03_OWNER_TRIAL_ROOT"',trial)
+        self.assertIn('P07_BIN_LINK="$M03_OWNER_TRIAL_BIN"',trial)
+        self.assertIn('P07_TOOLBOX_PARENT=1',trial)
         self.assertIn('M03_OWNER_TRIAL_INSTALLER_BLOB',trial)
         self.assertIn('m03_verified_owner_trial ||',trial)
-        self.assertIn('/usr/local/bin/vfops-rc147',source)
-        self.assertIn('/opt/vf-server-ops-ownertrial147',source)
+        self.assertNotIn('ensure_server_ops_current',trial)
+        self.assertNotIn('VF_SERVER_OPS_INSTALLER',trial)
         self.assertNotIn('P07_INSTALL_DIR="/opt/vf-server-ops"',trial)
-
     def test_main_entry_does_not_install_all_modules_on_start(self):
         source = SOURCE.read_text(encoding="utf-8")
         startup = source[:source.index("main_menu() {")]
