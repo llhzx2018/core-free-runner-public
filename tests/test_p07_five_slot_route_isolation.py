@@ -183,7 +183,7 @@ class FiveIndependentToolboxSlots(unittest.TestCase):
         self.assertIn("/opt/vf-server-ops-ownertrial147rc3",wrapper)
         self.assertIn("/usr/local/bin/vfops-rc147rc3",wrapper)
         self.assertIn("P07_TOOLBOX_PARENT:-0",wrapper)
-        self.assertIn("09406d27e47ad2f1946cc129e9492fc009b30e278b0ae65df56775a145244c0d",wrapper)
+        self.assertIn("3646285a2732c8249d0296a72c7ce6fae83be1e9564d76849e65bc396642672d",wrapper)
 
     def test_rc3_readonly_audit_installed_without_old_tree_changes(self):
         src = SOURCE.read_text(encoding="utf-8")
