@@ -1,0 +1,156 @@
+name: TEMP P08 S5 Tracker BeMob+Kuma native checks
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p08-s5-tracker-native-20261123.yml'
+permissions:
+  contents: read
+concurrency:
+  group: temp-p08-s5-tracker-20261123
+  cancel-in-progress: false
+jobs:
+  tracker-owner-vue-sqlite:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/p08-s5-tracker-native-20261123'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Ephemeral read-only P08 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: 08b01259e8cad7bcdb4d3f417b51575315a4c5dc
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-p08
+      - name: Exact source and package lock
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C private-p08 rev-parse HEAD)" = "08b01259e8cad7bcdb4d3f417b51575315a4c5dc"
+          test "$(cat private-p08/VERSION)" = 0.1.16
+          test -s private-p08/composer.lock && test -s private-p08/package-lock.json
+          echo P08_S5_SOURCE=PASS
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_sqlite, sqlite3, pdo_mysql, zip, mbstring, intl, bcmath, dom, fileinfo
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: PHP syntax and locked application dependencies
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          for p in app/Http/Controllers/TrackerCenterController.php app/Modules/Tracker/Actions/BeMobReadAdapter.php tests/Feature/BeMobTrackerWorkflowTest.php routes/web.php; do
+            php -l "$p" > /dev/null
+          done
+          echo P08_S5_PHP_LINT=PASS
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
+          composer install --no-scripts --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-composer.log" 2>&1 || { echo P08_S5_COMPOSER=FAIL; exit 1; }
+          npm ci --no-audit --no-fund > "$RUNNER_TEMP/p08-npm.log" 2>&1 || { echo P08_S5_NPM=FAIL; exit 1; }
+          echo P08_S5_DEPENDENCIES=PASS
+      - name: Vue build, TypeScript, Vitest and exact Laravel HTTP tests
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          npm run typecheck > "$RUNNER_TEMP/p08-ts.log" 2>&1 || { echo P08_S5_TYPESCRIPT=FAIL; exit 1; }
+          npm run build > "$RUNNER_TEMP/p08-build.log" 2>&1 || { echo P08_S5_VUE_BUILD=FAIL; exit 1; }
+          npm run test:unit > "$RUNNER_TEMP/p08-vitest.log" 2>&1 || { echo P08_S5_VITEST=FAIL; exit 1; }
+          echo P08_S5_VUE_TYPE_BUILD_VITEST=PASS
+          php vendor/bin/phpunit --no-coverage --colors=never tests/Feature/TrackerCenterWorkflowTest.php tests/Feature/BeMobTrackerWorkflowTest.php > "$RUNNER_TEMP/p08-phpunit.log" 2>&1 || {
+            echo P08_S5_PHPUNIT=FAIL
+            grep -E '^[0-9]+[)]|BeMobTrackerWorkflowTest.php:[0-9]+|TrackerCenterWorkflowTest.php:[0-9]+|^Tests:|^FAILURES!|^ERRORS!' "$RUNNER_TEMP/p08-phpunit.log" | awk '/WorkflowTest.php:[0-9]+/ { split($0,a,":"); print "TRACKER_TEST_LINE=" a[length(a)]; next } { print }' | tail -n 26 || true
+            exit 1
+          }
+          echo P08_S5_TRACKER_LARAVEL_SQLITE=PASS
+      - name: Wipe transient private source and logs
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- private-p08
+          rm -f -- "$RUNNER_TEMP"/p08-*.log
+          test ! -e private-p08
+          echo P08_S5_PRIVATE_CLEANUP=PASS
+
+  native-db:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/p08-s5-tracker-native-20261123'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [mysql, mariadb]
+    services:
+      db:
+        image: ${{ matrix.engine == 'mysql' && 'mysql:8.4' || 'mariadb:11.8' }}
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic-tracker-ci
+          MYSQL_ROOT_HOST: '%'
+          MARIADB_ROOT_PASSWORD: synthetic-tracker-ci
+          MARIADB_ROOT_HOST: '%'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="sh -c 'mariadb-admin ping --silent || mysqladmin ping --silent'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      DB_CONNECTION: mysql
+      DB_HOST: 127.0.0.1
+      DB_PORT: '3306'
+      DB_DATABASE: p08_s5_native_ci
+      DB_USERNAME: root
+      DB_PASSWORD: synthetic-tracker-ci
+      APP_ENV: testing
+      APP_KEY: base64:REREREREREREREREREREREREREREREREREREREREREQ=
+      SESSION_DRIVER: array
+      CACHE_STORE: array
+    steps:
+      - name: Ephemeral exact-source checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: 08b01259e8cad7bcdb4d3f417b51575315a4c5dc
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-p08
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, zip, mbstring, intl, bcmath, dom, fileinfo
+      - name: Native MySQL family migrations and tracker schema
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git rev-parse HEAD)" = "08b01259e8cad7bcdb4d3f417b51575315a4c5dc"
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
+          composer install --no-scripts --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-composer.log" 2>&1 || { echo P08_S5_NATIVE_COMPOSER=FAIL; exit 1; }
+          php -r '$p = new PDO("mysql:host=127.0.0.1;port=3306", "root", getenv("DB_PASSWORD")); $p->exec("CREATE DATABASE IF NOT EXISTS p08_s5_native_ci");'
+          php artisan migrate --force > "$RUNNER_TEMP/p08-migrate.log" 2>&1 || { echo P08_S5_NATIVE_MIGRATE=FAIL; exit 1; }
+          php -r '$p=new PDO("mysql:host=127.0.0.1;dbname=p08_s5_native_ci;port=3306","root",getenv("DB_PASSWORD")); if (!$p->query("SHOW TABLES LIKE '\''tracker_connections'\''")->fetchColumn()) exit(1);'
+          echo P08_S5_NATIVE_TRACKER_SCHEMA=PASS
+      - name: Wipe transient private source and logs
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- private-p08
+          rm -f -- "$RUNNER_TEMP"/p08-*.log
+          test ! -e private-p08
+          echo P08_S5_PRIVATE_CLEANUP=PASS
