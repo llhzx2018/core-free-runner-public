@@ -873,22 +873,12 @@ run_m03_owner_trial() {
 }
 
 run_server_ops() {
+  # Keep the default five-slot M03 route bound only to the stable release.
+  # The new opt-in Owner Trial lives in a separate guarded menu action,
+  # never masquerading as the existing stable module's install/upgrade.
   screen_clear
-  show_header
-  say 'P07-M03 网站与数据'
-  say "  1. 打开正式版（当前 $VF_SERVER_OPS_BUILD_EXPECTED）"
-  say "  2. 人工试用迁移版（$M03_OWNER_TRIAL_BUILD，独立安装）"
-  say '  0. 返回'
-  say '未选择前不会下载安装；试用版不自动迁移。'
-  local selection=''
-  printf '请选择 [0-2]：'
-  read -r selection || return 0
-  case "$selection" in
-    1) ensure_server_ops_current || return $?; vfops ;;
-    2) run_m03_owner_trial ;;
-    0) return 0 ;;
-    *) say '无效选择，未修改服务器。'; return 7 ;;
-  esac
+  ensure_server_ops_current || return $?
+  vfops
 }
 
 
@@ -1473,10 +1463,32 @@ main_menu() {
         pause_menu
         ;;
       3)
-        set +e
-        run_server_ops
-        rc=$?
-        set -e
+        screen_clear
+        show_header
+        say 'P07-M03 网站与数据'
+        say "  1. 进入正式版（$VF_SERVER_OPS_BUILD_EXPECTED）"
+        say "  2. 手工迁移试用版（$M03_OWNER_TRIAL_BUILD；与正式版隔离）"
+        say '  0. 返回'
+        say '只在选定操作后下载安装；试用版没有完成迁移验收。'
+        printf '请选择 [0-2]：'
+        local m03_choice=''
+        read -r m03_choice || return 0
+        case "$m03_choice" in
+          1)
+            set +e
+            run_server_ops
+            rc=$?
+            set -e
+            ;;
+          2)
+            set +e
+            run_m03_owner_trial
+            rc=$?
+            set -e
+            ;;
+          0) continue ;;
+          *) say '无效选择，未修改服务器。'; rc=7 ;;
+        esac
         [[ $rc -eq 0 ]] || { show_module_issue '网站与数据'; pause_menu; }
         ;;
       4)
