@@ -1,0 +1,155 @@
+name: TEMP P07 M03 D04 exact-source isolated recovery and Percona84 backup restore
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p07-m03-d04-native-backup-restore-20261123.yml'
+permissions:
+  contents: read
+jobs:
+  isolated-recovery:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'test/p07-m03-d04-native-backup-restore-20261123'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 24
+    env:
+      PRODUCT_SHA: '6179ceb71a05d7bb99c8d13facc951120e69015d'
+      PYTHONDONTWRITEBYTECODE: '1'
+      NO_COLOR: '1'
+    steps:
+      - name: Checkout exact private P07 source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: ${{ env.PRODUCT_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: .p07-private
+      - name: Real product backup and guarded restore regression suite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C .p07-private rev-parse HEAD)" = "$PRODUCT_SHA"
+          cd .p07-private
+          python3 -B -m unittest -q \
+            tests.test_backup tests.test_restore tests.test_restore_apply \
+            tests.test_restore_new tests.test_restore_as tests.test_verify \
+            > "$RUNNER_TEMP/p07-restore-python.log" 2>&1 || {
+              tail -n 35 "$RUNNER_TEMP/p07-restore-python.log" | sed -E 's/(password|token|secret)=[^[:space:]]+/\1=[REDACTED]/Ig'
+              exit 44
+            }
+          tail -n 3 "$RUNNER_TEMP/p07-restore-python.log"
+          echo P07_EXACT_SOURCE_BACKUP_RESTORE_NEGATIVE_TESTS=PASS
+      - name: Isolated real Percona84 SQL and SQLite source snapshot restore proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          work="$(mktemp -d "$RUNNER_TEMP/p07-native-restore.XXXXXXXX")"
+          echo "$work" > "$RUNNER_TEMP/p07-native-restore-current"
+          chmod 0700 "$work"
+          container="p07-d04-native-restore-$GITHUB_RUN_ID"
+          printf '%s' "$container" > "$RUNNER_TEMP/p07-native-restore-container"
+          pass='SYNTHETIC_LOCAL_ONLY_P07_2026'
+          docker run --rm -d --name "$container" \
+            -e MYSQL_ROOT_PASSWORD="$pass" \
+            percona/percona-server:8.4.11 > /dev/null
+          ready=0
+          for n in $(seq 1 75); do
+            if docker exec -e MYSQL_PWD="$pass" "$container" \
+              mysql --no-defaults --protocol=tcp -h127.0.0.1 -uroot \
+              -Nse 'SELECT VERSION()' >/dev/null 2>&1; then ready=1; break; fi
+            sleep 2
+          done
+          test "$ready" -eq 1
+          version="$(docker exec -e MYSQL_PWD="$pass" "$container" \
+            mysql --no-defaults --protocol=tcp -h127.0.0.1 -uroot -Nse 'SELECT VERSION()')"
+          [[ "$version" == 8.4.* ]] || { echo PERCONA_ENGINE_VERSION_MISMATCH; exit 31; }
+          docker exec -e MYSQL_PWD="$pass" "$container" \
+            mysql --no-defaults --protocol=tcp -h127.0.0.1 -uroot -e \
+            "CREATE DATABASE p07_source CHARACTER SET utf8mb4; CREATE DATABASE p07_restored CHARACTER SET utf8mb4; CREATE DATABASE p07_existing CHARACTER SET utf8mb4; CREATE TABLE p07_existing.protected (id INT PRIMARY KEY, marker VARCHAR(80)); INSERT INTO p07_existing.protected VALUES(1,'IMMUTABLE_EXISTING_TARGET'); CREATE TABLE p07_source.payload (id INT PRIMARY KEY, txt VARCHAR(128) CHARACTER SET utf8mb4, raw BLOB); INSERT INTO p07_source.payload VALUES (1,'SYNTHETIC_ALPHA',UNHEX('00FF807F')), (2,'SYNTHETIC_BETA',UNHEX('0041424300'))"
+          echo ISOLATED_REAL_PERCONA_84_SOURCE_AND_PROTECTED_TARGET=PASS
+          docker exec -e MYSQL_PWD="$pass" "$container" \
+            mysqldump --no-defaults --protocol=tcp -h127.0.0.1 -uroot \
+            --single-transaction --quick --skip-lock-tables \
+            --no-tablespaces --set-gtid-purged=OFF p07_source \
+            > "$work/actual-source.sql"
+          test -s "$work/actual-source.sql"
+          sha256sum "$work/actual-source.sql" | awk '{print $1}' > "$work/verified.sha"
+          cp "$work/actual-source.sql" "$work/tampered.sql"
+          printf '\nSYNTHETIC_TAMPER\n' >> "$work/tampered.sql"
+          python3 -B - "$work" <<'PY'
+          from pathlib import Path
+          import hashlib,sys
+          w=Path(sys.argv[1])
+          expected=(w/'verified.sha').read_text().strip()
+          assert hashlib.sha256((w/'actual-source.sql').read_bytes()).hexdigest()==expected
+          assert hashlib.sha256((w/'tampered.sql').read_bytes()).hexdigest()!=expected
+          print('ACTUAL_SQL_SNAPSHOT_SHA_AND_TAMPER_REFUSAL=PASS')
+          PY
+          # Only the signed, unmodified synthetic snapshot is restored;
+          # the pre-existing schema is not a restoration target.
+          docker exec -i -e MYSQL_PWD="$pass" "$container" \
+            mysql --no-defaults --protocol=tcp -h127.0.0.1 -uroot p07_restored \
+            < "$work/actual-source.sql"
+          source_values="$(docker exec -e MYSQL_PWD="$pass" "$container" \
+            mysql --no-defaults --protocol=tcp -h127.0.0.1 -uroot -Nse \
+            'SELECT id, txt, HEX(raw) FROM p07_source.payload ORDER BY id')"
+          restored_values="$(docker exec -e MYSQL_PWD="$pass" "$container" \
+            mysql --no-defaults --protocol=tcp -h127.0.0.1 -uroot -Nse \
+            'SELECT id, txt, HEX(raw) FROM p07_restored.payload ORDER BY id')"
+          test "$source_values" = "$restored_values"
+          echo "$source_values" | grep -Fq '00FF807F'
+          echo "$restored_values" | grep -Fq '0041424300'
+          existing="$(docker exec -e MYSQL_PWD="$pass" "$container" \
+            mysql --no-defaults --protocol=tcp -h127.0.0.1 -uroot -Nse \
+            'SELECT marker FROM p07_existing.protected WHERE id=1')"
+          test "$existing" = 'IMMUTABLE_EXISTING_TARGET'
+          echo NATIVE_PERCONA84_SQL_RESTORE_ROWS_BLOBS_AND_EXISTING_TARGET_UNCHANGED=PASS
+          python3 -B - "$work" <<'PY'
+          import hashlib, pathlib, sqlite3, sys
+          w=pathlib.Path(sys.argv[1]); src=w/'live-source.sqlite'; snap=w/'source-snapshot.sqlite'; dst=w/'target-restored.sqlite'
+          with sqlite3.connect(src) as conn:
+              conn.execute('PRAGMA journal_mode=WAL')
+              conn.execute('CREATE TABLE payload(id INTEGER PRIMARY KEY, txt TEXT, raw BLOB)')
+              conn.executemany('INSERT INTO payload VALUES (?,?,?)',[(1,'SYNTHETIC_SQLITE_FIRST',bytes.fromhex('00ff80')),(2,'SYNTHETIC_SQLITE_SECOND',bytes.fromhex('ff0088'))])
+              conn.commit()
+              with sqlite3.connect(snap) as out: conn.backup(out)
+          baseline=hashlib.sha256(snap.read_bytes()).hexdigest()
+          assert baseline==hashlib.sha256(snap.read_bytes()).hexdigest()
+          with sqlite3.connect(snap) as check:
+              assert check.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+          dst.write_bytes(snap.read_bytes())
+          with sqlite3.connect(src) as a, sqlite3.connect(dst) as b:
+              original=a.execute('SELECT id,txt,hex(raw) FROM payload ORDER BY id').fetchall()
+              recovered=b.execute('SELECT id,txt,hex(raw) FROM payload ORDER BY id').fetchall()
+              assert original==recovered and len(recovered)==2
+              assert b.execute('PRAGMA integrity_check').fetchone()[0]=='ok'
+              b.execute("INSERT INTO payload VALUES (3,'SYNTHETIC_TARGET_ONLY',X'F0F0')")
+              b.commit()
+              assert a.execute('SELECT COUNT(*) FROM payload').fetchone()[0]==2
+              assert b.execute('SELECT COUNT(*) FROM payload').fetchone()[0]==3
+          print('NATIVE_SQLITE_ONLINE_SNAPSHOT_RESTORE_INTEGRITY_SOURCE_UNCHANGED=PASS')
+          PY
+          echo OWNER_SERVERS_AND_LEGACY_22_TASKS=NOT_TOUCHED
+          echo REAL_DUAL_CLOUDPANEL_MIGRATION=NOT_RUN
+      - name: Always clean private source, synthetic schemas and scratch
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if test -s "$RUNNER_TEMP/p07-native-restore-container"; then
+            docker rm -f "$(cat "$RUNNER_TEMP/p07-native-restore-container")" >/dev/null 2>&1
+          fi
+          if test -s "$RUNNER_TEMP/p07-native-restore-current"; then
+            w="$(cat "$RUNNER_TEMP/p07-native-restore-current")"
+            case "$w" in "$RUNNER_TEMP"/p07-native-restore.*) rm -rf -- "$w";; esac
+          fi
+          rm -f -- "$RUNNER_TEMP/p07-native-restore-current" "$RUNNER_TEMP/p07-native-restore-container" "$RUNNER_TEMP/p07-restore-python.log"
+          rm -rf -- "$GITHUB_WORKSPACE/.p07-private"
+          echo EPHEMERAL_PRIVATE_AND_SYNTHETIC_CLEANUP=COMPLETE
