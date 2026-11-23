@@ -135,8 +135,12 @@ try {
     echo "P08_S3_TRANSPORT_FIRST_SYMLINK_CLASS=".(
         $independentLinkA==='releases/'.$a['bundle_sha256'] ? 'A' : 'OTHER')."\n";
     $check($independentStatusA===$a['bundle_sha256'],'FIRST_REAL_SSH_POINTER');
-    $check($gateway->verify($config,$a['bundle_sha256'],$a['files']['index.html']['sha256']),'FIRST_STRICT_TLS_GATEWAY_VERIFY');
+    $lastStep='FIRST_DIRECT_NGINX_HTTPS';
     $check($httpsBytes('index.html')===$htmlA,'FIRST_NGINX_HTTPS_EXACT_HTML');
+    $lastStep='FIRST_LARAVEL_HTTP_FACADE_VERIFY';
+    echo "P08_S3_TRANSPORT_FIRST_GATEWAY_TLS=START\n";
+    $check($gateway->verify($config,$a['bundle_sha256'],$a['files']['index.html']['sha256']),'FIRST_STRICT_TLS_GATEWAY_VERIFY');
+    echo "P08_S3_TRANSPORT_FIRST_GATEWAY_TLS=PASS\n";
     $check($httpsBytes('assets/site.css')===$cssA,'FIRST_NGINX_HTTPS_NESTED_CSS');
 
     echo "P08_S3_TRANSPORT_DEPLOY_B=START\n";
@@ -182,6 +186,14 @@ try {
     echo "P08_S3_TRANSPORT_REAL_SSH_NGINX_TLS={$successes}/{$successes}_PASS\n";
 } catch (Throwable $e) {
     // No provider output, SSH logs, source path, secret, exception or PHP stack trace.
+    $type = match (true) {
+        $e instanceof \Illuminate\Http\Client\ConnectionException => 'LARAVEL_HTTP_CONNECTION',
+        $e instanceof \GuzzleHttp\Exception\GuzzleException => 'GUZZLE_CLIENT',
+        $e instanceof RuntimeException => 'RUNTIME_OR_ASSERTION',
+        $e instanceof Error => 'PHP_RUNTIME',
+        default => 'OTHER_EXCEPTION',
+    };
     echo "P08_S3_TRANSPORT_FAILED_STEP=".$lastStep."\n";
+    echo "P08_S3_TRANSPORT_EXCEPTION_CLASS=".$type."\n";
     exit(1);
 }
