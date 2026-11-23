@@ -36,8 +36,13 @@ set_exception_handler(static function (Throwable $error): void {
     exit(1);
 });
 require $appRoot.'/vendor/autoload.php';
-$app = require $appRoot.'/bootstrap/app.php';
-$app->make(\Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+// This provider transport smoke does not need the product's first-install
+// console kernel. Testing it on an uninstalled checkout can exit before
+// executing ANY gateway assertion. Supply only the real Laravel HTTP Factory
+// used by VpsAtomicGateway::verify(), with no fake HTTP responses.
+\Illuminate\Support\Facades\Facade::setFacadeApplication(new \Illuminate\Container\Container());
+\Illuminate\Support\Facades\Http::swap(new \Illuminate\Http\Client\Factory());
+echo "P08_S3_TRANSPORT_PHP_GATEWAY_BOOTSTRAP=PASS\n";
 
 use App\Modules\StaticDeployment\Actions\OpenSshRemoteExecutor;
 use App\Modules\StaticDeployment\Actions\VpsAtomicGateway;
@@ -78,7 +83,10 @@ $config=[
 $remote = new OpenSshRemoteExecutor($policy);
 $gateway = new VpsAtomicGateway($remote,$policy);
 $lastStep='REAL_SSH_INITIAL_STATUS_NONE';
+$lastStep='REAL_SSH_INITIAL_STATUS_NONE';
+echo "P08_S3_TRANSPORT_REAL_GATEWAY_STATUS=START\n";
 $check($gateway->status($config) === null,'REAL_SSH_INITIAL_STATUS_NONE');
+echo "P08_S3_TRANSPORT_REAL_GATEWAY_STATUS=PASS\n";
 $check(str_starts_with($config['host_key'],'ssh-ed25519 '),'REAL_ED25519_KEY_PIN');
 
 $prepare=static function(string $tag) use ($root): array {
@@ -115,14 +123,18 @@ $httpsBytes=static function (string $path) use ($hostname): string {
     return $payload;
 };
 try {
+    echo "P08_S3_TRANSPORT_DEPLOY_A=START\n";
     $resultA=$gateway->deploy($config,$sourceA,$a['bundle_sha256'],null);
+    echo "P08_S3_TRANSPORT_DEPLOY_A=COMPLETE\n";
     $check($resultA['current']===$a['bundle_sha256'],'REAL_SSH_TAR_FIRST_DEPLOY');
     $check($gateway->status($config)===$a['bundle_sha256'],'FIRST_REAL_SSH_POINTER');
     $check($gateway->verify($config,$a['bundle_sha256'],$a['files']['index.html']['sha256']),'FIRST_STRICT_TLS_GATEWAY_VERIFY');
     $check($httpsBytes('index.html')===$htmlA,'FIRST_NGINX_HTTPS_EXACT_HTML');
     $check($httpsBytes('assets/site.css')===$cssA,'FIRST_NGINX_HTTPS_NESTED_CSS');
 
+    echo "P08_S3_TRANSPORT_DEPLOY_B=START\n";
     $resultB=$gateway->deploy($config,$sourceB,$b['bundle_sha256'],$a['bundle_sha256']);
+    echo "P08_S3_TRANSPORT_DEPLOY_B=COMPLETE\n";
     $check($resultB['current']===$b['bundle_sha256'],'REAL_SSH_TAR_SECOND_DEPLOY');
     $check($gateway->verify($config,$b['bundle_sha256'],$b['files']['index.html']['sha256']),'SECOND_STRICT_TLS_GATEWAY_VERIFY');
     $check($httpsBytes('index.html')===$htmlB,'SECOND_NGINX_HTTPS_EXACT_HTML');
