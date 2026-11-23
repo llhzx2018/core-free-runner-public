@@ -7,7 +7,7 @@ declare(strict_types=1);
  * Private Laravel source remains in an ephemeral read-only Actions checkout.
  */
 if (getenv('P08_ISOLATED_SSH_TEST') !== 'YES'
-    || getenv('P08_SOURCE_SHA') !== '00a62c8c8e991c10344255511efc6d45174c1e1c') {
+    || getenv('P08_SOURCE_SHA') !== '97da994bfd4a6d34eff146779c3cb83771765f91') {
     fwrite(STDOUT, "P08_S3_TRANSPORT_ENV=BLOCKED\n"); exit(2);
 }
 $appRoot = getenv('P08_TEST_APP_ROOT') ?: '';

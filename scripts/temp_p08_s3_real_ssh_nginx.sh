@@ -27,7 +27,7 @@ on_exit() {
 trap on_exit EXIT
 if id "$USER_NAME" >/dev/null 2>&1; then echo "P08_S3_TEST_USER_COLLISION=BLOCKED"; exit 2; fi
 if test "${P08_ISOLATED_SSH_TEST:-}" != "YES"; then echo "P08_S3_NON_DISPOSABLE_ENV=BLOCKED"; exit 2; fi
-if test "${P08_SOURCE_SHA:-}" != "00a62c8c8e991c10344255511efc6d45174c1e1c"; then echo "P08_S3_PINNED_SOURCE_DRIFT=BLOCKED"; exit 2; fi
+if test "${P08_SOURCE_SHA:-}" != "97da994bfd4a6d34eff146779c3cb83771765f91"; then echo "P08_S3_PINNED_SOURCE_DRIFT=BLOCKED"; exit 2; fi
 test -s "$GITHUB_WORKSPACE/private-p08/vendor/autoload.php"
 test "$(git -C "$GITHUB_WORKSPACE/private-p08" rev-parse HEAD)" = "$P08_SOURCE_SHA"
 command -v openssl >/dev/null
