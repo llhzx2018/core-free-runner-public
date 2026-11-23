@@ -28,7 +28,7 @@ set_exception_handler(static function (Throwable $error): void {
     $message=(string)$error->getMessage();
     $category=match (true) {
         $message==='VPS_SSH_REMOTE_DENIED_OR_FAILED' => 'REAL_SSH_AUTH_OR_EXEC',
-        str_starts_with($message,'VPS_') => 'VPS_POLICY_OR_GATEWAY',
+        str_starts_with($message,'VPS_') => preg_match('/^VPS_[A-Z0-9_]{4,80}$/D', $message) ? $message : 'VPS_UNKNOWN_POLICY',
         str_contains($message,'SYNTHETIC_') => 'SYNTHETIC_FIXTURE',
         default => 'PHP_BOOTSTRAP_OTHER',
     };
