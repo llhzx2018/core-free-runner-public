@@ -138,10 +138,19 @@ export P08_TEST_APP_ROOT="$GITHUB_WORKSPACE/private-p08" P08_TEST_HOST="$HOST"
 export P08_TEST_USERNAME="$USER_NAME" P08_TEST_SLUG="$SLUG" P08_TEST_ROOT="$ROOT"
 export P08_TEST_SSH_PIN_FILE="$ROOT/host_pin" P08_TEST_SSH_IDENTITY_FILE="$ROOT/owner_key"
 SETUP_STAGE=GATEWAY_REAL_SSH_TLS
-php "$GITHUB_WORKSPACE/public-harness/scripts/temp_p08_s3_real_ssh_nginx.php" > "$ROOT/php-test.log" 2>&1 || {
-  grep '^P08_S3_TRANSPORT_' "$ROOT/php-test.log" | tail -n 12 || true
+set +e
+php "$GITHUB_WORKSPACE/public-harness/scripts/temp_p08_s3_real_ssh_nginx.php" > "$ROOT/php-test.log" 2>&1
+php_status=$?
+set -e
+if test "$php_status" -ne 0; then
+  grep '^P08_S3_TRANSPORT_' "$ROOT/php-test.log" | tail -n 15 || true
   echo "P08_S3_NATIVE_SSH_NGINX_TLS=FAIL"
   exit 1
-}
+fi
+if ! grep -Eq '^P08_S3_TRANSPORT_REAL_SSH_NGINX_TLS=[0-9]+/[0-9]+_PASS$' "$ROOT/php-test.log"; then
+  grep '^P08_S3_TRANSPORT_' "$ROOT/php-test.log" | tail -n 15 || true
+  echo "P08_S3_NATIVE_SSH_NGINX_TLS=NO_ACTUAL_PASS_RECEIPT"
+  exit 1
+fi
 grep '^P08_S3_TRANSPORT_' "$ROOT/php-test.log"
 echo "P08_S3_REAL_OPENSSH_NGINX_TLS=PASS"
