@@ -1066,7 +1066,11 @@ ensure_m05_current() {
         if [[ ! -t 0 || ! -t 1 ]]; then say "请在交互式 SSH 中确认升级。"; return 7; fi
         printf "确认仅升级 P07-M05 新服务器初始化？[y/N]："
         read -r upgrade_response || upgrade_response=""
-        [[ "$upgrade_response" =~ ^[Yy]$ ]] || return 7 ;;
+        [[ "$upgrade_response" =~ ^[Yy]$ ]] || return 7
+        # Pin the confirmed official predecessor through the download.
+        # A concurrent version switch must never be silently overwritten.
+        upgrade_from="$M05_PREVIOUS_OFFICIAL_BUILD"
+        ;;
       "releases/$M05_UPGRADE_FROM"|"releases/$M05_UPGRADE_FROM2"|"releases/$M05_UPGRADE_FROM3"|"releases/$M05_UPGRADE_FROM4"|"releases/$M05_UPGRADE_FROM5"|"releases/$M05_UPGRADE_FROM6"|"releases/$M05_UPGRADE_FROM7"|"releases/$M05_UPGRADE_FROM8"|"releases/$M05_UPGRADE_FROM9"|"releases/$M05_UPGRADE_FROM10"|"releases/$M05_UPGRADE_FROM11"|"releases/$M05_UPGRADE_FROM12"|"releases/$M05_UPGRADE_FROM13"|"releases/$M05_UPGRADE_FROM14"|"releases/$M05_UPGRADE_FROM15"|"releases/$M05_UPGRADE_FROM16"|"releases/$M05_UPGRADE_FROM17")
         upgrade_from="${installed#releases/}"
         say "${C_CYAN}P07-M05 新服务器初始化：发现已验证的旧版 $upgrade_from。${C_RESET}"
