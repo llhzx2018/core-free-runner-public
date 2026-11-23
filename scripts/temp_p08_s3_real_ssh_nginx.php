@@ -127,7 +127,14 @@ try {
     $resultA=$gateway->deploy($config,$sourceA,$a['bundle_sha256'],null);
     echo "P08_S3_TRANSPORT_DEPLOY_A=COMPLETE\n";
     $check($resultA['current']===$a['bundle_sha256'],'REAL_SSH_TAR_FIRST_DEPLOY');
-    $check($gateway->status($config)===$a['bundle_sha256'],'FIRST_REAL_SSH_POINTER');
+    $independentStatusA=$gateway->status($config);
+    $independentLinkA=$remote->command($config,'readlink -- /home/p08stage/vf-adops-static/lp-preview/current');
+    echo "P08_S3_TRANSPORT_FIRST_STATUS_CLASS=".(
+        $independentStatusA===$a['bundle_sha256'] ? 'A' :
+        ($independentStatusA===null ? 'NONE' : ($independentStatusA===$b['bundle_sha256'] ? 'B' : 'OTHER')))."\n";
+    echo "P08_S3_TRANSPORT_FIRST_SYMLINK_CLASS=".(
+        $independentLinkA==='releases/'.$a['bundle_sha256'] ? 'A' : 'OTHER')."\n";
+    $check($independentStatusA===$a['bundle_sha256'],'FIRST_REAL_SSH_POINTER');
     $check($gateway->verify($config,$a['bundle_sha256'],$a['files']['index.html']['sha256']),'FIRST_STRICT_TLS_GATEWAY_VERIFY');
     $check($httpsBytes('index.html')===$htmlA,'FIRST_NGINX_HTTPS_EXACT_HTML');
     $check($httpsBytes('assets/site.css')===$cssA,'FIRST_NGINX_HTTPS_NESTED_CSS');
