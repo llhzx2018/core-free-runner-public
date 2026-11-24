@@ -14,7 +14,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.head_ref == 'test/p07-m03-two-real-vm-cloudpanel-preflight-20261124'
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 43
     env:
       TARGET_REPO: 'llhzx2018/vf-server-ops'
       TARGET_VERSION: '0.1.0'
@@ -131,6 +131,59 @@ jobs:
           echo P07_D04_CLOUDPANEL_INSTALLED=NOT_RUN
           echo P07_D04_SOURCE_TARGET_P07_PULL=NOT_RUN
           echo P07_D04_PRODUCTION_AND_DNS=UNTOUCHED
+      - name: Install hash-pinned genuine CloudPanel on both Debian13 KVM guests
+        shell: bash
+        timeout-minutes: 32
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test -s "$RUNNER_TEMP/p07-vm-directory"
+          T="$(cat "$RUNNER_TEMP/p07-vm-directory")"
+          case "$T" in "$RUNNER_TEMP"/p07-d04-two-vm.*) ;; *) echo P07_D04_ISOLATION_DIRECTORY_UNVERIFIED; exit 51 ;; esac
+          test -r "$T/key" && test -r "$T/known_hosts"
+          # Two separate source/target QEMU disks; installer checks pinned
+          # upstream SHA before execution. All installer logs stay private.
+          pids=()
+          for side in source target; do
+            port=22021
+            test "$side" = target && port=22022
+            (
+              ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" \
+                -o BatchMode=yes -o ConnectTimeout=7 -i "$T/key" -p "$port" root@127.0.0.1 bash -se <<'GUEST'
+          set -Eeuo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          test "$( . /etc/os-release; echo "$VERSION_ID")" = '13'
+          test "$(awk '/MemTotal:/{print $2}' /proc/meminfo)" -ge 1900000
+          test "$(df -k / | awk 'NR==2{print $4}')" -ge 9000000
+          timeout 160 apt-get -qq update
+          timeout 160 apt-get -y -qq install --no-install-recommends curl wget sudo ca-certificates
+          cd /root
+          curl --proto '=https' --tlsv1.2 -fLsS --retry 2 --max-time 100 https://installer.cloudpanel.io/ce/v2/install.sh -o install.sh
+          echo '8146dbe0a488e7088b04071b0c34d59aa0ab1fe9dcec382d395fd155c9e6c476  install.sh' | sha256sum -c -
+          timeout 1140 env DB_ENGINE=MYSQL_8.4 bash install.sh < /dev/null
+          command -v clpctl >/dev/null
+          test -f /home/clp/htdocs/app/data/db.sq3
+          systemctl is-active --quiet nginx
+          systemctl is-active --quiet mysql
+          ss -lnt | grep -Eq ':8443[[:space:]]'
+          echo P07_D04_GENUINE_CLOUDPANEL_MYSQL84_VM=PASS
+          GUEST
+            ) > "$T/$side-cloudpanel-install.log" 2>&1 &
+            pids+=("$!")
+          done
+          # Fail closed, no retry or restart/cleanup of an unknown guest.
+          status=0
+          wait "${pids[0]}" || { echo P07_D04_SOURCE_CLOUDPANEL_INSTALL_FAILED; status=52; }
+          wait "${pids[1]}" || { echo P07_D04_TARGET_CLOUDPANEL_INSTALL_FAILED; status=53; }
+          if test "$status" -ne 0; then
+            echo P07_D04_GENUINE_DUAL_CLOUDPANEL_E2E=BLOCKED
+            exit "$status"
+          fi
+          grep -Fxq P07_D04_GENUINE_CLOUDPANEL_MYSQL84_VM=PASS "$T/source-cloudpanel-install.log"
+          grep -Fxq P07_D04_GENUINE_CLOUDPANEL_MYSQL84_VM=PASS "$T/target-cloudpanel-install.log"
+          echo P07_D04_TWO_REAL_DEBIAN13_CLOUDPANEL_MYSQL84_VMS=PASS
+          echo P07_D04_REAL_P07_PULL_AND_SITE_DATA_PARITY=NOT_RUN
+          echo P07_D04_FORMAL_RELEASE=NOT_AUTHORIZED
       - name: Always stop QEMU guests, erase keys, qcow2 and ephemeral files
         if: always()
         shell: bash
