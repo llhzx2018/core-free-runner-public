@@ -12,7 +12,7 @@ jobs:
       github.repository == 'llhzx2018/core-free-runner-public' &&
       github.event.pull_request.user.login == 'llhzx2018' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.head_ref == 'test/p07-m03-web-first-run-20261124'
+      github.head_ref == 'test/p07-m03-dom-grounded-dual-cloudpanel-20261124'
     runs-on: ubuntu-24.04
     timeout-minutes: 48
     env:
@@ -59,6 +59,12 @@ jobs:
           for p in BUILD_ID VERSION lib/server_migration_pull.py lib/cloudpanel.py bin/vfops-migrate-ui; do
             test -f "$P/$p"
           done
+          python3 -B - <<'PY'
+          import ast, pathlib
+          p=pathlib.Path('.github/ephemeral/p07-m03-cloudpanel-first-run-browser-20261124.py')
+          ast.parse(p.read_text(encoding='utf-8'))
+          print('P07_D04_EXACT_BROWSER_SOURCE_AST=PASS')
+          PY
           echo P07_D04_EXACT_PRIVATE_PRODUCT_RUNTIME=PASS
       - name: Validate official CloudPanel VM-only boundary and free KVM requirements
         shell: bash
