@@ -19,6 +19,11 @@ WORKFLOW = "shared-test-on-demand.yml"
 OWNER = "llhzx2018"
 TEST_IDS = {"git-integrity", "python-syntax"}
 
+def run_title(job):
+    validate(job)
+    return "VF Shared "+job["task_id"]+" "+job["source"]["sha"]+" "+job["test_id"]
+
+
 class GithubApiHTTPS:
     """Official GitHub REST transport; only an existing injected runtime token.
 
@@ -101,8 +106,9 @@ class GithubActionsBridge:
                 "run_id":None,"machine_pass":False}
 
     def correlate(self, lease, *, sent_after_iso):
-        if not isinstance(lease,dict) or lease.get("lane")!="PUBLIC_HOSTED":
+        if not isinstance(lease,dict) or lease.get("lane")!="PUBLIC_HOSTED" or not isinstance(lease.get("job"),dict) or lease.get("task_id")!=lease["job"].get("task_id"):
             raise InvalidTask("INVALID_DISPATCH_LEASE")
+        expected=run_title(lease["job"])
         if not isinstance(sent_after_iso,str) or not re.fullmatch(r"20\d\d-\d\d-\d\dT\d\d:\d\d:\d\dZ", sent_after_iso):
             raise InvalidTask("INVALID_DISPATCH_WINDOW")
         self.check_remote()
@@ -111,7 +117,7 @@ class GithubActionsBridge:
             raise InvalidTask("UNVERIFIED_RUN_LIST")
         matches=[]
         for run in raw["workflow_runs"]:
-            if (run.get("display_title")=="VF Shared "+lease["task_id"]
+            if (run.get("display_title")==expected
                 and run.get("event")=="workflow_dispatch"
                 and run.get("head_branch")=="main"
                 and run.get("actor",{}).get("login")==OWNER
@@ -123,6 +129,63 @@ class GithubActionsBridge:
             raise InvalidTask("RUN_CORRELATION_NOT_UNIQUE")
         return {"task_id":lease["task_id"],"run_id":matches[0],
                 "verified_source":"GITHUB_ACTIONS_READBACK","machine_pass":False}
+
+
+    def inspect_bound_run(self, run_id, job):
+        """Prove an exact Owner run and its one approved public-safe job.
+
+        A GitHub workflow run being completed is not sufficient for machine
+        PASS: verified exact input title, successful source-pin step, actual
+        allocated Runner, and cleanup step must all be observed.
+        """
+        if type(run_id) is not int or run_id<=0:
+            raise InvalidTask("RUN_ID_INVALID")
+        name=run_title(job)
+        self.check_remote()
+        run=self.api("GET","/repos/"+REPO+"/actions/runs/"+str(run_id))
+        if (not isinstance(run,dict) or run.get("id")!=run_id
+                or run.get("display_title")!=name
+                or run.get("event")!="workflow_dispatch"
+                or run.get("head_branch")!="main"
+                or not isinstance(run.get("actor"),dict)
+                or run["actor"].get("login")!=OWNER
+                or not isinstance(run.get("triggering_actor"),dict)
+                or run["triggering_actor"].get("login")!=OWNER):
+            raise InvalidTask("RUN_IDENTITY_READBACK_MISMATCH")
+        result=self.api("GET","/repos/"+REPO+"/actions/runs/"+str(run_id)+"/jobs?per_page=100")
+        jobs=result.get("jobs") if isinstance(result,dict) else None
+        if not isinstance(jobs,list) or len(jobs)!=1:
+            raise InvalidTask("RUN_JOB_CARDINALITY_UNVERIFIED")
+        one=jobs[0]
+        if not isinstance(one,dict) or one.get("name")!="public-safe":
+            raise InvalidTask("WRONG_RUN_JOB")
+        run_terminal=run.get("status")=="completed" and one.get("status")=="completed"
+        step_status={}
+        for step in one.get("steps",[]):
+            if not isinstance(step,dict) or not isinstance(step.get("name"),str):
+                raise InvalidTask("MALFORMED_STEP")
+            if step["name"] in step_status:
+                raise InvalidTask("DUPLICATE_STEP")
+            step_status[step["name"]]=step.get("conclusion")
+        required=(
+            "Fail closed on unauthorized actor or input",
+            "Exact private source transient checkout",
+            "Verify exact SHA and run public-safe check",
+            "Remove temporary private checkout",
+        )
+        exact_steps_ok=all(step_status.get(name)=="success" for name in required)
+        runner_id=one.get("runner_id")
+        verified_pass=(run_terminal
+            and run.get("conclusion")=="success"
+            and one.get("conclusion")=="success"
+            and type(runner_id) is int and runner_id>0
+            and exact_steps_ok)
+        return {"run_id":run_id,"job_id":one.get("id"),
+                "state":run.get("status"),"conclusion":run.get("conclusion"),
+                "remote_terminal":run_terminal,"exact_input_verified":True,
+                "exact_steps_verified":exact_steps_ok,
+                "machine_pass":bool(verified_pass),
+                "cancel_confirmed":run_terminal and run.get("conclusion")=="cancelled"}
 
     def cancel_run(self, run_id):
         if type(run_id) is not int or run_id<=0:
