@@ -8,6 +8,7 @@ import secrets
 import sqlite3
 import stat
 import time
+from datetime import datetime, timezone
 from contextlib import contextmanager
 from pathlib import Path
 from shared_test_router import validate, identity, route, InvalidTask
@@ -40,6 +41,11 @@ class DurableQueue:
                state TEXT NOT NULL, token TEXT, deadline INTEGER, cancel_requested INTEGER NOT NULL DEFAULT 0,
                run_id INTEGER, job_id INTEGER, result_reason TEXT)""")
             db.execute("CREATE INDEX IF NOT EXISTS vf_queue_fifo ON tasks(state,submitted_at,task_id)")
+            # Safe candidate migration: this timestamp is written before any
+            # non-idempotent GitHub dispatch POST, to recover unknown replies.
+            columns={row[1] for row in db.execute("PRAGMA table_info(tasks)")}
+            if "dispatch_started_at" not in columns:
+                db.execute("ALTER TABLE tasks ADD COLUMN dispatch_started_at TEXT")
 
     @contextmanager
     def connect(self):
@@ -70,6 +76,8 @@ class DurableQueue:
         if job["source"]["repo"] not in REPOS[job["project"]]:
             raise InvalidTask("REPO_PROJECT_MISMATCH")
         lane = route(job)  # request flag cannot grant private source on Public
+        if lane=="PUBLIC_HOSTED" and job["timeout_seconds"]>1200:
+            raise InvalidTask("PUBLIC_HOSTED_TIMEOUT_EXCEEDS_20_MIN")
         with self.tx() as db:
             try:
                 db.execute("INSERT INTO tasks(task_id,fingerprint,job_json,lane,submitted_at,state) VALUES(?,?,?,?,?,'QUEUED')",
@@ -170,6 +178,83 @@ class DurableQueue:
             db.execute("UPDATE tasks SET state=?,token=NULL WHERE task_id=?",(result,task_id))
         return {"task_id":task_id,"state":result}
 
+
+    def dispatch_public_once(self, bridge, *, capacity=2, now=None):
+        """One local queue -> reviewed GitHub workflow, with no second daemon.
+
+        Preflight checks main/Owner BEFORE admission. POST intent is durable
+        before network call, so network loss can never trigger silent replay.
+        """
+        if type(capacity) is not int or not 0<=capacity<=2:
+            raise InvalidTask("UNVERIFIED_PUBLIC_HOSTED_CAPACITY")
+        bridge.check_remote()
+        lease=self.claim({"PUBLIC_HOSTED":capacity,"PRIVATE":0,"HYPERV_PRIVATE":0},
+                         now=now,lease_seconds=3600)
+        if "task_id" not in lease:
+            return lease
+        task_id=lease["task_id"]
+        at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self.tx() as db:
+            row=self._lease(db,task_id,lease["lease_token"],now)
+            if row[2]:
+                db.execute("UPDATE tasks SET state='CANCELLED',token=NULL WHERE task_id=?",(task_id,))
+                return {"task_id":task_id,"state":"CANCELLED_BEFORE_NETWORK"}
+            db.execute("""UPDATE tasks SET dispatch_started_at=?,result_reason='DISPATCH_OUTCOME_UNCERTAIN'
+                          WHERE task_id=? AND dispatch_started_at IS NULL""",(at,task_id))
+            if db.execute("SELECT changes()").fetchone()[0]!=1:
+                raise InvalidTask("DUPLICATE_DISPATCH_INTENT")
+        try:
+            bridge.dispatch(lease)
+        except Exception:
+            # Includes network errors AFTER GitHub could have accepted the
+            # POST. Never call dispatch again or free capacity automatically.
+            return {"task_id":task_id,"state":"DISPATCH_OUTCOME_UNKNOWN_NO_REPLAY",
+                    "run_id":None,"machine_pass":False}
+        return {"task_id":task_id,"state":"DISPATCH_ACCEPTED_AWAIT_RUN_READBACK",
+                "run_id":None,"machine_pass":False}
+
+    def poll_public_once(self, task_id, bridge, *, now=None):
+        """Advance one existing dispatched job; real Run/Job readback required."""
+        if now is None: now=int(time.time())
+        with self.connect() as db:
+            row=db.execute("""SELECT state,token,run_id,job_json,dispatch_started_at
+                              FROM tasks WHERE task_id=?""",(task_id,)).fetchone()
+        if not row: raise InvalidTask("UNKNOWN_TASK")
+        state,token,run_id,raw,dispatch_at=row
+        if state not in ("LEASED","CANCEL_REQUESTED"):
+            return {"task_id":task_id,"state":state,"machine_pass":False}
+        if not dispatch_at:
+            return {"task_id":task_id,"state":"BLOCKED_NO_REMOTE_DISPATCH_INTENT","machine_pass":False}
+        job=json.loads(raw)
+        if run_id is None:
+            try:
+                match=bridge.correlate({"task_id":task_id,"lane":"PUBLIC_HOSTED",
+                                        "job":job},sent_after_iso=dispatch_at)
+                run_id=match["run_id"]
+                self.bind_run(task_id,token,run_id,now=now)
+            except InvalidTask:
+                return {"task_id":task_id,"state":"RUN_CORRELATION_NOT_PROVEN","machine_pass":False}
+        proof=bridge.inspect_bound_run(run_id,job)
+        if proof["remote_terminal"]:
+            if state=="CANCEL_REQUESTED":
+                final="CANCELLED" if proof["cancel_confirmed"] else "INFRA_FAILED"
+            elif proof["machine_pass"]:
+                final="SUCCEEDED"
+            else:
+                final="INFRA_FAILED"
+            self.finish(task_id,token,final,now=now)
+            return {"task_id":task_id,"state":final,"run_id":run_id,
+                    "job_id":proof.get("job_id"),
+                    "machine_pass":final=="SUCCEEDED" and proof["machine_pass"],
+                    "cancel_confirmed":proof["cancel_confirmed"]}
+        if state=="CANCEL_REQUESTED":
+            bridge.cancel_run(run_id)  # POST is intent only; never claim cancel
+            self.heartbeat(task_id,token,now=now,lease_seconds=3600)
+            return {"task_id":task_id,"state":"REMOTE_CANCEL_REQUESTED",
+                    "run_id":run_id,"machine_pass":False}
+        self.heartbeat(task_id,token,now=now,lease_seconds=3600)
+        return {"task_id":task_id,"state":"REMOTE_RUNNING","run_id":run_id,
+                "machine_pass":False}
 
     def reconcile_interrupted(self, task_id, bridge):
         """Release capacity only after authenticated GitHub terminal readback.
