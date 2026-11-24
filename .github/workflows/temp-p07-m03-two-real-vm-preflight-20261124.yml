@@ -71,6 +71,7 @@ jobs:
           sums_url='https://cdimage.debian.org/images/cloud/trixie/latest/SHA512SUMS'
           curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --retry 2 --max-time 420 "$image_url" -o debian13.qcow2
           curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --retry 2 --max-time 90 "$sums_url" -o SHA512SUMS
+          ln -s debian13.qcow2 debian-13-genericcloud-amd64.qcow2
           grep -E '^[0-9a-f]{128}  (\./)?debian-13-genericcloud-amd64.qcow2$' SHA512SUMS | sed 's@  \./@  @' | sha512sum -c - >/dev/null || {
             echo P07_D04_OFFICIAL_DEBIAN_IMAGE_HASH_UNVERIFIED; exit 36;
           }
