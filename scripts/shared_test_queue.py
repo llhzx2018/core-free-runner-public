@@ -329,11 +329,11 @@ def main():
     subs.add_parser("recover")
     dp=subs.add_parser("dispatch-public")
     dp.add_argument("--capacity",type=int,default=2)
-    dp.add_argument("--reviewed-workflow-blob",required=True)
+
     for name in ("poll-public","reconcile-public"):
         sub=subs.add_parser(name)
         sub.add_argument("--task-id",required=True)
-        sub.add_argument("--reviewed-workflow-blob",required=True)
+
     args=p.parse_args()
     try:
         q=DurableQueue(args.db)
@@ -357,9 +357,9 @@ def main():
         elif args.action in ("dispatch-public","poll-public","reconcile-public"):
             # Existing runtime injected Actions credential only. This does not
             # configure a new Runner, timer, Repo Variable or GitHub Secret.
-            from shared_test_actions_bridge import GithubActionsBridge, GithubApiHTTPS
+            from shared_test_actions_bridge import GithubActionsBridge, GithubApiHTTPS, REVIEWED_WORKFLOW_BLOB
             bridge=GithubActionsBridge(GithubApiHTTPS(),
-                         expected_workflow_blob=args.reviewed_workflow_blob)
+                         expected_workflow_blob=REVIEWED_WORKFLOW_BLOB)
             if args.action=="dispatch-public":
                 ans=q.dispatch_public_once(bridge,capacity=args.capacity)
             elif args.action=="poll-public":
