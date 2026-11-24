@@ -1,0 +1,139 @@
+name: TEMP P01 exact-source Clean FULL package-only machine proof
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p01-clean-full-package-20261124.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-clean-full-package-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  clean-full-package:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.head_ref, 'test/p01-clean-full-exact-source-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - name: Transient exact private checkout, never publish private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-startnew
+          ref: 07249b8b1b482becb3dc92533c9b54e3ddbb8bc1
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: private-src
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Confirm private source SHA
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C private-src rev-parse HEAD)" = "07249b8b1b482becb3dc92533c9b54e3ddbb8bc1"
+          echo 'P01_FULL_EXACT_SOURCE=PASS'
+
+      - name: Set up real PHP and locked production package dependencies
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, pdo_sqlite, sqlite3, curl, openssl, fileinfo, dom, xml, zip
+          tools: composer:v2
+          coverage: none
+
+      - name: Set up Node 22 for locked frontend assets
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Construct and verify actual Clean FULL candidate (no install or apply)
+        working-directory: private-src
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          python3 scripts/check_php_syntax.py > "$RUNNER_TEMP/p01-full-lint.log" 2>&1 || { echo 'P01_FULL_PHP_LINT=FAIL'; exit 1; }
+          echo 'P01_FULL_PHP_LINT=PASS'
+          if ! composer install --no-dev --no-interaction --prefer-dist --no-progress --optimize-autoloader > "$RUNNER_TEMP/p01-full-composer.log" 2>&1; then
+            echo 'P01_FULL_COMPOSER_PRODUCTION=FAIL'
+            exit 1
+          fi
+          echo 'P01_FULL_COMPOSER_PRODUCTION=PASS'
+          if ! npm ci --no-audit --no-fund > "$RUNNER_TEMP/p01-full-npm.log" 2>&1; then
+            echo 'P01_FULL_NPM_CI=FAIL'
+            exit 1
+          fi
+          echo 'P01_FULL_NPM_CI=PASS'
+          if ! npm run build > "$RUNNER_TEMP/p01-full-vite.log" 2>&1; then
+            echo 'P01_FULL_VITE_BUILD=FAIL'
+            exit 1
+          fi
+          echo 'P01_FULL_VITE_BUILD=PASS'
+          if ! python3 scripts/build_clean_full.py --root . --source-sha "07249b8b1b482becb3dc92533c9b54e3ddbb8bc1" --output "$RUNNER_TEMP/p01-clean-full-a.zip" > "$RUNNER_TEMP/p01-full-build-result.json" 2> "$RUNNER_TEMP/p01-full-build-err.log"; then
+            python3 - "$RUNNER_TEMP/p01-full-build-err.log" <<'PY'
+          import pathlib,re,sys
+          s=pathlib.Path(sys.argv[1]).read_text(errors='replace')
+          m=re.search(r'PackageError: ([A-Z0-9_]+)',s)
+          print('P01_FULL_BUILD=FAIL:'+ (m.group(1) if m else 'UNCLASSIFIED'))
+          PY
+            exit 1
+          fi
+          echo 'P01_FULL_BUILD=PASS'
+          python3 - "$RUNNER_TEMP/p01-clean-full-a.zip" "$RUNNER_TEMP/p01-full-build-result.json" <<'PY'
+          import json,pathlib,sys
+          from scripts.build_clean_full import verify_archive
+          path=pathlib.Path(sys.argv[1])
+          report=json.loads(pathlib.Path(sys.argv[2]).read_text())
+          manifest=verify_archive(path)
+          assert report['sha256'] and report['source_sha'] == '07249b8b1b482becb3dc92533c9b54e3ddbb8bc1'
+          assert manifest['source_sha'] == '07249b8b1b482becb3dc92533c9b54e3ddbb8bc1'
+          assert manifest['version'] == '0.1.0-dev'
+          assert report['files'] == len(manifest['files'])
+          print('P01_FULL_VALIDATED=PASS')
+          print('P01_FULL_BYTES='+str(report['bytes']))
+          print('P01_FULL_FILES='+str(report['files']))
+          print('P01_FULL_SHA256='+report['sha256'])
+          PY
+          mkdir "$RUNNER_TEMP/p01-full-extracted"
+          unzip -q "$RUNNER_TEMP/p01-clean-full-a.zip" -d "$RUNNER_TEMP/p01-full-extracted"
+          test -f "$RUNNER_TEMP/p01-full-extracted/vendor/autoload.php"
+          test -f "$RUNNER_TEMP/p01-full-extracted/public/build/manifest.json"
+          test ! -e "$RUNNER_TEMP/p01-full-extracted/.env"
+          test ! -e "$RUNNER_TEMP/p01-full-extracted/public/hot"
+          test ! -e "$RUNNER_TEMP/p01-full-extracted/public/storage"
+          if ! (cd "$RUNNER_TEMP/p01-full-extracted" && php artisan --version) > "$RUNNER_TEMP/p01-full-boot.log" 2>&1; then
+            echo 'P01_FULL_EXTRACTED_BOOT=FAIL'
+            exit 1
+          fi
+          echo 'P01_FULL_EXTRACTED_BOOT=PASS'
+          python3 - "$RUNNER_TEMP/p01-clean-full-a.zip" <<'PY'
+          import pathlib,sys,zipfile
+          from scripts.build_clean_full import PackageError,verify_archive
+          src=pathlib.Path(sys.argv[1])
+          forged=src.with_name('p01-clean-full-forged.zip')
+          forged.write_bytes(src.read_bytes())
+          with zipfile.ZipFile(forged,'a') as z:
+              z.writestr('app/.env','PRIVATE_DATA_FORBIDDEN')
+          try:
+              verify_archive(forged)
+          except PackageError:
+              print('P01_FULL_FORGED_PRIVATE_MEMBER_REJECTED=PASS')
+          else:
+              raise AssertionError('forged ZIP accepted')
+          PY
+
+      - name: Always delete private checkout and any generated package bytes
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- private-src
+          rm -rf -- "$RUNNER_TEMP/p01-full-extracted"
+          rm -f -- "$RUNNER_TEMP"/p01-full-*
+          test ! -e private-src
+          echo 'P01_FULL_PRIVACY_CLEANUP=PASS'
