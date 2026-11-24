@@ -5,9 +5,11 @@ Not a VM controller. Never toggles systemd or repo isolation variables.
 Live dispatch fails closed until reviewed workflow is present on main.
 """
 from __future__ import annotations
+import json
+import os
 import re
-import time
-from datetime import datetime, timezone
+import urllib.error
+import urllib.request
 
 from shared_test_queue import InvalidTask
 from shared_test_router import validate, route
@@ -16,6 +18,40 @@ REPO = "llhzx2018/core-free-runner-public"
 WORKFLOW = "shared-test-on-demand.yml"
 OWNER = "llhzx2018"
 TEST_IDS = {"git-integrity", "python-syntax"}
+
+class GithubApiHTTPS:
+    """Official GitHub REST transport; only an existing injected runtime token.
+
+    Never log request headers, error body, authorization or private payload.
+    """
+    def __init__(self, token=None):
+        self.token = token if token is not None else os.environ.get("GITHUB_TOKEN")
+        if not isinstance(self.token,str) or not self.token or "\n" in self.token:
+            raise InvalidTask("GITHUB_ACTIONS_CREDENTIAL_NOT_INJECTED")
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, url):
+                raise InvalidTask("UNTRUSTED_GITHUB_REDIRECT")
+        self.opener=urllib.request.build_opener(NoRedirect())
+
+    def __call__(self,method,path,payload=None):
+        if method not in ("GET","POST") or not isinstance(path,str) or not path.startswith("/") or "://" in path or ".." in path:
+            raise InvalidTask("GITHUB_API_ENDPOINT_UNSAFE")
+        data=None if payload is None else json.dumps(payload,separators=(",",":")).encode("utf-8")
+        req=urllib.request.Request("https://api.github.com"+path,data=data,method=method,
+            headers={"Accept":"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28",
+                     "Authorization":"Bearer "+self.token,
+                     "Content-Type":"application/json"})
+        try:
+            with self.opener.open(req,timeout=15) as response:
+                if response.status not in (200,201,202,204):
+                    raise InvalidTask("GITHUB_API_STATUS_UNEXPECTED")
+                raw=response.read(2_000_000)
+                return json.loads(raw) if raw else {}
+        except urllib.error.HTTPError as exc:
+            raise InvalidTask("GITHUB_API_HTTP_"+str(exc.code)) from None
+        except urllib.error.URLError:
+            raise InvalidTask("GITHUB_API_TRANSPORT_UNAVAILABLE") from None
+
 
 class GithubActionsBridge:
     """api(method, path, payload=None) is a trusted HTTP GitHub API adapter.
@@ -105,4 +141,4 @@ class GithubActionsBridge:
             raise InvalidTask("RUN_READBACK_MISMATCH")
         return {"run_id":run_id,"state":result.get("status"),
                 "conclusion":result.get("conclusion"),
-                "machine_pass":result.get("status")=="completed" and result.get("conclusion")=="success"}
+                "machine_pass":False,"job_readback_required":True}
