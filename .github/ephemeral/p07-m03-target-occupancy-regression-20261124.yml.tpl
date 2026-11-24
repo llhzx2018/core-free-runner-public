@@ -97,36 +97,6 @@ jobs:
               ast.parse((root/path).read_text(encoding='utf-8'),filename=path)
           print('P07_M03_PYTHON_SYNTAX='+str(len(paths)))
           PY
-      - name: Run old-22-site history, zero-write and SQL catalog negative suites
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          set +x
-          P="$GITHUB_WORKSPACE/.p07-private"
-          run_case() {
-            label="$1"; pattern="$2"; root="$3"
-            log="$RUNNER_TEMP/p07-m03-$label.log"
-            if ! (cd "$P" && python3 -B -m unittest discover -s "$root" -p "$pattern" -q) > "$log" 2>&1; then
-              echo "P07_M03_$label=FAIL"
-              exit 36
-            fi
-            python3 -B - "$log" "$label" <<'PY'
-          import pathlib,re,sys
-          output=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8',errors='replace')
-          match=re.search(r'Ran ([0-9]+) tests?',output)
-          if match is None or int(match.group(1)) < 1:
-              print('P07_M03_UNIT_DISCOVERY_UNVERIFIED')
-              raise SystemExit(37)
-          print('P07_M03_'+sys.argv[2]+'_PASS='+match.group(1))
-          PY
-          }
-          run_case SAFE_BATCH test_p07_m03_safe_batch.py tests
-          run_case SQL_PROBE test_p07_m03_cloudpanel_sql_probe.py tests
-          run_case RESUME_AUDIT test_p07_m03_resume_audit.py tests
-          run_case TERMINAL_UX test_p07_m03_safe_batch_terminal_ux.py tests
-          run_case PULL_CORE test_server_migration_pull.py tests
-          run_case ARCH_NEGATIVES test_architecture_gate.py .github/checks
-          echo P07_M03_ALL_SELECTED_UNIT_SUITES=PASS
       - name: GOV-DOC architecture and source naming diff gate
         shell: bash
         run: |
@@ -145,6 +115,56 @@ jobs:
           grep -q '^PROJECT_ARCHITECTURE=STRUCTURAL_PASS' "$RUNNER_TEMP/p07-m03-architecture.log"
           echo P07_M03_ARCHITECTURE_AND_NAMING_GATE=PASS
           echo P07_M03_UNIT_RUN_ONLY_NO_SERVER_OR_SQL_WRITES=PASS
+      - name: Run old-22-site history, zero-write and SQL catalog negative suites
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          P="$GITHUB_WORKSPACE/.p07-private"
+          run_case() {
+            label="$1"; pattern="$2"; root="$3"
+            log="$RUNNER_TEMP/p07-m03-$label.log"
+            if ! (cd "$P" && python3 -B -m unittest discover -s "$root" -p "$pattern" -q) > "$log" 2>&1; then
+              # Only hashed test IDs and fixed exception categories leave
+              # the private workspace; NEVER emit raw source/tracebacks.
+              python3 -B - "$log" "$label" <<'PY'
+          import hashlib,pathlib,re,sys
+          content=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8',errors='replace')
+          names=re.findall(r'^(?:FAIL|ERROR): (test_[A-Za-z0-9_]+) \(',content,re.M)
+          for name in sorted(set(names))[:12]:
+              print('P07_M03_FAILURE_TEST_HASH='+hashlib.sha256(name.encode()).hexdigest()[:16])
+          classes=re.findall(r'^([A-Za-z][A-Za-z0-9]*Error):',content,re.M)
+          safe={'AssertionError','TypeError','ValueError','KeyError','PermissionError',
+                'FileNotFoundError','ModuleNotFoundError','ImportError','RuntimeError',
+                'AttributeError','NameError','OSError','SyntaxError'}
+          print('P07_M03_FAILURE_KINDS='+','.join(sorted(set(classes).intersection(safe))))
+          print('P07_M03_FAILURE_COUNT='+str(len(names)))
+          PY
+              echo "P07_M03_$label=FAIL"
+              return 1
+            fi
+            python3 -B - "$log" "$label" <<'PY'
+          import pathlib,re,sys
+          output=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8',errors='replace')
+          match=re.search(r'Ran ([0-9]+) tests?',output)
+          if match is None or int(match.group(1)) < 1:
+              print('P07_M03_UNIT_DISCOVERY_UNVERIFIED')
+              raise SystemExit(37)
+          print('P07_M03_'+sys.argv[2]+'_PASS='+match.group(1))
+          PY
+          }
+          failed=0
+          run_case SAFE_BATCH test_p07_m03_safe_batch.py tests || failed=1
+          run_case SQL_PROBE test_p07_m03_cloudpanel_sql_probe.py tests || failed=1
+          run_case RESUME_AUDIT test_p07_m03_resume_audit.py tests || failed=1
+          run_case TERMINAL_UX test_p07_m03_safe_batch_terminal_ux.py tests || failed=1
+          run_case PULL_CORE test_server_migration_pull.py tests || failed=1
+          run_case ARCH_NEGATIVES test_architecture_gate.py .github/checks || failed=1
+          if test "$failed" -ne 0; then
+            echo P07_M03_SELECTED_UNIT_SUITES=FAIL
+            exit 36
+          fi
+          echo P07_M03_ALL_SELECTED_UNIT_SUITES=PASS
       - name: Always wipe transient private and governance sources
         if: always()
         shell: bash
