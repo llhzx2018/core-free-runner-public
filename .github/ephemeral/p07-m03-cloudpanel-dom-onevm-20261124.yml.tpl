@@ -1,4 +1,4 @@
-name: TEMP P07 M03 CloudPanel one-VM browser phase proof
+name: TEMP P07 M03 CloudPanel checkbox hitmap readonly one VM
 on:
   pull_request:
     branches: [main]
@@ -12,7 +12,7 @@ jobs:
       github.repository == 'llhzx2018/core-free-runner-public' &&
       github.event.pull_request.user.login == 'llhzx2018' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.head_ref == 'test/p07-m03-onevm-browser-phases-20261124'
+      github.head_ref == 'test/p07-m03-onevm-checkbox-dom-20261124'
     runs-on: ubuntu-24.04
     timeout-minutes: 33
     env:
@@ -156,7 +156,7 @@ jobs:
           fi
           grep -Fxq P07_DOM_GUEST_ZERO_INITIAL_ADMIN=PASS "$T/cloudpanel-install.log"
           echo P07_DOM_OFFICIAL_CLOUDPANEL_FRESH_SETUP=PASS
-      - name: Prove exact first-admin browser stage only in disposable CloudPanel
+      - name: Read real checkbox and label hit targets without clicking or submitting
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -166,18 +166,13 @@ jobs:
           python3 -B - <<'PY'
           import ast,pathlib
           source=pathlib.Path('.github/ephemeral/p07-m03-cloudpanel-first-run-browser-20261124.py')
-          source_text=source.read_text(encoding='utf-8')
-          ast.parse(source_text)
-          for marker in (
-              'phase = "TERMS_REACQUIRE_FORM"',
-              'phase = "TERMS_DISCOVER"',
-              'phase = "TERMS_INSPECT"',
-              'phase = "TERMS_CLICK"',
-              'phase = "TERMS_VERIFY"',
-          ):
-              assert marker in source_text, 'missing fixed phase-specific marker'
-          print('P07_DOM_BROWSER_CHECKBOX_PHASE_CLASSIFIER=PASS')
-          print('P07_DOM_BROWSER_SOURCE_AST=PASS')
+          code=source.read_text(encoding='utf-8')
+          ast.parse(code)
+          assert 'phase = "TERMS_SNAPSHOT"' in code
+          assert 'P07_D04_BROWSER_READONLY_INSPECTION=PASS' in code
+          assert 'button.click()' not in code and 'c.click()' not in code
+          assert 'FIRST_RUN_CLICKED=YES' not in code
+          print('P07_DOM_BROWSER_READONLY_SOURCE_GUARD=PASS')
           PY
           command -v google-chrome >/dev/null || command -v google-chrome-stable >/dev/null
           command -v chromedriver >/dev/null
@@ -186,51 +181,60 @@ jobs:
             --disable-pip-version-check selenium==4.53.0 >/dev/null
           if ! timeout 105 "$T/browser-venv/bin/python" \
               .github/ephemeral/p07-m03-cloudpanel-first-run-browser-20261124.py \
-              --port 22443 > "$T/browser-phases.log" 2>&1; then
-            # Exact classifier from the registered one-VM test script only.
-            grep -E '^P07_D04_BROWSER_[A-Z_]+$' "$T/browser-phases.log" | head -n 8 || true
-            echo P07_DOM_SYNTHETIC_FIRST_ADMIN_STAGE_BLOCKED
+              --port 22443 > "$T/browser-readonly.log" 2>&1; then
+            grep -E '^P07_D04_BROWSER_[A-Z_]+$' "$T/browser-readonly.log" | head -n 8 || true
+            echo P07_DOM_READONLY_BROWSER_STAGE_BLOCKED
             exit 68
           fi
-          grep -Fxq P07_D04_BROWSER_FIRST_RUN_CLICKED=YES "$T/browser-phases.log" || {
-            echo P07_DOM_BROWSER_SUBMIT_RECEIPT_ABSENT
-            exit 69
-          }
-          echo P07_DOM_BROWSER_FIRST_RUN_CLICKED=YES
-          # Click != success. Independently validate the official SQLite state
-          # on the disposable guest via a read-only connection, no row contents.
-          if ! ssh -q -o StrictHostKeyChecking=yes \
-              -o UserKnownHostsFile="$T/known_hosts" -o BatchMode=yes \
-              -i "$T/key" -p 22021 root@127.0.0.1 \
-              python3 -B - <<'PY' > "$T/post-browser-readonly.log" 2>&1; then
+          python3 -B - "$T/browser-readonly.log" <<'PY'
+          import json,re,sys
+          from pathlib import Path
+          log=Path(sys.argv[1]).read_text(encoding='utf-8')
+          assert 'P07_D04_BROWSER_READONLY_INSPECTION=PASS' in log.splitlines()
+          prefix='P07_D04_BROWSER_CHECKBOX_SNAPSHOT='
+          rows=[x[len(prefix):] for x in log.splitlines() if x.startswith(prefix)]
+          assert len(rows)==1
+          obj=json.loads(rows[0])
+          assert set(obj)=={'checkbox_total','checkbox_summaries','form_has_native_submit','form_post','timezone_native_select_selected'}
+          assert isinstance(obj['checkbox_total'],int) and 0<=obj['checkbox_total']<=12
+          assert len(obj['checkbox_summaries'])<=6
+          assert obj['form_post'] is True and obj['timezone_native_select_selected'] is True
+          boolkeys={'relevant','required','checked','disabled','input_visible','input_nonzero_rect',
+                    'input_pointer_events_none','input_opacity_zero','input_display_none',
+                    'input_visibility_hidden','input_center_hit_self','input_center_hit_inside_label',
+                    'label_by_for','wrapping_label','associated_label_visible',
+                    'label_center_hit_self','label_center_hit_descendant','label_legal_keyword',
+                    'label_has_link','viewport_input_center_in_bounds','viewport_label_center_in_bounds'}
+          tagkeys={'input_center_hit_tag','label_center_hit_tag'}
+          tags={'none','input','label','span','div','svg','path','a','button','p','other'}
+          for item in obj['checkbox_summaries']:
+              assert set(item)==(boolkeys|tagkeys|{'associated_label_count'})
+              assert all(type(item[k]) is bool for k in boolkeys)
+              assert all(item[k] in tags for k in tagkeys)
+              assert isinstance(item['associated_label_count'],int) and 0<=item['associated_label_count']<=15
+          print('P07_DOM_READONLY_CHECKBOX_COUNT='+str(obj['checkbox_total']))
+          print('P07_DOM_SAFE_CHECKBOX_HITMAP='+json.dumps(obj['checkbox_summaries'],separators=(',',':'),sort_keys=True))
+          print('P07_DOM_BROWSER_CHECKBOX_READONLY=PASS')
+          PY
+          # The read-only inspection must not create any admin account.
+          if ! ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" \
+            -o BatchMode=yes -i "$T/key" -p 22021 root@127.0.0.1 \
+            python3 -B - <<'PY' > "$T/zero-admin.log" 2>&1; then
           import sqlite3
           p='/home/clp/htdocs/app/data/db.sq3'
           con=sqlite3.connect(f'file:{p}?mode=ro',uri=True)
           try:
-              user_count=int(con.execute('SELECT COUNT(*) FROM "user"').fetchone()[0])
-              table_count=int(con.execute(
-                  "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='database_server'"
-              ).fetchone()[0])
-              if user_count!=1:
-                  print('P07_DOM_FIRST_ADMIN_READBACK_BLOCKED')
-                  raise SystemExit(70)
-              print('P07_DOM_ONE_REAL_FIRST_ADMIN_READBACK=PASS')
-              if table_count:
-                  registered=int(con.execute('SELECT COUNT(*) FROM "database_server"').fetchone()[0])
-                  print('P07_DOM_DATABASE_SERVER_REGISTRATION_PRESENT=' + ('YES' if registered else 'NO'))
-              else:
-                  print('P07_DOM_DATABASE_SERVER_REGISTRATION_PRESENT=NO_TABLE')
+              assert con.execute('SELECT COUNT(*) FROM "user"').fetchone()[0]==0
           finally:
               con.close()
+          print('P07_DOM_GUEST_ADMIN_COUNT_UNCHANGED=PASS')
           PY
-            grep -E '^P07_DOM_[A-Z_]+$' "$T/post-browser-readonly.log" | head -n 8 || true
-            echo P07_DOM_READONLY_ADMIN_AUDIT_BLOCKED
+            echo P07_DOM_READONLY_GUEST_MUTATION_UNVERIFIED
             exit 70
           fi
-          grep '^P07_DOM_' "$T/post-browser-readonly.log" | head -n 8
-          grep -Fxq P07_DOM_ONE_REAL_FIRST_ADMIN_READBACK=PASS "$T/post-browser-readonly.log"
-          echo P07_DOM_SYNTHETIC_FIRST_ADMIN_PROOF=PASS
-          echo P07_DOM_TARGET_REAL_VPS_AND_MIGRATION=NOT_RUN
+          grep -Fxq P07_DOM_GUEST_ADMIN_COUNT_UNCHANGED=PASS "$T/zero-admin.log"
+          echo P07_DOM_GUEST_ADMIN_COUNT_UNCHANGED=PASS
+          echo P07_DOM_NO_TERMS_CLICK_NO_MIGRATION_NO_DNS=PASS
       - name: Always erase one VM, temporary keys and untrusted responses
         if: always()
         shell: bash
