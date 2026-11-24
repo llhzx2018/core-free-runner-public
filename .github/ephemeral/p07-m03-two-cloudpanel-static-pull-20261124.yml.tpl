@@ -329,23 +329,20 @@ jobs:
               elif t=='last':fields[name]='Admin'
               elif t=='password':fields[name]=password
               elif t=='timezone':
-                  # Select only a timezone actually offered by the upstream
-                  # form and recognized by the guest's IANA timezone database.
+                  # Select only a non-placeholder option *advertised by this
+                  # exact installed CloudPanel form*. Its validation belongs
+                  # to upstream CloudPanel, not the guest Python tzdata set.
+                  # This does not accept arbitrary caller-supplied values.
                   options=form['options'].get(name,[])
                   if not options:
-                      value='UTC'
-                  else:
-                      value=None
-                      preferred=('UTC','Etc/UTC','Etc/GMT','Europe/London','Europe/Berlin')
-                      from zoneinfo import ZoneInfo
-                      for candidate in (*preferred,*options):
-                          if candidate not in options:continue
-                          try:
-                              ZoneInfo(candidate)
-                          except (KeyError,ValueError):
-                              continue
-                          value=candidate
-                          break
+                      print('P07_D04_GUEST_WEB_ADMIN_TIMEZONE_OPTIONS_MISSING')
+                      raise SystemExit(83)
+                  safe=[v for v in options if
+                      isinstance(v,str) and
+                      re.fullmatch(r'[A-Za-z][A-Za-z0-9_+./:-]{0,79}',v) and
+                      v.lower() not in ('select','choose','timezone','none','null')]
+                  preferred=('UTC','Etc/UTC','Europe/London','Europe/Berlin','America/Los_Angeles','Asia/Shanghai')
+                  value=next((v for v in preferred if v in safe),safe[0] if safe else None)
                   if value is None:
                       print('P07_D04_GUEST_WEB_ADMIN_TIMEZONE_OPTIONS_UNSUPPORTED')
                       raise SystemExit(83)
@@ -401,6 +398,7 @@ jobs:
                 P07_D04_GUEST_WEB_ADMIN_PAGE_ORIGIN_REJECTED \
                 P07_D04_GUEST_WEB_ADMIN_FIRST_FORM_UNRECOGNIZED \
                 P07_D04_GUEST_WEB_ADMIN_SUBMIT_ORIGIN_REJECTED \
+                P07_D04_GUEST_WEB_ADMIN_TIMEZONE_OPTIONS_MISSING \
                 P07_D04_GUEST_WEB_ADMIN_TIMEZONE_OPTIONS_UNSUPPORTED \
                 P07_D04_GUEST_WEB_ADMIN_ROLE_OPTIONS_UNSUPPORTED \
                 P07_D04_GUEST_WEB_ADMIN_FIRST_POST_FAILED \
