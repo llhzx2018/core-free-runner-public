@@ -174,7 +174,7 @@ def main():
     p.add_argument("--db",type=Path,required=True)
     subs=p.add_subparsers(dest="action",required=True)
     e=subs.add_parser("enqueue");e.add_argument("--job",type=Path,required=True)
-    c=subs.add_parser("claim");c.add_argument("--capacity",type=Path,required=True)
+    c=subs.add_parser("claim");c.add_argument("--capacity",type=Path,required=True);c.add_argument("--token-file",type=Path,required=True)
     for action in ("status","cancel"):
         a=subs.add_parser(action);a.add_argument("--task-id",required=True)
     subs.add_parser("recover")
@@ -182,7 +182,20 @@ def main():
     try:
         q=DurableQueue(args.db)
         if args.action=="enqueue": ans=q.enqueue(json.loads(args.job.read_text()))
-        elif args.action=="claim": ans=q.claim(json.loads(args.capacity.read_text()))
+        elif args.action=="claim":
+            # Capability token never goes to stdout, GitHub logs or artifacts.
+            ans=q.claim(json.loads(args.capacity.read_text()))
+            if "lease_token" in ans:
+                out=args.token_file
+                parent=out.parent
+                if parent.is_symlink() or not parent.is_dir() or parent.stat().st_uid != os.geteuid() or parent.stat().st_mode & 0o077:
+                    raise InvalidTask("TOKEN_DIR_UNSAFE")
+                fd=os.open(out,os.O_CREAT|os.O_EXCL|os.O_WRONLY|os.O_NOFOLLOW,0o600)
+                with os.fdopen(fd,"w") as f:
+                    f.write(ans.pop("lease_token"))
+                    f.flush()
+                    os.fsync(f.fileno())
+                ans["lease_token_stored_privately"]=True
         elif args.action=="status": ans=q.status(args.task_id)
         elif args.action=="cancel": ans=q.cancel(args.task_id)
         else: ans=q.recover()
