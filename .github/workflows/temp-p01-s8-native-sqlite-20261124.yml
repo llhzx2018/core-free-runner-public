@@ -1,0 +1,93 @@
+name: TEMP P01 S8 SQLite native isolated restored-ledger and Laravel-migration proof
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p01-s8-native-sqlite-20261124.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-s8-sqlite-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  isolated-sqlite:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.head_ref, 'test/p01-s8-native-sqlite-migration-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 14
+    steps:
+      - name: Private exact-source checkout only in transient test workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-startnew
+          ref: 86c5766adc8cd70893c4bb555fc1cd7b4ed5d596
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: private-src
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Exact Git SHA identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C private-src rev-parse HEAD)" = "86c5766adc8cd70893c4bb555fc1cd7b4ed5d596"
+          echo 'P01_S8_SQLITE_EXACT_SOURCE=PASS'
+      - name: Native PHP SQLite3/PDO_SQLITE/sodium/zip
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, pdo_sqlite, sqlite3, dom, xml, fileinfo, curl, openssl, zip, sodium
+          tools: composer:v2
+          coverage: none
+      - name: Actual SQLite isolated restored database, Laravel DDL and negative tests
+        working-directory: private-src
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          python3 scripts/check_php_syntax.py >"$RUNNER_TEMP/p01-sqlite-lint.log" 2>&1
+          echo 'P01_S8_SQLITE_PHP_LINT=PASS'
+          composer install --no-interaction --prefer-dist --no-progress --quiet >"$RUNNER_TEMP/p01-sqlite-composer.log" 2>&1
+          echo 'P01_S8_SQLITE_COMPOSER=PASS'
+          export APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory:
+          export APP_KEY="base64:$(openssl rand -base64 32)"
+          set +e
+          ./vendor/bin/phpunit --log-junit "$RUNNER_TEMP/p01-sqlite-junit.xml" tests/Unit/IsolatedSqliteSchemaMigrationProbeTest.php >"$RUNNER_TEMP/p01-sqlite-phpunit.log" 2>&1
+          result=$?
+          set -e
+          python3 - "$RUNNER_TEMP/p01-sqlite-junit.xml" <<'PY'
+          import pathlib,re,sys,xml.etree.ElementTree as ET
+          path=pathlib.Path(sys.argv[1])
+          if not path.is_file():
+              print('P01_S8_SQLITE_JUNIT=MISSING')
+              sys.exit(1)
+          root=ET.parse(path).getroot()
+          cases=list(root.iter('testcase'))
+          skip=sum(x.find('skipped') is not None for x in cases)
+          failure=sum(x.find('failure') is not None or x.find('error') is not None for x in cases)
+          assertions=sum(int(x.attrib.get('assertions','0')) for x in cases)
+          print('P01_S8_SQLITE_JUNIT='+','.join(map(str,(len(cases),assertions,skip,failure))))
+          if len(cases)<10 or assertions<10 or skip or failure:
+              for x in cases:
+                  if x.find('error') is None and x.find('failure') is None: continue
+                  err=x.find('error') or x.find('failure')
+                  name=re.sub(r'[^A-Za-z0-9_]', '',x.attrib.get('name',''))[:80]
+                  type_=re.sub(r'[^A-Za-z0-9_\\]', '',(err.attrib.get('type','') if err is not None else ''))[:80]
+                  print('P01_S8_SQLITE_FAILED_METHOD='+name+';type='+type_)
+              sys.exit(1)
+          PY
+          if [ "$result" -ne 0 ]; then echo 'P01_S8_SQLITE_NATIVE_UNIT=FAIL'; exit "$result"; fi
+          echo 'P01_S8_SQLITE_NATIVE_UNIT=PASS'
+      - name: Always scrub all private files and temporary test logs
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- private-src
+          rm -f -- "$RUNNER_TEMP"/p01-sqlite-*
+          test ! -e private-src
+          echo 'P01_S8_SQLITE_CLEANUP=PASS'
