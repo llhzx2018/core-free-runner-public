@@ -148,19 +148,6 @@ jobs:
             # Only fixed exception classes/codes from synthetic test data;
             # never publish full tracebacks, dumps, private source or secrets.
             grep -E '^(test_|ERROR:|FAIL:|Ran [0-9]+ tests|FAILED|.*(OracleClientBlocked|HexExportBlocked|EvidenceBlocked|AssertionError|SYNTHETIC_DB_NATIVE_QUERY_FAILED|ORACLE_[A-Z_]+))' "$RUNNER_TEMP/p07-native-test.log" | cut -c1-220 | head -n 28 || true
-            python3 -B - "$RUNNER_TEMP/p07-native-test.log" <<'PY'
-            import pathlib,re,sys
-            lines=pathlib.Path(sys.argv[1]).read_text(errors="replace").splitlines()
-            known={'AssertionError','FileNotFoundError','PermissionError','RuntimeError',
-                   'HexExportBlocked','OracleClientBlocked','DebianClientBlocked',
-                   'CalledProcessError','OSError','TimeoutExpired','CloudPanelError'}
-            for line in lines:
-                m=re.match(r'^(?:[\w.]+\.)?([A-Za-z]+(?:Error|Blocked))(?::\s*(.+))?$',line.strip())
-                if m and m.group(1) in known:
-                    code=m.group(2) or ''
-                    code=code if re.fullmatch(r'[A-Z0-9_]{3,110}',code) else 'DETAIL_REDACTED'
-                    print('P07_NATIVE_ERROR_CLASS='+m.group(1)+' CODE='+code)
-            PY
             exit 44
           fi
           grep -E '^(Ran [0-9]+ tests|OK)$' "$RUNNER_TEMP/p07-native-test.log" || true
