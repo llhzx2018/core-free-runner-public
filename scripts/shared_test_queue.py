@@ -99,7 +99,14 @@ class DurableQueue:
         if now is None: now=int(time.time())
         with self.tx() as db:
             self._expire(db, now)
-            active=dict(db.execute("SELECT lane,COUNT(*) FROM tasks WHERE state IN ('LEASED','CANCEL_REQUESTED') GROUP BY lane"))
+            # Expired leases are quarantined until the exact remote run is
+            # independently confirmed terminal; never oversubscribe a lane
+            # while an unobserved Hosted job may still be running.
+            active=dict(db.execute("""SELECT lane,COUNT(*) FROM tasks
+                  WHERE state IN ('LEASED','CANCEL_REQUESTED')
+                     OR (state='INTERRUPTED_NO_REPLAY' AND
+                         COALESCE(result_reason,'')!='REMOTE_TERMINAL_VERIFIED')
+                  GROUP BY lane"""))
             rows=db.execute("SELECT task_id,job_json,lane FROM tasks WHERE state='QUEUED' ORDER BY submitted_at,task_id").fetchall()
             for task_id, raw, lane in rows:
                 if active.get(lane,0)>=capacities[lane]: continue
@@ -162,6 +169,41 @@ class DurableQueue:
             if row[2] and result=="SUCCEEDED": raise InvalidTask("CANCELLED_CANNOT_PASS")
             db.execute("UPDATE tasks SET state=?,token=NULL WHERE task_id=?",(result,task_id))
         return {"task_id":task_id,"state":result}
+
+
+    def reconcile_interrupted(self, task_id, bridge):
+        """Release capacity only after authenticated GitHub terminal readback.
+
+        The task stays INTERRUPTED_NO_REPLAY and is NEVER re-enqueued. Missing
+        Run ID leaves capacity quarantined, including a dispatch whose HTTP
+        response was lost before GitHub supplied a Run ID.
+        """
+        with self.connect() as db:
+            row=db.execute("SELECT state,run_id,job_json,result_reason FROM tasks WHERE task_id=?",
+                           (task_id,)).fetchone()
+        if row is None: raise InvalidTask("UNKNOWN_TASK")
+        state,run_id,raw,reason=row
+        if state!="INTERRUPTED_NO_REPLAY":
+            raise InvalidTask("NOT_INTERRUPTED")
+        if reason=="REMOTE_TERMINAL_VERIFIED":
+            return {"task_id":task_id,"state":state,"capacity_released":True}
+        if type(run_id) is not int or run_id<=0:
+            return {"task_id":task_id,"state":"BLOCKED_RUN_ID_NOT_ATTESTED",
+                    "capacity_released":False}
+        proof=bridge.inspect_bound_run(run_id,json.loads(raw))
+        if proof.get("remote_terminal") is not True:
+            return {"task_id":task_id,"state":"WAITING_REMOTE_TERMINAL",
+                    "capacity_released":False}
+        with self.tx() as db:
+            db.execute("""UPDATE tasks SET result_reason='REMOTE_TERMINAL_VERIFIED'
+                          WHERE task_id=? AND state='INTERRUPTED_NO_REPLAY'
+                            AND run_id=?""",(task_id,run_id))
+            if db.execute("SELECT changes()").fetchone()[0]!=1:
+                raise InvalidTask("RECONCILE_STATE_DRIFT")
+        return {"task_id":task_id,"state":"INTERRUPTED_NO_REPLAY",
+                "capacity_released":True,"run_id":run_id,
+                "remote_conclusion":proof.get("conclusion"),
+                "machine_pass":False}
 
     def status(self,task_id):
         with self.connect() as db:
