@@ -132,5 +132,7 @@ class BridgeTest(unittest.TestCase):
         self.assertIn("inputs.test_id",flow)
         self.assertIn("  issue_comment:",flow)
         self.assertIn("github.event.issue.number == 4475",flow)
+        self.assertIn("format('comment-{0}', github.event.comment.id) || inputs.project",flow)
+        self.assertIn("cancel-in-progress: false",flow)
 
 if __name__=="__main__":unittest.main()
