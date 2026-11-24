@@ -1,0 +1,214 @@
+name: TEMP VF测试 P08 scoped guest PHPUnit runtime diagnosis
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-vftest-p08-guest-classify-20261124.yml'
+permissions:
+  contents: read
+concurrency:
+  group: vftest-p08-light-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+env:
+  TARGET_REPO: llhzx2018/vf-adops
+  TARGET_VERSION: '0.1.17'
+  TARGET_SHA: 42bc1199835789aa55a7f5f60383a1270e2e15e5
+  TEST_PROJECT: P08
+  TEST_LANE: VFTEST_P08_GUEST_CLASSIFY_20261124
+jobs:
+  identity-preflight:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/vftest-p08-guest-classify-20261124'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Audit independent P08 lane source and run inputs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_spec.py audit-rendered --spec specs/ephemeral/vftest-p08-guest-classify-20261124.json --input .github/workflows/temp-vftest-p08-guest-classify-20261124.yml
+          echo 'VFTEST_P08_LANE_IDENTITY=PASS'
+  php-light:
+    needs: identity-preflight
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/vftest-p08-guest-classify-20261124'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    steps:
+      - name: Transient exact private P08 source checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: private-p08-vftest
+          persist-credentials: false
+      - name: PHP 8.4 runtime and SQLite in-memory test extension
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, pdo_sqlite, sqlite3, zip
+          tools: composer:v2
+          coverage: none
+      - name: Exact source, frozen Composer and focused Laravel Feature recheck only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          cd private-p08-vftest
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA" || { echo VFTEST_P08_SOURCE_SHA_MISMATCH; exit 1; }
+          test "$(cat VERSION)" = "$TARGET_VERSION" || { echo VFTEST_P08_VERSION_MISMATCH; exit 1; }
+          composer install --no-interaction --no-progress --prefer-dist --no-scripts > "$RUNNER_TEMP/p08-vftest-composer.log" 2>&1 || { echo VFTEST_P08_RECHECK_COMPOSER_INSTALL=FAIL; exit 1; }
+          echo VFTEST_P08_RECHECK_EXACT_SOURCE_COMPOSER=PASS
+          export APP_ENV=testing APP_KEY=base64:VFRlc3RFeGFtcGxlS2V5VFRlc3RFeGFtcGxlS2V5
+          export DB_CONNECTION=sqlite DB_DATABASE=:memory: CACHE_STORE=array SESSION_DRIVER=array
+          classify_failure() {
+            log="$1"
+            if grep -qi 'No tests executed' "$log"; then
+              echo VFTEST_P08_PHPUNIT_SAFE_REASON=NO_TESTS
+            elif grep -qi 'Class .*not found' "$log"; then
+              echo VFTEST_P08_PHPUNIT_SAFE_REASON=CLASS_NOT_FOUND
+            elif grep -qi 'not found' "$log"; then
+              echo VFTEST_P08_PHPUNIT_SAFE_REASON=MISSING_RESOURCE
+            elif grep -qi 'There was\|There were\|FAILURES!' "$log"; then
+              echo VFTEST_P08_PHPUNIT_SAFE_REASON=TEST_ASSERTION_OR_RUNTIME
+            elif grep -qi 'PHPUnit.*Usage:\|Unknown option' "$log"; then
+              echo VFTEST_P08_PHPUNIT_SAFE_REASON=CLI_USAGE
+            else
+              echo VFTEST_P08_PHPUNIT_SAFE_REASON=UNCLASSIFIED_PRIVATE_LOG
+            fi
+            # Only public-safe assertion/test class identities, not payloads.
+            grep -E '^Tests: [0-9]+|^(FAILURES!|ERRORS!)|^[0-9]+\) Tests\\' "$log" | head -6 | sed -E 's/[^A-Za-z0-9 .:_()\\-]/_/g' || true
+            # Classify error category only. Never publish private traces, paths,
+            # fixture values, credential strings, or PHPUnit raw output.
+            python3 - "$log" <<'PY'
+          import re, sys
+          with open(sys.argv[1], encoding="utf-8", errors="replace") as handle:
+              data = handle.read()
+          checks = [
+              ("FRAMEWORK_CONTAINER", r"BindingResolutionException|Target class"),
+              ("TEST_BOOTSTRAP", r"Application.*not.*bootstrapped|createApplication|bootstrap"),
+              ("LARAVEL_ENV", r"No application encryption key|APP_KEY|encryption key"),
+              ("SQLITE", r"SQLSTATE|no such table|unable to open database"),
+              ("FILESYSTEM", r"Permission denied|No such file or directory|failed to open stream"),
+              ("PHP_RUNTIME", r"Call to undefined|undefined function|TypeError"),
+              ("RELEASE_RUNTIME_GUARD", r"R27_|R34_|R43_"),
+              ("PHPUNIT_CONFIG", r"Unknown option|cannot read configuration"),
+          ]
+          tags = [name for name, pattern in checks if re.search(pattern, data, re.I)]
+          print("VFTEST_P08_PHPUNIT_ERROR_CATEGORIES=" + (",".join(tags) if tags else "UNCLASSIFIED"))
+          codes = sorted(set(re.findall(r"\\bR(?:27|34|43)_[A-Z0-9_]{4,90}\\b", data)))
+          if codes: print("VFTEST_P08_PHPUNIT_GUARD_CODES=" + ",".join(codes[:3]))
+          # Emit only allowlisted exception class identities; never message,
+          # traceback, fixture, file path, or token into public GitHub logs.
+          allowed_prefixes=("Illuminate\\", "Symfony\\", "PHPUnit\\")
+          allowed_bare={"Error","TypeError","ErrorException","RuntimeException","LogicException","Exception","PDOException"}
+          throwable=[]
+          lines=data.splitlines()
+          for idx,line in enumerate(lines):
+              if not re.match(r"^\d+\) Tests\\Feature\\", line.strip()):
+                  continue
+              for after in lines[idx+1:idx+8]:
+                  val=after.strip()
+                  if not val or val.startswith(("#","at ","---")): continue
+                  candidate=val.split(":",1)[0].split(" ",1)[0]
+                  if re.fullmatch(r"[A-Za-z_][A-Za-z_0-9\\]{0,90}",candidate):
+                      if candidate.startswith(allowed_prefixes) or candidate in allowed_bare:
+                          throwable.append(candidate)
+                      break
+          print("VFTEST_P08_SAFE_THROWABLE_CLASS=" + (",".join(sorted(set(throwable))[:3]) if throwable else "UNIDENTIFIED"))
+          print("VFTEST_P08_KNOWN_VITE_HINT=" + ("YES" if re.search(r"Vite|manifest not found",data,re.I) else "NO"))
+          msg_match = re.search(r"(?m)^\\s*RuntimeException:\\s*(.*)$",data)
+          msg = msg_match.group(1) if msg_match else ""
+          checks = [
+              ("ENV_KEY",r"key|encryp|APP_KEY|\.env"),
+              ("SESSION",r"session|cookie|CSRF"),
+              ("CACHE_STORAGE",r"storage|cache|directory|permission|writable"),
+              ("DATABASE",r"database|sqlite|SQLSTATE|PDO|migration"),
+              ("BOOTSTRAP",r"bootstrap|service provider|autoload|application"),
+              ("ROUTING",r"route|routing|host|origin|URL"),
+              ("VITE_VIEW",r"Vite|manifest|view|blade|Inertia"),
+              ("TEST_FRAMEWORK",r"PHPUnit|testing|TestCase|facade"),
+              ("UPGRADE_GATE",r"R[0-9]{2}[_-]|maintenance|write.gate|journal"),
+              ("NETWORK",r"connection|network|GitHub|curl"),
+          ]
+          categories=[name for name,rx in checks if re.search(rx,msg,re.I)]
+          print("VFTEST_P08_RUNTIME_MESSAGE_CATEGORY=" + (",".join(categories) if categories else "UNCLASSIFIED"))
+          import hashlib
+          print("VFTEST_P08_RUNTIME_MESSAGE_FINGERPRINT=" + (hashlib.sha256(msg.encode()).hexdigest()[:12] if msg else "UNAVAILABLE"))
+          origins=[]
+          for line in data.splitlines():
+              if "private-p08-vftest" in line and "vendor/" not in line: origins.append("PROJECT")
+              elif "vendor/laravel/" in line: origins.append("LARAVEL_VENDOR")
+              elif "vendor/phpunit/" in line: origins.append("PHPUNIT_VENDOR")
+          print("VFTEST_P08_STACK_ORIGIN_BUCKET=" + (",".join(sorted(set(origins))) if origins else "UNAVAILABLE"))
+          PY
+          }
+          if ! php vendor/bin/phpunit tests/Feature/WorkspaceInertiaTest.php > "$RUNNER_TEMP/p08-vftest-guest.log" 2>&1; then
+            echo VFTEST_P08_GUEST_HTTP_INERTIA_AUTH=FAIL
+            classify_failure "$RUNNER_TEMP/p08-vftest-guest.log"
+            exit 1
+          fi
+          echo VFTEST_P08_GUEST_HTTP_INERTIA_AUTH=PASS
+          if ! php vendor/bin/phpunit tests/Feature/R101IntegratedWorkspaceTest.php > "$RUNNER_TEMP/p08-vftest-integrated.log" 2>&1; then
+            echo VFTEST_P08_SYNTHETIC_API_WORKSPACE=FAIL
+            classify_failure "$RUNNER_TEMP/p08-vftest-integrated.log"
+            exit 1
+          fi
+          echo VFTEST_P08_SYNTHETIC_API_WORKSPACE=PASS
+          echo VFTEST_P08_REAL_AD_ACCOUNTS_TRACKER_TOKENS=NOT_USED
+      - name: Cleanup PHP private worktree and local logs
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- private-p08-vftest
+          rm -f -- "$RUNNER_TEMP"/p08-vftest-*.log
+          test ! -e private-p08-vftest || exit 1
+          echo VFTEST_P08_PHP_PRIVATE_WORKSPACE_CLEANUP=PASS
+  vue-light:
+    needs: identity-preflight
+    # Source-locked Vue/TS/Vitest already passed in run #45424228002; do not repeat.
+    if: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - name: Transient exact private P08 source checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: private-p08-vftest
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify exact P08 SHA, frozen npm tree, Vue TypeScript and unit tests
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          cd private-p08-vftest
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(cat VERSION)" = "$TARGET_VERSION"
+          npm ci --no-audit --no-fund > "$RUNNER_TEMP/p08-vftest-npm.log" 2>&1 || { echo VFTEST_P08_NPM_LOCKED_INSTALL=FAIL; exit 1; }
+          echo VFTEST_P08_NPM_LOCKED_INSTALL=PASS
+          npm run typecheck > "$RUNNER_TEMP/p08-vftest-typecheck.log" 2>&1 || { echo VFTEST_P08_VUE_TYPESCRIPT=FAIL; exit 1; }
+          echo VFTEST_P08_VUE_TYPESCRIPT=PASS
+          npm run build > "$RUNNER_TEMP/p08-vftest-vite.log" 2>&1 || { echo VFTEST_P08_VITE_BUILD=FAIL; exit 1; }
+          test -s public/build/manifest.json || { echo VFTEST_P08_VITE_MANIFEST=FAIL; exit 1; }
+          echo VFTEST_P08_VITE_BUILD=PASS
+          npm run test:unit > "$RUNNER_TEMP/p08-vftest-vitest.log" 2>&1 || { echo VFTEST_P08_VITEST_UNIT=FAIL; exit 1; }
+          echo VFTEST_P08_VITEST_UNIT=PASS
+          echo VFTEST_P08_BROWSER_E2E_HEAVY=NOT_RUN
+      - name: Remove generated Vue build outputs from isolated workspace
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- private-p08-vftest
+          rm -f -- "$RUNNER_TEMP"/p08-vftest-*.log
+          test ! -e private-p08-vftest || exit 1
+          echo VFTEST_P08_VUE_PRIVATE_WORKSPACE_CLEANUP=PASS
