@@ -7,7 +7,7 @@ Request keys (all mandatory; unknown keys rejected): `schema`, `task_id`, `proje
 
 Project's test command must come from **trusted executor configuration**, selected by the opaque `test_id`. **Never execute shell text from a request.** Verify checked-out Git HEAD SHA and optional Tree SHA before running; reject dirty workspaces and unknown files/fields.
 
-Public routes PUBLIC_SAFE light/normal to `PUBLIC_HOSTED`; PRIVATE_SOURCE only with explicit `allow_public_ephemeral` and mandatory transient checkout+cleanup can use Public; PRIVATE_EVIDENCE goes Private; every heavy task is `HYPERV_PRIVATE`. Routing is not dispatch. Public `ADMIT` is only planning; actual free Hosted capacity and GitHub Run/Job must be independently verified.
+Public routes PUBLIC_SAFE light/normal to `PUBLIC_HOSTED`; PRIVATE_SOURCE requires both `allow_public_ephemeral` and a separate trusted runtime approval (a self-declared request boolean is never authorization) and mandatory transient checkout+cleanup to use Public; PRIVATE_EVIDENCE goes Private; every heavy task is `HYPERV_PRIVATE`. Routing is not dispatch. Public `ADMIT` is only planning; actual free Hosted capacity and GitHub Run/Job must be independently verified.
 
 Dedup: Public stable fingerprint SHA-256 over canonical JSON without `task_id` and `submitted_at`; Private atomically creates per-task ID receipt to prevent replay. Private process-level project locks + global heavy lock allow non-conflicting projects to run in parallel. Heavy installation/recovery requires independent resource guards, not merely a YAML `max-parallel` claim.
 
