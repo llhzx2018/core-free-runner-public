@@ -134,10 +134,15 @@ def create(port: int) -> None:
             phase = "TIMEZONE_SELECT"
             if not select_timezone(browser, form):
                 die("TIMEZONE_BROWSER_SELECTION_UNSUPPORTED")
-            # In this disposable synthetic first-run only, act on one real
-            # form-local required/legal acknowledgement. No external account.
-            phase = "TERMS_CHECKBOX"
+            # A timezone onchange handler may refresh the form, invalidating
+            # Selenium element handles; re-acquire without losing browser state.
+            phase = "TERMS_REACQUIRE_FORM"
+            form = WebDriverWait(browser, 10).until(lambda d: find_form(d))
+            # Only a required, form-local synthetic account checkbox is eligible.
+            # Never print its label/name/value or blindly click a consent widget.
+            phase = "TERMS_DISCOVER"
             boxes = form.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+            phase = "TERMS_INSPECT"
             legal = []
             for c in boxes:
                 marker = ((c.get_attribute("name") or "") + " " +
@@ -145,13 +150,17 @@ def create(port: int) -> None:
                 if c.get_attribute("required") is not None or any(
                         word in marker for word in ("terms", "privacy", "license", "agree")):
                     legal.append(c)
+            phase = "TERMS_EVALUATE"
             if len(legal) > 1:
                 die("FIRST_RUN_TERMS_CHECKBOX_AMBIGUOUS")
             for c in legal:
+                phase = "TERMS_INTERACTABLE"
                 if not c.is_displayed() or not c.is_enabled():
                     die("FIRST_RUN_TERMS_CHECKBOX_NOT_INTERACTIVE")
+                phase = "TERMS_CLICK"
                 if not c.is_selected():
                     c.click()
+                phase = "TERMS_VERIFY"
                 if not c.is_selected():
                     die("FIRST_RUN_TERMS_CHECKBOX_NOT_SELECTED")
             phase = "ROLE_SELECTION"
