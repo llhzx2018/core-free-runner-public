@@ -1,0 +1,180 @@
+name: TEMP P01 S8 SQL engine paired code/data/recovery native proof
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p01-s8-paired-sql-code-data-20261124.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: p01-s8-paired-sql-code-data-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  code-data-recovery:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.head_ref, 'test/p01-s8-both-sql-code-data-')
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [mysql, mariadb]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    services:
+      database:
+        image: ${{ matrix.engine == 'mysql' && 'mysql:8.4' || 'mariadb:11.8' }}
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic-s8-root-only
+          MARIADB_ROOT_PASSWORD: synthetic-s8-root-only
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="(mysqladmin ping -h 127.0.0.1 -u root --password=synthetic-s8-root-only || mariadb-admin ping -h 127.0.0.1 -u root --password=synthetic-s8-root-only)"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Checkout exact private P01 candidate into transient workspace only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-startnew
+          ref: 23b4a750242d619a8aefafec06f2aeafc8cc1fe7
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: private-src
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify exact branch code bound to this proof
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C private-src rev-parse HEAD)" = "23b4a750242d619a8aefafec06f2aeafc8cc1fe7"
+          echo 'P01_S8_SQL_ATOMIC_EXACT_SOURCE=PASS'
+
+      - name: Configure PHP8.4 native SQL/SQLite/ZIP/Sodium libraries
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, pdo_mysql, pdo_sqlite, sqlite3, dom, xml, fileinfo, curl, openssl, zip, sodium
+          tools: composer:v2
+          coverage: none
+
+      - name: Ensure real MySQL GTID-aware or MariaDB native client
+        env:
+          DB_ENGINE: ${{ matrix.engine }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          if [ "$DB_ENGINE" = "mysql" ]; then
+            if ! command -v mysql >/dev/null 2>&1 || ! mysqldump --help 2>/dev/null | grep -q -- '--set-gtid-purged'; then
+              echo 'P01_S8_SQL_ATOMIC_MYSQL_NATIVE_CLIENT=UNAVAILABLE'
+              exit 1
+            fi
+          else
+            sudo apt-get update -qq >"$RUNNER_TEMP/p01-s8-sql-client-install.log" 2>&1
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mariadb-client >>"$RUNNER_TEMP/p01-s8-sql-client-install.log" 2>&1
+            command -v mariadb >/dev/null
+            command -v mariadb-dump >/dev/null
+          fi
+          echo 'P01_S8_SQL_ATOMIC_NATIVE_CLIENT=PASS'
+
+      - name: Run three new-system isolated SQL code/data swap positive and negative cases per engine
+        env:
+          DB_ENGINE: ${{ matrix.engine }}
+        working-directory: private-src
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          python3 scripts/check_php_syntax.py > "$RUNNER_TEMP/p01-s8-sql-lint.log" 2>&1
+          echo 'P01_S8_SQL_ATOMIC_PHP_LINT=PASS'
+          composer install --no-interaction --prefer-dist --no-progress --quiet > "$RUNNER_TEMP/p01-s8-sql-composer.log" 2>&1
+          echo 'P01_S8_SQL_ATOMIC_COMPOSER=PASS'
+          export APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory:
+          export APP_KEY="base64:$(openssl rand -base64 32)"
+          export MYSQL_PWD=synthetic-s8-root-only
+          if [ "$DB_ENGINE" = mysql ]; then
+            CLI=mysql
+            UPPER=MYSQL
+          else
+            CLI=mariadb
+            UPPER=MARIADB
+          fi
+          # Dedicated synthetic databases and test-only MySQL/MariaDB users.
+          # This never connects to Production or any owner-provided host.
+          "$CLI" --protocol=tcp -h 127.0.0.1 -P 3306 -u root <<'SQL' >"$RUNNER_TEMP/p01-s8-sql-init.log" 2>&1 || {
+          CREATE DATABASE vfstartnew_test_source_s8ci;
+          CREATE DATABASE vfstartnew_test_restore_okci;
+          CREATE DATABASE vfstartnew_test_restore_failci;
+          CREATE DATABASE vfstartnew_test_restore_dirtyci;
+          CREATE USER 'vfstartnew_test_source_s8ci'@'%' IDENTIFIED BY 'synthetic-source-s8-only';
+          CREATE USER 'vfstartnew_test_restore_okci'@'%' IDENTIFIED BY 'synthetic-ok-s8-only';
+          CREATE USER 'vfstartnew_test_restore_failci'@'%' IDENTIFIED BY 'synthetic-fail-s8-only';
+          CREATE USER 'vfstartnew_test_restore_dirtyci'@'%' IDENTIFIED BY 'synthetic-dirty-s8-only';
+          GRANT ALL PRIVILEGES ON vfstartnew_test_source_s8ci.* TO 'vfstartnew_test_source_s8ci'@'%';
+          GRANT ALL PRIVILEGES ON vfstartnew_test_restore_okci.* TO 'vfstartnew_test_restore_okci'@'%';
+          GRANT ALL PRIVILEGES ON vfstartnew_test_restore_failci.* TO 'vfstartnew_test_restore_failci'@'%';
+          GRANT ALL PRIVILEGES ON vfstartnew_test_restore_dirtyci.* TO 'vfstartnew_test_restore_dirtyci'@'%';
+          CREATE TABLE vfstartnew_test_source_s8ci.probe (id INT NOT NULL PRIMARY KEY, label VARCHAR(100) NOT NULL) ENGINE=InnoDB;
+          INSERT INTO vfstartnew_test_source_s8ci.probe VALUES (1,'alpha-old'),(2,'beta-old');
+          SQL
+            echo 'P01_S8_SQL_ATOMIC_DISPOSABLE_SQL_FIXTURE=FAIL'
+            exit 1
+          }
+          echo 'P01_S8_SQL_ATOMIC_DISPOSABLE_SQL_FIXTURE=PASS'
+          for role in SOURCE RESTORE FAIL_RESTORE DIRTY_RESTORE; do
+            case "$role" in
+              SOURCE) NAME=vfstartnew_test_source_s8ci; PASSWORD=synthetic-source-s8-only ;;
+              RESTORE) NAME=vfstartnew_test_restore_okci; PASSWORD=synthetic-ok-s8-only ;;
+              FAIL_RESTORE) NAME=vfstartnew_test_restore_failci; PASSWORD=synthetic-fail-s8-only ;;
+              DIRTY_RESTORE) NAME=vfstartnew_test_restore_dirtyci; PASSWORD=synthetic-dirty-s8-only ;;
+            esac
+            RAW="$(printf '{"driver":"%s","host":"127.0.0.1","port":3306,"database":"%s","username":"%s","password":"%s"}' "$DB_ENGINE" "$NAME" "$NAME" "$PASSWORD")"
+            export "P01_S8_ATOMIC_${UPPER}_${role}_JSON=$RAW"
+          done
+          COUNTER=0
+          for method in \
+            "test_native_${DB_ENGINE}_v2_paired_restore_can_gate_only_synthetic_code_swap" \
+            "test_native_${DB_ENGINE}_failed_code_swap_requires_exact_sql_and_uploads_recovery" \
+            "test_native_${DB_ENGINE}_committed_ddl_drift_refuses_false_code_recovery_receipt"; do
+            COUNTER=$((COUNTER + 1))
+            set +e
+            ./vendor/bin/phpunit --log-junit "$RUNNER_TEMP/p01-s8-sql-test-${COUNTER}.xml" --filter="$method" tests/Unit/IsolatedAtomicUpgradeCycleTest.php > "$RUNNER_TEMP/p01-s8-sql-test-${COUNTER}.log" 2>&1
+            CODE=$?
+            set -e
+            python3 - "$RUNNER_TEMP/p01-s8-sql-test-${COUNTER}.xml" "$COUNTER" <<'PY'
+          import pathlib,sys,re,xml.etree.ElementTree as ET
+          path=pathlib.Path(sys.argv[1])
+          if not path.is_file():
+              print('P01_S8_SQL_ATOMIC_TEST_'+sys.argv[2]+'=JUNIT_MISSING')
+              sys.exit(1)
+          cases=list(ET.parse(path).getroot().iter('testcase'))
+          skipped=sum(c.find('skipped') is not None for c in cases)
+          failed=sum(c.find('failure') is not None or c.find('error') is not None for c in cases)
+          assertions=sum(int(c.get('assertions','0')) for c in cases)
+          print('P01_S8_SQL_ATOMIC_CASE_'+sys.argv[2]+'_JUNIT='+','.join(map(str,(len(cases),assertions,skipped,failed))))
+          if len(cases)!=1 or assertions<10 or skipped or failed:
+              for c in cases:
+                  if c.find('failure') is not None or c.find('error') is not None:
+                      print('P01_S8_SQL_ATOMIC_FAILED_METHOD='+re.sub(r'[^A-Za-z0-9_]', '',c.get('name',''))[:100])
+              sys.exit(1)
+          PY
+            if [ "$CODE" -ne 0 ]; then echo 'P01_S8_SQL_ATOMIC_PHPUNIT=FAIL'; exit "$CODE"; fi
+            echo "P01_S8_SQL_ATOMIC_CASE_${COUNTER}=PASS"
+          done
+          echo 'P01_S8_SQL_ATOMIC_THREE_SCENARIOS=PASS'
+
+      - name: Always scrub private candidate and synthetic output
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- private-src
+          rm -f -- "$RUNNER_TEMP"/p01-s8-sql-*
+          test ! -e private-src
+          echo 'P01_S8_SQL_ATOMIC_PRIVACY_CLEANUP=PASS'
