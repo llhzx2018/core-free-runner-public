@@ -109,6 +109,13 @@ jobs:
               --gov-root "$G" \
               --base-sha "$BASE_SHA" --head-sha "$TARGET_SHA" \
               --git-root "$P") > "$RUNNER_TEMP/p07-m03-architecture.log" 2>&1; then
+            python3 -B - "$RUNNER_TEMP/p07-m03-architecture.log" <<'PY'
+          import pathlib,re,sys
+          text=pathlib.Path(sys.argv[1]).read_text(encoding='utf-8',errors='replace')
+          match=re.search(r'PROJECT_ARCHITECTURE=BLOCKED:([A-Z][A-Z0-9_]*)',text)
+          print('P07_M03_ARCHITECTURE_BLOCK_CLASS='+(
+              match.group(1) if match else 'UNCLASSIFIED'))
+          PY
             echo P07_M03_ARCHITECTURE_AND_NAMING_GATE=FAIL
             exit 37
           fi
@@ -116,6 +123,7 @@ jobs:
           echo P07_M03_ARCHITECTURE_AND_NAMING_GATE=PASS
           echo P07_M03_UNIT_RUN_ONLY_NO_SERVER_OR_SQL_WRITES=PASS
       - name: Run old-22-site history, zero-write and SQL catalog negative suites
+        if: always()
         shell: bash
         run: |
           set -Eeuo pipefail
