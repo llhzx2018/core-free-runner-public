@@ -125,6 +125,14 @@ class BridgeTest(unittest.TestCase):
         for bad in ("http://evil.test","/../secrets"):
             with self.assertRaisesRegex(InvalidTask,"GITHUB_API_ENDPOINT_UNSAFE"):cli("GET",bad)
         flow=(ROOT/".github/workflows/shared-test-on-demand.yml").read_text()
-        self.assertIn("run-name: VF Shared "+"$"+"{{ inputs.task_id }} "+"$"+"{{ inputs.source_sha }} "+"$"+"{{ inputs.test_id }}",flow)
+        self.assertIn("run-name: VF Shared ",flow)
+        self.assertIn("format('comment-{0}', github.event.comment.id)",flow)
+        self.assertIn("inputs.task_id",flow)
+        self.assertIn("inputs.source_sha",flow)
+        self.assertIn("inputs.test_id",flow)
+        self.assertIn("  issue_comment:",flow)
+        self.assertIn("github.event.issue.number == 4475",flow)
+        self.assertIn("format('comment-{0}', github.event.comment.id) || inputs.project",flow)
+        self.assertIn("cancel-in-progress: false",flow)
 
 if __name__=="__main__":unittest.main()
