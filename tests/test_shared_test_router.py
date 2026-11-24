@@ -2,6 +2,8 @@ import copy
 import importlib.util
 import pathlib
 import unittest
+import os
+import subprocess
 
 FILE = pathlib.Path(__file__).resolve().parents[1] / "scripts/shared_test_router.py"
 spec = importlib.util.spec_from_file_location("shared_router", FILE)
@@ -66,6 +68,19 @@ class TestRouter(unittest.TestCase):
         self.assertIn("secrets.VF_PRIVATE_READ_TOKEN", flow)
         self.assertIn("rm -rf -- transient-private-source", flow)
         self.assertIn("BLOCKED_OWNER_AUTH", flow)
+        self.assertIn("github.triggering_actor", flow)
+        self.assertIn("VF_TRIGGERING_ACTOR", flow)
+        owner_gate = next(line.strip() for line in flow.splitlines() if "BLOCKED_OWNER_AUTH" in line and "if [[" in line)
+        for original, rerunner, expected in (
+            ("llhzx2018", "llhzx2018", 0),
+            ("llhzx2018", "untrusted-rerun", 2),
+            ("untrusted-original", "llhzx2018", 2),
+        ):
+            with self.subTest(original=original, rerunner=rerunner):
+                result = subprocess.run(["bash", "-c", owner_gate],
+                                        env={"PATH": os.defpath, "VF_ACTOR": original, "VF_TRIGGERING_ACTOR": rerunner},
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, expected)
         self.assertIn("BLOCKED_PROJECT_REPO_MISMATCH", flow)
 
     def test_capacity_zero_is_not_fake_runner(self):
