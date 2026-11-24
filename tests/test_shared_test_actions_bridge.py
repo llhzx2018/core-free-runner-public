@@ -1,9 +1,10 @@
+import hashlib
 import sys
 import unittest
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT/"scripts"))
-from shared_test_actions_bridge import GithubActionsBridge, GithubApiHTTPS, InvalidTask
+from shared_test_actions_bridge import GithubActionsBridge, GithubApiHTTPS, InvalidTask, REVIEWED_WORKFLOW_BLOB
 
 class Fake:
     def __init__(self):
@@ -97,6 +98,12 @@ class BridgeTest(unittest.TestCase):
         mismatch["job"]["source"]["sha"]="c"*40
         with self.assertRaisesRegex(InvalidTask,"RUN_IDENTITY_READBACK_MISMATCH"):
             self.bridge.inspect_bound_run(123,mismatch["job"])
+
+    def test_reviewed_workflow_is_exact_candidate_git_blob(self):
+        path=ROOT/".github/workflows/shared-test-on-demand.yml"
+        raw=path.read_bytes()
+        digest=hashlib.sha1(("blob "+str(len(raw))+"\\0").encode()+raw).hexdigest()
+        self.assertEqual(REVIEWED_WORKFLOW_BLOB,digest)
 
     def test_secret_endpoint_and_workflow_identity(self):
         with self.assertRaises(InvalidTask):GithubApiHTTPS(token="")
