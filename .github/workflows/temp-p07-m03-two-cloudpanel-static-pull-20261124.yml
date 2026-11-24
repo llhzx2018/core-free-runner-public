@@ -12,7 +12,7 @@ jobs:
       github.repository == 'llhzx2018/core-free-runner-public' &&
       github.event.pull_request.user.login == 'llhzx2018' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.head_ref == 'test/p07-m03-two-cloudpanel-static-pull-20261124'
+      github.head_ref == 'test/p07-m03-engine-preflight-classify-20261124'
     runs-on: ubuntu-24.04
     timeout-minutes: 48
     env:
@@ -239,18 +239,33 @@ jobs:
           sys.path.insert(0,'/root/p07exact/lib')
           import server_migration_pull as p
           import migration_target_cloudpanel_environment as cp
-          if not cp.cloudpanel_database_server_ready():
-              print('P07_D04_GUEST_CLOUDPANEL_DB_REGISTRATION_INCOMPLETE')
-              raise SystemExit(73)
+          # Classify both independent failures before exiting. Never log SQL,
+          # credentials, raw DB metadata or arbitrary guest exception text.
+          registration_ok=cp.cloudpanel_database_server_ready()
           engine=p.local_target_active_db_engine_version()
-          if engine not in ('MYSQL_8.4','MYSQL_8.4_PERCONA'):
+          engine_ok=engine in ('MYSQL_8.4','MYSQL_8.4_PERCONA')
+          if not registration_ok:
+              print('P07_D04_GUEST_CLOUDPANEL_DB_REGISTRATION_INCOMPLETE')
+          if not engine_ok:
               print('P07_D04_GUEST_ACTIVE_DATABASE_ENGINE_UNPROVEN')
-              raise SystemExit(74)
+          if not registration_ok or not engine_ok:
+              raise SystemExit(73 if not registration_ok else 74)
           with open('/root/p07-db-release','w') as out:
               out.write(engine+'\n')
           print('P07_D04_PRODUCT_NATIVE_ACTIVE_ENGINE_PROOF=PASS')
           PY
           GUEST
+              # Only fixed whitelist codes leave the discarded, root-only guest log.
+              # Preserve fail-closed behavior even if no known marker is present.
+              for marker in \
+                P07_D04_GUEST_PANEL_DB_MISSING \
+                P07_D04_GUEST_MIGRATION_DEPS_MISSING \
+                P07_D04_GUEST_CLOUDPANEL_DB_REGISTRATION_INCOMPLETE \
+                P07_D04_GUEST_ACTIVE_DATABASE_ENGINE_UNPROVEN; do
+                if grep -Fxq "$marker" "$T/engine-$side.log"; then
+                  printf 'P07_D04_DIAG_%s_%s\n' "$side" "${marker#P07_D04_GUEST_}"
+                fi
+              done
               echo P07_D04_GUEST_ENGINE_PRECHECK_FAILED
               exit 62
             fi
