@@ -16,7 +16,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOLBOX = ROOT / "installers/p07-toolbox.sh"
-INSTALLER = ROOT / "installers/p07-m03-release142-atomic.sh"
+HISTORIC_INSTALLER = ROOT / "installers/p07-m03-release142-atomic.sh"
 OLD_BUILD = "0.1.0-release115"
 
 
@@ -32,6 +32,45 @@ def toolbox_function(source: str) -> str:
 
 
 class OwnerM03ToolboxRealEntry(unittest.TestCase):
+    def setUp(self):
+        # Bind the fixture to the reviewed Toolbox and its installer blob.
+        # The historical release142 must not be mistaken for today's target.
+        source = TOOLBOX.read_text(encoding="utf-8")
+
+        def pin(name, pattern):
+            values = re.findall(r'^' + re.escape(name) + r'="([^"\n]+)"$', source, re.M)
+            self.assertEqual(len(values), 1, name)
+            self.assertRegex(values[0], r"^(?:" + pattern + r")$")
+            return values[0]
+
+        target = pin("VF_SERVER_OPS_BUILD_EXPECTED", r"0[.]1[.]0-release[0-9]+")
+        ref = pin("VF_SERVER_OPS_INSTALLER_REF", r"main|[0-9a-f]{40}")
+        blob = pin("VF_SERVER_OPS_INSTALLER_BLOB", r"[0-9a-f]{40}")
+        self.installer_name = "p07-m03-" + target.removeprefix("0.1.0-") + "-atomic.sh"
+        self.installer = ROOT / "installers" / self.installer_name
+        raw = "https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/"
+        route = raw + "$" + "{VF_SERVER_OPS_INSTALLER_REF}/installers/" + self.installer_name
+        self.assertEqual(pin("VF_SERVER_OPS_INSTALLER", re.escape(route)), route)
+        self.installer_url = raw + ref + "/installers/" + self.installer_name
+        self.assertEqual(subprocess.check_output(
+            ["git", "hash-object", str(self.installer)], text=True).strip(), blob)
+        installer_source = self.installer.read_text(encoding="utf-8")
+        self.assertIn("BUILD='" + target + "'", installer_source)
+        releases = re.findall(r"(?m)^RELEASE='(p07-m03-v" +
+                              re.escape(target) + r"-[0-9]{8})'$", installer_source)
+        self.assertEqual(len(releases), 1)
+        self.release = releases[0]
+        builds = sorted(set(re.findall(
+            r"(?m)^(M03_(?:OFFICIAL[0-9]+|LEGACY[0-9]+|BOOTSTRAP|PREVIOUS)_BUILD)=", source)))
+        self.assertIn("M03_LEGACY115_BUILD", builds)
+        self.assertEqual(pin("M03_LEGACY115_BUILD", r"0[.]1[.]0-release115"), OLD_BUILD)
+        self.route_pins = "\n".join(
+            [f"VF_SERVER_OPS_BUILD_EXPECTED='{target}'",
+             f"VF_SERVER_OPS_INSTALLER_BLOB='{blob}'",
+             f"VF_SERVER_OPS_INSTALLER='{self.installer_url}'"] +
+            [f"{name}='{pin(name, r'0[.]1[.]0-release[0-9]+')}'" for name in builds]
+        ) + "\n"
+
     def run_upgrade(self, user_input: str | None, *, omit_install: bool = False):
         if user_input is not None and not shutil.which("script"):
             self.skipTest("util-linux script PTY wrapper not installed")
@@ -60,7 +99,7 @@ while (( $# )); do
 done
 [[ -n "$out" ]] || exit 33
 printf '%s\\n' "$url" >> "$P07_TEST_DOWNLOAD_LOG"
-if [[ "$url" == *'/installers/p07-m03-release142-atomic.sh' ]]; then
+if [[ "$url" == "$P07_TEST_INSTALLER_URL" ]]; then
   cp -- "$P07_TEST_REAL_INSTALLER" "$out"
 else
   # Caller reached the REAL M03 installer and its guarded ZIP phase.
@@ -82,17 +121,7 @@ fi
                 """#!/usr/bin/env bash
 set -Eeuo pipefail
 C_RED=''; C_RESET=''
-VF_SERVER_OPS_BUILD_EXPECTED='0.1.0-release142'
-M03_OFFICIAL141_BUILD='0.1.0-release141'
-M03_OFFICIAL140_BUILD='0.1.0-release140'
-M03_BOOTSTRAP_BUILD='0.1.0-release115'
-M03_PREVIOUS_BUILD='0.1.0-release139'
-M03_LEGACY138_BUILD='0.1.0-release138'
-M03_LEGACY135_BUILD='0.1.0-release135'
-M03_LEGACY115_BUILD='0.1.0-release115'
-M03_LEGACY137_BUILD='0.1.0-release137'
-VF_SERVER_OPS_INSTALLER_BLOB='1f10b7ce1d87b4b806cdd78455bfdbcf17276876'
-VF_SERVER_OPS_INSTALLER='https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-m03-release142-atomic.sh'
+""" + self.route_pins + """
 say() { printf '%s\\n' "$*"; }
 m03_verified_current() { [[ "$(cat "$P07_TEST_RUNTIME/BUILD_ID")" == '0.1.0-release115' ]]; }
 p07_git_blob_sha1() { git hash-object "$1"; }
@@ -107,7 +136,8 @@ exit 0
 """, encoding="utf-8")
             env = dict(os.environ, NO_COLOR="1", P07_ALLOW_NONROOT="1",
                        PATH=str(stubbin) + os.pathsep + os.environ["PATH"],
-                       P07_TEST_REAL_INSTALLER=str(INSTALLER),
+                       P07_TEST_REAL_INSTALLER=str(self.installer),
+                       P07_TEST_INSTALLER_URL=self.installer_url,
                        P07_TEST_DOWNLOAD_LOG=str(downloads),
                        P07_TEST_RUNTIME=str(runtime))
             command = ["bash", str(harness)]
@@ -129,8 +159,8 @@ exit 0
         self.assertIn("错误阶段：HASH_MISMATCH", out)
         self.assertNotIn("错误阶段：P07_M03_VERIFY_FAILED", out)
         self.assertEqual(len(urls), 2, urls)
-        self.assertTrue(urls[0].endswith("/p07-m03-release142-atomic.sh"))
-        self.assertIn("p07-m03-v0.1.0-release142-20261120", urls[1])
+        self.assertEqual(urls[0], self.installer_url)
+        self.assertIn("/" + self.release + "/", urls[1])
 
     def test_historical_missing_install_argument_reproduces_real_failure(self):
         out, urls = self.run_upgrade("y\n", omit_install=True)
@@ -149,11 +179,13 @@ exit 0
         self.assertEqual(urls, [])
 
     def test_real_installer_rejects_implicit_or_unknown_commands(self):
-        for args in ([], ["--made-up"], ["install", "another"]):
-            r = subprocess.run(["bash", str(INSTALLER), *args],
-                               capture_output=True, text=True, timeout=4)
-            self.assertEqual(r.returncode, 13, r.stderr)
-            self.assertIn("错误阶段：P07_M03_VERIFY_FAILED", r.stderr)
+        for installer in (HISTORIC_INSTALLER, self.installer):
+            for args in ([], ["--made-up"], ["install", "another"]):
+                with self.subTest(installer=installer.name, args=args):
+                    r = subprocess.run(["bash", str(installer), *args],
+                                       capture_output=True, text=True, timeout=4)
+                    self.assertEqual(r.returncode, 13, r.stderr)
+                    self.assertIn("错误阶段：P07_M03_VERIFY_FAILED", r.stderr)
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,7 +26,9 @@ class P07OwnerLiveRegression(unittest.TestCase):
         self.assertIn('M03_LEGACY115_BUILD="0.1.0-release115"', content)
         self.assertIn('M03_LEGACY115_MANIFEST_BLOB="4acbaca22aac0da681b34376e2cc86d876593181"', content)
         self.assertIn('M03_LEGACY135_BUILD="0.1.0-release135"', content)
-        self.assertIn('VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release142"', content)
+        # release142 remains a verified predecessor, not the current build.
+        self.assertIn('M03_OFFICIAL142_BUILD="0.1.0-release142"', content)
+        self.assertIn('M03_OFFICIAL142_MANIFEST_BLOB="cc3d90839bf71ea9139f5fc0d1c6cb12403b58e0"', content)
         self.assertIn('M03_OFFICIAL140_BUILD="0.1.0-release140"', content)
         self.assertIn('M03_OFFICIAL141_BUILD="0.1.0-release141"', content)
         self.assertIn('M03_PREVIOUS_BUILD="0.1.0-release139"', content)
