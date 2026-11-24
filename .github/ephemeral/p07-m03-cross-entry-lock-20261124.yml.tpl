@@ -71,6 +71,7 @@ jobs:
             tests.test_p07_m03_safe_batch_terminal_ux \
             tests.test_p07_m03_resume_audit \
             tests.test_p07_m03_cloudpanel_sql_probe \
+            tests.test_p07_m03_trial_builder_146 \
             > "$RUNNER_TEMP/p07-lock-tests.log" 2>&1 || {
               grep -E '^(FAIL:|ERROR:|Ran [0-9]+ tests|FAILED|AssertionError:|migration_safe_batch_guard.BatchScopeBlocked:)' "$RUNNER_TEMP/p07-lock-tests.log" | cut -c1-250 | head -n 55 || true
               exit 31
@@ -82,6 +83,99 @@ jobs:
           echo P07_M03_OLD_FAILED_TASK_REPLAY_BLOCKED=PASS
           echo P07_M03_DUAL_CLOUDPANEL_FULL_E2E=NOT_RUN
           echo P07_M03_FORMAL_RELEASE=NOT_AUTHORIZED
+      - name: Genuine official146 to 147rc4 closure and Atomic failback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          T="$(mktemp -d "$RUNNER_TEMP/p07-cross-lock.XXXXXXXX")"
+          echo "$T" > "$RUNNER_TEMP/p07-cross-lock-dir"
+          P="$GITHUB_WORKSPACE/.p07-private"
+          url='https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m03-v0.1.0-release146-20261122/P07-M03-0.1.0-release146.zip'
+          curl --proto '=https' --tlsv1.2 -fLsS --retry 2 --max-time 150 "$url" -o "$T/official.zip"
+          echo "7b3e46c651c5ce3597e4ab535fbdc734023fc1b706fe85189a344ee600514321  $T/official.zip" | sha256sum -c - >/dev/null
+          for candidate in one two; do
+            python3 -B "$P/scripts/p07_m03_trial_from_official.py" \
+              --official-zip "$T/official.zip" --product-root "$P" \
+              --product-sha "$TARGET_SHA" --official-build '0.1.0-release146' \
+              --build '0.1.0-release147-rc4' --output "$T/$candidate.zip" \
+              > "$T/$candidate.build.log"
+            grep -Fxq 'P07_M03_TRIAL_BUILD=PASS' "$T/$candidate.build.log"
+          done
+          cmp "$T/one.zip" "$T/two.zip"
+          python3 -B - "$T/one.zip" "$T" "$P" <<'PY'
+          import hashlib,pathlib,sys,zipfile
+          archive,temp,product=map(pathlib.Path,sys.argv[1:])
+          def git_blob(b):
+              return hashlib.sha1(b'blob '+str(len(b)).encode('ascii')+b'\0'+b).hexdigest()
+          overlay='dist/p07/0.1.0/overlay/'
+          with zipfile.ZipFile(archive) as z:
+              names=z.namelist()
+              assert len(names)==len(set(names))
+              assert z.read(overlay+'BUILD_ID').strip()==b'0.1.0-release147-rc4'
+              covered=set()
+              for line in z.read(overlay+'RUNTIME.gitblob').decode('utf-8').splitlines():
+                  digest,rel=line.split('  ',1)
+                  assert rel not in covered and git_blob(z.read(overlay+rel))==digest
+                  covered.add(rel)
+              for rel in ('lib/server_migration_pull.py','lib/migration_safe_batch_io.py',
+                          'lib/migration_safe_batch_guard.py','lib/migration_safe_batch_cli.py'):
+                  assert rel in covered
+                  assert z.read(overlay+rel)==(product/rel).read_bytes()
+              assert b'def _prepare_migration_under_receiver_lock' in z.read(overlay+'lib/server_migration_pull.py')
+              assert b'def receiver_batch_lock_held' in z.read(overlay+'lib/migration_safe_batch_io.py')
+              for info in z.infolist():
+                  path=pathlib.PurePosixPath(info.filename)
+                  assert not path.is_absolute() and '..' not in path.parts and not info.is_dir()
+              z.extractall(temp/'candidate')
+          print('P07_M03_ACTUAL_147RC4_LOCKED_RUNTIME_CLOSURE=PASS')
+          PY
+          curl --proto '=https' --tlsv1.2 -fLsS --retry 2 --max-time 75 \
+            'https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/0bd7afe75eb4bff9e974918caa092279569d60b0/installers/p07-m03-release146-atomic.sh' \
+            -o "$T/official-installer.sh"
+          test "$(git hash-object "$T/official-installer.sh")" = e046c3eebed700a7d423f31cba096ea4f5460c9c
+          mkdir -p "$T/bin" "$T/siblings"
+          for m in m01 m02 m04 m05; do printf '%s\n' "$m-STABLE" > "$T/siblings/$m"; done
+          (cd "$T/siblings" && sha256sum m01 m02 m04 m05 > "$T/siblings.sha")
+          export P07_INSTALL_DIR="$T/runtime/p07" P07_PREVIOUS_DIR="$T/runtime/p07.previous"
+          export P07_BIN_LINK="$T/bin/vfops" P07_ALLOW_NONROOT=1 P07_NO_EXEC=1
+          bash "$T/official-installer.sh" install > "$T/official-install.log" 2>&1
+          test "$(cat "$P07_INSTALL_DIR/BUILD_ID")" = '0.1.0-release146'
+          cp -a "$T/candidate" "$T/tampered"
+          printf 'CORRUPTED\n' >> "$T/tampered/dist/p07/0.1.0/overlay/lib/server_migration_pull.py"
+          if P07_PUBLIC_ROOT="file://$T/tampered" bash "$T/tampered/installers/p07-final.sh" > "$T/tamper.log" 2>&1; then
+            echo 'P07_BAD_PACKAGE_ACCEPTED'; exit 42
+          fi
+          test "$(cat "$P07_INSTALL_DIR/BUILD_ID")" = '0.1.0-release146'
+          mkdir "$T/stubs"
+          cat > "$T/stubs/mv" <<'SH'
+          #!/usr/bin/env bash
+          if [[ "$#" == 2 && "$1" == "$P07_INSTALL_DIR.new" && "$2" == "$P07_INSTALL_DIR" ]]; then
+            echo P07_ISOLATED_SWAP_FAULT >&2
+            exit 47
+          fi
+          exec /usr/bin/mv "$@"
+          SH
+          chmod 0700 "$T/stubs/mv"
+          if PATH="$T/stubs:$PATH" P07_PUBLIC_ROOT="file://$T/candidate" \
+            bash "$T/candidate/installers/p07-final.sh" > "$T/fault.log" 2>&1; then
+            echo 'P07_SWAP_FAILURE_ACCEPTED'; exit 43
+          fi
+          grep -Fq P07_ISOLATED_SWAP_FAULT "$T/fault.log"
+          test "$(cat "$P07_INSTALL_DIR/BUILD_ID")" = '0.1.0-release146'
+          test ! -e "$P07_PREVIOUS_DIR"
+          P07_PUBLIC_ROOT="file://$T/candidate" \
+            bash "$T/candidate/installers/p07-final.sh" > "$T/new-install.log" 2>&1
+          test "$(cat "$P07_INSTALL_DIR/BUILD_ID")" = '0.1.0-release147-rc4'
+          test "$(cat "$P07_PREVIOUS_DIR/BUILD_ID")" = '0.1.0-release146'
+          cmp "$P07_INSTALL_DIR/lib/server_migration_pull.py" "$P/lib/server_migration_pull.py"
+          cmp "$P07_INSTALL_DIR/lib/migration_safe_batch_io.py" "$P/lib/migration_safe_batch_io.py"
+          (cd "$T/siblings" && sha256sum -c "$T/siblings.sha" >/dev/null)
+          echo P07_M03_REAL_OFFICIAL146_TO_147RC4_ATOMIC_FAILBACK=PASS
+          echo P07_M03_OTHER_FOUR_MODULES_UNCHANGED=PASS
+          echo P07_M03_REAL_DUAL_CLOUDPANEL_E2E=NOT_RUN
+          echo P07_M03_FORMAL_RELEASE=NOT_PUBLISHED
       - name: Always erase transient private checkout and isolated runtime
         if: always()
         shell: bash
@@ -93,5 +187,10 @@ jobs:
             case "$t" in "$RUNNER_TEMP"/p07-atomic.*) rm -rf -- "$t";; esac
           fi
           rm -f -- "$RUNNER_TEMP/p07-atomic-current-path"
+          if test -f "$RUNNER_TEMP/p07-cross-lock-dir"; then
+            T="$(cat "$RUNNER_TEMP/p07-cross-lock-dir")"
+            case "$T" in "$RUNNER_TEMP"/p07-cross-lock.*) rm -rf -- "$T" ;; esac
+          fi
+          rm -f -- "$RUNNER_TEMP/p07-cross-lock-dir"
           rm -f -- "$RUNNER_TEMP/p07-lock-tests.log" "$RUNNER_TEMP/p07-lane-check.json" "$RUNNER_TEMP/p07-lane-audit.json"
           echo EPHEMERAL_PRIVATE_CLEANUP=COMPLETE
