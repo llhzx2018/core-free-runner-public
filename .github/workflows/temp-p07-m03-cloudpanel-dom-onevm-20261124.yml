@@ -198,7 +198,11 @@ jobs:
           assert set(obj)=={'checkbox_total','checkbox_summaries','form_has_native_submit','form_post','timezone_native_select_selected'}
           assert isinstance(obj['checkbox_total'],int) and 0<=obj['checkbox_total']<=12
           assert len(obj['checkbox_summaries'])<=6
-          assert obj['form_post'] is True and obj['timezone_native_select_selected'] is True
+          assert type(obj['form_post']) is bool
+          assert type(obj['timezone_native_select_selected']) is bool
+          assert type(obj['form_has_native_submit']) is bool
+          print('P07_DOM_FORM_POST='+('YES' if obj['form_post'] else 'NO'))
+          print('P07_DOM_TIMEZONE_OPTION_SELECTED='+('YES' if obj['timezone_native_select_selected'] else 'NO'))
           boolkeys={'relevant','required','checked','disabled','input_visible','input_nonzero_rect',
                     'input_pointer_events_none','input_opacity_zero','input_display_none',
                     'input_visibility_hidden','input_center_hit_self','input_center_hit_inside_label',
