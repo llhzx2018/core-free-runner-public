@@ -78,18 +78,29 @@ jobs:
           set -Eeuo pipefail
           set +x
           P="$GITHUB_WORKSPACE/.p07-private"
-          if ! (cd "$P" &&
-                python3 -B scripts/check_p07_terminal_ux.py &&
-                python3 -B scripts/check_p07_modules.py &&
-                python3 -B -m unittest discover -s tests -p test_p07_terminal_ux_contract.py -q &&
-                python3 -B -m unittest discover -s tests -p test_p07_module_contract.py -q &&
-                python3 -B scripts/check_p07_terminal_ux.py --base-ref "$BASE_SHA"
-              ) > "$RUNNER_TEMP/p07-m03-offline-ux.log" 2>&1; then
+          test -d "$P/.git"
+          failed=0
+          prove() {
+            label="$1"; shift
+            if (cd "$P" && "$@") > "$RUNNER_TEMP/p07-m03-native-ux-$label.log" 2>&1; then
+              echo "P07_M03_NATIVE_UX_$label=PASS"
+            else
+              echo "P07_M03_NATIVE_UX_$label=FAIL"
+              failed=1
+            fi
+          }
+          prove CANONICAL_CHECK python3 -B scripts/check_p07_terminal_ux.py
+          prove MODULE_SCOPE python3 -B scripts/check_p07_modules.py
+          prove UX_CONTRACT python3 -B -m unittest discover -s tests -p test_p07_terminal_ux_contract.py -q
+          prove MODULE_CONTRACT python3 -B -m unittest discover -s tests -p test_p07_module_contract.py -q
+          prove PR_BASE_CHECK python3 -B scripts/check_p07_terminal_ux.py --base-ref "$BASE_SHA"
+          if test "$failed" -ne 0; then
             echo P07_M03_NATIVE_UX_EQUIVALENT=FAIL
             exit 73
           fi
           echo P07_M03_NATIVE_UX_EQUIVALENT=PASS
       - name: Prove unpublished candidate zip fresh install atomic upgrade and recovery
+        if: always()
         shell: bash
         timeout-minutes: 12
         run: |
