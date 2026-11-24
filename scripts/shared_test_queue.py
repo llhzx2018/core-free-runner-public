@@ -259,38 +259,58 @@ class DurableQueue:
                 "machine_pass":False}
 
     def reconcile_interrupted(self, task_id, bridge):
-        """Release capacity only after authenticated GitHub terminal readback.
+        """Keep the lane quarantined until an exact terminal remote readback.
 
-        The task stays INTERRUPTED_NO_REPLAY and is NEVER re-enqueued. Missing
-        Run ID leaves capacity quarantined, including a dispatch whose HTTP
-        response was lost before GitHub supplied a Run ID.
+        Even a lost dispatch HTTP reply can be matched by the unique Owner
+        run-name and pinned source identity. No re-dispatch, ever.
         """
         with self.connect() as db:
-            row=db.execute("SELECT state,run_id,job_json,result_reason FROM tasks WHERE task_id=?",
-                           (task_id,)).fetchone()
+            row=db.execute("""SELECT state,run_id,job_json,result_reason,
+                                     dispatch_started_at,lane
+                              FROM tasks WHERE task_id=?""",(task_id,)).fetchone()
         if row is None: raise InvalidTask("UNKNOWN_TASK")
-        state,run_id,raw,reason=row
+        state,run_id,raw,reason,dispatch_at,lane=row
         if state!="INTERRUPTED_NO_REPLAY":
             raise InvalidTask("NOT_INTERRUPTED")
         if reason=="REMOTE_TERMINAL_VERIFIED":
             return {"task_id":task_id,"state":state,"capacity_released":True}
-        if type(run_id) is not int or run_id<=0:
-            return {"task_id":task_id,"state":"BLOCKED_RUN_ID_NOT_ATTESTED",
+        if lane!="PUBLIC_HOSTED":
+            return {"task_id":task_id,"state":"BLOCKED_PRIVATE_REMOTE_NOT_VERIFIED",
                     "capacity_released":False}
-        proof=bridge.inspect_bound_run(run_id,json.loads(raw))
+        job=json.loads(raw)
+        if type(run_id) is not int or run_id<=0:
+            if not dispatch_at:
+                return {"task_id":task_id,"state":"BLOCKED_RUN_ID_NOT_ATTESTED",
+                        "capacity_released":False}
+            try:
+                found=bridge.correlate({"task_id":task_id,"job":job,
+                                       "lane":"PUBLIC_HOSTED"},
+                                      sent_after_iso=dispatch_at)
+            except InvalidTask:
+                return {"task_id":task_id,"state":"BLOCKED_RUN_ID_NOT_ATTESTED",
+                        "capacity_released":False}
+            run_id=found["run_id"]
+            with self.tx() as db:
+                db.execute("""UPDATE tasks SET run_id=?
+                              WHERE task_id=? AND state='INTERRUPTED_NO_REPLAY'
+                                AND run_id IS NULL""",(run_id,task_id))
+                if db.execute("SELECT changes()").fetchone()[0]!=1:
+                    raise InvalidTask("RECOVERY_RUN_BINDING_DRIFT")
+        proof=bridge.inspect_bound_run(run_id,job)
         if proof.get("remote_terminal") is not True:
             return {"task_id":task_id,"state":"WAITING_REMOTE_TERMINAL",
                     "capacity_released":False}
         with self.tx() as db:
-            db.execute("""UPDATE tasks SET result_reason='REMOTE_TERMINAL_VERIFIED'
+            db.execute("""UPDATE tasks
+                          SET result_reason='REMOTE_TERMINAL_VERIFIED',
+                              job_id=COALESCE(job_id,?)
                           WHERE task_id=? AND state='INTERRUPTED_NO_REPLAY'
-                            AND run_id=?""",(task_id,run_id))
+                            AND run_id=?""",(proof.get("job_id"),task_id,run_id))
             if db.execute("SELECT changes()").fetchone()[0]!=1:
                 raise InvalidTask("RECONCILE_STATE_DRIFT")
         return {"task_id":task_id,"state":"INTERRUPTED_NO_REPLAY",
                 "capacity_released":True,"run_id":run_id,
-                "remote_conclusion":proof.get("conclusion"),
-                "machine_pass":False}
+                "remote_conclusion":proof.get("conclusion"),"machine_pass":False}
 
     def status(self,task_id):
         with self.connect() as db:
