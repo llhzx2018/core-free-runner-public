@@ -1,6 +1,8 @@
 """Regression for Public-owned durable scheduler; local Linux processes only."""
 import importlib.util
 import multiprocessing
+import json
+import subprocess
 import os
 from pathlib import Path
 import sys
@@ -112,6 +114,21 @@ class QueueTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(InvalidTask,"LEASE_EXPIRED"):
                 action()
+
+    def test_cli_claim_never_prints_private_lease_secret(self):
+        self.q.enqueue(job())
+        capacity=self.root/"capacity.json"
+        capacity.write_text(json.dumps(CAP))
+        token_path=self.root/"private-lease-token"
+        command=[sys.executable,str(SCRIPTS/"shared_test_queue.py"),"--db",str(self.db),
+                 "claim","--capacity",str(capacity),"--token-file",str(token_path)]
+        completed=subprocess.run(command,check=True,capture_output=True,text=True,timeout=8)
+        payload=json.loads(completed.stdout)
+        secret=token_path.read_text()
+        self.assertEqual(len(secret),48)
+        self.assertNotIn(secret,completed.stdout+completed.stderr)
+        self.assertTrue(payload["lease_token_stored_privately"])
+        self.assertEqual(token_path.stat().st_mode & 0o077,0)
 
     def test_untrusted_queue_directory_and_symlink(self):
         self.assertEqual(self.db.stat().st_mode & 0o077,0)
