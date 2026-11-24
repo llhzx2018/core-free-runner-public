@@ -111,12 +111,15 @@ class DurableQueue:
         return {"state":"DEFERRED_CAPACITY_OR_EMPTY","dispatched":False}
 
     @staticmethod
-    def _lease(db, task_id, token):
-        row=db.execute("SELECT state,token,cancel_requested FROM tasks WHERE task_id=?",(task_id,)).fetchone()
+    def _lease(db, task_id, token, now=None):
+        if now is None: now=int(time.time())
+        row=db.execute("SELECT state,token,cancel_requested,deadline FROM tasks WHERE task_id=?",(task_id,)).fetchone()
         if not row or not isinstance(token,str) or row[1] is None or not secrets.compare_digest(row[1],token):
             raise InvalidTask("INVALID_LEASE_TOKEN")
         if row[0] not in {"LEASED","CANCEL_REQUESTED"}:
             raise InvalidTask("LEASE_NOT_ACTIVE")
+        if row[3] is None or row[3] <= now:
+            raise InvalidTask("LEASE_EXPIRED")
         return row
 
     def heartbeat(self,task_id,token,now=None,lease_seconds=300):
@@ -124,7 +127,7 @@ class DurableQueue:
         if type(lease_seconds) is not int or not 1<=lease_seconds<=7200:
             raise InvalidTask("INVALID_LEASE")
         with self.tx() as db:
-            row=self._lease(db,task_id,token)
+            row=self._lease(db,task_id,token,now)
             db.execute("UPDATE tasks SET deadline=? WHERE task_id=?",(now+lease_seconds,task_id))
         return {"task_id":task_id,"cancel_requested":bool(row[2])}
 
@@ -141,21 +144,21 @@ class DurableQueue:
             else: new=row[0]
         return {"task_id":task_id,"state":new}
 
-    def bind_run(self,task_id,token,run_id,job_id=None):
+    def bind_run(self,task_id,token,run_id,job_id=None,now=None):
         if type(run_id) is not int or run_id<=0 or (job_id is not None and (type(job_id) is not int or job_id<=0)):
             raise InvalidTask("INVALID_RUN_ID")
         with self.tx() as db:
-            self._lease(db,task_id,token)
+            self._lease(db,task_id,token,now)
             old=db.execute("SELECT run_id FROM tasks WHERE task_id=?",(task_id,)).fetchone()[0]
             if old is not None and old!=run_id: raise InvalidTask("RUN_BINDING_IMMUTABLE")
             db.execute("UPDATE tasks SET run_id=?,job_id=COALESCE(job_id,?) WHERE task_id=?",(run_id,job_id,task_id))
         return {"task_id":task_id,"run_id":run_id,"provider_attestation":"REQUIRES_REAL_GITHUB_READBACK"}
 
-    def finish(self,task_id,token,result):
+    def finish(self,task_id,token,result,now=None):
         if result not in {"SUCCEEDED","TEST_FAILED","INFRA_FAILED","CANCELLED"}:
             raise InvalidTask("INVALID_RESULT")
         with self.tx() as db:
-            row=self._lease(db,task_id,token)
+            row=self._lease(db,task_id,token,now)
             if row[2] and result=="SUCCEEDED": raise InvalidTask("CANCELLED_CANNOT_PASS")
             db.execute("UPDATE tasks SET state=?,token=NULL WHERE task_id=?",(result,task_id))
         return {"task_id":task_id,"state":result}
