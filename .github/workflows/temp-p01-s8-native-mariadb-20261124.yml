@@ -1,0 +1,138 @@
+name: TEMP P01 S8 encrypted MariaDB isolated restore + Laravel migration proof
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p01-s8-native-mariadb-20261124.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temp-p01-s8-mariadb-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  s8-native-mariadb:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.head_ref, 'test/p01-s8-native-mariadb-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    services:
+      mariadb11:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: synthetic-ci-root-only-20261124
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Check out exact P01 private source only into transient workspace
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-startnew
+          ref: 86c5766adc8cd70893c4bb555fc1cd7b4ed5d596
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: private-src
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify exact code SHA
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C private-src rev-parse HEAD)" = "86c5766adc8cd70893c4bb555fc1cd7b4ed5d596"
+          echo "P01_S8_MARIADB_EXACT_SOURCE=PASS"
+
+      - name: Set up Laravel native PHP extensions, including PDO MySQL and SQLite
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, pdo_mysql, pdo_sqlite, sqlite3, dom, xml, fileinfo, curl, openssl, zip, sodium
+          tools: composer:v2
+          coverage: none
+
+      - name: Use ephemeral native MariaDB client in synthetic QA only
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          sudo apt-get update -qq >"$RUNNER_TEMP/p01-native-apt.log" 2>&1
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mariadb-client >>"$RUNNER_TEMP/p01-native-apt.log" 2>&1
+          command -v mariadb >/dev/null
+          command -v mariadb-dump >/dev/null
+          echo "P01_S8_MARIADB_NATIVE_CLIENT=PASS"
+
+      - name: Execute encrypted backup, independent restore and real Laravel migration
+        working-directory: private-src
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          python3 scripts/check_php_syntax.py >"$RUNNER_TEMP/p01-native-php-lint.log" 2>&1
+          echo "P01_S8_MARIADB_PHP_LINT=PASS"
+          composer install --no-interaction --prefer-dist --no-progress --quiet >"$RUNNER_TEMP/p01-native-composer.log" 2>&1
+          echo "P01_S8_MARIADB_COMPOSER=PASS"
+          export APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory:
+          export APP_KEY="base64:$(openssl rand -base64 32)"
+          export MYSQL_PWD=synthetic-ci-root-only-20261124
+          export P01_S8_LARAVEL_MARIADB_SOURCE_JSON='{"driver":"mariadb","host":"127.0.0.1","port":3307,"database":"vfstartnew_test_source_ciqa","username":"vfstartnew_test_source_ciqa","password":"synthetic-source-ci-only"}'
+          export P01_S8_DISPOSABLE_MARIADB_JSON='{"driver":"mariadb","host":"127.0.0.1","port":3307,"database":"vfstartnew_test_restore_ciqa","username":"vfstartnew_test_restore_ciqa","password":"synthetic-restore-ci-only"}'
+          export P01_S8_RECOVERY_MARIADB_JSON='{"driver":"mariadb","host":"127.0.0.1","port":3307,"database":"vfstartnew_test_restore_rollback_ciqa","username":"vfstartnew_test_restore_rollback_ciqa","password":"synthetic-rollback-ci-only"}'
+          for method in \
+            test_native_mariadb_v2_restore_then_real_laravel_migration_only_with_isolated_credentials \
+            test_mariadb_encrypted_preupgrade_generation_rebuilds_without_reusing_dirty_ddl_database; do
+            # Only disposable DBs, created from scratch in the job's ephemeral
+            # MariaDB service. NEVER connect to a user or Production server.
+            mariadb --protocol=tcp -h 127.0.0.1 -P 3307 -u root <<'SQL' >"$RUNNER_TEMP/p01-native-bootstrap.log" 2>&1
+          DROP DATABASE IF EXISTS vfstartnew_test_source_ciqa;
+          DROP DATABASE IF EXISTS vfstartnew_test_restore_ciqa;
+          DROP DATABASE IF EXISTS vfstartnew_test_restore_rollback_ciqa;
+          CREATE DATABASE vfstartnew_test_source_ciqa;
+          CREATE DATABASE vfstartnew_test_restore_ciqa;
+          CREATE DATABASE vfstartnew_test_restore_rollback_ciqa;
+          CREATE USER IF NOT EXISTS 'vfstartnew_test_source_ciqa'@'%' IDENTIFIED BY 'synthetic-source-ci-only';
+          CREATE USER IF NOT EXISTS 'vfstartnew_test_restore_ciqa'@'%' IDENTIFIED BY 'synthetic-restore-ci-only';
+          CREATE USER IF NOT EXISTS 'vfstartnew_test_restore_rollback_ciqa'@'%' IDENTIFIED BY 'synthetic-rollback-ci-only';
+          GRANT ALL PRIVILEGES ON vfstartnew_test_source_ciqa.* TO 'vfstartnew_test_source_ciqa'@'%';
+          GRANT ALL PRIVILEGES ON vfstartnew_test_restore_ciqa.* TO 'vfstartnew_test_restore_ciqa'@'%';
+          GRANT ALL PRIVILEGES ON vfstartnew_test_restore_rollback_ciqa.* TO 'vfstartnew_test_restore_rollback_ciqa'@'%';
+          CREATE TABLE vfstartnew_test_source_ciqa.probe (id INT NOT NULL PRIMARY KEY, label VARCHAR(100) NOT NULL) ENGINE=InnoDB;
+          INSERT INTO vfstartnew_test_source_ciqa.probe VALUES (1,'alpha-old'),(2,'beta-old');
+          SQL
+            echo "P01_S8_MARIADB_SYNTHETIC_FRESH_FIXTURE=PASS"
+            set +e
+            ./vendor/bin/phpunit --filter="$method" tests/Unit/IsolatedSqlLaravelMigrationRehearsalTest.php >"$RUNNER_TEMP/p01-native-test.log" 2>&1
+            exit_code=$?
+            set -e
+            if [ "$exit_code" -ne 0 ]; then
+              python3 - "$RUNNER_TEMP/p01-native-test.log" <<'PY'
+          import re,sys,pathlib
+          t=pathlib.Path(sys.argv[1]).read_text(errors='replace')
+          kinds=sorted(set(re.findall(r'(?m)^(?:\d+\)\s+)?(?:Tests?\\[A-Za-z0-9_\\]+::test_[A-Za-z0-9_]+)',t)))[:5]
+          errors=sorted(set(re.findall(r'\b(?:BACKUP|RESTORE|S8_SQL|SQL_CONTENT|ISOLATED_DB|RECOVERY_REVIEW)_[A-Z0-9_]{3,96}\b',t)))[:6]
+          print("P01_S8_MARIADB_FAILURE_CATEGORY="+(",".join(errors) if errors else "UNKNOWN"))
+          print("P01_S8_MARIADB_FAILURE_METHOD_COUNT="+str(len(kinds)))
+          PY
+              echo "P01_S8_MARIADB_NATIVE_TEST=FAIL"
+              exit "$exit_code"
+            fi
+            echo "P01_S8_MARIADB_NATIVE_TEST=PASS:$method"
+          done
+          echo "P01_S8_MARIADB_TWO_NATIVE_CASES=PASS"
+
+      - name: Always remove private source, synthetic credentials and output
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- private-src
+          rm -f -- "$RUNNER_TEMP"/p01-native-*
+          test ! -e private-src
+          echo "P01_S8_MARIADB_CLEANUP=PASS"
