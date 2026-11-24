@@ -255,7 +255,7 @@ class DurableQueue:
                     "machine_pass":final=="SUCCEEDED" and proof["machine_pass"],
                     "cancel_confirmed":proof["cancel_confirmed"]}
         if state=="CANCEL_REQUESTED":
-            bridge.cancel_run(run_id)  # POST is intent only; never claim cancel
+            bridge.cancel_run(run_id,job)  # exact task-bound POST; never claim cancellation
             self.heartbeat(task_id,token,now=now,lease_seconds=3600)
             return {"task_id":task_id,"state":"REMOTE_CANCEL_REQUESTED",
                     "run_id":run_id,"machine_pass":False}
