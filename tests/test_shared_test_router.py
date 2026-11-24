@@ -33,7 +33,8 @@ class TestRouter(unittest.TestCase):
         j = job(privacy="PRIVATE_SOURCE")
         self.assertEqual(router.route(j), "PRIVATE")
         j["allow_public_ephemeral"] = True
-        self.assertEqual(router.route(j), "PUBLIC_HOSTED")
+        self.assertEqual(router.route(j), "PRIVATE")  # untrusted input cannot approve itself
+        self.assertEqual(router.route(j, approved_ephemeral_source=True), "PUBLIC_HOSTED")
         j = job(privacy="PRIVATE_EVIDENCE")
         self.assertEqual(router.route(j), "PRIVATE")
         j = job(profile="heavy", kind="install_restore")
