@@ -108,7 +108,7 @@ jobs:
           test -S /var/run/docker.sock
           driver="$base-debian13"
           echo "$driver" > "$RUNNER_TEMP/p07-native-driver"
-          docker run --detach --name "$driver" --network bridge \
+          docker run --detach --name "$driver" --network "container:$base-source" \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$host_cli:/usr/local/bin/docker:ro" \
             -v "$GITHUB_WORKSPACE/.p07-private:/p07-private:ro" \
