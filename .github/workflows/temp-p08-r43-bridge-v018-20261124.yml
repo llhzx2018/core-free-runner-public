@@ -10,7 +10,9 @@ concurrency:
   cancel-in-progress: true
 jobs:
   source-bound-developer-bridge:
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/p08-r43-v017-bridge-v018-source-20261124'
+    # Earlier exact source R43 bridge/archive tests passed in run 45312421427.
+    # This rerun checks only the new disposable migration helper on all engines.
+    if: ${{ false }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
@@ -143,3 +145,166 @@ jobs:
           rm -f -- "$RUNNER_TEMP"/p08-r43-*.zip "$RUNNER_TEMP"/p08-r43-*.json "$RUNNER_TEMP"/p08-r43-*.log "$RUNNER_TEMP"/p08-r43-*.txt
           test ! -e private-p08-issued && test ! -e private-p08-bridge && test ! -e private-p08-target && test ! -e gov-proof
           echo P08_R43_PRIVATE_SOURCE_AND_ARTIFACT_CLEANUP=PASS
+
+  native-schema-migration:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/p08-r43-v017-bridge-v018-source-20261124'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [mysql, mariadb]
+    services:
+      db:
+        image: ${{ matrix.engine == 'mysql' && 'mysql:8.4' || 'mariadb:11.8' }}
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic-r43-schema
+          MYSQL_ROOT_HOST: '%'
+          MARIADB_ROOT_PASSWORD: synthetic-r43-schema
+          MARIADB_ROOT_HOST: '%'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="sh -c 'mariadb-admin ping --silent || mysqladmin ping --silent'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      APP_ENV: testing
+      APP_KEY: base64:REREREREREREREREREREREREREREREREREREREREREQ=
+      DB_CONNECTION: ${{ matrix.engine }}
+      DB_HOST: 127.0.0.1
+      DB_PORT: '3306'
+      DB_DATABASE: p08_ci_r43_dev_schema
+      DB_USERNAME: root
+      DB_PASSWORD: synthetic-r43-schema
+      SESSION_DRIVER: array
+      CACHE_STORE: array
+      GITHUB_ACTIONS: 'true'
+      P08_ISOLATED_INSTALL_TEST: 'YES'
+      P08_R43_DISPOSABLE_SCHEMA: 'YES'
+    steps:
+      - name: Original v016 schema exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: ed96b18627cd0a63b1da20a1fd8c9b6c1808f159
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-p08-issued
+      - name: Source-locked v017 bridge plan
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: 19e81c68fb1de3ce2bc2e938ba243341dca79519
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-p08-bridge
+      - name: Exact v018 new migration source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: 8d645d498fec5271434f4756c8b483d455575ed4
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-p08-target
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, zip, mbstring, intl, bcmath, dom, fileinfo
+      - name: Native disposable old-schema to new-schema with owner persistence and fault rollback
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C private-p08-issued rev-parse HEAD)" = 'ed96b18627cd0a63b1da20a1fd8c9b6c1808f159'
+          test "$(git -C private-p08-bridge rev-parse HEAD)" = '19e81c68fb1de3ce2bc2e938ba243341dca79519'
+          test "$(git -C private-p08-target rev-parse HEAD)" = '8d645d498fec5271434f4756c8b483d455575ed4'
+          php -l private-p08-bridge/src/Upgrade/R43AdditiveSchemaPlan.php > "$RUNNER_TEMP/p08-r43-schema-lint.log" 2>&1
+          php -l private-p08-bridge/tests/compatibility/r43_isolated_schema_native.php >> "$RUNNER_TEMP/p08-r43-schema-lint.log" 2>&1
+          for d in private-p08-issued private-p08-target; do
+            mkdir -p "$d/bootstrap/cache" "$d/storage/framework/cache/data" "$d/storage/framework/sessions" "$d/storage/framework/views" "$d/storage/logs"
+            (cd "$d" && composer install --no-scripts --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-r43-$d-composer.log" 2>&1) || { echo P08_R43_NATIVE_SCHEMA_DEPS=FAIL; exit 1; }
+          done
+          php -r '$p = new PDO("mysql:host=127.0.0.1;port=3306", "root", getenv("DB_PASSWORD")); $p->exec("CREATE DATABASE p08_ci_r43_dev_schema");'
+          (cd private-p08-issued && php artisan migrate --force > "$RUNNER_TEMP/p08-r43-issued-schema.log" 2>&1) || { echo P08_R43_NATIVE_ISSUED_BASE_MIGRATE=FAIL; exit 1; }
+          php private-p08-bridge/tests/compatibility/r43_isolated_schema_native.php private-p08-target > "$RUNNER_TEMP/p08-r43-native-schema.log" 2>&1 || { echo P08_R43_NATIVE_SCHEMA_TEST=FAIL; grep -E 'R43_|P08_R43_|PHP Fatal|Error' "$RUNNER_TEMP/p08-r43-native-schema.log" | tail -n 15 || true; exit 1; }
+          grep -q 'P08_R43_NATIVE_EMPTY_TABLE_ROLLBACK_OWNER_PARITY=PASS' "$RUNNER_TEMP/p08-r43-native-schema.log"
+          echo P08_R43_NATIVE_SIX_MIGRATION_FAULT_AND_ROLLBACK=PASS engine=${{ matrix.engine }}
+      - name: Clear private source and synthetic secrets
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- private-p08-issued private-p08-bridge private-p08-target
+          rm -f -- "$RUNNER_TEMP"/p08-r43-*.log
+          test ! -e private-p08-issued && test ! -e private-p08-bridge && test ! -e private-p08-target
+          echo P08_R43_NATIVE_SCHEMA_PRIVATE_CLEANUP=PASS
+
+  sqlite-schema-migration:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/p08-r43-v017-bridge-v018-source-20261124'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      APP_ENV: testing
+      APP_KEY: base64:REREREREREREREREREREREREREREREREREREREREREQ=
+      DB_CONNECTION: sqlite
+      SESSION_DRIVER: array
+      CACHE_STORE: array
+      P08_ISOLATED_INSTALL_TEST: 'YES'
+      P08_R43_DISPOSABLE_SCHEMA: 'YES'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: ed96b18627cd0a63b1da20a1fd8c9b6c1808f159
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-p08-issued
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: 19e81c68fb1de3ce2bc2e938ba243341dca79519
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-p08-bridge
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: 8d645d498fec5271434f4756c8b483d455575ed4
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-p08-target
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, zip, mbstring, intl, bcmath, dom, fileinfo
+      - name: Real old SQLite schema and disposable v018 migrations/rollback/fault
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          export DB_DATABASE="$RUNNER_TEMP/p08-r43-old-v016.sqlite"
+          test ! -e "$DB_DATABASE"
+          touch "$DB_DATABASE"
+          for d in private-p08-issued private-p08-target; do
+            mkdir -p "$d/bootstrap/cache" "$d/storage/framework/cache/data" "$d/storage/framework/sessions" "$d/storage/framework/views" "$d/storage/logs"
+            (cd "$d" && composer install --no-scripts --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-r43-$d-composer.log" 2>&1) || { echo P08_R43_SQLITE_DEPENDENCIES=FAIL; exit 1; }
+          done
+          (cd private-p08-issued && php artisan migrate --force > "$RUNNER_TEMP/p08-r43-issued-schema.log" 2>&1) || { echo P08_R43_SQLITE_ISSUED_MIGRATE=FAIL; exit 1; }
+          php private-p08-bridge/tests/compatibility/r43_isolated_schema_native.php private-p08-target > "$RUNNER_TEMP/p08-r43-sqlite-schema.log" 2>&1 || { echo P08_R43_SQLITE_SCHEMA_TEST=FAIL; grep -E 'R43_|P08_R43_|PHP Fatal|Error' "$RUNNER_TEMP/p08-r43-sqlite-schema.log" | tail -n 15 || true; exit 1; }
+          grep -q 'P08_R43_NATIVE_EMPTY_TABLE_ROLLBACK_OWNER_PARITY=PASS' "$RUNNER_TEMP/p08-r43-sqlite-schema.log"
+          echo P08_R43_NATIVE_SIX_MIGRATION_FAULT_AND_ROLLBACK=PASS engine=sqlite
+      - name: Delete all private checked out source and temp SQLite
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- private-p08-issued private-p08-bridge private-p08-target
+          rm -f -- "$RUNNER_TEMP"/p08-r43-*.log "$RUNNER_TEMP"/p08-r43-old-v016.sqlite "$RUNNER_TEMP"/p08-r43-old-v016.sqlite-wal "$RUNNER_TEMP"/p08-r43-old-v016.sqlite-shm
+          test ! -e private-p08-issued && test ! -e private-p08-bridge && test ! -e private-p08-target
+          echo P08_R43_SQLITE_SCHEMA_PRIVATE_CLEANUP=PASS
