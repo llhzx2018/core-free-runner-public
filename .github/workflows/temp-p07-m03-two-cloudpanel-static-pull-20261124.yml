@@ -258,7 +258,19 @@ jobs:
               raise SystemExit(78)
           class Forms(HTMLParser):
               def __init__(self):
-                  super().__init__();self.forms=[];self.cur=None;self.select=None
+                  super().__init__()
+                  self.forms=[];self.cur=None;self.select=None
+                  self.option=None;self.option_text=[]
+              def flush_option(self):
+                  if self.option is not None and self.cur is not None and self.select:
+                      if 'disabled' not in self.option:
+                          # HTML: without value= the option's text is the value.
+                          # Explicit value="" is different and must stay blank.
+                          value=self.option.get('value')
+                          if value is None:
+                              value=''.join(self.option_text).strip()
+                          self.cur['options'].setdefault(self.select,[]).append(value)
+                  self.option=None;self.option_text=[]
               def handle_starttag(self,tag,attrs):
                   a=dict(attrs)
                   if tag=='form':
@@ -272,12 +284,19 @@ jobs:
                       self.select=a.get('name')
                       if self.select:self.cur['fields'][self.select]=''
                   elif self.cur is not None and tag=='option' and self.select:
-                      self.cur['options'].setdefault(self.select,[]).append(a.get('value',''))
+                      self.flush_option()
+                      self.option=a;self.option_text=[]
                   elif self.cur is not None and tag=='button' and a.get('type')=='submit' and a.get('name'):
                       self.cur['fields'][a['name']]=a.get('value','')
+              def handle_data(self,data):
+                  if self.option is not None:
+                      self.option_text.append(data)
               def handle_endtag(self,tag):
-                  if tag=='select':self.select=None
+                  if tag=='option':self.flush_option()
+                  if tag=='select':
+                      self.flush_option();self.select=None
                   if tag=='form' and self.cur is not None:
+                      self.flush_option()
                       self.forms.append(self.cur);self.cur=None;self.select=None
           def kind(name):
               k=re.sub('[^a-z0-9]','',name.lower())
