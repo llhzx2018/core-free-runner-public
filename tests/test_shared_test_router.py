@@ -43,7 +43,7 @@ class RouterTest(unittest.TestCase):
             router.plan([{**req(), 'timeout_seconds': True}])
         p = router.plan([req()])
         p['tasks'][0]['lane'] = 'PRIVATE_SANDBOX'
-        with self.assertRaisesRegex(ValueError, 'LANE_TAMPERED'):
+        with self.assertRaisesRegex(ValueError, 'PLAN_TAMPERED'):
             router.execute_public(p, {}, workers=2)
 
     def test_independent_projects_really_overlap(self):

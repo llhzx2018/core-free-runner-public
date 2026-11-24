@@ -98,6 +98,11 @@ def _safe_run(command, timeout_seconds):
 def execute_public(planned, catalog, workers=2):
     if planned.get("protocol") != PROTOCOL or type(workers) is not int or not 1 <= workers <= 8:
         fail("PLAN_OR_CAPACITY_INVALID")
+    if not isinstance(planned, dict) or set(planned) != {"protocol", "tasks"} or not isinstance(planned.get("tasks"), list):
+        fail("PLAN_SHAPE_INVALID")
+    normalized = plan([task["request"] for task in planned["tasks"]])
+    if planned != normalized:
+        fail("PLAN_TAMPERED")
     if not isinstance(catalog, dict):
         fail("CATALOG_INVALID")
     results = [None] * len(planned["tasks"])
@@ -148,7 +153,7 @@ def main():
         print(json.dumps(output, sort_keys=True))
         return 0
     except (InvalidRequest, OSError, ValueError, KeyError, TypeError) as exc:
-        print(json.dumps({"protocol": PROTOCOL, "result": "BLOCKED_REQUEST", "reason": str(exc)[:120]}))
+        print(json.dumps({"protocol": PROTOCOL, "result": "BLOCKED_REQUEST", "reason": str(exc) if isinstance(exc, InvalidRequest) else "LOCAL_IO_OR_FORMAT_ERROR"}))
         return 2
 
 
