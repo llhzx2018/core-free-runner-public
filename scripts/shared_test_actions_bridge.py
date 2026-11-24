@@ -16,6 +16,9 @@ from shared_test_router import validate, route
 
 REPO = "llhzx2018/core-free-runner-public"
 WORKFLOW = "shared-test-on-demand.yml"
+# Exact reviewed Draft workflow Git blob; will only dispatch when this blob
+# is independently observed on default main after separate Owner approval.
+REVIEWED_WORKFLOW_BLOB = "c7ee7c5b1b7e59c80917006c4b7ec52d84abf151"
 OWNER = "llhzx2018"
 TEST_IDS = {"git-integrity", "python-syntax"}
 
