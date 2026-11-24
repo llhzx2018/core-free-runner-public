@@ -251,7 +251,16 @@ jobs:
           print('P07_D04_PRODUCT_NATIVE_ACTIVE_ENGINE_PROOF=PASS')
           PY
           GUEST
-              grep -E '^P07_D04_GUEST_[A-Z_]+
+              echo P07_D04_GUEST_ENGINE_PRECHECK_FAILED
+              exit 62
+            fi
+            grep -Fxq P07_D04_PRODUCT_NATIVE_ACTIVE_ENGINE_PROOF=PASS "$T/engine-$side.log"
+          done
+          a="$(ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" -i "$T/key" -p 22021 root@127.0.0.1 'cat /root/p07-db-release')"
+          b="$(ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" -i "$T/key" -p 22022 root@127.0.0.1 'cat /root/p07-db-release')"
+          test "$a" = "$b" || { echo P07_D04_ACTUAL_DB_ENGINE_FLAVOR_MISMATCH; exit 63; }
+          case "$a" in MYSQL_8.4|MYSQL_8.4_PERCONA) ;; *) echo P07_D04_ACTUAL_DB_NOT_MYSQL84;exit 64 ;; esac
+          echo P07_D04_TWO_CLOUDPANEL_REAL_ACTIVE_DB_ENGINE_MATCH=PASS
           ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" -i "$T/key" -p 22021 root@127.0.0.1 bash -se <<'SOURCE' > "$T/source-site.log" 2>&1
           set -Eeuo pipefail
           clpctl site:add:static --domainName=static-p07.example.test --siteUser=p07static --siteUserPassword=Synthetic2026SiteOnlySecure123
