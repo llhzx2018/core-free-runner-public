@@ -66,8 +66,8 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(self.q.cancel("task-000002")["state"],"CANCEL_REQUESTED")
         self.assertTrue(self.q.heartbeat(first["task_id"],first["lease_token"],now=100)["cancel_requested"])
         with self.assertRaisesRegex(InvalidTask,"CANCELLED_CANNOT_PASS"):
-            self.q.finish(first["task_id"],first["lease_token"],"SUCCEEDED")
-        self.assertEqual(self.q.finish(first["task_id"],first["lease_token"],"CANCELLED")["state"],"CANCELLED")
+            self.q.finish(first["task_id"],first["lease_token"],"SUCCEEDED",now=100)
+        self.assertEqual(self.q.finish(first["task_id"],first["lease_token"],"CANCELLED",now=100)["state"],"CANCELLED")
 
     def test_lease_expiry_fails_closed_no_replay(self):
         self.q.enqueue(job())
@@ -75,15 +75,15 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(self.q.recover(now=110)["recovered"],1)
         self.assertEqual(DurableQueue(self.db).status("task-000001")["state"],"INTERRUPTED_NO_REPLAY")
         self.assertEqual(self.q.claim(CAP,now=111)["state"],"DEFERRED_CAPACITY_OR_EMPTY")
-        with self.assertRaises(InvalidTask): self.q.finish("task-000001",r["lease_token"],"SUCCEEDED")
+        with self.assertRaises(InvalidTask): self.q.finish("task-000001",r["lease_token"],"SUCCEEDED",now=100)
 
     def test_lease_token_and_run_binding(self):
         self.q.enqueue(job())
         r=self.q.claim(CAP,now=100)
-        with self.assertRaises(InvalidTask): self.q.bind_run("task-000001","wrong",123)
-        self.assertEqual(self.q.bind_run("task-000001",r["lease_token"],123)["provider_attestation"],"REQUIRES_REAL_GITHUB_READBACK")
-        with self.assertRaises(InvalidTask): self.q.bind_run("task-000001",r["lease_token"],124)
-        self.assertEqual(self.q.finish("task-000001",r["lease_token"],"SUCCEEDED")["state"],"SUCCEEDED")
+        with self.assertRaises(InvalidTask): self.q.bind_run("task-000001","wrong",123,now=100)
+        self.assertEqual(self.q.bind_run("task-000001",r["lease_token"],123,now=100)["provider_attestation"],"REQUIRES_REAL_GITHUB_READBACK")
+        with self.assertRaises(InvalidTask): self.q.bind_run("task-000001",r["lease_token"],124,now=100)
+        self.assertEqual(self.q.finish("task-000001",r["lease_token"],"SUCCEEDED",now=100)["state"],"SUCCEEDED")
         self.assertNotIn("token",str(self.q.status("task-000001")))
 
     def test_sqlite_parallel_claim_single_slot(self):
@@ -101,6 +101,17 @@ class QueueTest(unittest.TestCase):
         got=[result.get(timeout=5) for _ in ps]
         for p in ps:p.join(5);self.assertEqual(p.exitcode,0)
         self.assertEqual(sorted(got),["DEFERRED","task-000001"])
+
+    def test_expired_old_worker_cannot_heartbeat_or_commit(self):
+        self.q.enqueue(job())
+        a=self.q.claim(CAP,now=100,lease_seconds=10)
+        for action in (
+            lambda: self.q.heartbeat(a["task_id"],a["lease_token"],now=110),
+            lambda: self.q.finish(a["task_id"],a["lease_token"],"SUCCEEDED",now=110),
+            lambda: self.q.bind_run(a["task_id"],a["lease_token"],123,now=110),
+        ):
+            with self.assertRaisesRegex(InvalidTask,"LEASE_EXPIRED"):
+                action()
 
     def test_untrusted_queue_directory_and_symlink(self):
         self.assertEqual(self.db.stat().st_mode & 0o077,0)
