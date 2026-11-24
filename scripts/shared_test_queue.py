@@ -236,6 +236,8 @@ class DurableQueue:
                 return {"task_id":task_id,"state":"RUN_CORRELATION_NOT_PROVEN","machine_pass":False}
         proof=bridge.inspect_bound_run(run_id,job)
         if proof["remote_terminal"]:
+            if type(proof.get("job_id")) is int and proof["job_id"]>0:
+                self.bind_run(task_id,token,run_id,job_id=proof["job_id"],now=now)
             if state=="CANCEL_REQUESTED":
                 final="CANCELLED" if proof["cancel_confirmed"] else "INFRA_FAILED"
             elif proof["machine_pass"]:
@@ -305,6 +307,13 @@ def main():
     for action in ("status","cancel"):
         a=subs.add_parser(action);a.add_argument("--task-id",required=True)
     subs.add_parser("recover")
+    dp=subs.add_parser("dispatch-public")
+    dp.add_argument("--capacity",type=int,default=2)
+    dp.add_argument("--reviewed-workflow-blob",required=True)
+    for name in ("poll-public","reconcile-public"):
+        sub=subs.add_parser(name)
+        sub.add_argument("--task-id",required=True)
+        sub.add_argument("--reviewed-workflow-blob",required=True)
     args=p.parse_args()
     try:
         q=DurableQueue(args.db)
@@ -325,6 +334,18 @@ def main():
                 ans["lease_token_stored_privately"]=True
         elif args.action=="status": ans=q.status(args.task_id)
         elif args.action=="cancel": ans=q.cancel(args.task_id)
+        elif args.action in ("dispatch-public","poll-public","reconcile-public"):
+            # Existing runtime injected Actions credential only. This does not
+            # configure a new Runner, timer, Repo Variable or GitHub Secret.
+            from shared_test_actions_bridge import GithubActionsBridge, GithubApiHTTPS
+            bridge=GithubActionsBridge(GithubApiHTTPS(),
+                         expected_workflow_blob=args.reviewed_workflow_blob)
+            if args.action=="dispatch-public":
+                ans=q.dispatch_public_once(bridge,capacity=args.capacity)
+            elif args.action=="poll-public":
+                ans=q.poll_public_once(args.task_id,bridge)
+            else:
+                ans=q.reconcile_interrupted(args.task_id,bridge)
         else: ans=q.recover()
         print(json.dumps({"schema":SCHEMA,**ans},sort_keys=True));return 0
     except (InvalidTask,OSError,ValueError,sqlite3.Error) as exc:
