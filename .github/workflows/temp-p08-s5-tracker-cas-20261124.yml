@@ -32,7 +32,8 @@ jobs:
           echo P08_S5_TRACKER_CAS_IDENTITY=PASS
   tracker-feature:
     needs: identity-preflight
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/p08-s5-tracker-cas-20261124'
+    # Exact-source focused PHP Feature passed on previous run 45433029623; reuse.
+    if: false
     runs-on: ubuntu-24.04
     timeout-minutes: 24
     steps:
@@ -107,3 +108,126 @@ jobs:
           rm -f -- "$RUNNER_TEMP"/p08-s5-*.log "$RUNNER_TEMP/p08-s5-junit.xml"
           test ! -e private-p08
           echo P08_S5_PRIVATE_CLEANUP=PASS
+
+  native-cas:
+    needs: identity-preflight
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/p08-s5-tracker-cas-20261124'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 23
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [mysql, mariadb]
+    services:
+      db:
+        image: ${{ matrix.engine == 'mysql' && 'mysql:8.4' || 'mariadb:11.8' }}
+        env:
+          MYSQL_ROOT_PASSWORD: p08-s5-synthetic
+          MYSQL_ROOT_HOST: '%'
+          MARIADB_ROOT_PASSWORD: p08-s5-synthetic
+          MARIADB_ROOT_HOST: '%'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="sh -c 'mariadb-admin ping --silent || mysqladmin ping --silent'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      APP_ENV: testing
+      APP_KEY: base64:REREREREREREREREREREREREREREREREREREREREREQ=
+      DB_CONNECTION: mysql
+      DB_HOST: 127.0.0.1
+      DB_PORT: '3306'
+      DB_DATABASE: p08_s5_cas_ci
+      DB_USERNAME: root
+      DB_PASSWORD: p08-s5-synthetic
+      SESSION_DRIVER: array
+      CACHE_STORE: array
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-p08
+          fetch-depth: 1
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, zip, mbstring, intl, bcmath, dom, fileinfo
+      - name: Native database CAS stale rejection and latest-write acceptance
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
+          composer install --no-scripts --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-s5-native-composer.log" 2>&1 || { echo P08_S5_NATIVE_COMPOSER=FAIL; exit 1; }
+          php -r '$p=new PDO("mysql:host=127.0.0.1;port=3306","root",getenv("DB_PASSWORD"));$p->exec("CREATE DATABASE IF NOT EXISTS p08_s5_cas_ci");'
+          php artisan migrate --force > "$RUNNER_TEMP/p08-s5-native-migration.log" 2>&1 || { echo P08_S5_NATIVE_MIGRATE=FAIL; exit 1; }
+          cat > "$RUNNER_TEMP/p08-s5-native-cas.php" <<'PHP'
+          <?php
+          declare(strict_types=1);
+          require getcwd().'/vendor/autoload.php';
+          $app=require getcwd().'/bootstrap/app.php';
+          $app->make(\Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+          $db=\Illuminate\Support\Facades\DB::getFacadeRoot();
+          $owner=\Illuminate\Support\Facades\DB::table('users')->insertGetId([
+              'name'=>'Synthetic R24 Owner','email'=>'r24-native@isolated.example',
+              'password'=>\Illuminate\Support\Facades\Hash::make('Synthetic-CI-Only'),
+              'created_at'=>now(),'updated_at'=>now()
+          ]);
+          $id='a12e0e10-2c3d-4e5f-89ab-cdef01234567';
+          \Illuminate\Support\Facades\DB::table('tracker_connections')->insert([
+              'id'=>$id,'owner_id'=>$owner,'provider'=>'bemob',
+              'label'=>'Native synthetic', 'base_url'=>'https://api.bemob.com',
+              'encrypted_api_key'=>'synthetic-encrypted-not-a-real-key',
+              'state'=>'CONNECTED','created_at'=>now(),'updated_at'=>now(),
+          ]);
+          $query=fn()=>\Illuminate\Support\Facades\DB::table('tracker_connections')->where('id',$id)->where('owner_id',$owner);
+          $old=$query()->first();
+          $query()->update(['snapshot_json'=>'{"source":"newer"}','updated_at'=>now()]);
+          $guard=fn($x)=>$query()->where('provider',$x->provider)
+              ->where('encrypted_api_key',$x->encrypted_api_key)->where('state',$x->state)
+              ->where('snapshot_json',$x->snapshot_json)->where('last_checked_at',$x->last_checked_at);
+          if($guard($old)->update(['snapshot_json'=>'{"source":"stale"}'])!==0) exit(11);
+          if($query()->value('snapshot_json')!=='{"source":"newer"}') exit(12);
+          $new=$query()->first();
+          if($guard($new)->update(['snapshot_json'=>'{"source":"fresh"}'])!==1) exit(13);
+          if($query()->value('snapshot_json')!=='{"source":"fresh"}') exit(14);
+          $cap=fn()=>\Illuminate\Support\Facades\DB::table('tracker_report_capabilities')
+              ->where('tracker_connection_id',$id)->where('owner_id',$owner);
+          $cap()->insert([
+              'tracker_connection_id'=>$id,'owner_id'=>$owner,'status'=>'AVAILABLE',
+              'metrics_json'=>'["clicks"]','dimensions_json'=>'["campaign"]',
+              'created_at'=>now(),'updated_at'=>now(),
+          ]);
+          $oldCap=$cap()->first();
+          $cap()->update(['metrics_json'=>'["newer"]','updated_at'=>now()]);
+          $cguard=fn($x)=>$cap()->where('status',$x->status)
+              ->where('metrics_json',$x->metrics_json)->where('dimensions_json',$x->dimensions_json)
+              ->where('last_checked_at',$x->last_checked_at)
+              ->where('last_error',$x->last_error)->where('updated_at',$x->updated_at);
+          if($cguard($oldCap)->update(['metrics_json'=>'["stale"]'])!==0) exit(15);
+          if($cap()->value('metrics_json')!=='["newer"]') exit(16);
+          $newCap=$cap()->first();
+          if($cguard($newCap)->update(['metrics_json'=>'["fresh"]'])!==1) exit(17);
+          if($cap()->value('metrics_json')!=='["fresh"]') exit(18);
+          echo "P08_S5_NATIVE_SQL_CAS_STALE_REJECT_AND_FRESH_ACCEPT=PASS\n";
+          PHP
+          php "$RUNNER_TEMP/p08-s5-native-cas.php" > "$RUNNER_TEMP/p08-s5-native-test.log" 2>&1 || { echo P08_S5_NATIVE_CAS=FAIL; exit 1; }
+          echo P08_S5_NATIVE_CAS=PASS
+      - name: Cleanup private P08 source and synthetic DB evidence
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- private-p08
+          rm -f -- "$RUNNER_TEMP"/p08-s5-native-*.log "$RUNNER_TEMP/p08-s5-native-cas.php"
+          test ! -e private-p08
+          echo P08_S5_NATIVE_PRIVATE_CLEANUP=PASS
