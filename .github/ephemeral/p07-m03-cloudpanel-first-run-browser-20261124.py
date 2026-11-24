@@ -13,6 +13,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
+from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.support.ui import Select, WebDriverWait
 
 def die(code: str) -> None:
@@ -57,7 +58,10 @@ def select_timezone(driver, form) -> bool:
     options = selector.options
     if not 3 <= len(options) <= 800:
         die("TIMEZONE_NATIVE_OPTION_COUNT_UNEXPECTED")
-    current = (selector.first_selected_option.get_attribute("value") or "").strip()
+    try:
+        current = (selector.first_selected_option.get_attribute("value") or "").strip()
+    except NoSuchElementException:
+        current = ""
     for i, option in enumerate(options):
         value = (option.get_attribute("value") or "").strip()
         if (not option.is_enabled() or not value or
@@ -93,20 +97,25 @@ def create(port: int) -> None:
             options.add_argument(flag)
         options.add_argument("--user-data-dir=" + profile)
         browser = None
+        phase = "BROWSER_CREATE"
         try:
             browser = webdriver.Chrome(
                 service=Service(executable_path=driver_path, log_output=subprocess.DEVNULL),
                 options=options,
             )
+            phase = "BROWSER_SETUP"
             browser.set_page_load_timeout(35)
+            phase = "PAGE_LOAD"
             browser.get(f"https://127.0.0.1:{port}/")
             if not is_local(browser.current_url, port):
                 die("NONLOCAL_NAVIGATION_REJECTED")
+            phase = "FORM_DISCOVERY"
             form = WebDriverWait(browser, 20).until(lambda d: find_form(d))
             if form is None:
                 die("FIRST_ADMIN_FORM_NOT_FOUND")
             if not is_local(form.get_attribute("action") or browser.current_url, port):
                 die("NONLOCAL_FORM_ACTION_REJECTED")
+            phase = "FILL_FIELDS"
             password = secrets.token_urlsafe(36)
             for e in form.find_elements(By.CSS_SELECTOR, "input[name]"):
                 tag = kind(e.get_attribute("name") or "")
@@ -122,10 +131,12 @@ def create(port: int) -> None:
                         die("REQUIRED_INPUT_NOT_INTERACTIVE")
                     e.clear()
                     e.send_keys(value)
+            phase = "TIMEZONE_SELECT"
             if not select_timezone(browser, form):
                 die("TIMEZONE_BROWSER_SELECTION_UNSUPPORTED")
             # In this disposable synthetic first-run only, act on one real
             # form-local required/legal acknowledgement. No external account.
+            phase = "TERMS_CHECKBOX"
             boxes = form.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
             legal = []
             for c in boxes:
@@ -143,6 +154,7 @@ def create(port: int) -> None:
                     c.click()
                 if not c.is_selected():
                     die("FIRST_RUN_TERMS_CHECKBOX_NOT_SELECTED")
+            phase = "ROLE_SELECTION"
             for e in form.find_elements(By.CSS_SELECTOR, "select[name]"):
                 if kind(e.get_attribute("name") or "") == "role":
                     s = Select(e)
@@ -151,6 +163,7 @@ def create(port: int) -> None:
                     if not allowed:
                         die("ADMIN_ROLE_UNVERIFIED")
                     s.select_by_value(allowed[0])
+            phase = "SUBMIT_BUTTON_DISCOVERY"
             buttons = form.find_elements(
                 By.CSS_SELECTOR,
                 "button[type='submit'],input[type='submit'],button:not([type])",
@@ -158,7 +171,9 @@ def create(port: int) -> None:
             button = next((b for b in buttons if b.is_displayed() and b.is_enabled()), None)
             if button is None:
                 die("CREATE_USER_SUBMIT_MISSING")
+            phase = "SUBMIT_CLICK"
             button.click()
+            phase = "POST_SUBMIT"
             time.sleep(3)
             if not is_local(browser.current_url, port):
                 die("NONLOCAL_REDIRECT_REJECTED")
@@ -167,7 +182,9 @@ def create(port: int) -> None:
         except SystemExit:
             raise
         except Exception:
-            die("FIRST_RUN_UI_INTERACTION_FAILED")
+            # Fixed, branch-owned phase only. Never print Selenium tracebacks,
+            # private HTML, form values or exception messages to public logs.
+            die("FIRST_RUN_" + phase + "_UNHANDLED")
         finally:
             if browser is not None:
                 try:
