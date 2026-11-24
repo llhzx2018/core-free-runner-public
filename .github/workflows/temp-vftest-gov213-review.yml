@@ -25,40 +25,99 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
           path: transient-gov-source
-      - name: Check actual GOV candidate source scope and run existing authority gates
+      - name: Verify exact source and run all original GOV acceptance checks with authenticated PR_BODY
         shell: bash
         env:
           GOV_HEAD: 09df22bb0a716867f6ec8fe45a4b8ef24b2f4d2e
           GOV_BASE: e57edc475b44df7d682c857703dabc3d75fc8193
+          GOV_TOKEN: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
         run: |
           set -Eeuo pipefail
           set +x
           cd transient-gov-source
-          test "$(git rev-parse HEAD)" = "$GOV_HEAD" || { echo SOURCE_MISMATCH; exit 2; }
-          test -z "$(git status --porcelain)" || { echo DIRTY_SOURCE; exit 2; }
+          test "$(git rev-parse HEAD)" = "$GOV_HEAD" || { echo GOV_EXACT_SOURCE_MISMATCH; exit 2; }
+          test -z "$(git status --porcelain)" || { echo GOV_DIRTY_SOURCE; exit 2; }
           git cat-file -e "$GOV_BASE^{commit}"
           test "$(git -c core.quotepath=false diff --name-only "$GOV_BASE" "$GOV_HEAD" | sort)" = "$(printf '%s\n' CURRENT.md governance/agent/VF_AGENT_INFRA_AUTHORITY.md 中文文档导航.md | sort)" || { echo GOV_SCOPE_DRIFT; exit 2; }
           echo GOV_EXACT_SOURCE_SCOPE=PASS
-          if python3 -B governance/public-authority/tools/global_closure_lint.py --git-base "$GOV_BASE" --git-head "$GOV_HEAD" > /dev/null 2>&1; then
-            echo GOV_GLOBAL_CLOSURE_LINT=PASS
-          else
-            echo GOV_GLOBAL_CLOSURE_LINT=FAIL
-            exit 1
-          fi
-          if python3 -B governance/public-authority/tools/current_dependency_lint.py --git-base "$GOV_BASE" --git-head "$GOV_HEAD" > /dev/null 2>&1; then
-            echo GOV_CURRENT_DEPENDENCY_LINT=PASS
-          else
-            echo GOV_CURRENT_DEPENDENCY_LINT=FAIL
-            exit 1
-          fi
-          if python3 -B -m unittest discover -s governance/public-authority/tools -p 'test_global_closure_lint.py' > /dev/null 2>&1; then
-            echo GOV_GLOBAL_CLOSURE_REGRESSION=PASS
-          else
-            echo GOV_GLOBAL_CLOSURE_REGRESSION=FAIL
-            exit 1
-          fi
-          echo GOV_EXACT_SOURCE_SHA="$GOV_HEAD"
-          echo GOV_PUBLIC_SAFE_EVIDENCE_ONLY=YES
+          python3 -B - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+          import urllib.request
+          
+          head = os.environ['GOV_HEAD']
+          base = os.environ['GOV_BASE']
+          token = os.environ['GOV_TOKEN']
+          if not token:
+              print('GOV_PR_BODY_ORIGIN=TOKEN_UNAVAILABLE')
+              raise SystemExit(2)
+          url = 'https://api.github.com/repos/llhzx2018/gov-doc/pulls/213'
+          req = urllib.request.Request(
+              url, headers={'Authorization': 'Bearer ' + token,
+                            'Accept': 'application/vnd.github+json',
+                            'X-GitHub-Api-Version': '2022-11-28',
+                            'User-Agent': 'VF-GOV-Exact-Source-Gate'})
+          try:
+              with urllib.request.urlopen(req, timeout=25) as response:
+                  pr = json.load(response)
+          except Exception:
+              print('GOV_PR_BODY_ORIGIN=AUTHENTICATED_FETCH_FAILED')
+              raise SystemExit(2)
+          if not (pr.get('number') == 213
+                  and pr.get('state') == 'open'
+                  and pr.get('head', {}).get('sha') == head
+                  and pr.get('base', {}).get('sha') == base
+                  and pr.get('head', {}).get('repo', {}).get('full_name') == 'llhzx2018/gov-doc'
+                  and pr.get('user', {}).get('login') == 'llhzx2018'):
+              print('GOV_PR_BODY_ORIGIN=EXACT_PR_HEAD_MISMATCH')
+              raise SystemExit(2)
+          body = pr.get('body')
+          if not isinstance(body, str) or len(body.encode('utf-8')) > 12000:
+              print('GOV_PR_BODY_ORIGIN=INVALID_BODY_SIZE_OR_TYPE')
+              raise SystemExit(2)
+          print('GOV_PR_BODY_ORIGIN=AUTHENTIC_GITHUB_PR_213_EXACT_HEAD')
+          # Only the real linter gets the private PR body; no file, log or artifact.
+          clean_env = os.environ.copy()
+          clean_env.pop('GOV_TOKEN', None)
+          clean_env.pop('VF_PRIVATE_READ_TOKEN', None)
+          
+          commands = (
+              ('GOV_GLOBAL_CLOSURE_LINT', ['python3', '-B', 'governance/public-authority/tools/global_closure_lint.py', '--git-base', base, '--git-head', head], True),
+              ('GOV_CURRENT_DEPENDENCY_LINT', ['python3', '-B', 'governance/public-authority/tools/current_dependency_lint.py', '--git-base', base, '--git-head', head], False),
+              ('GOV_GLOBAL_CLOSURE_REGRESSION', ['python3', '-B', '-m', 'unittest', 'discover', '-s', 'governance/public-authority/tools', '-p', 'test_global_closure_lint.py', '-v'], False),
+              ('GOV_CURRENT_DEPENDENCY_REGRESSION', ['python3', '-B', '-m', 'unittest', 'discover', '-s', 'governance/public-authority/tools', '-p', 'test_current_dependency_lint.py', '-v'], False),
+          )
+          for name, cmd, needs_body in commands:
+              env = clean_env.copy()
+              if needs_body:
+                  env['PR_BODY'] = body
+              else:
+                  env.pop('PR_BODY', None)
+              try:
+                  result = subprocess.run(cmd, env=env, capture_output=True, text=True, timeout=300, check=False)
+              except (OSError, subprocess.TimeoutExpired):
+                  print(name + '=EXECUTION_BLOCKED')
+                  raise SystemExit(2)
+              if result.returncode:
+                  if needs_body:
+                      # The existing checker emits opaque failure identifiers.
+                      reasons = re.findall(r'^GLOBAL_CLOSURE=BLOCKED: ([A-Z0-9_:\-]+)$', result.stdout, flags=re.M)
+                      for reason in reasons[:3]:
+                          print('GOV_GLOBAL_CLOSURE_REASON=' + reason)
+                  else:
+                      failures = re.findall(r'^(?:FAILED|ERROR):?\s*(?:\([a-zA-Z0-9_= ,]+\))?$', result.stderr, flags=re.M)
+                      for failure in failures[:2]:
+                          print(name + '_REASON=' + re.sub(r'[^A-Za-z0-9_=,() -]', '', failure)[:100])
+                  print(name + '=FAIL_EXIT_' + str(result.returncode))
+                  raise SystemExit(1)
+              print(name + '=PASS')
+          print('GOV_EXACT_SOURCE_SHA=' + head)
+          print('GOV_PR_BODY_LOGGED=NO')
+          print('GOV_PRIVATE_SOURCE_UPLOADED=NO')
+          PY
       - name: Remove private GOV source
         if: always()
         shell: bash
