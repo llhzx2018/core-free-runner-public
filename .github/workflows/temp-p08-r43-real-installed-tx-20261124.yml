@@ -1,0 +1,132 @@
+name: TEMP P08 R43 installed v017 to v018 schema transaction and process-kill recovery
+on:
+  pull_request:
+    paths:
+      - .github/workflows/temp-p08-r43-real-installed-tx-20261124.yml
+permissions:
+  contents: read
+concurrency:
+  group: temp-p08-r43-installed-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  installed-sqlite-transaction:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/p08-r43-real-installed-tx-20261124'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      P08_ISOLATED_INSTALL_TEST: 'YES'
+      P08_R43_DISPOSABLE_SCHEMA: 'YES'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: fb9bbc47a60394495caaa3ed4e84675c0a487c52
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-p08-bridge
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: 8d645d498fec5271434f4756c8b483d455575ed4
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-p08-target
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: gov-proof
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, zip, mbstring, intl, bcmath, dom, fileinfo, posix
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Exact source locked dependencies and two real source-built FULL archives
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C private-p08-bridge rev-parse HEAD)" = 'fb9bbc47a60394495caaa3ed4e84675c0a487c52'
+          test "$(git -C private-p08-target rev-parse HEAD)" = '8d645d498fec5271434f4756c8b483d455575ed4'
+          test "$(cat private-p08-bridge/VERSION)" = '0.1.17'
+          test "$(cat private-p08-target/VERSION)" = '0.1.18'
+          php -l private-p08-bridge/src/Upgrade/R43IsolatedSchemaTransaction.php > "$RUNNER_TEMP/r43-php-syntax.log" 2>&1 || { echo R43_TRANSACTION_PHP_SYNTAX=FAIL; exit 1; }
+          php -l private-p08-bridge/tests/compatibility/r43_isolated_installed_transaction.php >> "$RUNNER_TEMP/r43-php-syntax.log" 2>&1 || { echo R43_TEST_PHP_SYNTAX=FAIL; exit 1; }
+          for d in private-p08-bridge private-p08-target; do
+            mkdir -p "$d/bootstrap/cache" "$d/storage/framework/cache/data" "$d/storage/framework/sessions" "$d/storage/framework/views" "$d/storage/logs"
+            (cd "$d" && composer install --no-dev --no-scripts --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/r43-$d-composer.log" 2>&1) || { echo R43_COMPOSER_LOCK=FAIL; exit 1; }
+            (cd "$d" && npm ci --no-audit --no-fund > "$RUNNER_TEMP/r43-$d-npm.log" 2>&1 && npm run build > "$RUNNER_TEMP/r43-$d-vite.log" 2>&1) || { echo R43_NPM_VITE=FAIL; exit 1; }
+          done
+          python3 private-p08-bridge/scripts/build_full.py --source private-p08-bridge --output "$RUNNER_TEMP/r43-bridge.zip" --version 0.1.17 --source-sha 'fb9bbc47a60394495caaa3ed4e84675c0a487c52' --governance-root gov-proof > "$RUNNER_TEMP/r43-bridge-package.log" 2>&1 || { echo R43_BRIDGE_CANONICAL_FULL=FAIL; grep 'FULL_BLOCKED\|CONTRACT_REASON=' "$RUNNER_TEMP/r43-bridge-package.log" | head -n 7 || true; exit 1; }
+          python3 private-p08-target/scripts/build_full.py --source private-p08-target --output "$RUNNER_TEMP/r43-target.zip" --version 0.1.18 --source-sha '8d645d498fec5271434f4756c8b483d455575ed4' --governance-root gov-proof > "$RUNNER_TEMP/r43-target-package.log" 2>&1 || { echo R43_TARGET_CANONICAL_FULL=FAIL; grep 'FULL_BLOCKED\|CONTRACT_REASON=' "$RUNNER_TEMP/r43-target-package.log" | head -n 7 || true; exit 1; }
+          mkdir -m 700 "$RUNNER_TEMP/p08-r43-target-extract"
+          unzip -q "$RUNNER_TEMP/r43-target.zip" -d "$RUNNER_TEMP/p08-r43-target-extract"
+          echo P08_R43_CANONICAL_DEV_FULLS_EXTRACTED=PASS
+      - name: Three independent freshly installed v017 Owners with original 15 migrations
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          for mode in success fault kill; do
+            site="$RUNNER_TEMP/p08-r43-site-$mode"
+            mkdir -m 700 "$site"
+            unzip -q "$RUNNER_TEMP/r43-bridge.zip" -d "$site"
+            php private-p08-bridge/tests/compatibility/r43_isolated_installed_transaction.php setup "$site" "$RUNNER_TEMP/p08-r43-target-extract" 'fb9bbc47a60394495caaa3ed4e84675c0a487c52' '8d645d498fec5271434f4756c8b483d455575ed4' > "$RUNNER_TEMP/r43-setup-$mode.log" 2>&1 || { echo "P08_R43_NATIVE_OWNER_SETUP_FAIL=$mode"; grep -E 'R43_|Fatal error|Error:' "$RUNNER_TEMP/r43-setup-$mode.log" | head -n 8 || true; exit 1; }
+            mkdir -m 700 -p "$site/releases/fb9bbc47a60394495caaa3ed4e84675c0a487c52"
+            unzip -q "$RUNNER_TEMP/r43-bridge.zip" -d "$site/releases/fb9bbc47a60394495caaa3ed4e84675c0a487c52"
+            ln -s "releases/fb9bbc47a60394495caaa3ed4e84675c0a487c52" "$site/current"
+          done
+          echo P08_R43_THREE_ISOLATED_REAL_FULL_OWNER_INSTALLS=PASS
+      - name: Actual isolated installed-sqlite pointer and schema transaction success
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          site="$RUNNER_TEMP/p08-r43-site-success"
+          php private-p08-bridge/tests/compatibility/r43_isolated_installed_transaction.php success "$site" "$RUNNER_TEMP/p08-r43-target-extract" 'fb9bbc47a60394495caaa3ed4e84675c0a487c52' '8d645d498fec5271434f4756c8b483d455575ed4' > "$RUNNER_TEMP/r43-success.log" 2>&1 || { echo P08_R43_INSTALLED_SUCCESS=FAIL; grep -E 'R43_|Fatal error|Error:' "$RUNNER_TEMP/r43-success.log" | head -n 12 || true; exit 1; }
+          php private-p08-bridge/tests/compatibility/r43_isolated_installed_transaction.php verify-success "$site" "$RUNNER_TEMP/p08-r43-target-extract" 'fb9bbc47a60394495caaa3ed4e84675c0a487c52' '8d645d498fec5271434f4756c8b483d455575ed4' > "$RUNNER_TEMP/r43-verify-success.log" 2>&1 || { echo P08_R43_INSTALLED_VERIFY_SUCCESS=FAIL; grep -E 'R43_|Fatal error|Error:' "$RUNNER_TEMP/r43-verify-success.log" | head -n 10 || true; exit 1; }
+          echo P08_R43_REAL_OWNER_CODE_POINTER_AND_SCHEMA=PASS
+      - name: Fault at migration three automatically returns original Owner/Token/media
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          site="$RUNNER_TEMP/p08-r43-site-fault"
+          php private-p08-bridge/tests/compatibility/r43_isolated_installed_transaction.php fault "$site" "$RUNNER_TEMP/p08-r43-target-extract" 'fb9bbc47a60394495caaa3ed4e84675c0a487c52' '8d645d498fec5271434f4756c8b483d455575ed4' > "$RUNNER_TEMP/r43-fault.log" 2>&1 || { echo P08_R43_INSTALLED_FAULT=FAIL; grep -E 'R43_|Fatal error|Error:' "$RUNNER_TEMP/r43-fault.log" | head -n 12 || true; exit 1; }
+          php private-p08-bridge/tests/compatibility/r43_isolated_installed_transaction.php verify-rollback "$site" "$RUNNER_TEMP/p08-r43-target-extract" 'fb9bbc47a60394495caaa3ed4e84675c0a487c52' '8d645d498fec5271434f4756c8b483d455575ed4' > "$RUNNER_TEMP/r43-verify-fault.log" 2>&1 || { echo P08_R43_INSTALLED_FAULT_READBACK=FAIL; grep -E 'R43_|Fatal error|Error:' "$RUNNER_TEMP/r43-verify-fault.log" | head -n 10 || true; exit 1; }
+          echo P08_R43_REAL_INSTALLED_MIGRATION_FAULT_REVERSION=PASS
+      - name: REAL SIGKILL 137 after pointer swap and independent next process recovery
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          site="$RUNNER_TEMP/p08-r43-site-kill"
+          set +e
+          php private-p08-bridge/tests/compatibility/r43_isolated_installed_transaction.php kill "$site" "$RUNNER_TEMP/p08-r43-target-extract" 'fb9bbc47a60394495caaa3ed4e84675c0a487c52' '8d645d498fec5271434f4756c8b483d455575ed4' > "$RUNNER_TEMP/r43-kill.log" 2>&1
+          status=$?
+          set -e
+          test "$status" -eq 137 || { echo "P08_R43_REAL_SIGKILL_EXIT=FAIL_$status"; grep -E 'R43_|Fatal error|Error:' "$RUNNER_TEMP/r43-kill.log" | head -n 9 || true; exit 1; }
+          test "$(readlink "$site/current")" = 'releases/8d645d498fec5271434f4756c8b483d455575ed4'
+          test -f "$site/storage/app/private/adops/maintenance/maintenance.json"
+          php private-p08-bridge/tests/compatibility/r43_isolated_installed_transaction.php recover "$site" "$RUNNER_TEMP/p08-r43-target-extract" 'fb9bbc47a60394495caaa3ed4e84675c0a487c52' '8d645d498fec5271434f4756c8b483d455575ed4' > "$RUNNER_TEMP/r43-recover.log" 2>&1 || { echo P08_R43_NEW_PROCESS_RECOVERY=FAIL; grep -E 'R43_|Fatal error|Error:' "$RUNNER_TEMP/r43-recover.log" | head -n 15 || true; exit 1; }
+          php private-p08-bridge/tests/compatibility/r43_isolated_installed_transaction.php verify-rollback "$site" "$RUNNER_TEMP/p08-r43-target-extract" 'fb9bbc47a60394495caaa3ed4e84675c0a487c52' '8d645d498fec5271434f4756c8b483d455575ed4' > "$RUNNER_TEMP/r43-verify-kill.log" 2>&1 || { echo P08_R43_KILL_READBACK=FAIL; grep -E 'R43_|Fatal error|Error:' "$RUNNER_TEMP/r43-verify-kill.log" | head -n 9 || true; exit 1; }
+          echo P08_R43_REAL_SIGKILL_137_INDEPENDENT_RECOVERY_OWNER_PRESERVED=PASS
+      - name: Wipe synthetic sites, private source, recovery files and artifacts
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- private-p08-bridge private-p08-target gov-proof
+          rm -rf -- "$RUNNER_TEMP"/p08-r43-target-extract "$RUNNER_TEMP"/p08-r43-site-success "$RUNNER_TEMP"/p08-r43-site-fault "$RUNNER_TEMP"/p08-r43-site-kill
+          rm -f -- "$RUNNER_TEMP"/r43-*.zip "$RUNNER_TEMP"/r43-*.log
+          test ! -e private-p08-bridge && test ! -e private-p08-target && test ! -e gov-proof && test ! -e "$RUNNER_TEMP/p08-r43-site-success"
+          echo P08_R43_ISOLATED_INSTALLED_PRIVATE_CLEANUP=PASS
