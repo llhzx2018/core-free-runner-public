@@ -10,7 +10,7 @@ command -v docker >/dev/null
 docker info >/dev/null
 command -v ssh-keygen >/dev/null
 command -v rsync >/dev/null
-base="p07combo-\${GITHUB_RUN_ID}-\${GITHUB_RUN_ATTEMPT}"
+base="p07combo-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
 echo "$base" > "$RUNNER_TEMP/p07-combined-base"
 docker pull -q mariadb:11.8 >/dev/null
 docker pull -q ubuntu:24.04 >/dev/null

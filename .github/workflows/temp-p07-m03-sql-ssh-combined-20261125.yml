@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/temp-p07-m03-sql-ssh-combined-20261125.yml'
+      - '.github/ephemeral/p07-m03-sql-ssh-combined-20261125.sh'
 permissions:
   contents: read
 jobs:
