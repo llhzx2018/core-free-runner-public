@@ -123,12 +123,9 @@ jobs:
           set -Eeuo pipefail
           set +x
           T="$(cat "$RUNNER_TEMP/p07-dom-directory")"
-          ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" \
-            -o BatchMode=yes -i "$T/key" -p 22021 root@127.0.0.1 bash -se <<'GUEST' \
-            > "$T/cloudpanel-install.log" 2>&1 || {
-              echo P07_DOM_OFFICIAL_CLOUDPANEL_INSTALL_BLOCKED
-              exit 62
-            }
+          if ! ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" \
+            -o BatchMode=yes -i "$T/key" -p 22021 root@127.0.0.1 bash -se \
+            > "$T/cloudpanel-install.log" 2>&1 <<'GUEST'
           set -Eeuo pipefail
           export DEBIAN_FRONTEND=noninteractive
           timeout 160 apt-get -qq update
@@ -153,6 +150,10 @@ jobs:
           print('P07_DOM_GUEST_ZERO_INITIAL_ADMIN=PASS')
           PY
           GUEST
+          then
+            echo P07_DOM_OFFICIAL_CLOUDPANEL_INSTALL_BLOCKED
+            exit 62
+          fi
           grep -Fxq P07_DOM_GUEST_ZERO_INITIAL_ADMIN=PASS "$T/cloudpanel-install.log"
           echo P07_DOM_OFFICIAL_CLOUDPANEL_FRESH_SETUP=PASS
       - name: Inspect real browser timezone DOM read-only without creating any account
