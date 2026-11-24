@@ -1,0 +1,153 @@
+name: TEMP P01 S8 R24 native MySQL MariaDB v2 recovery proof
+on:
+  pull_request:
+    branches: [main]
+    paths: [.github/workflows/temp-p01-s8-r24-native-sql-v2-content-20261124.yml]
+permissions:
+  contents: read
+concurrency:
+  group: p01-s8-r24-native-v2-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  native-sql-v2:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.head_ref, 'test/p01-s8-r24-native-sql-v2-content-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 23
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - engine: mysql
+            image: mysql:8.4
+            binary: mysql
+            client: mysql-client-core-8.0
+          - engine: mariadb
+            image: mariadb:11.8
+            binary: mariadb
+            client: mariadb-client
+    services:
+      sql:
+        image: ${{ matrix.image }}
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic_test_only_root
+          MARIADB_ROOT_PASSWORD: synthetic_test_only_root
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="bash -c 'echo > /dev/tcp/127.0.0.1/3306'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+    steps:
+      - name: Ephemeral exact new P01 private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-startnew
+          ref: 9002745a908886f3800ff94c1550cc139f416a51
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: private-src
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Pinned source identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C private-src rev-parse HEAD)" = "9002745a908886f3800ff94c1550cc139f416a51"
+          echo P01_S8_SQL_V2_EXACT_SOURCE=PASS
+      - name: PHP 8.4 with native SQL drivers and sodium
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, pdo_mysql, mysqli, pdo_sqlite, sqlite3, zip, sodium, dom, xml, fileinfo, curl, openssl
+          tools: composer:v2
+          coverage: none
+      - name: Isolated native client dependency, no installation task
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          sudo apt-get update -qq >"$RUNNER_TEMP/p01-s8-v2-apt.log" 2>&1
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${{ matrix.client }}" >>"$RUNNER_TEMP/p01-s8-v2-apt.log" 2>&1
+          client="$(command -v '${{ matrix.binary }}')"
+          test -n "$client" && test -f "$client" && test ! -L "$client"
+          echo P01_S8_SQL_V2_NATIVE_CLIENT=PASS
+      - name: Provision only three synthetic disposable schemas in ephemeral DB
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          id="$(docker ps --filter 'ancestor=${{ matrix.image }}' --format '{{.ID}}')"
+          test "$(printf '%s\n' "$id" | grep -c .)" -eq 1
+          ready=0
+          for _ in $(seq 1 20); do
+            if docker exec -e MYSQL_PWD=synthetic_test_only_root "$id" '${{ matrix.binary }}' -uroot --batch --skip-column-names -e 'SELECT 1' >"$RUNNER_TEMP/p01-s8-v2-db.log" 2>&1; then ready=1; break; fi
+            sleep 2
+          done
+          test "$ready" -eq 1
+          sql="$(cat <<'SQL'
+          CREATE DATABASE vfstartnew_test_restore_src;
+          CREATE DATABASE vfstartnew_test_restore_ok;
+          CREATE DATABASE vfstartnew_test_restore_bad;
+          CREATE USER 'vfstartnew_test_restore_runner'@'%' IDENTIFIED BY 'synthetic_test_only_password';
+          GRANT ALL PRIVILEGES ON vfstartnew_test_restore_src.* TO 'vfstartnew_test_restore_runner'@'%';
+          GRANT ALL PRIVILEGES ON vfstartnew_test_restore_ok.* TO 'vfstartnew_test_restore_runner'@'%';
+          GRANT ALL PRIVILEGES ON vfstartnew_test_restore_bad.* TO 'vfstartnew_test_restore_runner'@'%';
+          CREATE TABLE vfstartnew_test_restore_src.probe (id INT NOT NULL PRIMARY KEY, value VARCHAR(80) NOT NULL) ENGINE=InnoDB;
+          INSERT INTO vfstartnew_test_restore_src.probe(id,value) VALUES (1,'first'),(2,'second');
+          SQL
+          )"
+          docker exec -e MYSQL_PWD=synthetic_test_only_root "$id" '${{ matrix.binary }}' -uroot -e "$sql" >"$RUNNER_TEMP/p01-s8-v2-db.log" 2>&1
+          echo P01_S8_SQL_V2_SYNTHETIC_SCHEMAS=PASS
+      - name: Native SQL v2 content, complete rows, and changed-row failure
+        working-directory: private-src
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          python3 scripts/check_php_syntax.py >"$RUNNER_TEMP/p01-s8-v2-lint.log" 2>&1
+          echo P01_S8_SQL_V2_PHP_LINT=PASS
+          composer install --no-interaction --prefer-dist --no-progress --quiet >"$RUNNER_TEMP/p01-s8-v2-composer.log" 2>&1
+          echo P01_S8_SQL_V2_COMPOSER=PASS
+          export APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory:
+          export APP_KEY="base64:$(openssl rand -base64 32)"
+          export CACHE_STORE=array SESSION_DRIVER=array QUEUE_CONNECTION=sync
+          export P01_S8_NATIVE_SQL_ENGINE='${{ matrix.engine }}'
+          base='{"driver":"${{ matrix.engine }}","host":"127.0.0.1","port":3306,'
+          tail='"username":"vfstartnew_test_restore_runner","password":"synthetic_test_only_password"}'
+          export P01_S8_NATIVE_SQL_SOURCE_JSON="${base}\"database\":\"vfstartnew_test_restore_src\",${tail}"
+          export P01_S8_NATIVE_SQL_TARGET_OK_JSON="${base}\"database\":\"vfstartnew_test_restore_ok\",${tail}"
+          export P01_S8_NATIVE_SQL_TARGET_BAD_JSON="${base}\"database\":\"vfstartnew_test_restore_bad\",${tail}"
+          set +e
+          ./vendor/bin/phpunit --log-junit "$RUNNER_TEMP/p01-s8-v2-junit.xml" \
+            tests/Unit/InstalledSqlV2NativeRestoreTest.php >"$RUNNER_TEMP/p01-s8-v2-phpunit.log" 2>&1
+          code=$?
+          set -e
+          python3 - "$RUNNER_TEMP/p01-s8-v2-junit.xml" <<'PY'
+          import pathlib,sys,re,xml.etree.ElementTree as ET
+          p=pathlib.Path(sys.argv[1])
+          if not p.is_file():
+              print('P01_S8_SQL_V2_JUNIT=MISSING')
+              sys.exit(1)
+          cases=list(ET.parse(p).getroot().iter('testcase'))
+          skipped=sum(c.find('skipped') is not None for c in cases)
+          failed=sum(c.find('failure') is not None or c.find('error') is not None for c in cases)
+          assertions=sum(int(c.get('assertions','0')) for c in cases)
+          print('P01_S8_SQL_V2_JUNIT='+','.join(map(str,(len(cases),assertions,skipped,failed))))
+          for c in cases:
+              if c.find('failure') is None and c.find('error') is None: continue
+              print('P01_S8_SQL_V2_FAILED_METHOD='+re.sub('[^A-Za-z0-9_]', '',c.get('name',''))[:110])
+          if len(cases)!=2 or skipped or failed or assertions<40: sys.exit(1)
+          PY
+          if [ "$code" -ne 0 ]; then echo P01_S8_SQL_V2_NATIVE_TEST=FAIL; exit "$code"; fi
+          echo P01_S8_SQL_V2_NATIVE_TEST=PASS
+      - name: Always scrub exact private source and all logs
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- private-src
+          rm -f -- "$RUNNER_TEMP"/p01-s8-v2-*
+          test ! -e private-src
+          echo P01_S8_SQL_V2_PRIVATE_CLEANUP=PASS
