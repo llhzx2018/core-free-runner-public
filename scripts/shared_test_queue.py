@@ -41,6 +41,7 @@ class DurableQueue:
                state TEXT NOT NULL, token TEXT, deadline INTEGER, cancel_requested INTEGER NOT NULL DEFAULT 0,
                run_id INTEGER, job_id INTEGER, result_reason TEXT)""")
             db.execute("CREATE INDEX IF NOT EXISTS vf_queue_fifo ON tasks(state,submitted_at,task_id)")
+            db.execute("CREATE UNIQUE INDEX IF NOT EXISTS vf_queue_run_owner ON tasks(run_id) WHERE run_id IS NOT NULL")
             # Safe candidate migration: this timestamp is written before any
             # non-idempotent GitHub dispatch POST, to recover unknown replies.
             columns={row[1] for row in db.execute("PRAGMA table_info(tasks)")}
@@ -166,7 +167,11 @@ class DurableQueue:
             self._lease(db,task_id,token,now)
             old=db.execute("SELECT run_id FROM tasks WHERE task_id=?",(task_id,)).fetchone()[0]
             if old is not None and old!=run_id: raise InvalidTask("RUN_BINDING_IMMUTABLE")
-            db.execute("UPDATE tasks SET run_id=?,job_id=COALESCE(job_id,?) WHERE task_id=?",(run_id,job_id,task_id))
+            try:
+                db.execute("UPDATE tasks SET run_id=?,job_id=COALESCE(job_id,?) WHERE task_id=?",
+                           (run_id,job_id,task_id))
+            except sqlite3.IntegrityError as exc:
+                raise InvalidTask("RUN_ALREADY_ASSIGNED_TO_OTHER_TASK") from exc
         return {"task_id":task_id,"run_id":run_id,"provider_attestation":"REQUIRES_REAL_GITHUB_READBACK"}
 
     def finish(self,task_id,token,result,now=None):
@@ -291,9 +296,12 @@ class DurableQueue:
                         "capacity_released":False}
             run_id=found["run_id"]
             with self.tx() as db:
-                db.execute("""UPDATE tasks SET run_id=?
-                              WHERE task_id=? AND state='INTERRUPTED_NO_REPLAY'
-                                AND run_id IS NULL""",(run_id,task_id))
+                try:
+                    db.execute("""UPDATE tasks SET run_id=?
+                                  WHERE task_id=? AND state='INTERRUPTED_NO_REPLAY'
+                                    AND run_id IS NULL""",(run_id,task_id))
+                except sqlite3.IntegrityError as exc:
+                    raise InvalidTask("RUN_ALREADY_ASSIGNED_TO_OTHER_TASK") from exc
                 if db.execute("SELECT changes()").fetchone()[0]!=1:
                     raise InvalidTask("RECOVERY_RUN_BINDING_DRIFT")
         proof=bridge.inspect_bound_run(run_id,job)
