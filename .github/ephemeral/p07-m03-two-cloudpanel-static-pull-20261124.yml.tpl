@@ -118,7 +118,7 @@ jobs:
           qemu-system-x86_64 -enable-kvm -m 2600 -smp 2 \
             -drive file="$T/source.qcow2",format=qcow2,if=virtio \
             -drive file="$T/source-seed.iso",format=raw,if=virtio \
-            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22021-:22 \
+            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22021-:22,hostfwd=tcp:127.0.0.1:22443-:8443 \
             -device virtio-net-pci,netdev=net0 \
             -netdev socket,id=lan,listen=127.0.0.1:24242 \
             -device virtio-net-pci,netdev=lan -display none -monitor none \
@@ -126,7 +126,7 @@ jobs:
           qemu-system-x86_64 -enable-kvm -m 2600 -smp 2 \
             -drive file="$T/target.qcow2",format=qcow2,if=virtio \
             -drive file="$T/target-seed.iso",format=raw,if=virtio \
-            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22022-:22 \
+            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22022-:22,hostfwd=tcp:127.0.0.1:22444-:8443 \
             -device virtio-net-pci,netdev=net0 \
             -netdev socket,id=lan,connect=127.0.0.1:24242 \
             -device virtio-net-pci,netdev=lan -display none -monitor none \
@@ -218,6 +218,260 @@ jobs:
           P="$GITHUB_WORKSPACE/.p07-private"
           test "$(git -C "$P" rev-parse HEAD)" = "$TARGET_SHA"
           test "$(git -C "$P" rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          test -f "$GITHUB_WORKSPACE/.github/ephemeral/p07-m03-cloudpanel-first-run-browser-20261124.py"
+          python3 -m venv "$T/browser-venv"
+          "$T/browser-venv/bin/python" -m pip -q install --disable-pip-version-check --no-cache-dir selenium==4.53.0 >/dev/null
+          for side in source target; do
+            browser_port=22443
+            test "$side" = target && browser_port=22444
+            if ! "$T/browser-venv/bin/python" \
+                "$GITHUB_WORKSPACE/.github/ephemeral/p07-m03-cloudpanel-first-run-browser-20261124.py" \
+                --port "$browser_port" > "$T/browser-$side.log" 2>&1; then
+              grep -E '^P07_D04_BROWSER_[A-Z_]+
+            port=22021
+            test "$side" = target && port=22022
+            tar -C "$P" --exclude='.git' -cf - bin lib components VERSION BUILD_ID |
+              ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" \
+                -i "$T/key" -p "$port" root@127.0.0.1 \
+                'install -d -m 0700 /root/p07exact && tar -C /root/p07exact -xf -'
+            if ! ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" -i "$T/key" -p "$port" root@127.0.0.1 bash -se <<'GUEST' > "$T/engine-$side.log" 2>&1; then
+          set -Eeuo pipefail
+          test -f /home/clp/htdocs/app/data/db.sq3 || { echo P07_D04_GUEST_PANEL_DB_MISSING; exit 71; }
+          if ! command -v rsync >/dev/null || ! command -v crontab >/dev/null; then
+            timeout 150 apt-get -qq update >/dev/null 2>&1
+            timeout 150 apt-get -y -qq install --no-install-recommends rsync cron >/dev/null 2>&1 || {
+              echo P07_D04_GUEST_MIGRATION_DEPS_MISSING;exit 72;
+            }
+          fi
+          # First admin created only by the host's actual browser, read-only verify.
+          python3 -B - <<'PY'
+          import sys
+          sys.path.insert(0,'/root/p07exact/lib')
+          import migration_target_cloudpanel_environment as cp
+          if cp.cloudpanel_user_count()!=1:
+              print('P07_D04_GUEST_WEB_ADMIN_CREATION_NOT_CONFIRMED')
+              raise SystemExit(85)
+          print('P07_D04_GUEST_WEB_ADMIN_FIRST_RUN_CONFIRMED=PASS')
+          PY
+          python3 -B - <<'PY'
+          import sys
+          sys.path.insert(0,'/root/p07exact/lib')
+          import server_migration_pull as p
+          import migration_target_cloudpanel_environment as cp
+          # Classify both independent failures before exiting. Never log SQL,
+          # credentials, raw DB metadata or arbitrary guest exception text.
+          registration_ok=cp.cloudpanel_database_server_ready()
+          engine=p.local_target_active_db_engine_version()
+          engine_ok=engine in ('MYSQL_8.4','MYSQL_8.4_PERCONA')
+          if not registration_ok:
+              print('P07_D04_GUEST_CLOUDPANEL_DB_REGISTRATION_INCOMPLETE')
+          if not engine_ok:
+              print('P07_D04_GUEST_ACTIVE_DATABASE_ENGINE_UNPROVEN')
+          if not registration_ok or not engine_ok:
+              raise SystemExit(73 if not registration_ok else 74)
+          with open('/root/p07-db-release','w') as out:
+              out.write(engine+'\n')
+          print('P07_D04_PRODUCT_NATIVE_ACTIVE_ENGINE_PROOF=PASS')
+          PY
+          GUEST
+              # Only fixed whitelist codes leave the discarded, root-only guest log.
+              # Preserve fail-closed behavior even if no known marker is present.
+              for marker in \
+                P07_D04_GUEST_WEB_ADMIN_INITIAL_STATE_UNVERIFIED \
+                P07_D04_GUEST_WEB_ADMIN_FIRST_PAGE_UNAVAILABLE \
+                P07_D04_GUEST_WEB_ADMIN_PAGE_ORIGIN_REJECTED \
+                P07_D04_GUEST_WEB_ADMIN_FIRST_FORM_UNRECOGNIZED \
+                P07_D04_GUEST_WEB_ADMIN_SUBMIT_ORIGIN_REJECTED \
+                P07_D04_GUEST_WEB_ADMIN_TIMEZONE_OPTIONS_MISSING \
+                P07_D04_GUEST_WEB_ADMIN_TIMEZONE_OPTIONS_UNSUPPORTED \
+                P07_D04_GUEST_WEB_ADMIN_ROLE_OPTIONS_UNSUPPORTED \
+                P07_D04_GUEST_WEB_ADMIN_FIRST_POST_FAILED \
+                P07_D04_GUEST_WEB_ADMIN_CREATION_NOT_CONFIRMED \
+                P07_D04_GUEST_PANEL_DB_MISSING \
+                P07_D04_GUEST_MIGRATION_DEPS_MISSING \
+                P07_D04_GUEST_PANEL_USER_LIST_UNVERIFIED \
+                P07_D04_GUEST_PANEL_ADMIN_PREFLIGHT_FAILED \
+                P07_D04_GUEST_OFFICIAL_INITIAL_ADMIN_CLI_FAILED \
+                P07_D04_GUEST_INITIAL_ADMIN_NOT_REGISTERED \
+                P07_D04_GUEST_CLOUDPANEL_DB_REGISTRATION_INCOMPLETE \
+                P07_D04_GUEST_ACTIVE_DATABASE_ENGINE_UNPROVEN; do
+                if grep -Fxq "$marker" "$T/engine-$side.log"; then
+                  printf 'P07_D04_DIAG_%s_%s\n' "$side" "${marker#P07_D04_GUEST_}"
+                fi
+              done
+              echo P07_D04_GUEST_ENGINE_PRECHECK_FAILED
+              exit 62
+            fi
+            grep -Fxq P07_D04_PRODUCT_NATIVE_ACTIVE_ENGINE_PROOF=PASS "$T/engine-$side.log"
+          done
+          a="$(ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" -i "$T/key" -p 22021 root@127.0.0.1 'cat /root/p07-db-release')"
+          b="$(ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" -i "$T/key" -p 22022 root@127.0.0.1 'cat /root/p07-db-release')"
+          test "$a" = "$b" || { echo P07_D04_ACTUAL_DB_ENGINE_FLAVOR_MISMATCH; exit 63; }
+          case "$a" in MYSQL_8.4|MYSQL_8.4_PERCONA) ;; *) echo P07_D04_ACTUAL_DB_NOT_MYSQL84;exit 64 ;; esac
+          echo P07_D04_TWO_CLOUDPANEL_REAL_ACTIVE_DB_ENGINE_MATCH=PASS
+          ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" -i "$T/key" -p 22021 root@127.0.0.1 bash -se <<'SOURCE' > "$T/source-site.log" 2>&1
+          set -Eeuo pipefail
+          clpctl site:add:static --domainName=static-p07.example.test --siteUser=p07static --siteUserPassword=Synthetic2026SiteOnlySecure123
+          root=/home/p07static/htdocs/static-p07.example.test
+          test -d "$root"
+          printf 'P07_TEST_STATIC_SITE_REAL_CLOUDPANEL_SHA_TARGET_2026\n' > "$root/index.html"
+          chown p07static:p07static "$root/index.html"
+          test "$(cat "$root/index.html")" = "P07_TEST_STATIC_SITE_REAL_CLOUDPANEL_SHA_TARGET_2026"
+          echo P07_D04_REAL_CLOUDPANEL_SOURCE_STATIC_SITE=PASS
+          SOURCE
+          grep -Fxq P07_D04_REAL_CLOUDPANEL_SOURCE_STATIC_SITE=PASS "$T/source-site.log" || {
+            echo P07_D04_SOURCE_STATIC_SITE_PROVISION_FAILED; exit 65;
+          }
+          echo P07_D04_SOURCE_SITE_FROM_REAL_CLOUDPANEL=PASS
+      - name: Establish isolated target-to-source SSH LAN with pinned host identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          T="$(cat "$RUNNER_TEMP/p07-vm-directory")"
+          for side in source target; do
+            port=22021
+            ip=172.28.77.1
+            if test "$side" = target; then port=22022;ip=172.28.77.2; fi
+            ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" -i "$T/key" -p "$port" root@127.0.0.1 bash -se -- "$ip" <<'GUEST' > "$T/lan-$side.log" 2>&1
+          set -Eeuo pipefail
+          addr="$1"
+          primary="$(ip -o -4 route show default | awk '{print $5;exit}')"
+          test -n "$primary"
+          iface=""
+          for candidate in /sys/class/net/*; do
+            name="$(basename "$candidate")"
+            case "$name" in lo) continue ;; esac
+            test "$name" != "$primary" || continue
+            if test -z "$iface"; then iface="$name"; else echo EXTRA_NETWORK_DEVICE;exit 14;fi
+          done
+          test -n "$iface"
+          ip link set dev "$iface" up
+          ip addr add "$addr/30" dev "$iface"
+          ip -o -4 addr show dev "$iface" | grep -Fq "$addr/30"
+          echo P07_D04_GUEST_PRIVATE_CROSS_LAN_READY=PASS
+          GUEST
+            grep -Fxq P07_D04_GUEST_PRIVATE_CROSS_LAN_READY=PASS "$T/lan-$side.log" || {
+              echo P07_D04_PRIVATE_LAN_CONFIGURATION_FAILED;exit 66;
+            }
+          done
+          ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" -i "$T/key" -p 22021 root@127.0.0.1 'cat /etc/ssh/ssh_host_ed25519_key.pub' > "$T/source-host.pub"
+          pub="$(cut -d' ' -f1,2 "$T/source-host.pub")"
+          printf '172.28.77.1 %s\n' "$pub" > "$T/lan-known-hosts"
+          scp -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" -i "$T/key" -P 22022 "$T/key" "$T/lan-known-hosts" root@127.0.0.1:/root/
+          ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" -i "$T/key" -p 22022 root@127.0.0.1 bash -se <<'TARGET'
+          set -Eeuo pipefail
+          install -m 0700 -d /root/.ssh
+          chmod 0600 /root/key
+          chmod 0600 /root/lan-known-hosts
+          ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/lan-known-hosts -o BatchMode=yes -i /root/key -p 22 root@172.28.77.1 'test -f /home/p07static/htdocs/static-p07.example.test/index.html'
+          TARGET
+          echo P07_D04_REAL_TARGET_TO_SOURCE_PRIVATE_SSH=PASS
+      - name: Run exact P07 M03 D04 PULL PLAN and PREPARE on real target CloudPanel
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          T="$(cat "$RUNNER_TEMP/p07-vm-directory")"
+          P="$GITHUB_WORKSPACE/.p07-private"
+          test "$(git -C "$P" rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C "$P" rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          tar -C "$P" --exclude='.git' -cf - bin lib components VERSION BUILD_ID |
+            ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" \
+              -i "$T/key" -p 22022 root@127.0.0.1 \
+              'install -d -m 0700 /root/p07exact && tar -C /root/p07exact -xf -'
+          ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" -i "$T/key" -p 22022 root@127.0.0.1 bash -se <<'TARGET' > "$T/p07-full-pull.log" 2>&1 || {
+            grep -Eo '(BATCH_[A-Z_]+|D04_[A-Z_]+|CURRENT_SERVER_[A-Z_]+|SOURCE_[A-Z_]+|CLOUDPANEL_[A-Z_]+|TARGET_[A-Z_]+)' "$T/p07-full-pull.log" | sort -u | head -n 25 || true
+            echo P07_D04_REAL_CLOUDPANEL_STATIC_P07_PULL_BLOCKED
+            exit 67
+          }
+          set -Eeuo pipefail
+          set +x
+          export PYTHONDONTWRITEBYTECODE=1 NO_COLOR=1
+          install -m 0700 -d /var/lib/vf-server-ops
+          command -v rsync >/dev/null
+          command -v crontab >/dev/null
+          test -f /root/p07exact/lib/server_migration_pull.py
+          test -r /root/key
+          test -r /root/lan-known-hosts
+          args=(--source-ip 172.28.77.1 --identity-file /root/key --site static-p07.example.test)
+          python3 -B /root/p07exact/lib/server_migration_pull.py plan "${args[@]}" \
+            --confirm-source-helper-staging ALLOW_SOURCE_HELPER_STAGING \
+            > /root/p07-plan.json 2> /root/p07-plan.log
+          python3 - <<'PY'
+          import json
+          plan=json.load(open('/root/p07-plan.json'))
+          assert plan['operation']=='PLAN' and plan['status']=='READY'
+          assert plan['site_count']==1 and plan['mysql_database_count']==0
+          assert plan['automatic_dns_change'] is False
+          print('P07_D04_REAL_CLOUDPANEL_SOURCE_P07_PLAN=PASS')
+          PY
+          python3 -B /root/p07exact/lib/server_migration_pull.py prepare "${args[@]}" \
+            --confirm PREPARE_PULL_MIGRATION \
+            > /root/p07-prepare.json 2> /root/p07-prepare.log
+          python3 - <<'PY'
+          import json
+          receipt=json.load(open('/root/p07-prepare.json'))
+          assert receipt['status']=='PREPARED'
+          assert receipt['site_count']==1
+          assert receipt['dns_changed_by_p07'] is False
+          assert receipt['source_delete_allowed'] is False
+          assert receipt['existing_target_overwrite_allowed'] is False
+          print('P07_D04_REAL_CLOUDPANEL_STATIC_P07_PREPARED=PASS')
+          PY
+          target=/home/p07static/htdocs/static-p07.example.test/index.html
+          test -f "$target"
+          test "$(cat "$target")" = P07_TEST_STATIC_SITE_REAL_CLOUDPANEL_SHA_TARGET_2026
+          test "$(ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile=/root/lan-known-hosts -i /root/key root@172.28.77.1 cat "$target")" = "$(cat "$target")"
+          echo P07_D04_REAL_SOURCE_TO_TARGET_FILE_CONTENT_PARITY=PASS
+          if python3 -B /root/p07exact/lib/server_migration_pull.py prepare "${args[@]}" \
+            --confirm PREPARE_PULL_MIGRATION > /root/p07-replay.json 2> /root/p07-replay.log; then
+            echo P07_D04_UNSAFE_REPLAY_ACCEPTED
+            exit 68
+          fi
+          test "$(cat "$target")" = P07_TEST_STATIC_SITE_REAL_CLOUDPANEL_SHA_TARGET_2026
+          echo P07_D04_REAL_SECOND_PREPARE_REPLAY_BLOCK=PASS
+          echo P07_D04_CUTOVER_AND_DNS=NOT_RUN
+          TARGET
+          for marker in P07_D04_REAL_CLOUDPANEL_SOURCE_P07_PLAN=PASS \
+            P07_D04_REAL_CLOUDPANEL_STATIC_P07_PREPARED=PASS \
+            P07_D04_REAL_SOURCE_TO_TARGET_FILE_CONTENT_PARITY=PASS \
+            P07_D04_REAL_SECOND_PREPARE_REPLAY_BLOCK=PASS; do
+            grep -Fxq "$marker" "$T/p07-full-pull.log" || exit 69
+            echo "$marker"
+          done
+          echo P07_D04_FULL_VPS_MULTI_SITE_MIGRATION=NOT_RUN
+          echo P07_D04_MYSQL_SQLITE_APP_E2E=NOT_RUN
+          echo P07_D04_FORMAL_RELEASE=NOT_AUTHORIZED
+      - name: Always stop QEMU guests, erase keys, qcow2 and ephemeral files
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if test -s "$RUNNER_TEMP/p07-vm-directory"; then
+            T="$(cat "$RUNNER_TEMP/p07-vm-directory")"
+            case "$T" in "$RUNNER_TEMP"/p07-d04-two-vm.*)
+              for side in source target; do
+                if test -f "$T/$side.pid"; then
+                  pid="$(cat "$T/$side.pid")"
+                  if test -n "$pid" && test "$pid" -eq "$pid" 2>/dev/null; then
+                    kill "$pid" 2>/dev/null || true
+                  fi
+                fi
+              done
+              rm -rf -- "$T"
+            ;; esac
+          fi
+          rm -rf -- "$GITHUB_WORKSPACE/.p07-private"
+          rm -f -- "$RUNNER_TEMP/p07-vm-directory" "$RUNNER_TEMP/p07-vm-spec.json" "$RUNNER_TEMP/p07-vm-audit.json" "$RUNNER_TEMP/p07-vm-apt.log"
+          echo P07_D04_TRANSIENT_TWO_VM_PRIVATE_KEYS_AND_DISKS_CLEANUP=PASS
+ "$T/browser-$side.log" | head -n 12 || true
+              echo "P07_D04_REAL_$side"_FIRST_RUN_BROWSER_FAILED
+              exit 86
+            fi
+            grep -Fxq P07_D04_BROWSER_FIRST_RUN_CLICKED=YES "$T/browser-$side.log"
+            echo "P07_D04_REAL_$side"_BROWSER_SUBMIT=PASS
+          done
           for side in source target; do
             port=22021
             test "$side" = target && port=22022
