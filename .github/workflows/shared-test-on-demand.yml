@@ -1,0 +1,108 @@
+name: Shared Free Test V1 (Review Candidate)
+run-name: VF Shared ${{ inputs.task_id }} ${{ inputs.source_sha }} ${{ inputs.test_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      project:
+        description: Approved project identity
+        required: true
+        type: choice
+        options: ['P01', 'P02', 'P07', 'P08', 'S01']
+      repo:
+        description: Exact canonical private repository
+        required: true
+        type: choice
+        options: ['vf-startnew', 'vf-doc', 'vf-server-ops', 'vf-adops', 'vf-tools-theme', 'vf-tools-ops', 'vf-tools-m3u8']
+      source_sha:
+        description: Full 40-hex canonical source SHA
+        required: true
+        type: string
+      tree_sha:
+        description: Optional full 40-hex Git tree SHA
+        required: false
+        type: string
+      test_id:
+        description: One allowlisted public-safe check
+        required: true
+        type: choice
+        options: ['git-integrity', 'python-syntax']
+      task_id:
+        description: Correlation identity (must be unique upstream)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shared-free-test-v1-${{ inputs.project }}-${{ inputs.source_sha }}-${{ inputs.test_id }}
+  cancel-in-progress: false
+
+jobs:
+  public-safe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Fail closed on unauthorized actor or input
+        shell: bash
+        env:
+          VF_ACTOR: ${{ github.actor }}
+          VF_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          VF_PROJECT: ${{ inputs.project }}
+          VF_REPO: ${{ inputs.repo }}
+          VF_SHA: ${{ inputs.source_sha }}
+          VF_TREE: ${{ inputs.tree_sha }}
+          VF_TASK: ${{ inputs.task_id }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          if [[ "$VF_ACTOR" != 'llhzx2018' || "$VF_TRIGGERING_ACTOR" != 'llhzx2018' ]]; then echo 'BLOCKED_OWNER_AUTH'; exit 2; fi
+          [[ "$VF_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo 'BLOCKED_SOURCE_SHA'; exit 2; }
+          if [[ -n "$VF_TREE" ]]; then [[ "$VF_TREE" =~ ^[0-9a-f]{40}$ ]] || { echo 'BLOCKED_TREE_SHA'; exit 2; }; fi
+          [[ "$VF_TASK" =~ ^[a-z0-9][a-z0-9_-]{7,63}$ ]] || { echo 'BLOCKED_TASK_ID'; exit 2; }
+          case "$VF_PROJECT:$VF_REPO" in
+            P01:vf-startnew|P02:vf-doc|P07:vf-server-ops|P08:vf-adops|S01:vf-tools-theme|S01:vf-tools-ops|S01:vf-tools-m3u8) ;;
+            *) echo 'BLOCKED_PROJECT_REPO_MISMATCH'; exit 2 ;;
+          esac
+          echo 'APPROVED_SOURCE_INPUT=PASS'
+
+      - name: Exact private source transient checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/${{ inputs.repo }}
+          ref: ${{ inputs.source_sha }}
+          path: transient-private-source
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify exact SHA and run public-safe check
+        shell: bash
+        env:
+          VF_SHA: ${{ inputs.source_sha }}
+          VF_TREE: ${{ inputs.tree_sha }}
+          VF_TEST: ${{ inputs.test_id }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          cd transient-private-source
+          [[ "$(git rev-parse HEAD)" == "$VF_SHA" ]] || { echo 'BLOCKED_SOURCE_MISMATCH'; exit 2; }
+          if [[ -n "$VF_TREE" ]]; then [[ "$(git rev-parse HEAD^{tree})" == "$VF_TREE" ]] || { echo 'BLOCKED_TREE_MISMATCH'; exit 2; }; fi
+          if [[ -n "$(git status --porcelain)" ]]; then echo 'BLOCKED_DIRTY_CHECKOUT'; exit 2; fi
+          case "$VF_TEST" in
+            git-integrity) git fsck --no-reflogs > /dev/null 2>&1 || { echo 'UNRESOLVED_TEST_FAILURE'; exit 1; } ;;
+            python-syntax) python3 -m compileall -q . > /dev/null 2>&1 || { echo 'UNRESOLVED_TEST_FAILURE'; exit 1; } ;;
+            *) echo 'BLOCKED_TEST_ID'; exit 2 ;;
+          esac
+          echo 'SHARED_PUBLIC_SAFE_TEST=PASS'
+          echo "EXACT_SOURCE_SHA=$VF_SHA"
+          echo 'RAW_PRIVATE_OUTPUT_UPLOADED=NO'
+
+      - name: Remove temporary private checkout
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- transient-private-source
+          echo 'TRANSIENT_PRIVATE_CHECKOUT_CLEANUP=ATTEMPTED'
