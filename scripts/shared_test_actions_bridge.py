@@ -190,13 +190,22 @@ class GithubActionsBridge:
                 "machine_pass":bool(verified_pass),
                 "cancel_confirmed":run_terminal and run.get("conclusion")=="cancelled"}
 
-    def cancel_run(self, run_id):
-        if type(run_id) is not int or run_id<=0:
-            raise InvalidTask("RUN_ID_REQUIRED_FOR_CANCEL")
-        self.check_remote()
+    def cancel_run(self, run_id, job):
+        """Cancel ONLY a trusted task's exact GitHub run, not any repo run ID."""
+        request=validate(job)
+        if request["privacy"]!="PUBLIC_SAFE" or request["profile"]=="heavy" or route(request)!="PUBLIC_HOSTED":
+            raise InvalidTask("CANCEL_LANE_NOT_AUTHORIZED")
+        if request["test_id"] not in TEST_IDS:
+            raise InvalidTask("CANCEL_TEST_NOT_ALLOWLISTED")
+        # Run IDs are globally shared within a repo. Never POST to a supplied ID
+        # without binding its Owner, source SHA, task/test identity and job.
+        proof=self.inspect_bound_run(run_id,request)
+        if proof["remote_terminal"]:
+            return {"run_id":run_id,"state":"ALREADY_TERMINAL",
+                    "cancel_confirmed":proof["cancel_confirmed"],"cancel_posted":False}
         self.api("POST","/repos/"+REPO+"/actions/runs/"+str(run_id)+"/cancel",{})
         return {"run_id":run_id,"state":"CANCEL_REQUESTED",
-                "cancel_confirmed":False}  # requires GET on real run
+                "cancel_confirmed":False,"cancel_posted":True}
 
     def inspect_run(self, run_id):
         if type(run_id) is not int or run_id<=0:
