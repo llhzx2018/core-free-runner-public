@@ -1,0 +1,195 @@
+name: TEMP P07 M03 CloudPanel first-run timezone DOM readonly one VM
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p07-m03-cloudpanel-dom-onevm-20261124.yml'
+permissions:
+  contents: read
+jobs:
+  timezone-dom-readonly:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'test/p07-m03-onevm-timezone-dom-20261124'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 33
+    env:
+      TARGET_REPO: 'llhzx2018/vf-server-ops'
+      TARGET_VERSION: '0.1.0'
+      TARGET_SHA: 'c60e3333be954f698ed97e306c82b3eebb620436'
+      TARGET_TREE: '0c695e0d965da06d8b3717e78246a8dd9fe5b3f1'
+      DEBIAN_FRONTEND: noninteractive
+      NO_COLOR: '1'
+    steps:
+      - name: Checkout existing public runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Validate exact identity and read-only scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$TARGET_REPO" = llhzx2018/vf-server-ops
+          test "$TARGET_VERSION" = 0.1.0
+          python3 -B scripts/ephemeral_lane_spec.py validate \
+            --spec .github/ephemeral/p07-m03-cloudpanel-dom-onevm-20261124.json >/dev/null
+          python3 -B scripts/ephemeral_lane_spec.py audit-rendered \
+            --spec .github/ephemeral/p07-m03-cloudpanel-dom-onevm-20261124.json \
+            --input .github/workflows/temp-p07-m03-cloudpanel-dom-onevm-20261124.yml \
+            > "$RUNNER_TEMP/p07-dom-audit.json"
+          python3 -B - "$RUNNER_TEMP/p07-dom-audit.json" "$TARGET_SHA" <<'PY'
+          import json,sys
+          p=json.load(open(sys.argv[1]))
+          assert p['status']=='PASS' and p['target_sha']==sys.argv[2]
+          print('P07_DOM_EXACT_PRODUCT_TARGET_IDENTITY=PASS')
+          PY
+          test -f .github/ephemeral/p07-m03-timezone-dom-probe-20261124.py
+          echo P07_DOM_PRIVATE_PRODUCT_CHECKOUT=NOT_PERFORMED
+          echo P07_DOM_RELEASE_OR_MIGRATION=NOT_AUTHORIZED
+      - name: Host KVM and isolated single VM prerequisites
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(uname -m)" = x86_64
+          test -c /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm || sudo chmod 666 /dev/kvm
+          test -r /dev/kvm && test -w /dev/kvm
+          awk '/MemAvailable:/{if ($2 < 4900000) exit 1}' /proc/meminfo
+          test "$(df --output=avail -k "$RUNNER_TEMP" | tail -1)" -ge 6100000
+          sudo apt-get -qq update >/dev/null
+          sudo apt-get -y -qq install --no-install-recommends \
+            qemu-system-x86 qemu-utils cloud-image-utils openssh-client \
+            > "$RUNNER_TEMP/p07-dom-apt.log" 2>&1
+          command -v qemu-system-x86_64
+          command -v cloud-localds
+          qemu-system-x86_64 -accel help | grep -Fq kvm
+          echo P07_DOM_ONE_VM_FREE_RUNNER_READY=PASS
+      - name: Boot exactly one genuine Debian13 QEMU KVM guest
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          T="$(mktemp -d "$RUNNER_TEMP/p07-dom-onevm.XXXXXXXX")"
+          echo "$T" > "$RUNNER_TEMP/p07-dom-directory"
+          cd "$T"
+          curl --proto '=https' --tlsv1.2 -fLsS --retry 2 --max-time 420 \
+            https://cdimage.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2 -o debian13.qcow2
+          curl --proto '=https' --tlsv1.2 -fLsS --retry 2 --max-time 100 \
+            https://cdimage.debian.org/images/cloud/trixie/latest/SHA512SUMS -o SHA512SUMS
+          ln -s debian13.qcow2 debian-13-genericcloud-amd64.qcow2
+          grep -E '^[0-9a-f]{128}  (\./)?debian-13-genericcloud-amd64.qcow2$' SHA512SUMS | sed 's@  \./@  @' |
+            sha512sum -c - >/dev/null
+          ssh-keygen -q -t ed25519 -N '' -f "$T/key"
+          pub="$(cat "$T/key.pub")"
+          cat > userdata <<EOF
+          #cloud-config
+          disable_root: false
+          ssh_pwauth: false
+          users:
+            - name: root
+              lock_passwd: true
+              ssh_authorized_keys:
+                - "$pub"
+          EOF
+          printf 'instance-id: p07-dom-onevm\nlocal-hostname: p07-dom\n' > meta
+          cloud-localds seed.iso userdata meta
+          mv debian13.qcow2 guest.qcow2
+          qemu-img resize guest.qcow2 16G >/dev/null
+          qemu-system-x86_64 -enable-kvm -m 2600 -smp 2 \
+            -drive file="$T/guest.qcow2",format=qcow2,if=virtio \
+            -drive file="$T/seed.iso",format=raw,if=virtio \
+            -netdev user,id=net0,hostfwd=tcp:127.0.0.1:22021-:22,hostfwd=tcp:127.0.0.1:22443-:8443 \
+            -device virtio-net-pci,netdev=net0 \
+            -display none -monitor none \
+            -serial file:"$T/serial.log" -daemonize -pidfile "$T/guest.pid"
+          ready=0
+          for trial in $(seq 1 70); do
+            if ssh -q -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$T/known_hosts" \
+              -o ConnectTimeout=5 -o BatchMode=yes -i "$T/key" -p 22021 root@127.0.0.1 \
+              'test "$( . /etc/os-release; echo "$VERSION_ID")" = 13' >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 5
+          done
+          test "$ready" = 1
+          echo P07_DOM_SINGLE_REAL_DEBIAN13_VM_SSH=PASS
+      - name: Install pinned official CloudPanel only in synthetic guest
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          T="$(cat "$RUNNER_TEMP/p07-dom-directory")"
+          ssh -q -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$T/known_hosts" \
+            -o BatchMode=yes -i "$T/key" -p 22021 root@127.0.0.1 bash -se <<'GUEST' \
+            > "$T/cloudpanel-install.log" 2>&1 || {
+              echo P07_DOM_OFFICIAL_CLOUDPANEL_INSTALL_BLOCKED
+              exit 62
+            }
+          set -Eeuo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          timeout 160 apt-get -qq update
+          timeout 160 apt-get -y -qq install --no-install-recommends curl wget sudo ca-certificates
+          cd /root
+          curl --proto '=https' --tlsv1.2 -fLsS --retry 2 --max-time 100 \
+            https://installer.cloudpanel.io/ce/v2/install.sh -o install.sh
+          echo '8146dbe0a488e7088b04071b0c34d59aa0ab1fe9dcec382d395fd155c9e6c476  install.sh' | sha256sum -c -
+          timeout 1140 env DB_ENGINE=MYSQL_8.4 bash install.sh < /dev/null
+          test -f /home/clp/htdocs/app/data/db.sq3
+          systemctl is-active --quiet nginx
+          systemctl is-active --quiet mysql
+          ss -lnt | grep -Eq ':8443[[:space:]]'
+          python3 - <<'PY'
+          import sqlite3
+          p='/home/clp/htdocs/app/data/db.sq3'
+          con=sqlite3.connect(f'file:{p}?mode=ro',uri=True)
+          try:
+              assert con.execute('SELECT COUNT(*) FROM "user"').fetchone()[0]==0
+          finally:
+              con.close()
+          print('P07_DOM_GUEST_ZERO_INITIAL_ADMIN=PASS')
+          PY
+          GUEST
+          grep -Fxq P07_DOM_GUEST_ZERO_INITIAL_ADMIN=PASS "$T/cloudpanel-install.log"
+          echo P07_DOM_OFFICIAL_CLOUDPANEL_FRESH_SETUP=PASS
+      - name: Inspect real browser timezone DOM read-only without creating any account
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          T="$(cat "$RUNNER_TEMP/p07-dom-directory")"
+          command -v google-chrome >/dev/null || command -v google-chrome-stable >/dev/null
+          command -v chromedriver >/dev/null
+          python3 -m venv "$T/browser-venv"
+          "$T/browser-venv/bin/python" -m pip -q install --no-cache-dir \
+            --disable-pip-version-check selenium==4.53.0 >/dev/null
+          "$T/browser-venv/bin/python" \
+            .github/ephemeral/p07-m03-timezone-dom-probe-20261124.py \
+            > "$T/dom-audit.log" 2>&1 || {
+              grep '^P07_DOM_' "$T/dom-audit.log" | cut -c 1-800 || true
+              echo P07_DOM_SAFE_READONLY_PROBE_BLOCKED
+              exit 67
+            }
+          grep '^P07_DOM_' "$T/dom-audit.log" | cut -c 1-800
+          grep -Fxq 'P07_DOM_READONLY_STATUS="PASS"' "$T/dom-audit.log"
+          echo P07_DOM_NO_ACCOUNT_NO_MIGRATION_NO_DNS=PASS
+      - name: Always erase one VM, temporary keys and untrusted responses
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          if test -s "$RUNNER_TEMP/p07-dom-directory"; then
+            T="$(cat "$RUNNER_TEMP/p07-dom-directory")"
+            case "$T" in "$RUNNER_TEMP"/p07-dom-onevm.*)
+              if test -f "$T/guest.pid"; then
+                kill "$(cat "$T/guest.pid")" 2>/dev/null || true
+              fi
+              rm -rf -- "$T"
+              ;;
+            esac
+          fi
+          rm -f "$RUNNER_TEMP/p07-dom-directory" "$RUNNER_TEMP/p07-dom-audit.json" "$RUNNER_TEMP/p07-dom-apt.log"
+          echo P07_DOM_TEMP_QEMU_DISK_KEY_LOG_CLEANUP=PASS
