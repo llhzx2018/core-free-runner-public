@@ -130,6 +130,38 @@ class QueueTest(unittest.TestCase):
         self.assertTrue(payload["lease_token_stored_privately"])
         self.assertEqual(token_path.stat().st_mode & 0o077,0)
 
+    def test_expired_dispatch_quarantine_prevents_oversubscription(self):
+        self.q.enqueue(job())
+        self.q.enqueue(job(task="task-000002", project="P08"))
+        first=self.q.claim(CAP,now=100,lease_seconds=10)
+        self.assertEqual(self.q.recover(now=110)["recovered"],1)
+        self.assertEqual(self.q.status("task-000001")["state"],"INTERRUPTED_NO_REPLAY")
+        # An expired local process does NOT prove its remote job stopped.
+        self.assertEqual(self.q.claim(CAP,now=111)["state"],"DEFERRED_CAPACITY_OR_EMPTY")
+        refusal=self.q.reconcile_interrupted("task-000001",None)
+        self.assertEqual(refusal["state"],"BLOCKED_RUN_ID_NOT_ATTESTED")
+        self.assertFalse(refusal["capacity_released"])
+        self.assertEqual(self.q.claim(CAP,now=112)["state"],"DEFERRED_CAPACITY_OR_EMPTY")
+
+    def test_reconcile_uses_exact_remote_terminal_confirmation(self):
+        self.q.enqueue(job())
+        self.q.enqueue(job(task="task-000002",project="P08"))
+        first=self.q.claim(CAP,now=100,lease_seconds=10)
+        self.q.bind_run(first["task_id"],first["lease_token"],123,now=101)
+        self.q.recover(now=110)
+        class Remote:
+            def __init__(self,terminal):self.terminal=terminal
+            def inspect_bound_run(self,run_id,request):
+                assert run_id==123 and request["source"]["sha"]=="a"*40
+                return {"remote_terminal":self.terminal,"conclusion":"cancelled"}
+        hold=self.q.reconcile_interrupted("task-000001",Remote(False))
+        self.assertFalse(hold["capacity_released"])
+        self.assertEqual(self.q.claim(CAP,now=111)["state"],"DEFERRED_CAPACITY_OR_EMPTY")
+        release=self.q.reconcile_interrupted("task-000001",Remote(True))
+        self.assertTrue(release["capacity_released"])
+        self.assertEqual(self.q.status("task-000001")["state"],"INTERRUPTED_NO_REPLAY")
+        self.assertEqual(self.q.claim(CAP,now=112)["task_id"],"task-000002")
+
     def test_untrusted_queue_directory_and_symlink(self):
         self.assertEqual(self.db.stat().st_mode & 0o077,0)
         bad=self.root/"symlink.sqlite"
