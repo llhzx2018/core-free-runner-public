@@ -133,7 +133,6 @@ jobs:
           echo P07_D04_PRODUCTION_AND_DNS=UNTOUCHED
       - name: Install hash-pinned genuine CloudPanel on both Debian13 KVM guests
         shell: bash
-        timeout-minutes: 32
         run: |
           set -Eeuo pipefail
           set +x
