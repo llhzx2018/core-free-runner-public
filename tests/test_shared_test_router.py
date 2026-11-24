@@ -57,6 +57,17 @@ class TestRouter(unittest.TestCase):
         a = job(); b = job("task-000002", time=100)
         self.assertEqual(router.identity(a), router.identity(b))
 
+    def test_hosted_lane_secret_and_activation_boundary(self):
+        flow = (FILE.parents[1] / ".github/workflows/shared-test-on-demand.yml").read_text()
+        self.assertIn("workflow_dispatch:", flow)
+        self.assertNotIn("pull_request_target:", flow)
+        self.assertNotIn("\n  pull_request:", flow)
+        self.assertIn("persist-credentials: false", flow)
+        self.assertIn("secrets.VF_PRIVATE_READ_TOKEN", flow)
+        self.assertIn("rm -rf -- transient-private-source", flow)
+        self.assertIn("BLOCKED_OWNER_AUTH", flow)
+        self.assertIn("BLOCKED_PROJECT_REPO_MISMATCH", flow)
+
     def test_capacity_zero_is_not_fake_runner(self):
         self.assertEqual(router.plan([job()], {"PUBLIC_HOSTED": 0, "PRIVATE": 0, "HYPERV_PRIVATE": 0})["entries"][0]["decision"], "DEFER_CAPACITY")
 
