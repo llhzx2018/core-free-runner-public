@@ -234,6 +234,49 @@ jobs:
               echo P07_D04_GUEST_MIGRATION_DEPS_MISSING;exit 72;
             }
           fi
+          # Official CloudPanel bootstrap normally creates the first admin from
+          # its 8443 setup page; these isolated VMs have no public 8443 route.
+          # Use the documented root-only CLI only when no admin exists.
+          # Do not persist or print the synthetic one-time password.
+          if python3 -B - <<'PY'
+          import sys
+          sys.path.insert(0,'/root/p07exact/lib')
+          import migration_target_cloudpanel_environment as cp
+          n=cp.cloudpanel_user_count()
+          if n is None:
+              print('P07_D04_GUEST_PANEL_USER_LIST_UNVERIFIED')
+              raise SystemExit(79)
+          raise SystemExit(0 if n > 0 else 78)
+          PY
+          then
+            echo P07_D04_GUEST_EXISTING_PANEL_ADMIN=PASS
+          else
+            status=$?
+            if test "$status" -ne 78; then
+              echo P07_D04_GUEST_PANEL_ADMIN_PREFLIGHT_FAILED
+              exit 79
+            fi
+            synthetic_pass="$(openssl rand -hex 24)"
+            if ! clpctl user:add \
+                --userName='p07-ci-admin' --email='p07-ci-admin@example.invalid' \
+                --firstName='Synthetic' --lastName='Admin' \
+                --password="$synthetic_pass" --role='admin' \
+                --timezone='UTC' --status='1' >/dev/null 2>&1; then
+              unset synthetic_pass
+              echo P07_D04_GUEST_OFFICIAL_INITIAL_ADMIN_CLI_FAILED
+              exit 80
+            fi
+            unset synthetic_pass
+            python3 -B - <<'PY'
+          import sys
+          sys.path.insert(0,'/root/p07exact/lib')
+          import migration_target_cloudpanel_environment as cp
+          if not (cp.cloudpanel_user_count() or 0) > 0:
+              print('P07_D04_GUEST_INITIAL_ADMIN_NOT_REGISTERED')
+              raise SystemExit(81)
+          print('P07_D04_GUEST_OFFICIAL_INITIAL_ADMIN_BOOTSTRAP=PASS')
+          PY
+          fi
           python3 -B - <<'PY'
           import sys
           sys.path.insert(0,'/root/p07exact/lib')
@@ -260,6 +303,10 @@ jobs:
               for marker in \
                 P07_D04_GUEST_PANEL_DB_MISSING \
                 P07_D04_GUEST_MIGRATION_DEPS_MISSING \
+                P07_D04_GUEST_PANEL_USER_LIST_UNVERIFIED \
+                P07_D04_GUEST_PANEL_ADMIN_PREFLIGHT_FAILED \
+                P07_D04_GUEST_OFFICIAL_INITIAL_ADMIN_CLI_FAILED \
+                P07_D04_GUEST_INITIAL_ADMIN_NOT_REGISTERED \
                 P07_D04_GUEST_CLOUDPANEL_DB_REGISTRATION_INCOMPLETE \
                 P07_D04_GUEST_ACTIVE_DATABASE_ENGINE_UNPROVEN; do
                 if grep -Fxq "$marker" "$T/engine-$side.log"; then
