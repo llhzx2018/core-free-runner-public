@@ -38,46 +38,36 @@ def find_form(driver):
     return None
 
 def select_timezone(driver, form) -> bool:
-    for e in form.find_elements(By.CSS_SELECTOR, "select[name]"):
-        if kind(e.get_attribute("name") or "") != "timezone":
+    """Use the real native dropdown, not guessed IANA option syntax.
+
+    Actual first-run CloudPanel DOM proof: one visible <select name=timezone>
+    with 419 enabled-looking options and 419 nonempty option values.
+    The app's option values are authoritative for this synthetic test.
+    """
+    fields = [
+        e for e in form.find_elements(By.CSS_SELECTOR, "select[name]")
+        if kind(e.get_attribute("name") or "") == "timezone"
+    ]
+    if len(fields) != 1:
+        die("TIMEZONE_NATIVE_SELECT_AMBIGUOUS")
+    field = fields[0]
+    if not field.is_displayed() or not field.is_enabled():
+        die("TIMEZONE_NATIVE_SELECT_NOT_INTERACTIVE")
+    selector = Select(field)
+    options = selector.options
+    if not 3 <= len(options) <= 800:
+        die("TIMEZONE_NATIVE_OPTION_COUNT_UNEXPECTED")
+    current = (selector.first_selected_option.get_attribute("value") or "").strip()
+    for i, option in enumerate(options):
+        value = (option.get_attribute("value") or "").strip()
+        if (not option.is_enabled() or not value or
+            value == current or len(value) > 120 or
+            value.lower() in ("choose", "select", "timezone", "none", "null")):
             continue
-        choices = []
-        for x in Select(e).options:
-            value = (x.get_attribute("value") or x.text or "").strip()
-            if (x.is_enabled()
-                and re.fullmatch(r"[A-Za-z][A-Za-z0-9_+./:-]{0,79}", value)
-                and value.lower() not in ("select", "choose", "timezone", "none")):
-                choices.append((value, x))
-        preferred = ("UTC", "Etc/UTC", "Europe/London", "Europe/Berlin", "Asia/Shanghai")
-        item = next(((v, x) for v, x in choices if v in preferred), choices[0] if choices else None)
-        if item is None:
-            continue
-        value, option = item
-        if e.is_displayed():
-            option.click()
-        else:
-            driver.execute_script(
-                "arguments[0].value=arguments[1];"
-                "arguments[0].dispatchEvent(new Event('input',{bubbles:true}));"
-                "arguments[0].dispatchEvent(new Event('change',{bubbles:true}));",
-                e, value,
-            )
+        selector.select_by_index(i)
+        if (Select(field).first_selected_option.get_attribute("value") or "").strip() != value:
+            die("TIMEZONE_NATIVE_SELECTION_NOT_CONFIRMED")
         return True
-    for e in form.find_elements(By.CSS_SELECTOR, "input[name]"):
-        if kind(e.get_attribute("name") or "") == "timezone" and e.is_displayed():
-            e.clear()
-            e.send_keys("UTC")
-            return True
-    for trigger in form.find_elements(By.CSS_SELECTOR, ".select2-selection,[role='combobox']"):
-        if not trigger.is_displayed():
-            continue
-        trigger.click()
-        for option in driver.find_elements(By.CSS_SELECTOR, ".select2-results__option,[role='option']"):
-            label = (option.text or "").strip()
-            if (re.search(r"[A-Za-z]+/[A-Za-z_]+", label)
-                and option.is_displayed() and option.is_enabled()):
-                option.click()
-                return True
     return False
 
 def create(port: int) -> None:
@@ -134,6 +124,25 @@ def create(port: int) -> None:
                     e.send_keys(value)
             if not select_timezone(browser, form):
                 die("TIMEZONE_BROWSER_SELECTION_UNSUPPORTED")
+            # In this disposable synthetic first-run only, act on one real
+            # form-local required/legal acknowledgement. No external account.
+            boxes = form.find_elements(By.CSS_SELECTOR, "input[type='checkbox']")
+            legal = []
+            for c in boxes:
+                marker = ((c.get_attribute("name") or "") + " " +
+                          (c.get_attribute("id") or "")).lower()
+                if c.get_attribute("required") is not None or any(
+                        word in marker for word in ("terms", "privacy", "license", "agree")):
+                    legal.append(c)
+            if len(legal) > 1:
+                die("FIRST_RUN_TERMS_CHECKBOX_AMBIGUOUS")
+            for c in legal:
+                if not c.is_displayed() or not c.is_enabled():
+                    die("FIRST_RUN_TERMS_CHECKBOX_NOT_INTERACTIVE")
+                if not c.is_selected():
+                    c.click()
+                if not c.is_selected():
+                    die("FIRST_RUN_TERMS_CHECKBOX_NOT_SELECTED")
             for e in form.find_elements(By.CSS_SELECTOR, "select[name]"):
                 if kind(e.get_attribute("name") or "") == "role":
                     s = Select(e)
