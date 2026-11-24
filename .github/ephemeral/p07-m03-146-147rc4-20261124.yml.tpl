@@ -1,0 +1,131 @@
+name: TEMP P07 M03 exact-source offline candidate install upgrade rollback
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p07-m03-146-147rc4-20261124.yml'
+permissions:
+  contents: read
+jobs:
+  p07-m03-offline-candidate-proof:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'test/p07-m03-146-147rc4-20261124'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TARGET_REPO: '{{REPOSITORY}}'
+      TARGET_VERSION: '{{TARGET_VERSION}}'
+      TARGET_SHA: '{{TARGET_SHA}}'
+      TARGET_TREE: '{{TARGET_TREE}}'
+      BASE_SHA: 'fd113376cf8e44c6a3bc00fbe47f34c2a354726a'
+      PYTHONDONTWRITEBYTECODE: '1'
+      PYTHONUNBUFFERED: '1'
+      P07_NO_EXEC: '1'
+      P07_ALLOW_NONROOT: '1'
+      NO_COLOR: '1'
+    steps:
+      - name: Checkout canonical public runner
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Verify lane exact immutable product identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -B scripts/ephemeral_lane_spec.py validate \
+            --spec .github/ephemeral/p07-m03-146-147rc4-20261124.json \
+            > "$RUNNER_TEMP/p07-m03-exact-spec.log"
+          python3 -B scripts/ephemeral_lane_spec.py audit-rendered \
+            --spec .github/ephemeral/p07-m03-146-147rc4-20261124.json \
+            --input .github/workflows/temp-p07-m03-146-147rc4-20261124.yml \
+            > "$RUNNER_TEMP/p07-m03-exact-rendered.json"
+          python3 -B - "$RUNNER_TEMP/p07-m03-exact-rendered.json" "$TARGET_SHA" <<'PY'
+          import json,sys
+          d=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert d['status']=='PASS' and d['target_sha']==sys.argv[2]
+          print('P07_M03_OFFLINE_SPEC=PASS')
+          PY
+      - name: Checkout exact P07 private product transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: '{{REPOSITORY}}'
+          ref: '{{TARGET_SHA}}'
+          path: .p07-private
+          fetch-depth: 0
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - name: Verify private source and immutable source tree
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          P="$GITHUB_WORKSPACE/.p07-private"
+          test "$(git -C "$P" rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git -C "$P" rev-parse 'HEAD^{tree}')" = "$TARGET_TREE"
+          test "$(cat "$P/VERSION")" = "$TARGET_VERSION"
+          git -C "$P" cat-file -e "$BASE_SHA^{commit}"
+          test -f "$P/.github/checks/prove_p07_safe_batch_package.sh"
+          test -f "$P/scripts/check_p07_terminal_ux.py"
+          test -f "$P/scripts/check_p07_modules.py"
+          test "$(git -C "$P" status --porcelain --untracked-files=all)" = ""
+          echo P07_M03_OFFLINE_EXACT_PRIVATE_SHA_TREE=PASS
+      - name: Prove genuine 146 to isolated 147-rc4 install corruption upgrade and recovery
+        shell: bash
+        timeout-minutes: 15
+        run: |
+          set -Eeuo pipefail
+          set +x
+          P="$GITHUB_WORKSPACE/.p07-private"
+          test "$P07_NO_EXEC" = 1
+          test "$P07_ALLOW_NONROOT" = 1
+          test "$(git -C "$P" rev-parse HEAD)" = "$TARGET_SHA"
+          python3 -B - "$P/.github/checks/prove_p07_safe_batch_package.sh" "$RUNNER_TEMP/p07-m03-offline-prove147.sh" <<'PY'
+          from pathlib import Path
+          import sys
+          script=Path(sys.argv[1]).read_text(encoding="utf-8")
+          replacements={
+              "candidate=0.1.0-release144-rc4":"candidate=0.1.0-release147-rc4",
+              "previous=0.1.0-release142":"previous=0.1.0-release146",
+              "p07-m03-v0.1.0-release142-20261120/P07-M03-0.1.0-release142.zip":"p07-m03-v0.1.0-release146-20261122/P07-M03-0.1.0-release146.zip",
+              "overlay/lib/migration_batch_withdraw.py":"overlay/lib/migration_safe_batch_io.py",
+          }
+          for old,new in replacements.items():
+              if script.count(old)!=1: raise SystemExit("P07_M03_TRIAL_HARNESS_SHAPE_UNVERIFIED")
+              script=script.replace(old,new,1)
+          Path(sys.argv[2]).write_text(script,encoding="utf-8")
+          print("P07_M03_146_147_HARNESS_EXACT_SOURCE=PASS")
+          PY
+          if ! (cd "$P" && timeout 650 bash "$RUNNER_TEMP/p07-m03-offline-prove147.sh" "$TARGET_SHA") > "$RUNNER_TEMP/p07-m03-offline-package.log" 2>&1; then
+            python3 -B - "$RUNNER_TEMP/p07-m03-offline-package.log" <<'PY'
+          from pathlib import Path
+          import sys
+          data=Path(sys.argv[1]).read_text(encoding="utf-8",errors="replace")
+          markers=("P07_CANDIDATE_FRESH_INSTALL","P07_CANDIDATE_CORRUPTION_REJECTED_AND_ATOMIC_UPGRADE","P07_CANDIDATE_POSTSWAP_RECOVERY","P07_SAFE_BATCH_CANDIDATE")
+          for marker in markers:
+              print(marker+"="+("PASS" if marker+"=PASS" in data else "NOT_PROVEN"))
+          kinds=("OFFICIAL_ZIP_HASH_MISMATCH","OFFICIAL_ARCHIVE_INVALID","SOURCE_PATCH_FILE_UNVERIFIED","INSTALLER_PIN_SHAPE_CHANGED","TimeoutExpired","FileNotFoundError","PermissionError","AssertionError")
+          print("P07_M03_146_147_FAIL_CLASS="+next((kind for kind in kinds if kind in data),"UNCLASSIFIED"))
+          PY
+            echo P07_M03_146_TO_147_ISOLATED=FAIL
+            exit 74
+          fi
+          for marker in P07_CANDIDATE_FRESH_INSTALL P07_CANDIDATE_CORRUPTION_REJECTED_AND_ATOMIC_UPGRADE P07_CANDIDATE_POSTSWAP_RECOVERY P07_SAFE_BATCH_CANDIDATE; do
+            grep -Fxq "$marker=PASS" "$RUNNER_TEMP/p07-m03-offline-package.log"
+            echo "$marker=PASS"
+          done
+          echo P07_M03_146_TO_147_ISOLATED=PASS
+          echo P07_M03_NO_RELEASE_NO_REAL_VPS_NO_MIGRATION=PASS
+      - name: Always wipe transient private source and test logs
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- "$GITHUB_WORKSPACE/.p07-private"
+          rm -f -- "$RUNNER_TEMP"/p07-m03-offline-*.log \
+                   "$RUNNER_TEMP/p07-m03-exact-spec.log" \
+                   "$RUNNER_TEMP/p07-m03-exact-rendered.json"
+          rm -f -- "$RUNNER_TEMP/p07-m03-offline-prove147.sh"
+          echo P07_M03_OFFLINE_PRIVATE_CLEANUP=PASS
