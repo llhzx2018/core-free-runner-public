@@ -150,44 +150,85 @@ def create(port: int) -> None:
                 if c.get_attribute("required") is not None or any(
                         word in marker for word in ("terms", "privacy", "license", "agree")):
                     legal.append(c)
-            phase = "TERMS_EVALUATE"
-            if len(legal) > 1:
-                die("FIRST_RUN_TERMS_CHECKBOX_AMBIGUOUS")
-            for c in legal:
-                phase = "TERMS_INTERACTABLE"
-                if not c.is_displayed() or not c.is_enabled():
-                    die("FIRST_RUN_TERMS_CHECKBOX_NOT_INTERACTIVE")
-                phase = "TERMS_CLICK"
-                if not c.is_selected():
-                    c.click()
-                phase = "TERMS_VERIFY"
-                if not c.is_selected():
-                    die("FIRST_RUN_TERMS_CHECKBOX_NOT_SELECTED")
-            phase = "ROLE_SELECTION"
-            for e in form.find_elements(By.CSS_SELECTOR, "select[name]"):
-                if kind(e.get_attribute("name") or "") == "role":
-                    s = Select(e)
-                    allowed = [o.get_attribute("value") for o in s.options
-                               if (o.get_attribute("value") or "").lower() == "admin"]
-                    if not allowed:
-                        die("ADMIN_ROLE_UNVERIFIED")
-                    s.select_by_value(allowed[0])
-            phase = "SUBMIT_BUTTON_DISCOVERY"
-            buttons = form.find_elements(
-                By.CSS_SELECTOR,
-                "button[type='submit'],input[type='submit'],button:not([type])",
-            )
-            button = next((b for b in buttons if b.is_displayed() and b.is_enabled()), None)
-            if button is None:
-                die("CREATE_USER_SUBMIT_MISSING")
-            phase = "SUBMIT_CLICK"
-            button.click()
-            phase = "POST_SUBMIT"
-            time.sleep(3)
-            if not is_local(browser.current_url, port):
-                die("NONLOCAL_REDIRECT_REJECTED")
-            # Click is not proof of creation. Guest SQLite + database_server gate follows.
-            print("P07_D04_BROWSER_FIRST_RUN_CLICKED=YES")
+            # DO NOT CLICK or submit: capture only bounded boolean/enum
+            # interaction evidence for a synthetic local CloudPanel form.
+            phase = "TERMS_SNAPSHOT"
+            summary = browser.execute_script(r"""
+              const form = arguments[0];
+              const checkboxes = Array.from(form.querySelectorAll('input[type=checkbox]'));
+              const legal = text => /\b(terms|privacy|consent|agree|license|conditions)\b/i.test(text || '');
+              const safeTag = e => {
+                if (!e || !e.tagName) return 'none';
+                const tag = e.tagName.toLowerCase();
+                return ['input','label','span','div','svg','path','a','button','p'].includes(tag)
+                    ? tag : 'other';
+              };
+              const visible = el => {
+                if(!el) return false;
+                const cs=getComputedStyle(el),rect=el.getBoundingClientRect();
+                return cs.display!=='none'&&cs.visibility!=='hidden'&&
+                    Number(cs.opacity)>0&&rect.width>0&&rect.height>0;
+              };
+              const center = el => {
+                if(!el) return null;
+                const r=el.getBoundingClientRect();
+                if(r.width<1||r.height<1) return null;
+                const x=Math.min(innerWidth-1,Math.max(0,r.left+r.width/2));
+                const y=Math.min(innerHeight-1,Math.max(0,r.top+r.height/2));
+                if(x<0||y<0||x>=innerWidth||y>=innerHeight) return null;
+                return document.elementFromPoint(x,y);
+              };
+              const card = e => {
+                const associated=Array.from(e.labels||[]);
+                const parentLabel=e.closest('label');
+                const marker=((e.name||'')+' '+(e.id||'')).toLowerCase();
+                const relevant=e.required||legal(marker);
+                const hit=center(e);
+                const cs=getComputedStyle(e);
+                const label=associated.find(visible)||parentLabel||associated[0]||null;
+                const labelHit=center(label);
+                return {
+                  relevant:!!relevant,
+                  required:!!e.required,checked:!!e.checked,disabled:!!e.disabled,
+                  input_visible:visible(e),
+                  input_nonzero_rect:!!(e.getBoundingClientRect().width>0&&e.getBoundingClientRect().height>0),
+                  input_pointer_events_none:cs.pointerEvents==='none',
+                  input_opacity_zero:Number(cs.opacity)===0,
+                  input_display_none:cs.display==='none',
+                  input_visibility_hidden:cs.visibility==='hidden',
+                  input_center_hit_tag:safeTag(hit),
+                  input_center_hit_self:hit===e,
+                  input_center_hit_inside_label:associated.some(l=>hit&&(l===hit||l.contains(hit))),
+                  associated_label_count:associated.length,
+                  label_by_for:associated.some(l=>!!e.id&&l.htmlFor===e.id),
+                  wrapping_label:!!parentLabel,
+                  associated_label_visible:visible(label),
+                  label_center_hit_tag:safeTag(labelHit),
+                  label_center_hit_self:labelHit===label,
+                  label_center_hit_descendant:!!(label&&labelHit&&label.contains(labelHit)),
+                  label_legal_keyword:associated.some(l=>legal(l.textContent||'')),
+                  label_has_link:associated.some(l=>!!l.querySelector('a')),
+                  viewport_input_center_in_bounds:!!center(e),
+                  viewport_label_center_in_bounds:!!center(label)
+                };
+              };
+              return {
+                checkbox_total:checkboxes.length,
+                checkbox_summaries:checkboxes.slice(0,6).map(card),
+                form_has_native_submit:!!form.querySelector('button[type=submit],input[type=submit],button:not([type])'),
+                form_post:(form.method||'').toLowerCase()==='post',
+                timezone_native_select_selected:!!form.querySelector('select[name=timezone] option:checked')
+              };
+            """,form)
+            if not isinstance(summary,dict):
+                die("TERMS_SNAPSHOT_RESULT_MISSING")
+            if summary.get("checkbox_total",0) > 12:
+                die("TERMS_SNAPSHOT_UNEXPECTED_CHECKBOX_COUNT")
+            # Fixed keys and booleans/enumerated tags only; never raw HTML,
+            # label strings, input names/values or exception messages.
+            import json
+            print("P07_D04_BROWSER_CHECKBOX_SNAPSHOT=" + json.dumps(summary,sort_keys=True,separators=(",",":")))
+            print("P07_D04_BROWSER_READONLY_INSPECTION=PASS")
         except SystemExit:
             raise
         except Exception:
