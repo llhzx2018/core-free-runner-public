@@ -328,12 +328,34 @@ jobs:
               elif t=='first':fields[name]='Synthetic'
               elif t=='last':fields[name]='Admin'
               elif t=='password':fields[name]=password
-              elif t in ('timezone','role'):
-                  candidates=form['options'].get(name,[])
-                  allowed=['UTC','Etc/UTC'] if t=='timezone' else ['admin']
-                  value=next((x for x in allowed if not candidates or x in candidates),None)
+              elif t=='timezone':
+                  # Select only a timezone actually offered by the upstream
+                  # form and recognized by the guest's IANA timezone database.
+                  options=form['options'].get(name,[])
+                  if not options:
+                      value='UTC'
+                  else:
+                      value=None
+                      preferred=('UTC','Etc/UTC','Etc/GMT','Europe/London','Europe/Berlin')
+                      from zoneinfo import ZoneInfo
+                      for candidate in (*preferred,*options):
+                          if candidate not in options:continue
+                          try:
+                              ZoneInfo(candidate)
+                          except (KeyError,ValueError):
+                              continue
+                          value=candidate
+                          break
                   if value is None:
-                      print('P07_D04_GUEST_WEB_ADMIN_OPTIONS_UNSUPPORTED')
+                      print('P07_D04_GUEST_WEB_ADMIN_TIMEZONE_OPTIONS_UNSUPPORTED')
+                      raise SystemExit(83)
+                  fields[name]=value
+              elif t=='role':
+                  options=form['options'].get(name,[])
+                  allowed=('admin','role_admin','administrator','role-administrator','super_admin','role_super_admin')
+                  value=next((x for x in options if x.lower() in allowed),None) if options else 'admin'
+                  if value is None:
+                      print('P07_D04_GUEST_WEB_ADMIN_ROLE_OPTIONS_UNSUPPORTED')
                       raise SystemExit(83)
                   fields[name]=value
           req=urllib.request.Request(dest,urllib.parse.urlencode(fields).encode(),headers={'Content-Type':'application/x-www-form-urlencoded','Referer':page_url},method='POST')
@@ -379,7 +401,8 @@ jobs:
                 P07_D04_GUEST_WEB_ADMIN_PAGE_ORIGIN_REJECTED \
                 P07_D04_GUEST_WEB_ADMIN_FIRST_FORM_UNRECOGNIZED \
                 P07_D04_GUEST_WEB_ADMIN_SUBMIT_ORIGIN_REJECTED \
-                P07_D04_GUEST_WEB_ADMIN_OPTIONS_UNSUPPORTED \
+                P07_D04_GUEST_WEB_ADMIN_TIMEZONE_OPTIONS_UNSUPPORTED \
+                P07_D04_GUEST_WEB_ADMIN_ROLE_OPTIONS_UNSUPPORTED \
                 P07_D04_GUEST_WEB_ADMIN_FIRST_POST_FAILED \
                 P07_D04_GUEST_WEB_ADMIN_CREATION_NOT_CONFIRMED \
                 P07_D04_GUEST_PANEL_DB_MISSING \
