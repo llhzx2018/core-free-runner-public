@@ -102,7 +102,7 @@ class BridgeTest(unittest.TestCase):
     def test_reviewed_workflow_is_exact_candidate_git_blob(self):
         path=ROOT/".github/workflows/shared-test-on-demand.yml"
         raw=path.read_bytes()
-        digest=hashlib.sha1(("blob "+str(len(raw))+"\\0").encode()+raw).hexdigest()
+        digest=hashlib.sha1(("blob "+str(len(raw))).encode()+bytes([0])+raw).hexdigest()
         self.assertEqual(REVIEWED_WORKFLOW_BLOB,digest)
 
     def test_secret_endpoint_and_workflow_identity(self):
