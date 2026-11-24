@@ -1,4 +1,4 @@
-name: TEMP P07 M03 true native SQL import and SQLite/static recovery
+name: TEMP P07 M03 MariaDB118 native SQL import plus SQLite/static recovery
 on:
   pull_request:
     branches: [main]
@@ -71,48 +71,6 @@ jobs:
           tail -n 3 "$RUNNER_TEMP/p07-batch-order-tests.log"
           echo BATCH_22SITE_HISTORY_UNVERIFIED_FAIL_CLOSED=PASS
           echo NINE_FILE_RELEASE147_RESUME_AUDIT_CLOSURE_UNIT=PASS
-      - name: Two real Percona 8.4 instances and native P07 target import adapter
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          set +x
-          command -v docker >/dev/null
-          docker info >/dev/null
-          image='percona/percona-server:8.4.11-12'
-          docker pull -q "$image"
-          id="$(docker image inspect "$image" --format '{{.Id}}')"
-          test -n "$id"
-          base="p07-native-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          echo "$base" > "$RUNNER_TEMP/p07-native-container-base"
-          for side in source target; do
-            docker run -d --name "$base-$side" -e MYSQL_ROOT_PASSWORD=SYNTHETIC_ci_root_2026 "$id" >/dev/null
-          done
-          for side in source target; do
-            ok=0
-            for trial in $(seq 1 90); do
-              if docker exec -e MYSQL_PWD=SYNTHETIC_ci_root_2026 "$base-$side" mysql --user=root --batch --skip-column-names --execute 'SELECT 1' >/dev/null 2>&1; then ok=1; break; fi
-              sleep 3
-            done
-            test "$ok" = 1
-          done
-          a="$(docker exec -e MYSQL_PWD=SYNTHETIC_ci_root_2026 "$base-source" mysql --user=root --batch --skip-column-names --execute 'SELECT @@version, @@version_comment')"
-          b="$(docker exec -e MYSQL_PWD=SYNTHETIC_ci_root_2026 "$base-target" mysql --user=root --batch --skip-column-names --execute 'SELECT @@version, @@version_comment')"
-          test "$a" = "$b"
-          case "$a" in 8.4.*Percona*) ;; *) echo P07_INCORRECT_ENGINE; exit 38 ;; esac
-          echo P07_M03_TWO_NATIVE_PERCONA84_SAME_ENGINE=PASS
-          test ! -e /home/p07native
-          sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" /home/p07native/htdocs
-          echo yes > "$RUNNER_TEMP/p07-native-home-created"
-          cd "$GITHUB_WORKSPACE/.p07-private"
-          export P07_MYSQL_NATIVE_CI=1 P07_NATIVE_DB_ENGINE=MYSQL_8.4 P07_NATIVE_DB_CONTAINER="$base"
-          python3 -B -m unittest -v tests.test_p07_m03_d04_native_restore_drill > "$RUNNER_TEMP/p07-native-test.log" 2>&1 || {
-            grep -E '^(test_|FAIL:|ERROR:|Ran [0-9]+ tests|FAILED)' "$RUNNER_TEMP/p07-native-test.log" | cut -c1-320 | head -n 38 || true
-            exit 41
-          }
-          grep -E '^(Ran [0-9]+ tests|OK)$' "$RUNNER_TEMP/p07-native-test.log" || true
-          echo P07_M03_REAL_P07_TARGET_CREATE_DATABASE_LOCAL=PASS
-          echo P07_M03_NATIVE_FOREIGN_TARGET_REFUSED=PASS
-          echo P07_M03_NATIVE_PARTIAL_IMPORT_MARKER_PREVENTS_REPLAY=PASS
       - name: Real SQLite WAL and static asset snapshots with failure injections
         shell: bash
         run: |
@@ -133,6 +91,48 @@ jobs:
           echo P07_M03_ORIGINAL_FAILED_22_SITE_TASK=NOT_RUN
           echo P07_M03_DUAL_CLOUDPANEL_FULL_PULL_E2E=NOT_RUN
           echo P07_M03_RELEASE_PUBLICATION=NOT_PERMITTED
+      - name: Two real MariaDB 11.8 instances and native P07 target import adapter
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          command -v docker >/dev/null
+          docker info >/dev/null
+          image='mariadb:11.8'
+          docker pull -q "$image"
+          id="$(docker image inspect "$image" --format '{{.Id}}')"
+          test -n "$id"
+          base="p07-native-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          echo "$base" > "$RUNNER_TEMP/p07-native-container-base"
+          for side in source target; do
+            docker run -d --name "$base-$side" -e MARIADB_ROOT_PASSWORD=SYNTHETIC_ci_root_2026 "$id" >/dev/null
+          done
+          for side in source target; do
+            ok=0
+            for trial in $(seq 1 90); do
+              if docker exec -e MYSQL_PWD=SYNTHETIC_ci_root_2026 "$base-$side" mariadb --user=root --batch --skip-column-names --execute 'SELECT 1' >/dev/null 2>&1; then ok=1; break; fi
+              sleep 3
+            done
+            test "$ok" = 1
+          done
+          a="$(docker exec -e MYSQL_PWD=SYNTHETIC_ci_root_2026 "$base-source" mariadb --user=root --batch --skip-column-names --execute 'SELECT @@version, @@version_comment')"
+          b="$(docker exec -e MYSQL_PWD=SYNTHETIC_ci_root_2026 "$base-target" mariadb --user=root --batch --skip-column-names --execute 'SELECT @@version, @@version_comment')"
+          test "$a" = "$b"
+          case "$a" in 11.8.*MariaDB*) ;; *) echo P07_INCORRECT_ENGINE; exit 38 ;; esac
+          echo P07_M03_TWO_NATIVE_MARIADB118_SAME_ENGINE=PASS
+          test ! -e /home/p07native
+          sudo install -d -m 0700 -o "$(id -u)" -g "$(id -g)" /home/p07native/htdocs
+          echo yes > "$RUNNER_TEMP/p07-native-home-created"
+          cd "$GITHUB_WORKSPACE/.p07-private"
+          export P07_MYSQL_NATIVE_CI=1 P07_NATIVE_DB_ENGINE=MARIADB_11.8 P07_NATIVE_DB_CONTAINER="$base"
+          python3 -B -m unittest -v tests.test_p07_m03_d04_native_restore_drill > "$RUNNER_TEMP/p07-native-test.log" 2>&1 || {
+            grep -E '^(test_|FAIL:|ERROR:|Ran [0-9]+ tests|FAILED|[A-Za-z_]*(Error|Blocked): [A-Z_]+)' "$RUNNER_TEMP/p07-native-test.log" | cut -c1-320 | head -n 38 || true
+            exit 41
+          }
+          grep -E '^(Ran [0-9]+ tests|OK)$' "$RUNNER_TEMP/p07-native-test.log" || true
+          echo P07_M03_REAL_P07_TARGET_CREATE_DATABASE_LOCAL=PASS
+          echo P07_M03_NATIVE_FOREIGN_TARGET_REFUSED=PASS
+          echo P07_M03_NATIVE_PARTIAL_IMPORT_MARKER_PREVENTS_REPLAY=PASS
       - name: Always erase native DBs, synthetic home and private source
         if: always()
         shell: bash
