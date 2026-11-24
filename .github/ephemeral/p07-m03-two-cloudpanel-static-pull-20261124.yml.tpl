@@ -12,7 +12,7 @@ jobs:
       github.repository == 'llhzx2018/core-free-runner-public' &&
       github.event.pull_request.user.login == 'llhzx2018' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.head_ref == 'test/p07-m03-engine-preflight-classify-20261124'
+      github.head_ref == 'test/p07-m03-web-first-run-20261124'
     runs-on: ubuntu-24.04
     timeout-minutes: 48
     env:
@@ -234,49 +234,122 @@ jobs:
               echo P07_D04_GUEST_MIGRATION_DEPS_MISSING;exit 72;
             }
           fi
-          # Official CloudPanel bootstrap normally creates the first admin from
-          # its 8443 setup page; these isolated VMs have no public 8443 route.
-          # Use the documented root-only CLI only when no admin exists.
-          # Do not persist or print the synthetic one-time password.
-          if python3 -B - <<'PY'
-          import sys
-          sys.path.insert(0,'/root/p07exact/lib')
-          import migration_target_cloudpanel_environment as cp
-          n=cp.cloudpanel_user_count()
-          if n is None:
-              print('P07_D04_GUEST_PANEL_USER_LIST_UNVERIFIED')
+          # Exercise genuine CloudPanel first-run HTTPS (local guest loopback only).
+          # CLI user:add does NOT prove the first-run Web lifecycle completed.
+          # Fail closed if the installed upstream form differs; never forge DB rows.
+          python3 -B - <<'WEB'
+          import http.cookiejar, re, secrets, sqlite3, ssl, urllib.parse, urllib.request
+          from html.parser import HTMLParser
+          from pathlib import Path
+
+          base='https://127.0.0.1:8443'
+          db=Path('/home/clp/htdocs/app/data/db.sq3')
+          def count_users():
+              try:
+                  con=sqlite3.connect(f'file:{db}?mode=ro',uri=True,timeout=4)
+                  try:
+                      return int(con.execute('SELECT count(*) FROM "user"').fetchone()[0])
+                  finally:
+                      con.close()
+              except (OSError,sqlite3.Error,TypeError,ValueError):
+                  return None
+          if count_users()!=0:
+              print('P07_D04_GUEST_WEB_ADMIN_INITIAL_STATE_UNVERIFIED')
+              raise SystemExit(78)
+          class Forms(HTMLParser):
+              def __init__(self):
+                  super().__init__();self.forms=[];self.cur=None;self.select=None
+              def handle_starttag(self,tag,attrs):
+                  a=dict(attrs)
+                  if tag=='form':
+                      if self.cur is None:
+                          self.cur={'action':a.get('action',''),'method':a.get('method','get').lower(),'fields':{},'options':{}}
+                  elif self.cur is not None and tag=='input':
+                      name=a.get('name')
+                      if name and a.get('type','text').lower() not in ('submit','button','reset','file','image'):
+                          self.cur['fields'][name]=a.get('value','')
+                  elif self.cur is not None and tag=='select':
+                      self.select=a.get('name')
+                      if self.select:self.cur['fields'][self.select]=''
+                  elif self.cur is not None and tag=='option' and self.select:
+                      self.cur['options'].setdefault(self.select,[]).append(a.get('value',''))
+                  elif self.cur is not None and tag=='button' and a.get('type')=='submit' and a.get('name'):
+                      self.cur['fields'][a['name']]=a.get('value','')
+              def handle_endtag(self,tag):
+                  if tag=='select':self.select=None
+                  if tag=='form' and self.cur is not None:
+                      self.forms.append(self.cur);self.cur=None;self.select=None
+          def kind(name):
+              k=re.sub('[^a-z0-9]','',name.lower())
+              if 'csrf' in k or 'token' in k:return 'hidden'
+              if 'password' in k or 'passwd' in k:return 'password'
+              if 'username' in k:return 'username'
+              if 'firstname' in k:return 'first'
+              if 'lastname' in k:return 'last'
+              if 'email' in k:return 'email'
+              if 'timezone' in k:return 'timezone'
+              if 'role' in k:return 'role'
+              return 'other'
+          class LocalRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self,request,fp,code,msg,headers,url):
+                  u=urllib.parse.urlsplit(url)
+                  if (u.scheme,u.netloc)!=('https','127.0.0.1:8443'):
+                      raise ValueError('Nonlocal first-run redirect rejected')
+                  return super().redirect_request(request,fp,code,msg,headers,url)
+          ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+          ctx.check_hostname=False;ctx.verify_mode=ssl.CERT_NONE
+          op=urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx),urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()),LocalRedirect())
+          try:
+              with op.open(base+'/',timeout=18) as res:
+                  page=res.read(160000).decode('utf-8','replace');page_url=res.url
+          except Exception:
+              print('P07_D04_GUEST_WEB_ADMIN_FIRST_PAGE_UNAVAILABLE')
               raise SystemExit(79)
-          raise SystemExit(0 if n > 0 else 78)
-          PY
-          then
-            echo P07_D04_GUEST_EXISTING_PANEL_ADMIN=PASS
-          else
-            status=$?
-            if test "$status" -ne 78; then
-              echo P07_D04_GUEST_PANEL_ADMIN_PREFLIGHT_FAILED
-              exit 79
-            fi
-            synthetic_pass="$(openssl rand -hex 24)"
-            if ! clpctl user:add \
-                --userName='p07-ci-admin' --email='p07-ci-admin@example.invalid' \
-                --firstName='Synthetic' --lastName='Admin' \
-                --password="$synthetic_pass" --role='admin' \
-                --timezone='UTC' --status='1' >/dev/null 2>&1; then
-              unset synthetic_pass
-              echo P07_D04_GUEST_OFFICIAL_INITIAL_ADMIN_CLI_FAILED
-              exit 80
-            fi
-            unset synthetic_pass
-            python3 -B - <<'PY'
-          import sys
-          sys.path.insert(0,'/root/p07exact/lib')
-          import migration_target_cloudpanel_environment as cp
-          if not (cp.cloudpanel_user_count() or 0) > 0:
-              print('P07_D04_GUEST_INITIAL_ADMIN_NOT_REGISTERED')
+          if urllib.parse.urlsplit(page_url).netloc!='127.0.0.1:8443':
+              print('P07_D04_GUEST_WEB_ADMIN_PAGE_ORIGIN_REJECTED')
+              raise SystemExit(80)
+          forms=Forms();forms.feed(page)
+          candidates=[f for f in forms.forms if f['method']=='post' and {'username','password','email'}.issubset({kind(x) for x in f['fields']})]
+          if len(candidates)!=1:
+              print('P07_D04_GUEST_WEB_ADMIN_FIRST_FORM_UNRECOGNIZED')
               raise SystemExit(81)
-          print('P07_D04_GUEST_OFFICIAL_INITIAL_ADMIN_BOOTSTRAP=PASS')
-          PY
-          fi
+          form=candidates[0]
+          dest=urllib.parse.urljoin(page_url,form['action'] or '')
+          u=urllib.parse.urlsplit(dest)
+          if (u.scheme,u.netloc)!=('https','127.0.0.1:8443'):
+              print('P07_D04_GUEST_WEB_ADMIN_SUBMIT_ORIGIN_REJECTED')
+              raise SystemExit(82)
+          password=secrets.token_urlsafe(36)
+          fields=dict(form['fields'])
+          for name in fields:
+              t=kind(name)
+              if t=='username':fields[name]='p07-ci-admin'
+              elif t=='email':fields[name]='p07-ci-admin@example.invalid'
+              elif t=='first':fields[name]='Synthetic'
+              elif t=='last':fields[name]='Admin'
+              elif t=='password':fields[name]=password
+              elif t in ('timezone','role'):
+                  candidates=form['options'].get(name,[])
+                  allowed=['UTC','Etc/UTC'] if t=='timezone' else ['admin']
+                  value=next((x for x in allowed if not candidates or x in candidates),None)
+                  if value is None:
+                      print('P07_D04_GUEST_WEB_ADMIN_OPTIONS_UNSUPPORTED')
+                      raise SystemExit(83)
+                  fields[name]=value
+          req=urllib.request.Request(dest,urllib.parse.urlencode(fields).encode(),headers={'Content-Type':'application/x-www-form-urlencoded','Referer':page_url},method='POST')
+          try:
+              with op.open(req,timeout=30) as res:
+                  if urllib.parse.urlsplit(res.url).netloc!='127.0.0.1:8443':
+                      raise ValueError('Nonlocal redirect')
+                  res.read(10000)
+          except Exception:
+              print('P07_D04_GUEST_WEB_ADMIN_FIRST_POST_FAILED')
+              raise SystemExit(84)
+          if count_users()!=1:
+              print('P07_D04_GUEST_WEB_ADMIN_CREATION_NOT_CONFIRMED')
+              raise SystemExit(85)
+          print('P07_D04_GUEST_WEB_ADMIN_FIRST_RUN_CONFIRMED=PASS')
+          WEB
           python3 -B - <<'PY'
           import sys
           sys.path.insert(0,'/root/p07exact/lib')
@@ -301,6 +374,14 @@ jobs:
               # Only fixed whitelist codes leave the discarded, root-only guest log.
               # Preserve fail-closed behavior even if no known marker is present.
               for marker in \
+                P07_D04_GUEST_WEB_ADMIN_INITIAL_STATE_UNVERIFIED \
+                P07_D04_GUEST_WEB_ADMIN_FIRST_PAGE_UNAVAILABLE \
+                P07_D04_GUEST_WEB_ADMIN_PAGE_ORIGIN_REJECTED \
+                P07_D04_GUEST_WEB_ADMIN_FIRST_FORM_UNRECOGNIZED \
+                P07_D04_GUEST_WEB_ADMIN_SUBMIT_ORIGIN_REJECTED \
+                P07_D04_GUEST_WEB_ADMIN_OPTIONS_UNSUPPORTED \
+                P07_D04_GUEST_WEB_ADMIN_FIRST_POST_FAILED \
+                P07_D04_GUEST_WEB_ADMIN_CREATION_NOT_CONFIRMED \
                 P07_D04_GUEST_PANEL_DB_MISSING \
                 P07_D04_GUEST_MIGRATION_DEPS_MISSING \
                 P07_D04_GUEST_PANEL_USER_LIST_UNVERIFIED \
