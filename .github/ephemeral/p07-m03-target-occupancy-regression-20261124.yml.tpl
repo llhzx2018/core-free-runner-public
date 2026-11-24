@@ -77,6 +77,7 @@ jobs:
           test "$(cat "$P/VERSION")" = "$TARGET_VERSION"
           git -C "$P" cat-file -e "$BASE_SHA^{commit}"
           test -f "$P/lib/migration_safe_batch_io.py"
+          test -f "$P/lib/migration_safe_batch_inventory.py"
           test -f "$P/tests/test_p07_m03_safe_batch.py"
           test -f "$G/governance/agent/code_architecture_lint.py"
           echo P07_M03_EXACT_PRIVATE_SOURCE_AND_GOV=PASS
@@ -88,7 +89,8 @@ jobs:
           python3 -B - "$GITHUB_WORKSPACE/.p07-private" <<'PY'
           import ast,pathlib,sys
           root=pathlib.Path(sys.argv[1])
-          paths=('lib/migration_safe_batch_io.py','lib/migration_safe_batch_guard.py',
+          paths=('lib/migration_safe_batch_io.py','lib/migration_safe_batch_inventory.py',
+                 'lib/migration_safe_batch_guard.py',
                  'lib/migration_safe_batch_cli.py','lib/migration_resume_audit.py',
                  'tests/test_p07_m03_safe_batch.py',
                  'tests/test_p07_m03_cloudpanel_sql_probe.py',
