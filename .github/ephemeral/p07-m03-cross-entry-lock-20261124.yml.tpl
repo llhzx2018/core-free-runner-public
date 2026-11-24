@@ -135,7 +135,7 @@ jobs:
             'https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/0bd7afe75eb4bff9e974918caa092279569d60b0/installers/p07-m03-release146-atomic.sh' \
             -o "$T/official-installer.sh"
           test "$(git hash-object "$T/official-installer.sh")" = e046c3eebed700a7d423f31cba096ea4f5460c9c
-          mkdir -p "$T/bin" "$T/siblings"
+          mkdir -p "$T/bin" "$T/siblings" "$T/runtime"
           for m in m01 m02 m04 m05; do printf '%s\n' "$m-STABLE" > "$T/siblings/$m"; done
           (cd "$T/siblings" && sha256sum m01 m02 m04 m05 > "$T/siblings.sha")
           export P07_INSTALL_DIR="$T/runtime/p07" P07_PREVIOUS_DIR="$T/runtime/p07.previous"
