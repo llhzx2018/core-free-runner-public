@@ -60,14 +60,14 @@ def validate(job: object) -> dict:
     return job
 
 
-def route(job: dict) -> str:
+def route(job: dict, *, approved_ephemeral_source: bool = False) -> str:
     validate(job)
     if job["profile"] == "heavy":
         return "HYPERV_PRIVATE"
     if job["privacy"] == "PRIVATE_EVIDENCE":
         return "PRIVATE"
-    if job["privacy"] == "PRIVATE_SOURCE" and not job["allow_public_ephemeral"]:
-        return "PRIVATE"
+    if job["privacy"] == "PRIVATE_SOURCE":
+        return "PUBLIC_HOSTED" if job["allow_public_ephemeral"] and approved_ephemeral_source else "PRIVATE"
     return "PUBLIC_HOSTED"
 
 
