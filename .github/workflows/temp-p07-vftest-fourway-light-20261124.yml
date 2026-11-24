@@ -93,7 +93,7 @@ jobs:
                  'lib/migration_safe_batch_guard.py','lib/migration_safe_batch_cli.py',
                  'lib/migration_resume_audit.py',
                  'tests/test_cli_menu.py','tests/test_main_menu_routes.py',
-                 'tests/test_p07_fresh_menu.py','tests/test_p07_m03_safe_batch.py',
+                 'tests/test_p07_m03_safe_batch_terminal_ux.py','tests/test_p07_m03_safe_batch.py',
                  'tests/test_p07_m03_d04_cli_parser_entrypoints.py',
                  'tests/test_server_migration_pull.py')
           for path in paths:
@@ -175,7 +175,7 @@ jobs:
           run_case CLI_MENU test_cli_menu.py tests || failed=1
           run_case MAIN_MENU test_main_menu_routes.py tests || failed=1
           run_case D04_CLI_SAFE test_p07_m03_d04_cli_parser_entrypoints.py tests || failed=1
-          run_case FAKE_MIGRATION_MENU test_p07_fresh_menu.py tests || failed=1
+          run_case SAFE_BATCH_TERMINAL_UX test_p07_m03_safe_batch_terminal_ux.py tests || failed=1
           run_case HISTORY_ZERO_WRITE test_p07_m03_safe_batch.py tests || failed=1
           run_case ARCH_NEGATIVES test_architecture_gate.py .github/checks || failed=1
           if test "$failed" -ne 0; then
