@@ -1,0 +1,97 @@
+name: TEMP P07 M03 D04 receiver prepare mutex and safe batch regression
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p07-m03-cross-entry-lock-20261124.yml'
+permissions:
+  contents: read
+jobs:
+  isolated-atomic:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'test/p07-m03-cross-entry-receiver-lock-20261124'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      TARGET_REPO: '{{REPOSITORY}}'
+      TARGET_VERSION: '{{TARGET_VERSION}}'
+      TARGET_SHA: '{{TARGET_SHA}}'
+      TARGET_TREE: '{{TARGET_TREE}}'
+      PRODUCT_SHA: '{{TARGET_SHA}}'
+      NO_COLOR: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout public lane contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Public source-render audit before any private checkout
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -B scripts/ephemeral_lane_spec.py validate --spec .github/ephemeral/p07-m03-cross-entry-lock-20261124.json > "$RUNNER_TEMP/p07-lane-check.json"
+          python3 -B scripts/ephemeral_lane_spec.py audit-rendered --spec .github/ephemeral/p07-m03-cross-entry-lock-20261124.json --input .github/workflows/temp-p07-m03-cross-entry-lock-20261124.yml > "$RUNNER_TEMP/p07-lane-audit.json"
+          python3 -B - "$RUNNER_TEMP/p07-lane-audit.json" "$TARGET_SHA" <<'PY'
+          import json,sys
+          data=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert data['status']=='PASS' and data['target_sha']==sys.argv[2]
+          print('P07_M03_RC4_SOURCE_LANE_PRECHECK=PASS')
+          PY
+      - name: Transient exact private source checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: {{REPOSITORY}}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: .p07-private
+      - name: Exact P07 M03 receiver lock and safe migration regressions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          cd "$GITHUB_WORKSPACE/.p07-private"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          python3 -B - <<'PY'
+          import ast,pathlib
+          for path in ("lib/migration_safe_batch_io.py","lib/server_migration_pull.py",
+                       "tests/test_p07_m03_safe_batch.py","tests/test_server_migration_pull.py"):
+              ast.parse(pathlib.Path(path).read_text(encoding="utf-8"), filename=path)
+          print("P07_M03_EXACT_SOURCE_PYTHON_SYNTAX=PASS")
+          PY
+          python3 -B -m unittest -q \
+            tests.test_p07_m03_safe_batch \
+            tests.test_server_migration_pull \
+            tests.test_p07_m03_safe_batch_terminal_ux \
+            tests.test_p07_m03_resume_audit \
+            tests.test_p07_m03_cloudpanel_sql_probe \
+            > "$RUNNER_TEMP/p07-lock-tests.log" 2>&1 || {
+              grep -E '^(FAIL:|ERROR:|Ran [0-9]+ tests|FAILED|AssertionError:|migration_safe_batch_guard.BatchScopeBlocked:)' "$RUNNER_TEMP/p07-lock-tests.log" | cut -c1-250 | head -n 55 || true
+              exit 31
+            }
+          grep -E '^(Ran [0-9]+ tests|OK)$' "$RUNNER_TEMP/p07-lock-tests.log" || true
+          echo P07_M03_DIRECT_AND_SAFE_BATCH_SHARED_RECEIVER_MUTEX=PASS
+          echo P07_M03_SECOND_THREAD_PREPARE_REJECTED_BEFORE_SOURCE_PROBE=PASS
+          echo P07_M03_PRIVATE_INTERNAL_PREPARE_NO_LOCK_REFUSED=PASS
+          echo P07_M03_OLD_FAILED_TASK_REPLAY_BLOCKED=PASS
+          echo P07_M03_DUAL_CLOUDPANEL_FULL_E2E=NOT_RUN
+          echo P07_M03_FORMAL_RELEASE=NOT_AUTHORIZED
+      - name: Always erase transient private checkout and isolated runtime
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- "$GITHUB_WORKSPACE/.p07-private"
+          if test -s "$RUNNER_TEMP/p07-atomic-current-path"; then
+            t="$(cat "$RUNNER_TEMP/p07-atomic-current-path")"
+            case "$t" in "$RUNNER_TEMP"/p07-atomic.*) rm -rf -- "$t";; esac
+          fi
+          rm -f -- "$RUNNER_TEMP/p07-atomic-current-path"
+          rm -f -- "$RUNNER_TEMP/p07-lock-tests.log" "$RUNNER_TEMP/p07-lane-check.json" "$RUNNER_TEMP/p07-lane-audit.json"
+          echo EPHEMERAL_PRIVATE_CLEANUP=COMPLETE
