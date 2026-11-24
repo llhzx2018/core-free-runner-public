@@ -1,0 +1,226 @@
+name: TEMP P08 R43 isolated artifact and recovery preflight
+on:
+  pull_request:
+    paths:
+      - .github/workflows/temp-p08-s9-r43-artifact-recovery-20261124.yml
+permissions:
+  contents: read
+concurrency:
+  group: p08-r43-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  package-sqlite:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/p08-s9-r43-artifact-recovery-20261124'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    env:
+      P08_ISOLATED_INSTALL_TEST: 'YES'
+      P08_CANDIDATE_SOURCE_SHA: e190631cb12c515eaeaba2745b286f50ed1d62b8
+      P08_CANDIDATE_VERSION: '0.1.16'
+    steps:
+      - name: Ephemeral exact private P08 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: e190631cb12c515eaeaba2745b286f50ed1d62b8
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 0
+          path: private-p08
+      - name: Canonical governance checkout for real package authority gate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: main
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: gov-proof
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, zip, mbstring, intl, bcmath, dom, fileinfo
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Locked dependencies and code-level release-input gate
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git rev-parse HEAD)" = "e190631cb12c515eaeaba2745b286f50ed1d62b8"
+          test "$(cat VERSION)" = "0.1.16"
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
+          composer install --no-dev --no-scripts --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-r43-composer.log" 2>&1 || { echo P08_R43_DEPENDENCIES=FAIL; exit 1; }
+          npm ci --no-audit --no-fund > "$RUNNER_TEMP/p08-r43-npm.log" 2>&1 || { echo P08_R43_NPM=FAIL; exit 1; }
+          npm run build > "$RUNNER_TEMP/p08-r43-build.log" 2>&1 || { echo P08_R43_VITE_BUILD=FAIL; exit 1; }
+          python3 scripts/check_stack_contract.py --phase full --root . > "$RUNNER_TEMP/p08-r43-stack.log" 2>&1 || { echo P08_R43_STACK_GATE=FAIL; grep '^P08_STACK_CHECK_FAIL=' "$RUNNER_TEMP/p08-r43-stack.log" | head -n 20 || true; exit 1; }
+          echo P08_R43_SOURCE_AND_COMPILED_RUNTIME=PASS
+      - name: Two actual deterministic Clean FULL archives with canonical build and delivery gates
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          python3 scripts/build_full.py --source . --output "$RUNNER_TEMP/p08-r43-a.zip" --version 0.1.16 --source-sha e190631cb12c515eaeaba2745b286f50ed1d62b8 --governance-root "$GITHUB_WORKSPACE/gov-proof" > "$RUNNER_TEMP/p08-r43-full-a.log" 2>&1 || { echo P08_R43_CANONICAL_FULL_A=FAIL; grep -Eo 'CONTRACT_REASON=[A-Z0-9_]+|FULL_BLOCKED[^"]*' "$RUNNER_TEMP/p08-r43-full-a.log" | head -n 12 || true; exit 1; }
+          python3 scripts/build_full.py --source . --output "$RUNNER_TEMP/p08-r43-b.zip" --version 0.1.16 --source-sha e190631cb12c515eaeaba2745b286f50ed1d62b8 --governance-root "$GITHUB_WORKSPACE/gov-proof" > "$RUNNER_TEMP/p08-r43-full-b.log" 2>&1 || { echo P08_R43_CANONICAL_FULL_B=FAIL; grep -Eo 'CONTRACT_REASON=[A-Z0-9_]+|FULL_BLOCKED[^"]*' "$RUNNER_TEMP/p08-r43-full-b.log" | head -n 12 || true; exit 1; }
+          cmp -s "$RUNNER_TEMP/p08-r43-a.zip" "$RUNNER_TEMP/p08-r43-b.zip" || { echo P08_R43_FULL_NOT_DETERMINISTIC; exit 1; }
+          python3 - "$RUNNER_TEMP/p08-r43-a.zip" <<'PY'
+          import hashlib,json,sys,zipfile
+          p=sys.argv[1]
+          with zipfile.ZipFile(p) as z:
+              names=z.namelist()
+              m=json.loads(z.read('FULL_MANIFEST.json'))
+              assert m['type']=='CLEAN_FULL_ONLY' and m['source_sha']=='e190631cb12c515eaeaba2745b286f50ed1d62b8'
+              assert m['target_version']=='0.1.16' and m['update_type']=='NOT_ATOMIC'
+              assert m['data_included'] is False and len(names)==len(set(names))
+              assert all('.env' not in n.split('/') or n=='.env.example' for n in names)
+              assert all(not n.startswith(('storage/app/private/','tests/','.git/','.github/')) for n in names)
+              assert all(x in names for x in ('public/setup.php','public/index.php','vendor/autoload.php','public/build/manifest.json'))
+          print('P08_R43_FULL_SOURCE_INDEX_PRIVACY=PASS')
+          print('P08_R43_FULL_SHA256='+hashlib.sha256(open(p,'rb').read()).hexdigest())
+          PY
+          echo P08_R43_DOUBLE_FULL_IDENTICAL_BYTES_AND_CANONICAL_DELIVERY=PASS
+      - name: Extract actual FULL and first-claim with isolated SQLite
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          mkdir -m 700 "$RUNNER_TEMP/p08-r43-extracted"
+          unzip -q "$RUNNER_TEMP/p08-r43-a.zip" -d "$RUNNER_TEMP/p08-r43-extracted"
+          php tests/test_extracted_full_sqlite_e2e.php "$RUNNER_TEMP/p08-r43-extracted" > "$RUNNER_TEMP/p08-r43-extracted.log" 2>&1 || { echo P08_R43_EXTRACTED_FULL_INSTALL=FAIL; grep -E '^(P08_|FULL_EXTRACTED_|PHP Fatal)' "$RUNNER_TEMP/p08-r43-extracted.log" | tail -n 12 || true; exit 1; }
+          echo P08_R43_EXTRACTED_FULL_SQLITE_OWNER_INSTALL=PASS
+      - name: Independent SQLite WAL and private Token media restore with negative tamper
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          php tests/test_install_sqlite_e2e.php > "$RUNNER_TEMP/p08-r43-sqlite-install.log" 2>&1 || { echo P08_R43_SQLITE_SETUP=FAIL; exit 1; }
+          php tests/test_recovery_sqlite_e2e.php > "$RUNNER_TEMP/p08-r43-sqlite-recovery.log" 2>&1 || { echo P08_R43_SQLITE_WAL_RESTORE=FAIL; exit 1; }
+          php tests/test_recovery_private_payload_e2e.php > "$RUNNER_TEMP/p08-r43-private-recovery.log" 2>&1 || { echo P08_R43_PRIVATE_MEDIA_TOKEN_RESTORE=FAIL; exit 1; }
+          php tests/test_recovery_landing_assets_snapshot.php > "$RUNNER_TEMP/p08-r43-assets.log" 2>&1 || { echo P08_R43_LANDING_MEDIA_TAMPER=FAIL; exit 1; }
+          echo P08_R43_SQLITE_WAL_AND_PRIVATE_RESTORE=PASS
+      - name: Older installed source to new schema and unchanged version must refuse code-only Atomic
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          set +e
+          python3 scripts/check_r101_atomic_schema_compat.py --repo . --base-ref 462e3dbb52ad122073ee3a614414263ffe5c2b02 --target-ref e190631cb12c515eaeaba2745b286f50ed1d62b8 > "$RUNNER_TEMP/p08-r43-atomic-gate.json" 2>&1
+          code=$?
+          set -e
+          test "$code" -eq 2 || { echo P08_R43_ATOMIC_VERSION_SCHEMA_GATE_NOT_FAIL_CLOSED; exit 1; }
+          python3 - "$RUNNER_TEMP/p08-r43-atomic-gate.json" <<'PY'
+          import json,sys
+          lines=open(sys.argv[1]).read().splitlines()
+          x=json.loads(lines[0])
+          reasons=set(x['reason_codes'])
+          assert x['status']=='BLOCKED_PRE_RELEASE'
+          assert {'SCHEMA_MIGRATIONS_CHANGED','TARGET_VERSION_NOT_NEWER'}<=reasons, reasons
+          assert x['source_version']=='0.1.16' and x['target_version']=='0.1.16'
+          assert x['added_migrations'] and x['source_sha']=='462e3dbb52ad122073ee3a614414263ffe5c2b02'
+          assert x['target_sha']=='e190631cb12c515eaeaba2745b286f50ed1d62b8'
+          print('P08_R43_CODE_ONLY_ATOMIC_UNSAFE_SOURCE_REFUSED=PASS')
+          print('P08_R43_CURRENT_ATOMIC_RELEASE_READINESS=BLOCKED_SCHEMA_AND_VERSION')
+          PY
+          test ! -e "$RUNNER_TEMP/p08-r43-atomic.zip"
+      - name: Clear all transient source and package contents
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- private-p08 gov-proof "$RUNNER_TEMP/p08-r43-extracted"
+          rm -f -- "$RUNNER_TEMP"/p08-r43-*.zip "$RUNNER_TEMP"/p08-r43-*.log "$RUNNER_TEMP"/p08-r43-atomic-gate.json
+          test ! -e private-p08 && test ! -e gov-proof
+          echo P08_R43_PRIVATE_RUNTIME_AND_ARTIFACT_CLEANUP=PASS
+
+  native-recovery:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/p08-s9-r43-artifact-recovery-20261124'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [mysql, mariadb]
+    services:
+      db:
+        image: ${{ matrix.engine == 'mysql' && 'mysql:8.4' || 'mariadb:11.8' }}
+        env:
+          MYSQL_ROOT_PASSWORD: synthetic-r43-ci
+          MYSQL_ROOT_HOST: '%'
+          MARIADB_ROOT_PASSWORD: synthetic-r43-ci
+          MARIADB_ROOT_HOST: '%'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="sh -c 'mariadb-admin ping --silent || mysqladmin ping --silent'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      P08_ISOLATED_INSTALL_TEST: 'YES'
+      P08_TEST_DB_DRIVER: ${{ matrix.engine }}
+      P08_TEST_DB_HOST: 127.0.0.1
+      P08_TEST_DB_USER: root
+      P08_TEST_DB_PASSWORD: synthetic-r43-ci
+      P08_TEST_DB_CLEAN: p08_ci_r43_clean
+      P08_TEST_DB_DIRTY: p08_ci_r43_dirty
+      P08_TEST_DB_RESTORE: p08_ci_r43_restore
+      P08_TEST_DB_FULL_RESTORE: p08_ci_r43_full
+    steps:
+      - name: Ephemeral locked private candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: e190631cb12c515eaeaba2745b286f50ed1d62b8
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-p08
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, zip, mbstring, intl, bcmath, dom, fileinfo
+      - name: Native client and locked runtime for independent restore
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git rev-parse HEAD)" = "e190631cb12c515eaeaba2745b286f50ed1d62b8"
+          sudo apt-get update -qq > "$RUNNER_TEMP/p08-r43-apt.log" 2>&1
+          sudo apt-get install -y -qq mariadb-client >> "$RUNNER_TEMP/p08-r43-apt.log" 2>&1 || { echo P08_R43_NATIVE_CLIENT=BLOCKED; exit 1; }
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
+          composer install --no-scripts --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-r43-composer.log" 2>&1 || { echo P08_R43_NATIVE_DEPS=FAIL; exit 1; }
+          command -v mariadb-dump >/dev/null
+          echo P08_R43_NATIVE_SQL_CLIENT_AND_DEPS=PASS
+      - name: Real isolated native first install and independent DB restore
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          php tests/fixtures/create_ci_databases.php > "$RUNNER_TEMP/p08-r43-fixtures.log" 2>&1 || { echo P08_R43_NATIVE_FIXTURES=FAIL; exit 1; }
+          php tests/test_install_mysql_e2e.php > "$RUNNER_TEMP/p08-r43-install.log" 2>&1 || { echo P08_R43_NATIVE_CLEAN_INSTALL=FAIL; grep -E 'P08_|TEST_BLOCKED|PHP Fatal' "$RUNNER_TEMP/p08-r43-install.log" | tail -n 12 || true; exit 1; }
+          echo P08_R43_NATIVE_FIRST_INSTALL=PASS
+          php tests/test_recovery_sql_e2e.php > "$RUNNER_TEMP/p08-r43-restore.log" 2>&1 || { echo P08_R43_NATIVE_INDEPENDENT_RESTORE=FAIL; grep -E 'P08_|TEST_BLOCKED|PHP Fatal' "$RUNNER_TEMP/p08-r43-restore.log" | tail -n 12 || true; exit 1; }
+          echo P08_R43_NATIVE_INDEPENDENT_DB_RESTORE=PASS
+          php tests/test_recovery_private_payload_e2e.php > "$RUNNER_TEMP/p08-r43-media.log" 2>&1 || { echo P08_R43_NATIVE_PRIVATE_MEDIA_TOKEN_RESTORE=FAIL; grep -E 'P08_|TEST_BLOCKED|PHP Fatal' "$RUNNER_TEMP/p08-r43-media.log" | tail -n 12 || true; exit 1; }
+          echo P08_R43_NATIVE_PRIVATE_MEDIA_TOKEN_RESTORE=PASS
+      - name: Erase all temporary private checkout, database credentials and test logs
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- private-p08
+          rm -f -- "$RUNNER_TEMP"/p08-r43-*.log
+          test ! -e private-p08
+          echo P08_R43_NATIVE_PRIVATE_CLEANUP=PASS
