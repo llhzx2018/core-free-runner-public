@@ -18,7 +18,7 @@ REPO = "llhzx2018/core-free-runner-public"
 WORKFLOW = "shared-test-on-demand.yml"
 # Exact reviewed Draft workflow Git blob; will only dispatch when this blob
 # is independently observed on default main after separate Owner approval.
-REVIEWED_WORKFLOW_BLOB = "5900feae3cd29a2ef1a4d729ce77df517e90f82f"
+REVIEWED_WORKFLOW_BLOB = "f9fa97a6afb59942e5c9a35119009274c93061b5"
 OWNER = "llhzx2018"
 TEST_IDS = {"git-integrity", "python-syntax"}
 
