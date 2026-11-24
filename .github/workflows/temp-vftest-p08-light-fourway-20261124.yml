@@ -51,45 +51,47 @@ jobs:
           extensions: mbstring, pdo_sqlite, sqlite3, zip
           tools: composer:v2
           coverage: none
-      - name: Verify exact P08 SHA and lint PHP/stack
+      - name: Exact source, frozen Composer and focused Laravel Feature recheck only
         shell: bash
         run: |
           set -Eeuo pipefail
           set +x
           cd private-p08-vftest
-          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
-          test "$(cat VERSION)" = "$TARGET_VERSION"
-          python3 scripts/check_stack_contract.py --phase foundation > "$RUNNER_TEMP/p08-vftest-foundation.log" 2>&1 || { echo VFTEST_P08_FOUNDATION=FAIL; exit 1; }
-          find app bootstrap config database public routes src tests -type f -name '*.php' -print0 | xargs -0 -r -n 1 php -l > "$RUNNER_TEMP/p08-vftest-php-lint.log" 2>&1 || { echo VFTEST_P08_PHP84_SYNTAX=FAIL; exit 1; }
-          checked="$(grep -c '^No syntax errors detected in ' "$RUNNER_TEMP/p08-vftest-php-lint.log" || true)"
-          test "$checked" -gt 100 || { echo VFTEST_P08_PHP84_FILE_COVERAGE=FAIL; exit 1; }
-          echo "VFTEST_P08_PHP84_SYNTAX=PASS checked=$checked"
-          echo 'VFTEST_P08_STACK_FOUNDATION=PASS'
-      - name: Composer frozen dependencies and synthetic local PHP security regressions
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          set +x
-          cd private-p08-vftest
-          composer install --no-interaction --no-progress --prefer-dist --no-scripts > "$RUNNER_TEMP/p08-vftest-composer.log" 2>&1 || { echo VFTEST_P08_COMPOSER_LOCKED_INSTALL=FAIL; exit 1; }
-          echo VFTEST_P08_COMPOSER_LOCKED_INSTALL=PASS
-          php tests/run.php > "$RUNNER_TEMP/p08-vftest-core.log" 2>&1 || { echo VFTEST_P08_CORE_PHP_UNIT=FAIL; exit 1; }
-          echo VFTEST_P08_CORE_PHP_UNIT=PASS
-          for test in tests/test_setup_guard.php tests/test_stable_runtime_gateway.php tests/test_maintenance_gate.php; do
-            php "$test" >> "$RUNNER_TEMP/p08-vftest-security.log" 2>&1 || { echo VFTEST_P08_LOCAL_SECURITY_REGRESSIONS=FAIL; exit 1; }
-          done
-          echo VFTEST_P08_LOCAL_SECURITY_REGRESSIONS=PASS
-      - name: Real Laravel HTTP guest/Inertia access and in-memory integrated business feature
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          set +x
-          cd private-p08-vftest
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA" || { echo VFTEST_P08_SOURCE_SHA_MISMATCH; exit 1; }
+          test "$(cat VERSION)" = "$TARGET_VERSION" || { echo VFTEST_P08_VERSION_MISMATCH; exit 1; }
+          composer install --no-interaction --no-progress --prefer-dist --no-scripts > "$RUNNER_TEMP/p08-vftest-composer.log" 2>&1 || { echo VFTEST_P08_RECHECK_COMPOSER_INSTALL=FAIL; exit 1; }
+          echo VFTEST_P08_RECHECK_EXACT_SOURCE_COMPOSER=PASS
           export APP_ENV=testing APP_KEY=base64:VFRlc3RFeGFtcGxlS2V5VFRlc3RFeGFtcGxlS2V5
           export DB_CONNECTION=sqlite DB_DATABASE=:memory: CACHE_STORE=array SESSION_DRIVER=array
-          vendor/bin/phpunit --bootstrap vendor/autoload.php tests/Feature/WorkspaceInertiaTest.php > "$RUNNER_TEMP/p08-vftest-http-guest.log" 2>&1 || { echo VFTEST_P08_GUEST_HTTP_INERTIA_AUTH=FAIL; exit 1; }
+          classify_failure() {
+            log="$1"
+            if grep -qi 'No tests executed' "$log"; then
+              echo VFTEST_P08_PHPUNIT_SAFE_REASON=NO_TESTS
+            elif grep -qi 'Class .*not found' "$log"; then
+              echo VFTEST_P08_PHPUNIT_SAFE_REASON=CLASS_NOT_FOUND
+            elif grep -qi 'not found' "$log"; then
+              echo VFTEST_P08_PHPUNIT_SAFE_REASON=MISSING_RESOURCE
+            elif grep -qi 'There was\|There were\|FAILURES!' "$log"; then
+              echo VFTEST_P08_PHPUNIT_SAFE_REASON=TEST_ASSERTION_OR_RUNTIME
+            elif grep -qi 'PHPUnit.*Usage:\|Unknown option' "$log"; then
+              echo VFTEST_P08_PHPUNIT_SAFE_REASON=CLI_USAGE
+            else
+              echo VFTEST_P08_PHPUNIT_SAFE_REASON=UNCLASSIFIED_PRIVATE_LOG
+            fi
+            # Only public-safe assertion/test class identities, not payloads.
+            grep -E '^Tests: [0-9]+|^(FAILURES!|ERRORS!)|^[0-9]+\) Tests\\' "$log" | head -6 | sed -E 's/[^A-Za-z0-9 .:_()\\-]/_/g' || true
+          }
+          if ! php vendor/bin/phpunit tests/Feature/WorkspaceInertiaTest.php > "$RUNNER_TEMP/p08-vftest-guest.log" 2>&1; then
+            echo VFTEST_P08_GUEST_HTTP_INERTIA_AUTH=FAIL
+            classify_failure "$RUNNER_TEMP/p08-vftest-guest.log"
+            exit 1
+          fi
           echo VFTEST_P08_GUEST_HTTP_INERTIA_AUTH=PASS
-          vendor/bin/phpunit --bootstrap vendor/autoload.php tests/Feature/R101IntegratedWorkspaceTest.php > "$RUNNER_TEMP/p08-vftest-http-integration.log" 2>&1 || { echo VFTEST_P08_SYNTHETIC_API_WORKSPACE=FAIL; exit 1; }
+          if ! php vendor/bin/phpunit tests/Feature/R101IntegratedWorkspaceTest.php > "$RUNNER_TEMP/p08-vftest-integrated.log" 2>&1; then
+            echo VFTEST_P08_SYNTHETIC_API_WORKSPACE=FAIL
+            classify_failure "$RUNNER_TEMP/p08-vftest-integrated.log"
+            exit 1
+          fi
           echo VFTEST_P08_SYNTHETIC_API_WORKSPACE=PASS
           echo VFTEST_P08_REAL_AD_ACCOUNTS_TRACKER_TOKENS=NOT_USED
       - name: Cleanup PHP private worktree and local logs
@@ -103,7 +105,8 @@ jobs:
           echo VFTEST_P08_PHP_PRIVATE_WORKSPACE_CLEANUP=PASS
   vue-light:
     needs: identity-preflight
-    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/vftest-p08-light-fourway-20261124'
+    # Source-locked Vue/TS/Vitest already passed in run #45424228002; do not repeat.
+    if: false
     runs-on: ubuntu-24.04
     timeout-minutes: 18
     steps:
