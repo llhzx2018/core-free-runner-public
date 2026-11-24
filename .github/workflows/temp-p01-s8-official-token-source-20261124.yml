@@ -1,0 +1,91 @@
+name: TEMP P01 S8 official Token and fail-closed source proof
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/temp-p01-s8-official-token-source-20261124.yml']
+permissions:
+  contents: read
+concurrency:
+  group: temp-p01-s8-token-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  official-token-source:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.head_ref, 'test/p01-s8-official-token-source-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    steps:
+      - name: Exact P01 private source in disposable QA workspace only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-startnew
+          ref: ae58b75934fd47b580d1446e2d8559b5a682a852
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: private-src
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify source code identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C private-src rev-parse HEAD)" = "ae58b75934fd47b580d1446e2d8559b5a682a852"
+          echo 'P01_S8_TOKEN_EXACT_SOURCE=PASS'
+      - name: Native PHP8.4 / SQLite test runtime
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, pdo_sqlite, sqlite3, zip, sodium, dom, xml, fileinfo, curl, openssl
+          tools: composer:v2
+          coverage: none
+      - name: Test official-source Token and Owner route with SQLite synthetic users only
+        working-directory: private-src
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          python3 scripts/check_php_syntax.py > "$RUNNER_TEMP/p01-token-lint.log" 2>&1
+          echo 'P01_S8_TOKEN_SOURCE_PHP_LINT=PASS'
+          composer install --no-interaction --prefer-dist --no-progress --quiet > "$RUNNER_TEMP/p01-token-composer.log" 2>&1
+          echo 'P01_S8_TOKEN_LOCKED_COMPOSER=PASS'
+          export APP_ENV=testing DB_CONNECTION=sqlite DB_DATABASE=:memory:
+          export APP_KEY="base64:$(openssl rand -base64 32)"
+          export CACHE_STORE=array SESSION_DRIVER=array QUEUE_CONNECTION=sync
+          set +e
+          ./vendor/bin/phpunit --log-junit "$RUNNER_TEMP/p01-token-junit.xml" \
+            tests/Unit/UpdateCredentialStoreTest.php \
+            tests/Unit/ReleaseSourcePolicyTest.php \
+            tests/Feature/OwnerUpdatePageTest.php > "$RUNNER_TEMP/p01-token-phpunit.log" 2>&1
+          result=$?
+          set -e
+          python3 - "$RUNNER_TEMP/p01-token-junit.xml" <<'PY'
+          import pathlib,sys,re,xml.etree.ElementTree as ET
+          p=pathlib.Path(sys.argv[1])
+          if not p.is_file():
+              print('P01_S8_TOKEN_JUNIT=MISSING')
+              sys.exit(1)
+          cases=list(ET.parse(p).getroot().iter('testcase'))
+          skipped=sum(c.find('skipped') is not None for c in cases)
+          failed=sum(c.find('failure') is not None or c.find('error') is not None for c in cases)
+          assertions=sum(int(c.get('assertions','0')) for c in cases)
+          print('P01_S8_TOKEN_JUNIT='+','.join(map(str,(len(cases),assertions,skipped,failed))))
+          for c in cases:
+              if c.find('failure') is None and c.find('error') is None: continue
+              method=re.sub('[^A-Za-z0-9_]', '',c.get('name',''))[:112]
+              print('P01_S8_TOKEN_FAILED_METHOD='+method)
+          if len(cases)<22 or assertions<50 or skipped or failed: sys.exit(1)
+          PY
+          if [ "$result" -ne 0 ]; then
+            echo 'P01_S8_TOKEN_NATIVE_TEST=FAIL'
+            exit "$result"
+          fi
+          echo 'P01_S8_TOKEN_NATIVE_TEST=PASS'
+      - name: Always remove private checkout, synthetic users and internal test logs
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- private-src
+          rm -f -- "$RUNNER_TEMP"/p01-token-*
+          test ! -e private-src
+          echo 'P01_S8_TOKEN_PRIVATE_CLEANUP=PASS'
