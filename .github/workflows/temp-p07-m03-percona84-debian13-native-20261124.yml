@@ -82,6 +82,8 @@ jobs:
           debian='debian:13'
           docker pull -q "$percona"
           docker pull -q "$debian"
+          host_cli="$(command -v docker)"
+          test -f "$host_cli"
           percona_id="$(docker image inspect "$percona" --format '{{.Id}}')"
           debian_id="$(docker image inspect "$debian" --format '{{.Id}}')"
           test -n "$percona_id" && test -n "$debian_id"
@@ -108,6 +110,7 @@ jobs:
           echo "$driver" > "$RUNNER_TEMP/p07-native-driver"
           docker run --detach --name "$driver" --network bridge \
             -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$host_cli:/usr/local/bin/docker:ro" \
             -v "$GITHUB_WORKSPACE/.p07-private:/p07-private:ro" \
             -e P07_MYSQL_NATIVE_CI=1 \
             -e P07_NATIVE_DB_ENGINE=MYSQL_8.4 \
@@ -118,7 +121,8 @@ jobs:
             set -Eeuo pipefail
             export DEBIAN_FRONTEND=noninteractive
             apt-get -qq update >/dev/null
-            apt-get -y -qq install --no-install-recommends python3 docker.io ca-certificates libaio1t64 libnuma1 >/dev/null
+            apt-get -y -qq install --no-install-recommends python3 ca-certificates libaio1t64 libnuma1 >/dev/null
+            test -x /usr/local/bin/docker
             mkdir -p -m 0700 /home/p07native/htdocs
             python3 -B -c "import sys;sys.path.insert(0, \"/p07-private/lib\");from migration_oracle_mysql84_deb import source_debian_release; assert source_debian_release() == \"13\""
           ' > "$RUNNER_TEMP/p07-debian-setup.log" 2>&1 || {
@@ -126,8 +130,13 @@ jobs:
             exit 43
           }
           echo P07_M03_NATIVE_DEBIAN13_OFFICIAL_CLIENT_PATH=VERIFIED
-          docker exec "$driver" docker info >/dev/null 2>&1 || {
-            echo P07_DEBIAN13_DRIVER_DOCKER_SOCKET_UNAVAILABLE; exit 45;
+          docker exec "$driver" /usr/local/bin/docker info >/dev/null 2>&1 || {
+            if docker exec "$driver" test -S /var/run/docker.sock; then
+              echo P07_DEBIAN13_DRIVER_SOCKET_PRESENT_CLI_UNAVAILABLE
+            else
+              echo P07_DEBIAN13_DRIVER_SOCKET_MISSING
+            fi
+            exit 45
           }
           docker exec "$driver" docker exec -e MYSQL_PWD=SYNTHETIC_ci_root_2026 "$base-source" \
             mysql --no-defaults --protocol=tcp --host=127.0.0.1 --user=root --default-character-set=utf8mb4 \
