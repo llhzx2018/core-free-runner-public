@@ -13,7 +13,7 @@ class Fake:
         if path=="/repos/llhzx2018/core-free-runner-public":return {"default_branch":"main","private":False}
         if "/contents/" in path:return {"sha":self.blob}
         if method=="POST":self.posts.append((path,payload));return {}
-        if path.endswith("per_page=100"):return {"workflow_runs":self.runs}
+        if path.endswith("/runs?event=workflow_dispatch&per_page=100"):return {"workflow_runs":self.runs}
         if path.endswith("/jobs?per_page=100"):
             return {"jobs":[{"id":456,"name":"public-safe","status":"completed",
                     "conclusion":"success","runner_id":789,"steps":[
