@@ -162,6 +162,24 @@ class QueueTest(unittest.TestCase):
         self.assertEqual(self.q.status("task-000001")["state"],"INTERRUPTED_NO_REPLAY")
         self.assertEqual(self.q.claim(CAP,now=112)["task_id"],"task-000002")
 
+    def test_run_id_has_one_owner_across_independent_projects(self):
+        self.q.enqueue(job())
+        self.q.enqueue(job(task="task-000002",project="P08"))
+        capacity={"PUBLIC_HOSTED":2,"PRIVATE":0,"HYPERV_PRIVATE":0}
+        a=self.q.claim(capacity,now=100)
+        b=self.q.claim(capacity,now=100)
+        self.assertNotEqual(a["task_id"],b["task_id"])
+        self.q.bind_run(a["task_id"],a["lease_token"],123,now=100)
+        with self.assertRaisesRegex(InvalidTask,"RUN_ALREADY_ASSIGNED_TO_OTHER_TASK"):
+            self.q.bind_run(b["task_id"],b["lease_token"],123,now=100)
+        self.q.bind_run(b["task_id"],b["lease_token"],124,now=100)
+        self.q.finish(a["task_id"],a["lease_token"],"SUCCEEDED",now=100)
+        self.q.finish(b["task_id"],b["lease_token"],"TEST_FAILED",now=100)
+        self.assertEqual(self.q.status(a["task_id"])["run_id"],123)
+        self.assertEqual(self.q.status(b["task_id"])["run_id"],124)
+        self.assertEqual(self.q.status(a["task_id"])["state"],"SUCCEEDED")
+        self.assertEqual(self.q.status(b["task_id"])["state"],"TEST_FAILED")
+
     def test_untrusted_queue_directory_and_symlink(self):
         self.assertEqual(self.db.stat().st_mode & 0o077,0)
         bad=self.root/"symlink.sqlite"
