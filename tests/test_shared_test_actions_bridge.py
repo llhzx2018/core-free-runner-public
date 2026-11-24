@@ -70,11 +70,25 @@ class BridgeTest(unittest.TestCase):
         self.api.runs=[dict(run,triggering_actor={"login":"other"})]
         with self.assertRaises(InvalidTask):
             self.bridge.correlate(lease(),sent_after_iso="2026-11-24T13:59:59Z")
-    def test_cancel_requires_remote_status_and_job_proof(self):
-        r=self.bridge.cancel_run(123)
-        self.assertFalse(r["cancel_confirmed"])
+    def test_cancel_requires_exact_owner_run_and_job_not_arbitrary_run_id(self):
+        request=lease()["job"]
         self.assertFalse(self.bridge.inspect_run(123)["machine_pass"])
         self.assertTrue(self.bridge.inspect_run(123)["job_readback_required"])
+        # Mock Run already terminal: do not send redundant cancel POST.
+        r=self.bridge.cancel_run(123,request)
+        self.assertEqual(r["state"],"ALREADY_TERMINAL")
+        self.assertFalse(r["cancel_posted"])
+        self.assertEqual(self.api.posts,[])
+        # An arbitrary Run ID in the same repo cannot cancel other work.
+        with self.assertRaisesRegex(InvalidTask,"RUN_IDENTITY_READBACK_MISMATCH"):
+            self.bridge.cancel_run(999,request)
+        mismatched=lease()["job"]
+        mismatched["source"]["sha"]="c"*40
+        with self.assertRaisesRegex(InvalidTask,"RUN_IDENTITY_READBACK_MISMATCH"):
+            self.bridge.cancel_run(123,mismatched)
+        with self.assertRaisesRegex(InvalidTask,"CANCEL_LANE_NOT_AUTHORIZED"):
+            self.bridge.cancel_run(123,lease("PRIVATE_EVIDENCE")["job"])
+        self.assertEqual(self.api.posts,[])
     def test_exact_job_identity_steps_and_runner_are_required_for_pass(self):
         evidence=self.bridge.inspect_bound_run(123,lease()["job"])
         self.assertTrue(evidence["remote_terminal"])
