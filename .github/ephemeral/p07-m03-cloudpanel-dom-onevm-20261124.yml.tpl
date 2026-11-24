@@ -166,7 +166,17 @@ jobs:
           python3 -B - <<'PY'
           import ast,pathlib
           source=pathlib.Path('.github/ephemeral/p07-m03-cloudpanel-first-run-browser-20261124.py')
-          ast.parse(source.read_text(encoding='utf-8'))
+          source_text=source.read_text(encoding='utf-8')
+          ast.parse(source_text)
+          for marker in (
+              'phase = "TERMS_REACQUIRE_FORM"',
+              'phase = "TERMS_DISCOVER"',
+              'phase = "TERMS_INSPECT"',
+              'phase = "TERMS_CLICK"',
+              'phase = "TERMS_VERIFY"',
+          ):
+              assert marker in source_text, 'missing fixed phase-specific marker'
+          print('P07_DOM_BROWSER_CHECKBOX_PHASE_CLASSIFIER=PASS')
           print('P07_DOM_BROWSER_SOURCE_AST=PASS')
           PY
           command -v google-chrome >/dev/null || command -v google-chrome-stable >/dev/null
