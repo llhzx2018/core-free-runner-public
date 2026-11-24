@@ -1,0 +1,90 @@
+name: TEMP P07 M03 source-first UX and guarded migration preflight
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p07-m03-sourcefirst-ui-20261124.yml'
+permissions:
+  contents: read
+jobs:
+  isolated-atomic:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'test/p07-m03-sourcefirst-ui-20261124'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      TARGET_REPO: '{{REPOSITORY}}'
+      TARGET_VERSION: '{{TARGET_VERSION}}'
+      TARGET_SHA: '{{TARGET_SHA}}'
+      TARGET_TREE: '{{TARGET_TREE}}'
+      PRODUCT_SHA: '{{TARGET_SHA}}'
+      NO_COLOR: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout public lane contract
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Public source-render audit before any private checkout
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 -B scripts/ephemeral_lane_spec.py validate --spec .github/ephemeral/p07-m03-sourcefirst-ui-20261124.json > "$RUNNER_TEMP/p07-lane-check.json"
+          python3 -B scripts/ephemeral_lane_spec.py audit-rendered --spec .github/ephemeral/p07-m03-sourcefirst-ui-20261124.json --input .github/workflows/temp-p07-m03-sourcefirst-ui-20261124.yml > "$RUNNER_TEMP/p07-lane-audit.json"
+          python3 -B - "$RUNNER_TEMP/p07-lane-audit.json" "$TARGET_SHA" <<'PY'
+          import json,sys
+          data=json.load(open(sys.argv[1],encoding='utf-8'))
+          assert data['status']=='PASS' and data['target_sha']==sys.argv[2]
+          print('P07_M03_RC4_SOURCE_LANE_PRECHECK=PASS')
+          PY
+      - name: Transient exact private source checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: {{REPOSITORY}}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: .p07-private
+      - name: Actual source-first terminal UX, negative cases and contract check
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          cd "$GITHUB_WORKSPACE/.p07-private"
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git rev-parse HEAD^{tree})" = "$TARGET_TREE"
+          bash -n components/p07-m03-safe-batch-ui.sh
+          bash -n bin/vfops-migrate-ui
+          python3 -B scripts/check_p07_terminal_ux.py --module P07-M03-D04 --changed-file components/p07-m03-safe-batch-ui.sh --evidence-file docs/ux-reviews/p07-m03-d04-source-first-safe-batch-20261124.json > "$RUNNER_TEMP/p07-ux-contract.log" 2>&1 || {
+            grep -E '^(P07_TERMINAL_UX_GATE|P07_TERMINAL_UX_DOC_CONTRACT)' "$RUNNER_TEMP/p07-ux-contract.log" || true
+            exit 35
+          }
+          grep -E '^P07_TERMINAL_UX_DOC_CONTRACT=|^PR_UX_EVIDENCE=' "$RUNNER_TEMP/p07-ux-contract.log" || true
+          python3 -B -m unittest -q tests.test_p07_m03_safe_batch_terminal_ux tests.test_p07_m03_d04_preparation_checklist tests.test_p07_m03_safe_batch tests.test_p07_m03_resume_audit tests.test_p07_m03_cloudpanel_sql_probe > "$RUNNER_TEMP/p07-sourcefirst-test.log" 2>&1 || {
+            grep -E '^(FAIL:|ERROR:|Ran [0-9]+ tests|FAILED)' "$RUNNER_TEMP/p07-sourcefirst-test.log" || true
+            exit 31
+          }
+          grep -E '^(Ran [0-9]+ tests|OK)$' "$RUNNER_TEMP/p07-sourcefirst-test.log" || true
+          echo P07_M03_SOURCE_FIRST_OLD_VPS_WITH_UNINITIALIZED_RECEIVER=PASS
+          echo P07_M03_ENGINE_MISMATCH_ABORT_BEFORE_PLAN=PASS
+          echo P07_M03_USED_RECEIVER_STRICT_NEW_TASK_FILTER=PASS
+          echo P07_M03_CANCEL_AND_NON_TTY_NO_TARGET_WRITE=PASS
+          echo P07_M03_SOURCE_FIRST_TERMINAL_UX_V3=PASS
+      - name: Always erase transient private checkout and isolated runtime
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          rm -rf -- "$GITHUB_WORKSPACE/.p07-private"
+          if test -s "$RUNNER_TEMP/p07-atomic-current-path"; then
+            t="$(cat "$RUNNER_TEMP/p07-atomic-current-path")"
+            case "$t" in "$RUNNER_TEMP"/p07-atomic.*) rm -rf -- "$t";; esac
+          fi
+          rm -f -- "$RUNNER_TEMP/p07-atomic-current-path"
+          rm -f -- "$RUNNER_TEMP/p07-sourcefirst-test.log" "$RUNNER_TEMP/p07-ux-contract.log" "$RUNNER_TEMP/p07-lane-check.json" "$RUNNER_TEMP/p07-lane-audit.json"
+          echo EPHEMERAL_PRIVATE_CLEANUP=COMPLETE
