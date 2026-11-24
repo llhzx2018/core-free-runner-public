@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/temp-p07-m05-native-bootstrap-replay-20261124.yml'
+      - '.github/ephemeral/p07-m05-native-bootstrap-replay-20261124.json'
 permissions:
   contents: read
 jobs:
