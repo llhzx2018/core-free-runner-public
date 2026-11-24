@@ -106,6 +106,19 @@ class IntegratedTest(unittest.TestCase):
         self.assertEqual(self.q.recover(now=3700)["recovered"],1)
         self.assertEqual(self.q.claim(CAP,now=3701)["state"],"DEFERRED_CAPACITY_OR_EMPTY")
         self.assertEqual(sum(path.endswith("/dispatches") for path,_ in self.api.posts),1)
+        # No Run indexed yet -> still quarantined, not a fake recovery PASS.
+        known=self.api.runs
+        self.api.runs=[]
+        self.assertFalse(self.q.reconcile_interrupted(self.j["task_id"],self.bridge)["capacity_released"])
+        self.assertEqual(self.q.claim(CAP,now=3702)["state"],"DEFERRED_CAPACITY_OR_EMPTY")
+        # An independently attested exact Run may release capacity, but the
+        # interrupted task itself is NEVER replayed.
+        self.api.runs=known
+        clean=self.q.reconcile_interrupted(self.j["task_id"],self.bridge)
+        self.assertTrue(clean["capacity_released"])
+        self.assertEqual(clean["run_id"],123)
+        self.assertEqual(self.q.status(self.j["task_id"])["state"],"INTERRUPTED_NO_REPLAY")
+        self.assertEqual(self.q.claim(CAP,now=3703)["task_id"],other["task_id"])
 
 if __name__=="__main__":
     unittest.main()
