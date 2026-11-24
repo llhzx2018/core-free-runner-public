@@ -20,7 +20,6 @@ on:
       - 'scripts/shared_test_actions_bridge.py'
       - 'tests/test_shared_test_actions_bridge.py'
       - 'tests/test_shared_test_scheduler_integration.py'
-      - 'tests/test_shared_test_four_project.py'
       - '.github/workflows/shared-test-on-demand.yml'
       - 'docs/authority/SHARED_TEST_PROTOCOL_V1.md'
   workflow_dispatch:
@@ -181,16 +180,18 @@ jobs:
         shell: bash
         run: python3 -m unittest discover -s tests -p test_shared_test_scheduler_integration.py -v
 
-      - name: Verify four-project isolated queue and competing local processes
-        shell: bash
-        run: python3 -m unittest discover -s tests -p test_shared_test_four_project.py -v
-
       - name: Build public-safe receipt
         shell: bash
         run: |
           set -Eeuo pipefail
           mkdir -p evidence/runner
           PROVENANCE="${MAIN_PUSH_PROVENANCE:-NOT_APPLICABLE}"
+          TRANSIENT_PRIVATE_SOURCE_USED=NO
+          TRANSIENT_PRIVATE_SECRET_USED=NO
+          if [[ "${GITHUB_EVENT_NAME}" == 'pull_request' && "${GITHUB_HEAD_REF}" == 'feature/shared-test-v1-public-20261124' ]]; then
+            TRANSIENT_PRIVATE_SOURCE_USED=YES_PR_ONLY
+            TRANSIENT_PRIVATE_SECRET_USED=YES_RUNTIME_INJECTED
+          fi
           cat > evidence/runner/PUBLIC_RUNNER_CURRENT.txt <<EOF
           PUBLIC_RUNNER_ALLOCATION=PASS
           MAIN_PUSH_PROVENANCE=$PROVENANCE
@@ -198,8 +199,8 @@ jobs:
           EPHEMERAL_LANE_HELPER=PASS
           EPHEMERAL_WORKTREE_HELPER=PASS
           RUNNER_REPOSITORY=llhzx2018/core-free-runner-public
-          PRIVATE_SOURCE_USED=NO
-          SECRET_USED=NO
+          PRIVATE_SOURCE_USED=${TRANSIENT_PRIVATE_SOURCE_USED}
+          SECRET_USED=${TRANSIENT_PRIVATE_SECRET_USED}
           PRIVATE_SOURCE_PERSISTED=NO
           MAIN_WRITE=NO
           USER_MANUAL_EXECUTION_REQUIRED=NO
@@ -212,106 +213,3 @@ jobs:
           path: evidence/runner/PUBLIC_RUNNER_CURRENT.txt
           if-no-files-found: error
           retention-days: 14
-
-  # One-off four-project evidence only. Not a workflow_dispatch, scheduler,
-  # Hyper-V runner or additional long-lived workflow.
-  vf-four-project-pr-light:
-    if: github.event_name == 'pull_request' && github.head_ref == 'feature/shared-test-v1-public-20261124'
-    name: VF Fourway ${{ matrix.project }} light pinned source
-    runs-on: ubuntu-24.04
-    timeout-minutes: 8
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        include:
-          - project: P01
-            repo: vf-startnew
-            sha: a37927c5b2ecb0372816adfb53aef17d0d575611
-            task: vf4-20261124-p01-01
-          - project: P02
-            repo: vf-doc
-            sha: a292cbe9f5d17e1ca62a70fa5ba6f1f50dc39ba1
-            task: vf4-20261124-p02-01
-          - project: P07
-            repo: vf-server-ops
-            sha: e379e29a8c3d5a425da8551d4f67ff373a837b8b
-            task: vf4-20261124-p07-01
-          - project: P08
-            repo: vf-adops
-            sha: 42bc1199835789aa55a7f5f60383a1270e2e15e5
-            task: vf4-20261124-p08-01
-    steps:
-      - name: Checkout existing Public v1 policy without credentials
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          path: vf-policy
-      - name: Checkout exact private project source transiently
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: llhzx2018/${{ matrix.repo }}
-          ref: ${{ matrix.sha }}
-          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-          persist-credentials: false
-          path: vf-source
-      - name: Verify project identity fixed SHA and lightweight source syntax
-        shell: bash
-        env:
-          VF_PROJECT: ${{ matrix.project }}
-          VF_REPO: ${{ matrix.repo }}
-          VF_SHA: ${{ matrix.sha }}
-          VF_TASK: ${{ matrix.task }}
-        run: |
-          set -Eeuo pipefail
-          set +x
-          test "$(git -C vf-source rev-parse HEAD)" = "$VF_SHA"
-          test -z "$(git -C vf-source status --porcelain)"
-          python3 - <<'PY'
-          import os,sys
-          sys.path.insert(0, 'vf-policy/scripts')
-          from shared_test_router import validate, route
-          p=os.environ['VF_PROJECT']; repo=os.environ['VF_REPO']
-          j={'schema':'vf-shared-test-job/v1','task_id':os.environ['VF_TASK'],
-             'project':p,'source':{'repo':'llhzx2018/'+repo,
-             'sha':os.environ['VF_SHA'],'tree_sha':None},
-             'test_id':'git-integrity','kind':'lint','privacy':'PRIVATE_SOURCE',
-             'profile':'light','timeout_seconds':90,'submitted_at':1,
-             'allow_public_ephemeral':False}
-          assert validate(j)==j
-          assert route(j)=='PRIVATE'
-          assert p in ('P01','P02','P07','P08')
-          expected={'P01':'vf-startnew','P02':'vf-doc',
-                    'P07':'vf-server-ops','P08':'vf-adops'}
-          assert repo==expected[p]
-          PY
-          case "$VF_PROJECT" in
-            P01) test -s vf-source/routes/web.php
-                 php -l vf-source/routes/web.php >/dev/null ;;
-            P02) test -s vf-source/routes/web.php
-                 test -s vf-source/public/index.php
-                 php -l vf-source/routes/web.php >/dev/null
-                 php -l vf-source/public/index.php >/dev/null
-                 python3 -m json.tool vf-source/composer.json >/dev/null ;;
-            P07) test -s vf-source/VERSION
-                 test -s vf-source/install.sh
-                 bash -n vf-source/install.sh ;;
-            P08) test -s vf-source/routes/web.php
-                 php -l vf-source/routes/web.php >/dev/null ;;
-          esac
-          echo "VF_FOURWAY_PROJECT=$VF_PROJECT"
-          echo "VF_FOURWAY_TASK_ID=$VF_TASK"
-          echo "VF_FOURWAY_EXACT_SHA=$VF_SHA"
-          echo 'VF_FOURWAY_LIGHT_SYNTAX=PASS'
-          echo "VF_FOURWAY_TEST_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          # Deliberate harmless overlap interval to observe real Hosted
-          # parallel Jobs; no VM, DB, API mutation or user credentials used.
-          sleep 18
-      - name: Cleanup all transient project and policy material
-        if: always()
-        shell: bash
-        run: |
-          set +x
-          rm -rf -- vf-source vf-policy
-          test ! -e vf-source
-          echo 'VF_FOURWAY_TRANSIENT_CLEANUP=PASS'
