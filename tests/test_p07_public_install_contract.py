@@ -98,7 +98,7 @@ class PublicSingleEntryTests(unittest.TestCase):
         self.assertIn('M05_BUNDLE_SHA256="969e0a61177f0ef85b4b06524579c506f0506d545c9e2acfc6b272ab5522142d"', toolbox)
         self.assertIn("p07-m05-v0.1.0-ux13-provider-neutral-20261125/P07-M05-0.1.0-m05-ux13-provider-neutral.zip", toolbox)
         self.assertIn('M05_UPGRADE_FROM17="0.1.0-m05-ux10-bootstrap-ux-failstop"', toolbox)
-        self.assertIn('"releases/$M05_UPGRADE_FROM17")', toolbox)
+        self.assertIn('"releases/$M05_UPGRADE_FROM17"|', toolbox)
         self.assertIn('M05_UPGRADE_FROM18="0.1.0-m05-ux11-toolbox-lock"', toolbox)
         self.assertIn('"releases/$M05_UPGRADE_FROM18")', toolbox)
         pins = "\n".join(re.findall(r"(?m)^M05_[A-Z0-9_]+=.*$", toolbox))
