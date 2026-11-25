@@ -143,6 +143,15 @@ else:
         for key,value in (("RAW_URL",RAW),("ZIP_URL",BASE+TAG+"/"+NAME),("API_URL",API),("TAG_NAME",TAG),("ASSET_NAME",NAME)):
             source=source.replace(key,repr(value))
         p=self.shim/"curl";p.write_text(source);p.chmod(0o755)
+    def create_fixture_cache_directory(self):
+        # The genuine issued installer produced no unsafe entries. Create
+        # only this new synthetic cache directory, before py_compile.
+        # Do not chmod/chown an existing installed historical runtime.
+        directory=ROOT/"lib/__pycache__"
+        self.assertFalse(exists(directory),"unexpected existing RC3 cache directory")
+        directory.mkdir(mode=0o755)
+        self.assertEqual(stat.S_IMODE(directory.lstat().st_mode),0o755)
+        self.assert_safe_fixture_permissions()
     def install_old(self,caches=False):
         olddir=self.work/"old";olddir.mkdir()
         with zipfile.ZipFile(self.old) as z: z.extractall(olddir)
@@ -162,6 +171,7 @@ else:
             self.assertNotIn(ROOT/"lib/ux.py",cache_sources)
             options=[(p,k) for k in (0,1) for p in cache_sources]
             self.assertGreaterEqual(len(options),66)
+            self.create_fixture_cache_directory()
             for p,k in options[:66]: py_compile.compile(str(p),optimize=k,doraise=True)
             self.assertEqual(len(list((ROOT/"lib/__pycache__").glob("*.pyc"))),66)
         self.log.unlink(missing_ok=True)
@@ -275,6 +285,7 @@ else:
         with zipfile.ZipFile(self.new) as z:
             extra=ROOT/"lib/policy.py"
             extra.write_bytes(z.read("dist/p07/0.1.0/overlay/lib/policy.py"))
+        self.create_fixture_cache_directory()
         py_compile.compile(str(extra),doraise=True)
         self.assert_safe_fixture_permissions()
         before=fingerprint(ROOT)
