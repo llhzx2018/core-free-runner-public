@@ -149,20 +149,32 @@ else:
             with zipfile.ZipFile(self.new) as z:
                 for name in ("policy.py","ux.py"):
                     (ROOT/"lib"/name).write_bytes(z.read("dist/p07/0.1.0/overlay/lib/"+name))
-            options=[(p,k) for k in (0,1) for p in sorted((ROOT/"lib").glob("*.py"))]
+            # RC3's signed manifest owns cache source identities. The two
+            # allowed extra source files are not signed cache sources.
+            signed={line.split("  ",1)[1] for line in (ROOT/".runtime-manifest.gitblob").read_text().splitlines()}
+            cache_sources=[p for p in sorted((ROOT/"lib").glob("*.py")) if p.relative_to(ROOT).as_posix() in signed]
+            self.assertNotIn(ROOT/"lib/policy.py",cache_sources)
+            self.assertNotIn(ROOT/"lib/ux.py",cache_sources)
+            options=[(p,k) for k in (0,1) for p in cache_sources]
             self.assertGreaterEqual(len(options),66)
             for p,k in options[:66]: py_compile.compile(str(p),optimize=k,doraise=True)
             self.assertEqual(len(list((ROOT/"lib/__pycache__").glob("*.pyc"))),66)
         self.log.unlink(missing_ok=True)
-    def entry(self,answer="y",mode="normal",extra=None):
+    def entry(self,answer="y",mode="normal",extra=None,expect_block=False):
         env={**self.env,"VF_TEST_TRANSPORT":mode,**(extra or {})}
         # The exact public toolbox runs on a real pseudo-terminal, then selects 3/2.
         # 0 exits the authenticated child on success; blank acknowledges failure.
         commands="3\n2\n"+answer+"\n0\n0\n0\n"
         p=subprocess.run(["script","-qefc","bash "+shlex.quote(str(TOOLBOX)),"/dev/null"],input=commands,text=True,capture_output=True,env=env,timeout=180)
-        self.assertEqual(p.returncode,0,"entry process failed "+p.stdout[-700:]+p.stderr[-300:])
+        output=p.stdout+p.stderr
         self.preserve()
-        return p.stdout+p.stderr
+        markers=re.findall(r"RC3_UPGRADE_PROVENANCE_BLOCKED=[^\r\n]+|错误阶段：[A-Z_]+|试用安装器身份/语法验证失败|试用包安装失败|原运行时归属或完整性无法确认|已有试用目录、恢复点或命令身份未确认|独立维护程序已就绪",output)
+        diagnostic="exit="+str(p.returncode)+" markers="+repr(markers)
+        self.assertEqual(p.returncode,0,"menu did not return safely: "+diagnostic)
+        if expect_block:
+            self.assertNotIn("独立维护程序已就绪",output)
+            self.assertTrue(any("失败" in m or "BLOCKED" in m or "未确认" in m or "错误阶段" in m for m in markers),diagnostic)
+        return output
     def unchanged(self,before):
         self.assertEqual(fingerprint(ROOT),before)
         self.assertFalse(exists(PREV))
@@ -171,7 +183,7 @@ else:
     def test_real_public_upgrade_legacy_caches_and_reentry(self):
         self.install_old(caches=True); before=fingerprint(ROOT)
         output=self.entry()
-        self.assertIn("独立维护程序已就绪",output)
+        self.assertIn("独立维护程序已就绪",output,"LEGACY_CACHE_UPGRADE: "+repr(re.findall(r"RC3_UPGRADE_PROVENANCE_BLOCKED=[^\r\n]+|错误阶段：[A-Z_]+|原运行时归属或完整性无法确认",output)))
         self.assertEqual((ROOT/"BUILD_ID").read_text().strip(),NEW)
         self.assertEqual(fingerprint(PREV),before)
         self.assertEqual(os.readlink(BIN),str(ROOT/"bin/vfops-user"))
@@ -182,11 +194,19 @@ else:
         self.assertIn("无须重新下载",output)
         self.assertFalse(self.log.exists())
         self.assertEqual(fingerprint(PREV),before)
+    def test_real_public_fresh_install(self):
+        output=self.entry()
+        self.assertIn("独立维护程序已就绪",output)
+        self.assertEqual((ROOT/"BUILD_ID").read_text().strip(),NEW)
+        self.assertFalse(exists(PREV))
     def test_real_public_fresh_install_and_no_color(self):
         output=self.entry()
         self.assertEqual((ROOT/"BUILD_ID").read_text().strip(),NEW)
         self.assertFalse(exists(PREV))
-        self.assertNotIn("\x1b",output)
+        # Never accept screen clear sequences in NO_COLOR. Report only
+        # escape sequence identities rather than dumping the runtime transcript.
+        escapes=re.findall(r"\x1b\[[0-9;]*[A-Za-z]",output)
+        self.assertNotIn("\x1b", "".join(escapes), "NO_COLOR_CONTROL_SEQUENCES="+repr(escapes))
     def test_cancel_and_invalid_confirmation(self):
         self.install_old(); before=fingerprint(ROOT)
         for a in ("n","invalid",""):
@@ -197,7 +217,7 @@ else:
     def test_bad_wrapper_and_bad_zip_rejected(self):
         self.install_old(); before=fingerprint(ROOT)
         for mode in ("bad-wrapper","bad-zip","bad-meta"):
-            self.entry(mode=mode); self.unchanged(before)
+            self.entry(mode=mode,expect_block=True); self.unchanged(before)
     def test_fallback_transport_real_bytes(self):
         self.install_old()
         output=self.entry(mode="fallback")
@@ -208,20 +228,20 @@ else:
         self.install_old()
         marker=ROOT/"BUILD_ID"; marker.write_text("UNKNOWN\n")
         before=fingerprint(ROOT)
-        self.entry();self.unchanged(before);self.assertFalse(self.log.exists())
+        self.entry(expect_block=True);self.unchanged(before);self.assertFalse(self.log.exists())
         marker.write_text(OLD+"\n")
         mf=ROOT/".runtime-manifest.gitblob"; original=mf.read_bytes(); mf.unlink()
         other=self.work/"manifest";other.write_bytes(original);mf.symlink_to(other)
         before=fingerprint(ROOT)
-        self.entry();self.unchanged(before);self.assertFalse(self.log.exists())
+        self.entry(expect_block=True);self.unchanged(before);self.assertFalse(self.log.exists())
     def test_unknown_extra_source_and_preexisting_rollback_slot(self):
         self.install_old()
         x=ROOT/"lib/unknown-source.py";x.write_text("raise RuntimeError('never execute')")
         before=fingerprint(ROOT)
-        self.entry(); self.unchanged(before); x.unlink()
+        self.entry(expect_block=True); self.unchanged(before); x.unlink()
         PREV.mkdir();(PREV/"KEEP").write_text("do not rotate")
         old=fingerprint(ROOT);prev=fingerprint(PREV)
-        self.entry()
+        self.entry(expect_block=True)
         self.assertEqual(fingerprint(ROOT),old)
         self.assertEqual(fingerprint(PREV),prev)
         self.preserve()
@@ -230,7 +250,17 @@ else:
         p=self.shim/"mv"
         p.write_text('#!/bin/sh\nif [ "$1" = "$P07_INSTALL_DIR.new" ]; then exit 77; fi\nexec /usr/bin/mv "$@"\n')
         p.chmod(0o755)
-        output=self.entry()
+        output=self.entry(expect_block=True)
         self.assertIn("安装失败",output)
+        self.unchanged(before)
+    def test_unsigned_extra_cache_is_rejected_not_run(self):
+        self.install_old()
+        with zipfile.ZipFile(self.new) as z:
+            extra=ROOT/"lib/policy.py"
+            extra.write_bytes(z.read("dist/p07/0.1.0/overlay/lib/policy.py"))
+        py_compile.compile(str(extra),doraise=True)
+        before=fingerprint(ROOT)
+        output=self.entry(expect_block=True)
+        self.assertIn("RC3 bytecode source unsigned",output)
         self.unchanged(before)
 if __name__=="__main__": unittest.main()
