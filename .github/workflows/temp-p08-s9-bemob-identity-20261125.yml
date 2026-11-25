@@ -1,0 +1,167 @@
+name: TEMP P08 S9 BeMob exact source three DB
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p08-s9-bemob-identity-20261125.yml'
+permissions:
+  contents: read
+concurrency:
+  group: p08-s9-identity-20261125
+  cancel-in-progress: false
+env:
+  TARGET_REPO: llhzx2018/vf-adops
+  TARGET_VERSION: '0.1.18'
+  TARGET_SHA: ee7fa8eb97c8f098b8e1cf795119034534955b50
+jobs:
+  source-preflight:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/p08-s9-bemob-identity-20261125'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Existing lane audit
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_spec.py audit-rendered --spec specs/ephemeral/p08-s9-bemob-identity-20261125.json --input .github/workflows/temp-p08-s9-bemob-identity-20261125.yml
+          echo P08_S9_SOURCE_PREFLIGHT=PASS
+  sqlite-owner-and-landing:
+    needs: source-preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Transient exact private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: ee7fa8eb97c8f098b8e1cf795119034534955b50
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-p08
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_sqlite, sqlite3, pdo_mysql, zip, mbstring, intl, bcmath, dom, fileinfo, pcntl
+      - name: Exact PHP syntax and owner tests
+        working-directory: private-p08
+        shell: bash
+        env:
+          APP_ENV: testing
+          APP_KEY: 'base64:QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI='
+          SESSION_DRIVER: array
+          CACHE_STORE: array
+          DB_CONNECTION: sqlite
+          DB_DATABASE: ':memory:'
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(cat VERSION)" = "$TARGET_VERSION"
+          test -z "$(git status --porcelain)"
+          for f in app/Http/Controllers/TrackerCenterController.php app/Modules/Tracker/Actions/TrackerConnectionIdentity.php database/migrations/2026_11_25_000018_add_tracker_connection_identity.php tests/Feature/BeMobTrackerWorkflowTest.php tests/native/tracker_identity_migration_compat.php app/Http/Controllers/LandingController.php tests/Feature/LandingCrashRecoveryTest.php; do
+            php -l "$f" > /dev/null || { echo P08_S9_PHP_LINT=FAIL; exit 1; }
+          done
+          echo P08_S9_PHP_LINT=PASS
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
+          composer install --no-scripts --no-interaction --no-progress --prefer-dist > "$RUNNER_TEMP/p08-s9-composer.log" 2>&1 || { echo P08_S9_COMPOSER=FAIL; exit 1; }
+          php vendor/bin/phpunit --no-coverage --colors=never tests/Feature/BeMobTrackerWorkflowTest.php tests/Feature/BeMobCatalogPaginationTest.php tests/Feature/LandingCrashRecoveryTest.php > "$RUNNER_TEMP/p08-s9-owner.log" 2>&1 || { echo P08_S9_OWNER_TESTS=FAIL; exit 1; }
+          echo P08_S9_OWNER_TESTS=PASS
+          php tests/test_landing_post_lock_cleanup_race.php > "$RUNNER_TEMP/p08-s9-race.log" 2>&1 || { echo P08_S9_LANDING_CONCURRENCY=FAIL; exit 1; }
+          echo P08_S9_LANDING_CONCURRENCY=PASS
+      - name: Remove private data and transient checkout
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- private-p08
+          rm -f -- "$RUNNER_TEMP"/p08-s9-*.log
+          test ! -e private-p08
+          echo P08_S9_PRIVATE_CLEANUP=PASS
+  native-tracker-migration:
+    needs: source-preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [mysql, mariadb]
+    services:
+      sql:
+        image: ${{ matrix.engine == 'mysql' && 'mysql:8.4' || 'mariadb:11.8' }}
+        env:
+          MYSQL_ROOT_PASSWORD: 'p08_synthetic_password_2026'
+          MYSQL_DATABASE: p08_identity_ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="sh -c 'mariadb-admin ping --silent || mysqladmin ping --silent'"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    steps:
+      - name: Transient exact private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: ee7fa8eb97c8f098b8e1cf795119034534955b50
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-p08
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_sqlite, sqlite3, pdo_mysql, zip, mbstring, intl, bcmath, dom, fileinfo
+      - name: Native old source preservation and guarded schema migration
+        working-directory: private-p08
+        shell: bash
+        env:
+          APP_ENV: testing
+          APP_KEY: 'base64:QkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkI='
+          SESSION_DRIVER: array
+          CACHE_STORE: array
+          DB_CONNECTION: mysql
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_DATABASE: p08_identity_ci
+          DB_USERNAME: root
+          DB_PASSWORD: 'p08_synthetic_password_2026'
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(cat VERSION)" = "$TARGET_VERSION"
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
+          composer install --no-scripts --no-interaction --no-progress --prefer-dist > "$RUNNER_TEMP/p08-s9-composer.log" 2>&1 || { echo P08_S9_NATIVE_COMPOSER=FAIL; exit 1; }
+          m18=2026_11_25_000018_add_tracker_connection_identity.php
+          m19=2026_11_25_000019_create_tracker_catalog_bindings.php
+          mv "database/migrations/$m18" "$RUNNER_TEMP/$m18"
+          mv "database/migrations/$m19" "$RUNNER_TEMP/$m19"
+          php artisan migrate --force > "$RUNNER_TEMP/p08-s9-old-migrate.log" 2>&1 || { echo P08_S9_NATIVE_OLD_MIGRATE=FAIL; exit 1; }
+          php tests/native/tracker_identity_migration_compat.php prepare > "$RUNNER_TEMP/p08-s9-prepare.log" 2>&1 || { echo P08_S9_NATIVE_SEED=FAIL; exit 1; }
+          mv "$RUNNER_TEMP/$m18" "database/migrations/$m18"
+          mv "$RUNNER_TEMP/$m19" "database/migrations/$m19"
+          php artisan migrate --force > "$RUNNER_TEMP/p08-s9-expanded-migrate.log" 2>&1 || { echo P08_S9_NATIVE_EXPAND=FAIL; exit 1; }
+          php tests/native/tracker_identity_migration_compat.php expanded > "$RUNNER_TEMP/p08-s9-expanded.log" 2>&1 || { echo P08_S9_NATIVE_MULTI_ACCOUNT=FAIL; exit 1; }
+          php tests/native/tracker_identity_migration_compat.php guarded > "$RUNNER_TEMP/p08-s9-guarded.log" 2>&1 || { echo P08_S9_NATIVE_DOWN_REFUSAL=FAIL; exit 1; }
+          php tests/native/tracker_identity_migration_compat.php refused > "$RUNNER_TEMP/p08-s9-refused.log" 2>&1 || { echo P08_S9_NATIVE_PROTECTED_DATA=FAIL; exit 1; }
+          php artisan migrate:rollback --step=2 --force > "$RUNNER_TEMP/p08-s9-down.log" 2>&1 || { echo P08_S9_NATIVE_SAFE_ROLLBACK=FAIL; exit 1; }
+          php tests/native/tracker_identity_migration_compat.php rolled_back > "$RUNNER_TEMP/p08-s9-rolled-back.log" 2>&1 || { echo P08_S9_NATIVE_OLD_INDEX=FAIL; exit 1; }
+          php artisan migrate --force > "$RUNNER_TEMP/p08-s9-reapply.log" 2>&1 || { echo P08_S9_NATIVE_REAPPLY=FAIL; exit 1; }
+          php tests/native/tracker_identity_migration_compat.php reapplied > "$RUNNER_TEMP/p08-s9-reapplied.log" 2>&1 || { echo P08_S9_NATIVE_DATA_PARITY=FAIL; exit 1; }
+          echo P08_S9_NATIVE_IDENTITY_MIGRATION=PASS
+      - name: Remove private data and transient checkout
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- private-p08
+          rm -f -- "$RUNNER_TEMP"/p08-s9-*.log "$RUNNER_TEMP"/2026_11_25_000018_add_tracker_connection_identity.php "$RUNNER_TEMP"/2026_11_25_000019_create_tracker_catalog_bindings.php "$RUNNER_TEMP"/p08-s5-identity-before.json
+          test ! -e private-p08
+          echo P08_S9_PRIVATE_CLEANUP=PASS
