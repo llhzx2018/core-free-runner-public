@@ -1,0 +1,121 @@
+# One-shot P02 exact-source SQLite Clean FULL diagnostic. CLOSE WITHOUT MERGE.
+# Private source and diagnostic scratch stay transient; logs expose stages/status only.
+name: TEMP P02 exact-source SQLite FULL root-cause (one-shot)
+on:
+  pull_request:
+    branches: [main]
+    types: [opened]
+    paths: ['.github/workflows/p02-sqlite-full-rootcause-once.yml']
+permissions:
+  contents: read
+concurrency:
+  group: p02-sqlite-rootcause-20261125
+  cancel-in-progress: false
+jobs:
+  sqlite-diagnostic:
+    if: >-
+      github.actor == 'llhzx2018' &&
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.head.ref == 'test/p02-sqlite-full-rootcause-20261125' &&
+      github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-doc
+          ref: b1cfa8c6cca8c5c5f430d865c7a0570d5c8f857a
+          path: target
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring,pdo_sqlite,sqlite3,pdo_mysql,dom,xml,zip,curl,fileinfo
+          tools: composer:v2
+          coverage: none
+      - uses: pnpm/action-setup@v4
+        with:
+          version: '10.20.0'
+          run_install: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '22'
+      - name: Reproduce real extracted SQLite FULL, report only safe stage and HTTP codes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          test "$(git -C target rev-parse HEAD)" = b1cfa8c6cca8c5c5f430d865c7a0570d5c8f857a
+          test "$(git -C target rev-parse HEAD^{tree})" = d524c7c4e34b7348e24c344c4c6696f86884743f
+          echo P02_DIAG_EXACT_SOURCE=PASS
+          mkdir -m 700 -p "$RUNNER_TEMP/p02-sqlite-diag"
+          if bash target/scripts/build-clean-full.sh "$RUNNER_TEMP/p02-sqlite-diag/full.zip" >"$RUNNER_TEMP/p02-sqlite-diag/build.log" 2>&1; then
+            echo P02_DIAG_FULL_BUILD=PASS
+          else
+            echo P02_DIAG_FULL_BUILD=FAIL
+            exit 1
+          fi
+          unzip -tqq "$RUNNER_TEMP/p02-sqlite-diag/full.zip"
+          mkdir -m 700 -p "$RUNNER_TEMP/p02-sqlite-diag/site"
+          unzip -q "$RUNNER_TEMP/p02-sqlite-diag/full.zip" -d "$RUNNER_TEMP/p02-sqlite-diag/site"
+          cat > "$RUNNER_TEMP/p02-sqlite-diag/site/router.php" <<'PHP'
+          <?php
+          $p=parse_url($_SERVER["REQUEST_URI"],PHP_URL_PATH);
+          if(is_file(__DIR__."/public".$p))return false;
+          require __DIR__."/public/index.php";
+          PHP
+          php -S 127.0.0.1:8131 -t "$RUNNER_TEMP/p02-sqlite-diag/site/public" "$RUNNER_TEMP/p02-sqlite-diag/site/router.php" >"$RUNNER_TEMP/p02-sqlite-diag/server.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/p02-sqlite-diag/server.pid"
+          ready=NO
+          for i in $(seq 1 40); do
+            if curl --fail --silent --show-error --output /dev/null http://127.0.0.1:8131/setup.php 2>/dev/null; then ready=YES; break; fi
+            sleep 1
+          done
+          echo P02_DIAG_HTTP_READY=$ready
+          test "$ready" = YES || exit 1
+          python3 - "$RUNNER_TEMP/p02-sqlite-diag/site" <<'PY'
+          import importlib.util, sys
+          from pathlib import Path
+          root=Path(sys.argv[1])
+          spec=importlib.util.spec_from_file_location("vf_probe", Path("target/tests/e2e/full_install_probe.py"))
+          module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+          original=module.request
+          def traced(opener,url,method="GET",data=None,headers=None):
+              status,page,loc=original(opener,url,method=method,data=data,headers=headers)
+              stage=module.STAGE
+              allow={"setup-get","csrf-rejection","install-post","repeat-lock","login-get","login-post","workspace-html"}
+              if stage in allow and isinstance(status,int):
+                  print(f"P02_DIAG_HTTP_{stage.replace('-', '_').upper()}={status}",flush=True)
+              return status,page,loc
+          module.request=traced
+          sys.argv=["full_install_probe.py","--root",str(root),"--base","http://127.0.0.1:8131","--engine","sqlite","--db-port","3306","--db-name","vfdoc-ci","--mode","clean"]
+          try:
+              module.main()
+              print("P02_DIAG_CLEAN_FULL_SQLITE=PASS",flush=True)
+          except Exception as exc:
+              stage=module.STAGE
+              category=type(exc).__name__ if type(exc).__name__ in {"AssertionError","HTTPError","URLError","OSError","RuntimeError","ValueError"} else "OtherError"
+              if stage not in {"start","setup-get","setup-nonce","csrf-rejection","install-post","installed-files","repeat-lock","login-get","login-post","workspace-html"}: stage="unexpected"
+              print(f"P02_DIAG_CLEAN_FULL_SQLITE=FAIL stage={stage} category={category}",flush=True)
+              sys.exit(2)
+          PY
+      - name: Erase transient private checkout, FULL, logs and synthetic DB
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          if test -f "$RUNNER_TEMP/p02-sqlite-diag/server.pid"; then
+            kill "$(cat "$RUNNER_TEMP/p02-sqlite-diag/server.pid")" 2>/dev/null || true
+          fi
+          rm -rf -- target "$RUNNER_TEMP/p02-sqlite-diag"
+          test ! -e target && test ! -e "$RUNNER_TEMP/p02-sqlite-diag"
+          echo P02_DIAG_PRIVATE_CLEANUP=PASS
+          echo P02_DIAG_PUBLIC_ARTIFACT=NONE
