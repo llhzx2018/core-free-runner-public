@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import pty
 from pathlib import Path
 import re
 import shutil
@@ -123,6 +124,103 @@ class PublicSingleEntryTests(unittest.TestCase):
             self.assertNotIn("unexpected download", run.stdout)
             self.assertEqual((Path(tmp) / "current").readlink(),
                              Path("releases/0.1.0-m05-ux11-toolbox-lock"))
+
+    def test_m05_official_predecessor_changed_during_download_blocks_install(self):
+        """Confirmed UX11 must be read back after downloading; no M05 write."""
+        toolbox = (ROOT / public_contract.TOOLBOX).read_text(encoding="utf-8")
+        pins = "\n".join(re.findall(r"(?m)^M05_[A-Z0-9_]+=.*$", toolbox))
+        ensure = re.search(r"(?ms)^ensure_m05_current\(\) \{\n.*?^\}$", toolbox)
+        self.assertIsNotNone(ensure)
+        with tempfile.TemporaryDirectory() as tmp:
+            current = Path(tmp) / "current"
+            current.symlink_to("releases/0.1.0-m05-ux11-toolbox-lock")
+            # Never use production paths, external network or a real installer.
+            script = "\n".join((
+                "set -euo pipefail",
+                pins,
+                'M05_ROOT="$P07_TEST_ROOT"',
+                'C_CYAN=""',
+                'C_YELLOW=""',
+                'C_RED=""',
+                'C_RESET=""',
+                'say() { printf "%s\\n" "$*"; }',
+                'm05_verified_current() { return 0; }',
+                'id() { printf "0\\n"; }',
+                'curl() { ln -sfn releases/changed-during-download "$M05_ROOT/current"; return 0; }',
+                'sha256_file() { printf "%s\\n" "$M05_BUNDLE_SHA256"; }',
+                'p07_git_blob_sha1() { printf "%s\\n" "$M05_INSTALLER_BLOB"; }',
+                'python3() { printf "FORBIDDEN\\n" > "$M05_ROOT/installer-executed"; return 99; }',
+                ensure.group(),
+                "ensure_m05_current",
+            ))
+            master, slave = pty.openpty()
+            try:
+                proc = subprocess.Popen(
+                    ["bash", "-c", script],
+                    stdin=slave, stdout=slave, stderr=slave, text=False,
+                    env={**os.environ, "P07_TEST_ROOT": tmp, "NO_COLOR": "1"},
+                    start_new_session=True,
+                )
+                os.close(slave)
+                slave = -1
+                os.write(master, b"y\n")
+                self.assertEqual(proc.wait(timeout=10), 13)
+            finally:
+                if slave != -1:
+                    os.close(slave)
+                os.close(master)
+            self.assertEqual(current.readlink(),
+                             Path("releases/changed-during-download"))
+            self.assertFalse((Path(tmp) / "installer-executed").exists())
+
+    def test_m05_official_predecessor_stays_same_allows_confirmed_upgrade(self):
+        """The new race guard must not block a legitimate unchanged UX11."""
+        toolbox = (ROOT / public_contract.TOOLBOX).read_text(encoding="utf-8")
+        pins = "\n".join(re.findall(r"(?m)^M05_[A-Z0-9_]+=.*$", toolbox))
+        ensure = re.search(r"(?ms)^ensure_m05_current\(\) \{\n.*?^\}$", toolbox)
+        self.assertIsNotNone(ensure)
+        with tempfile.TemporaryDirectory() as tmp:
+            current = Path(tmp) / "current"
+            current.symlink_to("releases/0.1.0-m05-ux11-toolbox-lock")
+            script = "\n".join((
+                "set -euo pipefail",
+                pins,
+                'M05_ROOT="$P07_TEST_ROOT"',
+                'C_CYAN=""',
+                'C_YELLOW=""',
+                'C_RED=""',
+                'C_RESET=""',
+                'say() { printf "%s\\n" "$*"; }',
+                'm05_verified_current() { return 0; }',
+                'id() { printf "0\\n"; }',
+                'curl() { return 0; }',
+                'sha256_file() { printf "%s\\n" "$M05_BUNDLE_SHA256"; }',
+                'p07_git_blob_sha1() { printf "%s\\n" "$M05_INSTALLER_BLOB"; }',
+                'python3() { printf "%s\\n" "$*" > "$M05_ROOT/installer-invoked"; return 0; }',
+                ensure.group(),
+                "ensure_m05_current",
+            ))
+            master, slave = pty.openpty()
+            try:
+                proc = subprocess.Popen(
+                    ["bash", "-c", script],
+                    stdin=slave, stdout=slave, stderr=slave, text=False,
+                    env={**os.environ, "P07_TEST_ROOT": tmp, "NO_COLOR": "1"},
+                    start_new_session=True,
+                )
+                os.close(slave)
+                slave = -1
+                os.write(master, b"y\n")
+                self.assertEqual(proc.wait(timeout=10), 0)
+            finally:
+                if slave != -1:
+                    os.close(slave)
+                os.close(master)
+            self.assertEqual(current.readlink(),
+                             Path("releases/0.1.0-m05-ux11-toolbox-lock"))
+            args = (Path(tmp) / "installer-invoked").read_text()
+            self.assertIn("install ", args)
+            self.assertIn("424ff9b90d9ce1c5d2b8de9773fb3350d959d8a5f030580e568918a7bc66d279", args)
 
     def test_public_toolbox_missing_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
