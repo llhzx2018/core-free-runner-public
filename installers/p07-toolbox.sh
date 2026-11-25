@@ -886,13 +886,14 @@ run_m03_owner_trial() {
        ! bash -n "$file"; then
       rm -f -- "$file"; say '试用安装器身份/语法验证失败，拒绝运行。' >&2; return 6
     fi
-    set +e
-    P07_INSTALL_DIR="$M03_OWNER_TRIAL_ROOT" \
+    if P07_INSTALL_DIR="$M03_OWNER_TRIAL_ROOT" \
     P07_PREVIOUS_DIR="$M03_OWNER_TRIAL_ROOT.previous" \
     P07_BIN_LINK="$M03_OWNER_TRIAL_BIN" \
-    P07_M03_EXPECTED_SOURCE="$source_kind" P07_TOOLBOX_PARENT=1 P07_NO_EXEC=1 bash "$file" install
-    rc=$?
-    set -e
+    P07_M03_EXPECTED_SOURCE="$source_kind" P07_TOOLBOX_PARENT=1 P07_NO_EXEC=1 bash "$file" install; then
+      rc=0
+    else
+      rc=$?
+    fi
     rm -f -- "$file"
     [[ $rc -eq 0 ]] || { say '试用包安装失败，请保留现场；正式版不变。' >&2; return "$rc"; }
     m03_verified_owner_trial || { say '试用版安装后身份未通过验证。' >&2; return 13; }
