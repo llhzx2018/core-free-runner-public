@@ -9,6 +9,7 @@ from pathlib import Path
 import py_compile
 import re
 import shlex
+import stat
 import shutil
 import subprocess
 import tempfile
@@ -82,6 +83,10 @@ class RealEntry(unittest.TestCase):
         if digest(cls.old)!=OLD_SHA or digest(cls.new)!=NEW_SHA: raise RuntimeError("package identity mismatch")
     def setUp(self):
         if any(exists(p) for p in self.paths): self.fail("unexpected residue")
+        # Model a normal root SSH umask; hosted sudo can inherit 0002.
+        # Never chmod or normalize the installed historical tree.
+        previous_umask=os.umask(0o022)
+        self.addCleanup(os.umask,previous_umask)
         self.tmp=tempfile.TemporaryDirectory(prefix="p07-rc4-public-real-")
         self.addCleanup(self.tmp.cleanup)
         self.addCleanup(self.clean_owned)
@@ -160,6 +165,18 @@ else:
             for p,k in options[:66]: py_compile.compile(str(p),optimize=k,doraise=True)
             self.assertEqual(len(list((ROOT/"lib/__pycache__").glob("*.pyc"))),66)
         self.log.unlink(missing_ok=True)
+    def assert_safe_fixture_permissions(self):
+        # Match the signed verifier's ownership/type/mode/link constraints.
+        # Diagnostic names are only synthetic test paths, never Owner data.
+        owner=ROOT.lstat().st_uid
+        for p in (ROOT,*ROOT.rglob("*")):
+            info=p.lstat()
+            safe_dir=stat.S_ISDIR(info.st_mode)
+            self.assertTrue(safe_dir or stat.S_ISREG(info.st_mode),p.relative_to(ROOT).as_posix())
+            self.assertIn(info.st_uid,(0,owner),p.relative_to(ROOT).as_posix())
+            self.assertEqual(info.st_mode & 0o022,0,
+                "fixture permission: "+p.relative_to(ROOT).as_posix()+" "+oct(stat.S_IMODE(info.st_mode)))
+            if not safe_dir: self.assertEqual(info.st_nlink,1,p.relative_to(ROOT).as_posix())
     def entry(self,answer="y",mode="normal",extra=None,expect_block=False):
         env={**self.env,"VF_TEST_TRANSPORT":mode,**(extra or {})}
         # The exact public toolbox runs on a real pseudo-terminal, then selects 3/2.
@@ -181,7 +198,7 @@ else:
         self.assertFalse(exists(NEWROOT))
         self.preserve()
     def test_real_public_upgrade_legacy_caches_and_reentry(self):
-        self.install_old(caches=True); before=fingerprint(ROOT)
+        self.install_old(caches=True); self.assert_safe_fixture_permissions(); before=fingerprint(ROOT)
         output=self.entry()
         self.assertIn("独立维护程序已就绪",output,"LEGACY_CACHE_UPGRADE: "+repr(re.findall(r"RC3_UPGRADE_PROVENANCE_BLOCKED=[^\r\n]+|错误阶段：[A-Z_]+|原运行时归属或完整性无法确认",output)))
         self.assertEqual((ROOT/"BUILD_ID").read_text().strip(),NEW)
@@ -259,8 +276,19 @@ else:
             extra=ROOT/"lib/policy.py"
             extra.write_bytes(z.read("dist/p07/0.1.0/overlay/lib/policy.py"))
         py_compile.compile(str(extra),doraise=True)
+        self.assert_safe_fixture_permissions()
         before=fingerprint(ROOT)
         output=self.entry(expect_block=True)
         self.assertIn("RC3 bytecode source unsigned",output)
         self.unchanged(before)
+    def test_group_writable_cache_directory_rejected_without_mutation(self):
+        self.install_old(caches=True)
+        self.assert_safe_fixture_permissions()
+        cache_dir=ROOT/"lib/__pycache__"
+        cache_dir.chmod(0o775)
+        before=fingerprint(ROOT)
+        output=self.entry(expect_block=True)
+        self.assertIn("RC3 unsafe file type or permission",output)
+        self.unchanged(before)
+        self.assertEqual(stat.S_IMODE(cache_dir.lstat().st_mode),0o775)
 if __name__=="__main__": unittest.main()
