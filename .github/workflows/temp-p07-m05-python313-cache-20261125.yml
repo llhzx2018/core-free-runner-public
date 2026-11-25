@@ -1,0 +1,148 @@
+name: TEMP P07-M05 official RC3 Python cache regression
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/temp-p07-m05-python313-cache-20261125.yml
+permissions:
+  contents: read
+jobs:
+  p07-m05-rc3-cache:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.actor == 'llhzx2018' &&
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'temp/p07-m05-python313-cache-20261125'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      P07_SHA: 'e3772bda6a6647853dd026fa026b26dd8d8f3e92'
+      P07_TREE: 'edb933e44a3deb9dd6f9ce12c4e6fddd8814d75e'
+      P07_BASE: '2bf8fb645fee1d813520329dcd7748bee2225376'
+      GOV_SHA: '74db859d21b0f93c7c2230d13eae9de8f0fd576a'
+      RC3_ZIP_SHA: '3646285a2732c8249d0296a72c7ce6fae83be1e9564d76849e65bc396642672d'
+    steps:
+      - name: Checkout exact private product source transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: e3772bda6a6647853dd026fa026b26dd8d8f3e92
+          path: transient-p07
+          fetch-depth: 0
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - name: Checkout pinned GOV architecture gate transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: 74db859d21b0f93c7c2230d13eae9de8f0fd576a
+          path: transient-gov
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - name: Verify exact source and existing architecture gate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C transient-p07 rev-parse HEAD)" = "$P07_SHA"
+          test "$(git -C transient-p07 rev-parse 'HEAD^{tree}')" = "$P07_TREE"
+          test "$(git -C transient-gov rev-parse HEAD)" = "$GOV_SHA"
+          git -C transient-p07 cat-file -e "$P07_BASE^{commit}"
+          cd transient-p07
+          if ! python3 -B .github/checks/architecture_gate.py \
+            --manifest .github/checks/code_architecture.json \
+            --gov-root "$GITHUB_WORKSPACE/transient-gov" --git-root . \
+            --base-sha "$P07_BASE" --head-sha "$P07_SHA" \
+            > "$RUNNER_TEMP/p07-arch.log" 2>&1; then
+            echo P07_M05_CACHE_ARCHITECTURE=FAIL
+            exit 13
+          fi
+          echo P07_M05_CACHE_ARCHITECTURE=PASS
+      - name: Run actual M05 new and historical tests without writing installed modules
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          cd transient-p07
+          for suite in test_p07_m05_trial_cache_guard.py test_p07_m05_dirty_host_guard.py test_p07_m05_installed_root_guard.py test_p07_m05_isolated_module.py test_p07_m05_host_write_gate.py; do
+            log="$RUNNER_TEMP/$suite.log"
+            if ! python3 -B -m unittest discover -s tests -p "$suite" -q >"$log" 2>&1; then
+              echo "P07_M05_CACHE_SUITE=FAIL:$suite"
+              grep -E '^(FAIL|ERROR): test_[A-Za-z0-9_]+ ' "$log" | head -12 || true
+              exit 13
+            fi
+            grep -E '^Ran [0-9]+ tests?' "$log" || true
+            echo "P07_M05_CACHE_SUITE=PASS:$suite"
+          done
+      - name: Test officially released RC3 artifact with genuine generated caches
+        shell: bash
+        env:
+          RC3_URL: 'https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m03-v0.1.0-release147-rc3-ownertrial-20261123/P07-M03-0.1.0-release147-rc3-OWNER-TRIAL.zip'
+        run: |
+          set -Eeuo pipefail
+          set +x
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error --retry 2 --max-time 95 "$RC3_URL" -o "$RUNNER_TEMP/m03-rc3.zip"
+          printf '%s  %s\n' "$RC3_ZIP_SHA" "$RUNNER_TEMP/m03-rc3.zip" | sha256sum -c - >/dev/null
+          echo P07_M03_OFFICIAL_RC3_ZIP_SHA=PASS
+          python3 -B - <<'PY'
+          import os,pathlib,py_compile,sys,zipfile
+          sys.path.insert(0,str(pathlib.Path("transient-p07/lib").resolve()))
+          from m05_owner_trial_guard import verified_p07_trial_runtime, REQUIRED_DIRS
+          root=pathlib.Path(os.environ["RUNNER_TEMP"])/"vf-server-ops-ownertrial147rc3"
+          root.mkdir(mode=0o700)
+          for name in REQUIRED_DIRS:
+              (root/name).mkdir(mode=0o700)
+          prefix="dist/p07/0.1.0/overlay/"
+          with zipfile.ZipFile(pathlib.Path(os.environ["RUNNER_TEMP"])/"m03-rc3.zip") as z:
+              for member in z.namelist():
+                  if not member.startswith(prefix):
+                      continue
+                  rel=member[len(prefix):]
+                  if rel=="RUNTIME.gitblob":
+                      rel=".runtime-manifest.gitblob"
+                  if not rel or ".." in pathlib.PurePosixPath(rel).parts:
+                      raise ValueError("invalid relative member")
+                  target=root/rel
+                  target.parent.mkdir(parents=True,exist_ok=True)
+                  target.write_bytes(z.read(member))
+          (root/"VERSION").write_text("0.1.0\n",encoding="ascii")
+          assert verified_p07_trial_runtime(root)
+          print("P07_M05_RC3_ORIGINAL_IDENTITY=PASS")
+          sources=sorted((root/"lib").rglob("*.py"))
+          assert len(sources)>=20
+          for source in sources[:66]:
+              py_compile.compile(str(source),doraise=True)
+          assert verified_p07_trial_runtime(root)
+          print("P07_M05_RC3_REAL_CPYTHON313_CACHE_IDENTITY=PASS")
+          extra=root/"lib"/"unlisted-site-worker.sh"
+          extra.write_text("#!/bin/sh\nexit 0\n")
+          assert not verified_p07_trial_runtime(root)
+          print("P07_M05_RC3_UNKNOWN_BINARY_REFUSED=PASS")
+          PY
+      - name: Rebuild isolated M05 ZIP and verify cache checker inclusion
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          cd transient-p07
+          python3 -B scripts/build_p07_m05_bundle.py --output "$RUNNER_TEMP/p07-m05-cache.zip" >"$RUNNER_TEMP/p07-build.log"
+          python3 -B - <<'PY'
+          import os,zipfile,hashlib
+          p=os.environ["RUNNER_TEMP"]+"/p07-m05-cache.zip"
+          with zipfile.ZipFile(p) as z:
+              assert "p07-m05/lib/m05_python_cache_guard.py" in z.namelist()
+          print("P07_M05_CACHE_CODE_BUNDLED=PASS")
+          print("P07_M05_NEW_CANDIDATE_ZIP_SHA256="+hashlib.sha256(open(p,"rb").read()).hexdigest())
+          PY
+      - name: Remove private checkout and RC3 temporary files
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          set +x
+          rm -rf -- "$GITHUB_WORKSPACE/transient-p07" "$GITHUB_WORKSPACE/transient-gov" "$RUNNER_TEMP/vf-server-ops-ownertrial147rc3"
+          rm -f -- "$RUNNER_TEMP"/test_p07_m05_*.py.log "$RUNNER_TEMP/p07-arch.log" "$RUNNER_TEMP/p07-build.log" "$RUNNER_TEMP/m03-rc3.zip" "$RUNNER_TEMP/p07-m05-cache.zip"
+          test ! -e "$GITHUB_WORKSPACE/transient-p07"
+          echo P07_M05_EPHEMERAL_PRIVATE_CLEANUP=PASS
