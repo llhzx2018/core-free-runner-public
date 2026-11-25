@@ -1,0 +1,116 @@
+name: TEMP P07 M03 RC4 isolated MariaDB9 DEV proof
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/temp-p07-m03-rc4-mariadb9-dev-20261125.yml
+permissions:
+  contents: read
+jobs:
+  p07-m03-recovery:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.actor == 'llhzx2018' &&
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'temp/p07-m03-rc4-mariadb9-dev-20261125'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      PRODUCT_SHA: '0d414b3c198bdab1e0d600d560f77ee7d9775a60'
+    steps:
+      - name: Python 3.13 exact cache environment
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: '3.13'
+      - name: Checkout exact private M03 source only transiently
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 0d414b3c198bdab1e0d600d560f77ee7d9775a60
+          fetch-depth: 0
+          path: transient-p07
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+      - name: Exact unchanged final-main source and test blobs
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git -C transient-p07 rev-parse HEAD)" = "$PRODUCT_SHA"
+          test "$(git -C transient-p07 rev-parse HEAD:tests/test_native_scratch_restore.py)" = "17c7821116f4168d2a687bdfbabb903c68e476ad"
+          test "$(git -C transient-p07 rev-parse HEAD:tests/test_isolated_db_restore.py)" = "9c1a427b9b8dced064e7c71b36d30eccd872fc9e"
+          echo P07_M03_RC4_EXACT_MAIN_AND_TEST_BLOBS=PASS
+      - name: DEV actual native MariaDB recovery and fault cleanup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          sudo apt-get update -qq >/dev/null
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq mariadb-server mariadb-client >/dev/null
+          command -v mariadbd
+          command -v mariadb-install-db
+          command -v mariadb
+          mariadbd --no-defaults --version
+          cd transient-p07
+          log="$RUNNER_TEMP/dev-native-mariadb.log"
+          if ! P07_R5_NATIVE_INTEGRATION=1 python3 -B -m unittest discover -s tests -p 'test_native_scratch_restore.py' -v >"$log" 2>&1; then
+            echo P07_M03_DEV_NATIVE_MARIADB=FAIL
+            grep -E '^(FAIL|ERROR): test_[A-Za-z0-9_]+' "$log" | head -12 || true
+            tail -n 45 "$log" | sed -E "s@/home/runner/work/[^/]+/[^/]+/@WORKSPACE/@g"
+            exit 31
+          fi
+          grep -E '^Ran [0-9]+ tests?' "$log" | tail -1
+          grep -Eq '^Ran 9 tests in [0-9.]+' "$log"
+          grep -Fxq 'OK' "$log"
+          grep -Eq '^test_two_independent_native_mariadb_datadirs_and_sql_import \(.*\) \.\.\. ok$' "$log"
+          grep -Eq '^test_bad_sql_refuses_and_cleans_daemon_and_datadir \(.*\) \.\.\. ok$' "$log"
+          echo P07_M03_DEV_NATIVE_MARIADB_TWO_REAL_CASES_NOT_SKIPPED=PASS
+          echo P07_M03_DEV_NATIVE_MARIADB_SCRATCH_AND_CLEANUP=PASS
+      - name: DEV actual Docker MariaDB 11.8 recovery and fault cleanup
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          docker info --format '{{.ServerVersion}}' >/dev/null
+          docker pull mariadb:11.8 >/dev/null
+          docker image inspect mariadb:11.8 --format '{{.Id}}' >/dev/null
+          cd transient-p07
+          log="$RUNNER_TEMP/dev-docker-mariadb.log"
+          if ! P07_R4_DOCKER_INTEGRATION=1 python3 -B -m unittest discover -s tests -p 'test_isolated_db_restore.py' -v >"$log" 2>&1; then
+            echo P07_M03_DEV_DOCKER_MARIADB118=FAIL
+            grep -E '^(FAIL|ERROR): test_[A-Za-z0-9_]+' "$log" | head -12 || true
+            tail -n 45 "$log" | sed -E "s@/home/runner/work/[^/]+/[^/]+/@WORKSPACE/@g"
+            exit 32
+          fi
+          grep -E '^Ran [0-9]+ tests?' "$log" | tail -1
+          grep -Eq '^Ran 9 tests in [0-9.]+' "$log"
+          grep -Fxq 'OK' "$log"
+          grep -Eq '^test_actual_native_sql_import_and_independent_cleanup \(.*\) \.\.\. ok$' "$log"
+          grep -Eq '^test_sql_import_error_fail_closed_with_cleanup \(.*\) \.\.\. ok$' "$log"
+          echo P07_M03_DEV_DOCKER_MARIADB118_TWO_REAL_CASES_NOT_SKIPPED=PASS
+          if [[ -n "$(docker ps -a --format '{{.Names}}' --filter name='vfops-r4-')" ]]; then
+            echo P07_M03_DEV_DOCKER_EPHEMERAL_CONTAINER_REMAINS=FAIL
+            exit 33
+          fi
+          echo P07_M03_DEV_DOCKER_MARIADB118_REAL_RESTORE=PASS
+      - name: Always cleanup isolated generated DB containers and transient source
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          set +x
+          leaked="$(docker ps -a --format '{{.Names}}' --filter name='vfops-r4-' 2>/dev/null || true)"
+          if [[ -n "$leaked" ]]; then
+            echo P07_M03_DEV_EPHEMERAL_CONTAINER_LEAK=FAIL
+            while IFS= read -r name; do
+              [[ "$name" == vfops-r4-* ]] && docker rm --force --volumes -- "$name" >/dev/null 2>&1
+            done <<< "$leaked"
+          fi
+          rm -rf -- "$GITHUB_WORKSPACE/transient-p07"
+          rm -f -- "$RUNNER_TEMP/dev-native-mariadb.log" "$RUNNER_TEMP/dev-docker-mariadb.log"
+          test ! -e "$GITHUB_WORKSPACE/transient-p07" || exit 38
+          echo P07_M03_DEV_TRANSIENT_PRIVATE_BYTES_REMOVED=PASS
+          [[ -z "$leaked" ]] || exit 39
+          echo P07_M03_DEV_EPHEMERAL_DATABASE_CONTAINERS_CLEAN=PASS
