@@ -1,0 +1,139 @@
+name: TEMP P07 M05 exact-source UX13 final package machine verification
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p07-m05-ux13-final-package-20261125.yml'
+permissions:
+  contents: read
+jobs:
+  init-guard:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'test/p07-m05-native-bootstrap-replay-20261125'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      TARGET_VERSION: '0.1.0'
+      TARGET_REPO: 'llhzx2018/vf-server-ops'
+      TARGET_SHA: '425e894bdb484ba23cb70c777f78e83986201639'
+      TARGET_TREE: 'bad4aca106ccec32dd9a1e9fb92bd4f76b27c0ba'
+      NO_COLOR: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Transient private exact-source checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: ${{ env.TARGET_SHA }}
+          path: private-src
+          fetch-depth: 0
+          persist-credentials: false
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+      - name: Verify checkout identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$(git -C private-src rev-parse HEAD)" == "$TARGET_SHA" ]]
+          [[ "$(git -C private-src rev-parse HEAD^{tree})" == "$TARGET_TREE" ]]
+          echo 'P07_M05_EXACT_SOURCE_BINDING=PASS'
+      - name: Verify exact public M05 atomic installer on genuine official UX12 and new fixed-root candidate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git hash-object installers/p07-m05-atomic.py)" = "17e47121ac27f31162d93a72aa0b1dbea602ea01"
+          echo 'PUBLIC_M05_INSTALLER_EXACT_PUBLISHED_BLOB=PASS'
+          mkdir -p "$RUNNER_TEMP/p07-m05-package-proof"
+          cd private-src
+          python3 -B scripts/build_p07_m05_bundle.py --output "$RUNNER_TEMP/p07-m05-package-proof/ux13.zip"
+          python3 -B scripts/build_p07_m05_bundle.py --output "$RUNNER_TEMP/p07-m05-package-proof/ux13-repeat.zip" >/dev/null
+          cmp "$RUNNER_TEMP/p07-m05-package-proof/ux13.zip" "$RUNNER_TEMP/p07-m05-package-proof/ux13-repeat.zip"
+          echo P07_M05_NEW_SOURCE_CANDIDATE_REPRODUCIBLE=PASS
+          echo "P07_M05_NEW_SOURCE_ZIP_SHA256=$(sha256sum "$RUNNER_TEMP/p07-m05-package-proof/ux13.zip" | cut -d ' ' -f1)"
+          curl --fail --location --silent --show-error --retry 2 --max-time 95 \
+            'https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-ux12-apt-failstop-20261122/P07-M05-0.1.0-m05-ux12-apt-failstop.zip' \
+            --output "$RUNNER_TEMP/p07-m05-package-proof/ux12-official.zip"
+          echo '424ff9b90d9ce1c5d2b8de9773fb3350d959d8a5f030580e568918a7bc66d279  '"$RUNNER_TEMP/p07-m05-package-proof/ux12-official.zip" | sha256sum -c -
+          python3 -B - "$RUNNER_TEMP/p07-m05-package-proof" <<'PY'
+          import hashlib
+          import importlib.util
+          import os
+          from pathlib import Path
+          import sys
+          from unittest.mock import patch
+          import zipfile
+          tmp=Path(sys.argv[1])
+          script=Path.cwd().parent/"installers/p07-m05-atomic.py"
+          assert script.is_file()
+          spec=importlib.util.spec_from_file_location("public_m05_exact",script)
+          public=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(public)
+          # Explicitly confine all writes to the ephemeral runner tempdir.
+          public.BASE=tmp/"vfops-modules"
+          assert str(public.BASE).startswith(str(tmp))
+          old=tmp/"ux12-official.zip"
+          new=tmp/"ux13.zip"
+          sha=lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+          old_id="0.1.0-m05-ux12-apt-failstop"
+          new_id="0.1.0-m05-ux13-provider-neutral"
+          old_build,_=public.read_verified_archive(old,sha(old))
+          new_build,_=public.read_verified_archive(new,sha(new))
+          assert (old_build,new_build)==(old_id,new_id)
+          markers={}
+          for slot in ("m01","m02","m03","m04"):
+              folder=public.BASE/slot
+              folder.mkdir(parents=True,exist_ok=True)
+              marker=folder/"sentinel"
+              marker.write_bytes(("unchanged-"+slot).encode())
+              markers[slot]=marker.read_bytes()
+          with patch.object(public.os,"geteuid",return_value=0):
+              assert public.install(old,sha(old))==old_id
+              assert public.install(new,sha(new))==new_id
+              current=public.BASE/"m05/current"
+              assert os.readlink(current)=="releases/"+new_id
+              assert public.install(new,sha(new))==new_id
+              try:
+                  public.install(new,"0"*64)
+              except public.Unsafe:
+                  pass
+              else:
+                  raise AssertionError("wrong zip SHA accepted")
+              assert os.readlink(current)=="releases/"+new_id
+              tampered=tmp/"modified-inner.zip"
+              with zipfile.ZipFile(new) as original,zipfile.ZipFile(tampered,"w") as forged:
+                  for info in original.infolist():
+                      data=original.read(info)
+                      if info.filename=="p07-m05/MODULE_BUILD_ID":
+                          data=b"0.1.0-m05-tampered\\n"
+                      forged.writestr(info,data)
+              try:
+                  public.install(tampered,sha(tampered))
+              except public.Unsafe:
+                  pass
+              else:
+                  raise AssertionError("valid outer SHA with tampered manifest accepted")
+              assert os.readlink(current)=="releases/"+new_id
+              assert public.rollback(old_id,"P07-M05:"+old_id)==old_id
+              assert os.readlink(current)=="releases/"+old_id
+          for slot,data in markers.items():
+              assert (public.BASE/slot/"sentinel").read_bytes()==data
+          public.verify_saved_release(public.BASE/"m05/releases"/new_id,new_id)
+          print("P07_M05_PUBLIC_INSTALLER_REAL_ZIP_UX12_TO_UX13=PASS")
+          print("P07_M05_PUBLIC_INSTALLER_BAD_SHA_AND_MANIFEST_REJECT=PASS")
+          print("P07_M05_PUBLIC_INSTALLER_ROLLBACK=PASS")
+          print("P07_M05_PUBLIC_INSTALLER_OTHER_FOUR_UNCHANGED=PASS")
+          print("P07_M05_PUBLIC_DISTRIBUTION=NOT_PUBLISHED")
+          PY
+      - name: Remove transient private source and candidate
+        if: always()
+        shell: bash
+        run: |
+          rm -rf -- private-src
+          rm -rf -- "$RUNNER_TEMP/p07-m05-package-proof"
+          echo "TARGETED_PACKAGE_DIAGNOSTIC_CLEANUP=COMPLETE"
+          echo 'EPHEMERAL_PRIVATE_CLEANUP=COMPLETE'
