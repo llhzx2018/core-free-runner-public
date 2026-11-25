@@ -1,0 +1,217 @@
+name: TEMP P01 S4 R10 R12 online media batch native SQL and browser
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p01-s4-online-batch-20261125.yml'
+permissions:
+  contents: read
+concurrency:
+  group: temp-p01-s4-online-batch-20261125-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  s4-sql-module:
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.head_ref, 'test/p01-s4-online-batch-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 28
+    services:
+      mysql84:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: p01_s4_synthetic
+          MYSQL_USER: vf_s4_fixture
+          MYSQL_PASSWORD: p01_s4_ephemeral_fixture_only_2026
+          MYSQL_ROOT_PASSWORD: p01_s4_ephemeral_fixture_only_2026
+        ports:
+          - 33584:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pp01_s4_ephemeral_fixture_only_2026"
+          --health-interval=5s --health-timeout=4s --health-retries=18
+      mariadb118:
+        image: mariadb:11.8
+        env:
+          MARIADB_DATABASE: p01_s4_synthetic
+          MARIADB_USER: vf_s4_fixture
+          MARIADB_PASSWORD: p01_s4_ephemeral_fixture_only_2026
+          MARIADB_ROOT_PASSWORD: p01_s4_ephemeral_fixture_only_2026
+        ports:
+          - 33585:3306
+        options: >-
+          --health-cmd="mariadb-admin ping -h 127.0.0.1 -u root -pp01_s4_ephemeral_fixture_only_2026"
+          --health-interval=5s --health-timeout=4s --health-retries=18
+    steps:
+      - name: Exact transient private candidate only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: llhzx2018/vf-startnew
+          ref: 479479e92eb584708165228b07fbbe72a437fc38
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          path: private-src
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Bind exact source and deny installer / legacy / production scope
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(git -C private-src rev-parse HEAD)" = "479479e92eb584708165228b07fbbe72a437fc38"
+          test "$(cat private-src/VERSION)" = '0.1.0-dev'
+          test ! -e private-src/storage/app/private/vf-startnew/installed.json
+          node --check private-src/tests/browser/p01_s4_online_media_batch_browser.mjs
+          echo 'P01_S4_SQL_EXACT_SOURCE=PASS'
+          echo 'P01_S4_SQL_FIRST_OWNER_INSTALL_NOT_INVOKED=TRUE'
+          echo 'P01_S4_SQL_SYNTHETIC_MODULE_TESTS_ONLY=TRUE'
+      - name: PHP 8.4 with native PDO drivers
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, pdo_mysql, pdo_sqlite, sqlite3, dom, xml, fileinfo, curl, openssl, zip
+          tools: composer:v2
+          coverage: none
+      - name: Pin PHP dependencies and run S4 native SQL modules
+        working-directory: private-src
+        shell: bash
+        env:
+          APP_ENV: testing
+          APP_DEBUG: 'false'
+          VF_INSTALL_ALLOW_UNMARKED_DEV: 'true'
+          VF_INSTALL_DEV_CLAIM_ENABLED: 'false'
+          DB_HOST: 127.0.0.1
+          DB_DATABASE: p01_s4_synthetic
+          DB_USERNAME: vf_s4_fixture
+          DB_PASSWORD: p01_s4_ephemeral_fixture_only_2026
+          DB_URL: ''
+          CACHE_STORE: array
+          SESSION_DRIVER: array
+          QUEUE_CONNECTION: sync
+        run: |
+          set -Eeuo pipefail
+          set +x
+          php -r 'if (!extension_loaded("pdo_mysql")) exit(1);'
+          if ! composer install --no-interaction --prefer-dist --no-progress --quiet >"$RUNNER_TEMP/s4-sql-composer.log" 2>&1; then
+            echo 'P01_S4_SQL_COMPOSER=FAIL'
+            exit 1
+          fi
+          echo 'P01_S4_SQL_COMPOSER=PASS'
+          export APP_KEY="base64:$(openssl rand -base64 32)"
+          for engine in mysql mariadb; do
+            export DB_CONNECTION="$engine"
+            if [[ "$engine" == mysql ]]; then export DB_PORT=33584; else export DB_PORT=33585; fi
+            if ! php -r '
+              require "vendor/autoload.php";
+              $app = require "bootstrap/app.php";
+              $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
+              $engine = (string) config("database.default");
+              if ($engine !== getenv("DB_CONNECTION")) exit(41);
+              $pdo = Illuminate\Support\Facades\DB::connection()->getPdo();
+              $version = (string) $pdo->getAttribute(PDO::ATTR_SERVER_VERSION);
+              if ($engine === "mysql" && stripos($version, "mariadb") !== false) exit(42);
+              if ($engine === "mariadb" && stripos($version, "mariadb") === false) exit(43);
+            ' >"$RUNNER_TEMP/s4-sql-preflight.log" 2>&1; then
+              echo "P01_S4_SQL_ENGINE_PREFLIGHT_$engine=FAIL"
+              exit 1
+            fi
+            echo "P01_S4_SQL_ENGINE_PREFLIGHT_$engine=PASS"
+            if ! php artisan test tests/Feature/ChannelsModuleTest.php tests/Feature/ChannelOwnerParityStateTest.php tests/Feature/ChannelYoutubeFeedWorkflowTest.php tests/Feature/MusicModuleTest.php tests/Feature/MusicPlaylistM3uWorkflowTest.php tests/Feature/MusicOnlineDirectoryWorkflowTest.php --no-ansi >"$RUNNER_TEMP/s4-sql-$engine.log" 2>&1; then
+              python3 - "$RUNNER_TEMP/s4-sql-$engine.log" "$engine" <<'PY'
+          import pathlib,re,sys
+          text=pathlib.Path(sys.argv[1]).read_text(errors='replace')
+          clean=re.sub(r'\x1b\[[0-9;]*m','',text)
+          names=re.findall(r'FAILED\s+(Tests\\Feature\\[A-Za-z0-9_]+(?: > [A-Za-z0-9_]+)?)',clean)
+          print('P01_S4_SQL_FAILED_TEST_NAMES='+','.join(names[:12]) if names else 'P01_S4_SQL_FAILED_TEST_NAMES=UNAVAILABLE')
+          PY
+              echo "P01_S4_SQL_ENGINE_$engine=FAIL"
+              exit 1
+            fi
+            python3 - "$RUNNER_TEMP/s4-sql-$engine.log" "$engine" <<'PY'
+          import pathlib,re,sys
+          clean=re.sub(r'\x1b\[[0-9;]*m','',pathlib.Path(sys.argv[1]).read_text(errors='replace'))
+          m=re.search(r'Tests:\s*([^\n]+)',clean)
+          print('P01_S4_SQL_'+sys.argv[2].upper()+'_ASSERT_SUMMARY='+(m.group(1)[:140] if m else 'unavailable'))
+          PY
+            echo "P01_S4_SQL_ENGINE_$engine=PASS"
+          done
+          test ! -e storage/app/private/vf-startnew/installed.json
+          echo 'P01_S4_SQL_NO_INSTALL_MARKER=PASS'
+          echo 'P01_S4_SQL_MODULE_MYSQL84_MARIADB118=PASS'
+      - name: Compile Vue and prepare Chromium for S4 channel Owner parity
+        working-directory: private-src
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          if ! npm ci --no-audit --no-fund >"$RUNNER_TEMP/s4-parity-npm.log" 2>&1; then
+            echo 'P01_S4_ONLINE_NPM=FAIL'; exit 1
+          fi
+          if ! npm run typecheck >"$RUNNER_TEMP/s4-parity-ts.log" 2>&1; then
+            grep 'error TS' "$RUNNER_TEMP/s4-parity-ts.log" | sed -E 's/: error TS[0-9]+:.*/: TYPE_ERROR/' | head -12 || true
+            echo 'P01_S4_ONLINE_TYPECHECK=FAIL'; exit 1
+          fi
+          if ! npm run build >"$RUNNER_TEMP/s4-parity-build.log" 2>&1; then
+            echo 'P01_S4_ONLINE_BUILD=FAIL'; exit 1
+          fi
+          if ! npm install --no-save --package-lock=false --no-audit --no-fund playwright@1.55.0 >"$RUNNER_TEMP/s4-parity-pw.log" 2>&1; then
+            echo 'P01_S4_ONLINE_PLAYWRIGHT=FAIL'; exit 1
+          fi
+          if ! npx playwright install --with-deps chromium >"$RUNNER_TEMP/s4-parity-chrome.log" 2>&1; then
+            echo 'P01_S4_ONLINE_CHROME=FAIL'; exit 1
+          fi
+          echo 'P01_S4_ONLINE_VUE_COMPILE=PASS'
+      - name: Browser 390 768 1440 Owner flags on fresh testing-only SQLite
+        working-directory: private-src
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          export APP_ENV=testing
+          export APP_DEBUG=false
+          export APP_URL=http://127.0.0.1:8777
+          export VF_INSTALL_ALLOW_UNMARKED_DEV=true
+          export VF_INSTALL_DEV_CLAIM_ENABLED=false
+          export APP_KEY="base64:$(openssl rand -base64 32)"
+          export DB_CONNECTION=sqlite
+          export DB_DATABASE="$RUNNER_TEMP/p01-s3-channel-ephemeral.sqlite"
+          export SESSION_DRIVER=file
+          export CACHE_STORE=array
+          export QUEUE_CONNECTION=sync
+          export P01_S3_SYNTH_PASS="$(openssl rand -hex 32)"
+          export P01_S3_REAL_URL="$APP_URL"
+          touch "$DB_DATABASE"
+          if ! php artisan migrate --force --no-interaction >"$RUNNER_TEMP/s4-parity-migrate.log" 2>&1; then
+            echo 'P01_S4_ONLINE_SQLITE_SCHEMA=FAIL'; exit 1
+          fi
+          test ! -e storage/app/private/vf-startnew/installed.json
+          if ! php tests/browser/p01_s3_seed_synthetic.php >"$RUNNER_TEMP/s4-parity-seed.log" 2>&1; then
+            echo 'P01_S4_ONLINE_SEED=FAIL'; exit 1
+          fi
+          export APP_ENV=local
+          php artisan serve --host=127.0.0.1 --port=8777 >"$RUNNER_TEMP/s4-parity-web.log" 2>&1 &
+          SERVER_PID=$!
+          trap 'kill "$SERVER_PID" 2>/dev/null || true' EXIT
+          READY=no
+          for i in $(seq 1 35); do
+            if curl --noproxy '*' -s -o /dev/null "$APP_URL/login"; then READY=yes; break; fi
+            sleep 1
+          done
+          test "$READY" = yes
+          if node tests/browser/p01_s4_online_media_batch_browser.mjs >"$RUNNER_TEMP/s4-parity-browser.log" 2>&1; then
+            grep '^P01_S4_ONLINE_MEDIA_' "$RUNNER_TEMP/s4-parity-browser.log"
+            grep -q '^P01_S4_ONLINE_MEDIA_BROWSER_UI_MOCK_PASS=TRUE$' "$RUNNER_TEMP/s4-parity-browser.log"
+          else
+            grep -E 'AssertionError|Error:|TimeoutError|waiting for' "$RUNNER_TEMP/s4-parity-browser.log" | head -10 || true
+            echo 'P01_S4_WATCH_DETAIL_BROWSER=FAIL'
+            exit 1
+          fi
+          test ! -e storage/app/private/vf-startnew/installed.json
+          echo 'P01_S4_R11_NO_INSTALL_CLAIM=PASS'
+      - name: Clear private checkout and synthetic logs
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- private-src
+          rm -f -- "$RUNNER_TEMP"/s4-sql-*.log
+          rm -f -- "$RUNNER_TEMP"/s4-parity-*.log "$RUNNER_TEMP"/p01-s3-channel-ephemeral.sqlite
+          test ! -e private-src
+          echo 'P01_S4_SQL_PRIVATE_CLEANUP=PASS'
