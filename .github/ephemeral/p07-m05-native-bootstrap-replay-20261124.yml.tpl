@@ -13,7 +13,7 @@ jobs:
       github.repository == 'llhzx2018/core-free-runner-public' &&
       github.event.pull_request.user.login == 'llhzx2018' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.head_ref == 'test/p07-m05-native-bootstrap-replay-20261124'
+      github.head_ref == 'test/p07-m05-native-bootstrap-replay-20261125'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
@@ -22,7 +22,7 @@ jobs:
       TARGET_SHA: '{{TARGET_SHA}}'
       TARGET_TREE: '{{TARGET_TREE}}'
       BASE_SHA: 'fd113376cf8e44c6a3bc00fbe47f34c2a354726a'
-      GOV_SHA: 'e57edc475b44df7d682c857703dabc3d75fc8193'
+      GOV_SHA: '74db859d21b0f93c7c2230d13eae9de8f0fd576a'
       PYTHONDONTWRITEBYTECODE: '1'
       PYTHONUNBUFFERED: '1'
     steps:
@@ -61,7 +61,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/gov-doc
-          ref: e57edc475b44df7d682c857703dabc3d75fc8193
+          ref: 74db859d21b0f93c7c2230d13eae9de8f0fd576a
           path: .gov-private
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
