@@ -1,0 +1,224 @@
+name: TEMP P08 S5 BeMob Multi-Account Native Migration Gate
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p08-s5-bemob-multi-account-20261125.yml'
+permissions:
+  contents: read
+concurrency:
+  group: p08-s5-trio-cas-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+env:
+  TARGET_REPO: llhzx2018/vf-adops
+  TARGET_VERSION: '0.1.18'
+  TARGET_SHA: ebe8f7f7e0874080804e046f249b1d98c2e3aba6
+  TEST_PROJECT: P08
+  TEST_LANE: P08_S5_BEMOB_MULTI_20261125
+jobs:
+  identity-preflight:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/p08-s5-bemob-multi-account-20261125'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Exact product source and rendered workflow identity
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/ephemeral_lane_spec.py audit-rendered --spec specs/ephemeral/p08-s5-bemob-multi-account-20261125.json --input .github/workflows/temp-p08-s5-bemob-multi-account-20261125.yml
+          echo P08_S5_BEMOB_IDENTITY=PASS
+  bemob-feature:
+    needs: identity-preflight
+    # Focused BeMob two independent accounts, legacy safe duplicate and unchanged Kuma.
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/p08-s5-bemob-multi-account-20261125'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 24
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-p08
+          fetch-depth: 1
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_sqlite, sqlite3, zip, mbstring, intl, bcmath, dom, fileinfo
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Pinned source, PHP syntax, dependencies and frontend asset precondition
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(cat VERSION)" = "$TARGET_VERSION"
+          for f in app/Http/Controllers/TrackerCenterController.php app/Modules/Tracker/Actions/TrackerConnectionIdentity.php database/migrations/2026_11_25_000018_add_tracker_connection_identity.php tests/Feature/BeMobTrackerWorkflowTest.php tests/native/tracker_identity_migration_compat.php; do php -l "$f" > /dev/null || exit 1; done
+          echo P08_S5_BEMOB_PHP_SYNTAX=PASS
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
+          composer install --no-scripts --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-s5-composer.log" 2>&1 || { echo P08_S5_BEMOB_COMPOSER=FAIL; exit 1; }
+          npm ci --no-audit --no-fund > "$RUNNER_TEMP/p08-s5-npm.log" 2>&1 || { echo P08_S5_BEMOB_NPM=FAIL; exit 1; }
+          npm run build > "$RUNNER_TEMP/p08-s5-build.log" 2>&1 || { echo P08_S5_BEMOB_VITE=FAIL; exit 1; }
+          test -s public/build/manifest.json
+          echo P08_S5_BEMOB_FRAMEWORK=PASS
+      - name: Focused BeMob, Simple Kuma and Tracker attribution Laravel Feature
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          if php vendor/bin/phpunit --no-coverage --colors=never --log-junit "$RUNNER_TEMP/p08-s5-junit.xml" tests/Feature/BeMobTrackerWorkflowTest.php tests/Feature/TrackerCenterWorkflowTest.php tests/Feature/TrackerAttributionReadinessTest.php > "$RUNNER_TEMP/p08-s5-phpunit.log" 2>&1; then
+            echo P08_S5_BEMOB_BOTH_FEATURES=PASS
+          else
+            echo P08_S5_BEMOB_BOTH_FEATURES=FAIL
+            python3 - "$RUNNER_TEMP/p08-s5-junit.xml" <<'PY'
+          import sys,xml.etree.ElementTree as ET
+          try:
+              root=ET.parse(sys.argv[1]).getroot()
+              print("P08_S6_JUNIT_TESTS="+str(root.get("tests","UNKNOWN")))
+              print("P08_S6_JUNIT_ERRORS="+str(root.get("errors","UNKNOWN")))
+              print("P08_S6_JUNIT_FAILURES="+str(root.get("failures","UNKNOWN")))
+              for case in root.iter("testcase"):
+                  if case.find("failure") is not None or case.find("error") is not None:
+                      print("P08_S6_FAIL_CASE="+str(case.get("name","UNKNOWN"))[:120])
+                      diagnostic=case.find("failure")
+                      if diagnostic is None: diagnostic=case.find("error")
+                      print("P08_S6_FAIL_TYPE="+str(diagnostic.get("type","UNKNOWN"))[:90])
+                      import re,hashlib
+                      raw=str(diagnostic.get("message",""))+"\n"+str(diagnostic.text or "")
+                      hits=re.findall(r'tests/Feature/[A-Za-z]+Test\.php:(\d+)',raw)
+                      print("P08_S6_TEST_FILE_LINE="+(hits[0] if hits else "UNKNOWN"))
+                      print("P08_S6_FAILURE_CLASS="+("ASSERT" if "Failed asserting" in raw else "EXCEPTION"))
+                      print("P08_S6_FAILURE_FINGERPRINT="+hashlib.sha256(raw.encode()).hexdigest()[:12])
+          except (OSError,ET.ParseError):
+              print("P08_S6_JUNIT_UNAVAILABLE")
+          PY
+            exit 1
+          fi
+          echo P08_S5_EXTERNAL_CREDENTIALS=NOT_USED
+      - name: SQLite WAL old schema and protected multi-account downgrade
+        working-directory: private-p08
+        shell: bash
+        env:
+          APP_ENV: testing
+          APP_KEY: base64:REREREREREREREREREREREREREREREREREREREREREQ=
+          DB_CONNECTION: sqlite
+          DB_DATABASE: ${{ runner.temp }}/p08-s5-legacy.sqlite
+          SESSION_DRIVER: array
+          CACHE_STORE: array
+        run: |
+          set -Eeuo pipefail
+          set +x
+          touch "$DB_DATABASE"
+          php artisan migrate --force > "$RUNNER_TEMP/p08-s5-native-migration.log" 2>&1 || { echo P08_S5_NATIVE_FRESH_MIGRATE=FAIL; exit 1; }
+          php artisan migrate:rollback --step=1 --force > "$RUNNER_TEMP/p08-s5-native-oldschema.log" 2>&1 || { echo P08_S5_NATIVE_OLD_SCHEMA=FAIL; exit 1; }
+          php tests/native/tracker_identity_migration_compat.php prepare > "$RUNNER_TEMP/p08-s5-native-prepare.log" 2>&1 || { echo P08_S5_NATIVE_OLD_SEED=FAIL; exit 1; }
+          php artisan migrate --force > "$RUNNER_TEMP/p08-s5-native-expand.log" 2>&1 || { echo P08_S5_NATIVE_FORWARD=FAIL; exit 1; }
+          php tests/native/tracker_identity_migration_compat.php expanded > "$RUNNER_TEMP/p08-s5-native-expanded.log" 2>&1 || { echo P08_S5_NATIVE_MULTIPLE=FAIL; exit 1; }
+          if php artisan migrate:rollback --step=1 --force > "$RUNNER_TEMP/p08-s5-native-refused.log" 2>&1; then echo P08_S5_NATIVE_DOWNGRADE_UNEXPECTEDLY_SUCCEEDED=FAIL; exit 1; fi
+          php tests/native/tracker_identity_migration_compat.php refused > "$RUNNER_TEMP/p08-s5-native-refused-state.log" 2>&1 || { echo P08_S5_NATIVE_DOWNGRADE_DATA=FAIL; exit 1; }
+          php artisan migrate:rollback --step=1 --force > "$RUNNER_TEMP/p08-s5-native-safe-rollback.log" 2>&1 || { echo P08_S5_NATIVE_SAFE_DOWNGRADE=FAIL; exit 1; }
+          php tests/native/tracker_identity_migration_compat.php rolled_back > "$RUNNER_TEMP/p08-s5-native-rolled-back.log" 2>&1 || { echo P08_S5_NATIVE_ROLLBACK_DATA=FAIL; exit 1; }
+          php artisan migrate --force > "$RUNNER_TEMP/p08-s5-native-reapply.log" 2>&1 || { echo P08_S5_NATIVE_REAPPLY=FAIL; exit 1; }
+          php tests/native/tracker_identity_migration_compat.php reapplied > "$RUNNER_TEMP/p08-s5-native-reapplied-state.log" 2>&1 || { echo P08_S5_NATIVE_REAPPLY_DATA=FAIL; exit 1; }
+          echo P08_S5_NATIVE_OLD_TO_NEW_GUARDED_ROLLBACK_REAPPLY=PASS
+      - name: Erase private checkout, dependencies and local test logs
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- private-p08
+          rm -f -- "$RUNNER_TEMP"/p08-s5-*.log "$RUNNER_TEMP/p08-s5-junit.xml" "$RUNNER_TEMP/p08-s5-legacy.sqlite" "$RUNNER_TEMP/p08-s5-identity-before.json"
+          test ! -e private-p08
+          echo P08_S6_PRIVATE_CLEANUP=PASS
+
+  native-cas:
+    needs: identity-preflight
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'evidence/p08-s5-bemob-multi-account-20261125'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 23
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [mysql, mariadb]
+    services:
+      db:
+        image: ${{ matrix.engine == 'mysql' && 'mysql:8.4' || 'mariadb:11.8' }}
+        env:
+          MYSQL_ROOT_PASSWORD: p08-s5-synthetic
+          MYSQL_ROOT_HOST: '%'
+          MARIADB_ROOT_PASSWORD: p08-s5-synthetic
+          MARIADB_ROOT_HOST: '%'
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="sh -c 'mariadb-admin ping --silent || mysqladmin ping --silent'"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=20
+    env:
+      APP_ENV: testing
+      APP_KEY: base64:REREREREREREREREREREREREREREREREREREREREREQ=
+      DB_CONNECTION: mysql
+      DB_HOST: 127.0.0.1
+      DB_PORT: '3306'
+      DB_DATABASE: p08_s5_bemob_ci
+      DB_USERNAME: root
+      DB_PASSWORD: p08-s5-synthetic
+      SESSION_DRIVER: array
+      CACHE_STORE: array
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-adops
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: private-p08
+          fetch-depth: 1
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_mysql, pdo_sqlite, sqlite3, zip, mbstring, intl, bcmath, dom, fileinfo
+      - name: Native old BeMob and Kuma data preserved through identity expansion
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
+          composer install --no-scripts --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-s5-native-composer.log" 2>&1 || { echo P08_S5_NATIVE_COMPOSER=FAIL; exit 1; }
+          php -r '$p=new PDO("mysql:host=127.0.0.1;port=3306","root",getenv("DB_PASSWORD"));$p->exec("CREATE DATABASE IF NOT EXISTS p08_s5_bemob_ci");'
+          php artisan migrate --force > "$RUNNER_TEMP/p08-s5-native-migration.log" 2>&1 || { echo P08_S5_NATIVE_FRESH_MIGRATE=FAIL; exit 1; }
+          php artisan migrate:rollback --step=1 --force > "$RUNNER_TEMP/p08-s5-native-oldschema.log" 2>&1 || { echo P08_S5_NATIVE_OLD_SCHEMA=FAIL; exit 1; }
+          php tests/native/tracker_identity_migration_compat.php prepare > "$RUNNER_TEMP/p08-s5-native-prepare.log" 2>&1 || { echo P08_S5_NATIVE_OLD_SEED=FAIL; exit 1; }
+          php artisan migrate --force > "$RUNNER_TEMP/p08-s5-native-expand.log" 2>&1 || { echo P08_S5_NATIVE_FORWARD=FAIL; exit 1; }
+          php tests/native/tracker_identity_migration_compat.php expanded > "$RUNNER_TEMP/p08-s5-native-expanded.log" 2>&1 || { echo P08_S5_NATIVE_MULTIPLE=FAIL; exit 1; }
+          if php artisan migrate:rollback --step=1 --force > "$RUNNER_TEMP/p08-s5-native-refused.log" 2>&1; then echo P08_S5_NATIVE_DOWNGRADE_UNEXPECTEDLY_SUCCEEDED=FAIL; exit 1; fi
+          php tests/native/tracker_identity_migration_compat.php refused > "$RUNNER_TEMP/p08-s5-native-refused-state.log" 2>&1 || { echo P08_S5_NATIVE_DOWNGRADE_DATA=FAIL; exit 1; }
+          php artisan migrate:rollback --step=1 --force > "$RUNNER_TEMP/p08-s5-native-safe-rollback.log" 2>&1 || { echo P08_S5_NATIVE_SAFE_DOWNGRADE=FAIL; exit 1; }
+          php tests/native/tracker_identity_migration_compat.php rolled_back > "$RUNNER_TEMP/p08-s5-native-rolled-back.log" 2>&1 || { echo P08_S5_NATIVE_ROLLBACK_DATA=FAIL; exit 1; }
+          php artisan migrate --force > "$RUNNER_TEMP/p08-s5-native-reapply.log" 2>&1 || { echo P08_S5_NATIVE_REAPPLY=FAIL; exit 1; }
+          php tests/native/tracker_identity_migration_compat.php reapplied > "$RUNNER_TEMP/p08-s5-native-reapplied-state.log" 2>&1 || { echo P08_S5_NATIVE_REAPPLY_DATA=FAIL; exit 1; }
+          echo P08_S5_NATIVE_OLD_TO_NEW_GUARDED_ROLLBACK_REAPPLY=PASS
+      - name: Cleanup private P08 source and synthetic DB evidence
+        if: always()
+        shell: bash
+        run: |
+          set +x
+          rm -rf -- private-p08
+          rm -f -- "$RUNNER_TEMP"/p08-s5-native-*.log "$RUNNER_TEMP/p08-s5-identity-before.json"
+          test ! -e private-p08
+          echo P08_S5_NATIVE_PRIVATE_CLEANUP=PASS
