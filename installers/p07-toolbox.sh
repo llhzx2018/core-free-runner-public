@@ -88,10 +88,12 @@ M03_LEGACY115_BUILD="0.1.0-release115"
 M03_LEGACY115_MANIFEST_BLOB="4acbaca22aac0da681b34376e2cc86d876593181"
 # This is explicitly NOT the stable M03 pin. Owner must choose option 2
 # inside module 3 and confirm. The trial uses its own root/executable.
-M03_OWNER_TRIAL_BUILD="0.1.0-release147-rc3"
-M03_OWNER_TRIAL_MANIFEST_BLOB="06c79cf8595de625cc84d6a849d9e88fe01c4520"
-M03_OWNER_TRIAL_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-m03-ownertrial147rc3-atomic.sh"
-M03_OWNER_TRIAL_INSTALLER_BLOB="8ac6da95d808ea9aeb9f6f8b8a54a04fcdad4bcc"
+M03_OWNER_TRIAL_BUILD="0.1.0-release147-rc4"
+M03_OWNER_TRIAL_PREVIOUS_BUILD="0.1.0-release147-rc3"
+M03_OWNER_TRIAL_PREVIOUS_MANIFEST_BLOB="06c79cf8595de625cc84d6a849d9e88fe01c4520"
+M03_OWNER_TRIAL_MANIFEST_BLOB="980ef2b84b521f41b1d2ca51fa09ac5c83ecaea9"
+M03_OWNER_TRIAL_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-m03-ownertrial147rc4-atomic.sh"
+M03_OWNER_TRIAL_INSTALLER_BLOB="7f8c56f8106f2d0ec1c4f5d84b9fa7554df1a2ae"
 M03_OWNER_TRIAL_ROOT="/opt/vf-server-ops-ownertrial147rc3"
 M03_OWNER_TRIAL_BIN="/usr/local/bin/vfops-rc147rc3"
 M03_ROLLBACK_INSTALLER_REF="main"
@@ -796,12 +798,28 @@ run_server_ops_owner143_trial() {
   /usr/local/bin/vfops-rc143
 }
 
+m03_owner_trial_previous_pinned() {
+  # Preliminary identity only; authenticated inner installer checks every RC3
+  # file, permitted legacy extras and caches before atomic upgrade.
+  local root="$M03_OWNER_TRIAL_ROOT"
+  [[ -d "$root" && ! -L "$root" &&
+     -d "$root/bin" && ! -L "$root/bin" &&
+     -d "$root/lib" && ! -L "$root/lib" &&
+     -d "$root/components" && ! -L "$root/components" &&
+     -f "$root/BUILD_ID" && ! -L "$root/BUILD_ID" &&
+     -f "$root/.runtime-manifest.gitblob" && ! -L "$root/.runtime-manifest.gitblob" &&
+     -L "$M03_OWNER_TRIAL_BIN" ]] || return 1
+  [[ "$(readlink "$M03_OWNER_TRIAL_BIN")" == "$root/bin/vfops-user" &&
+     "$(cat "$root/BUILD_ID")" == "$M03_OWNER_TRIAL_PREVIOUS_BUILD" &&
+     "$(p07_git_blob_sha1 "$root/.runtime-manifest.gitblob" 2>/dev/null || true)" == "$M03_OWNER_TRIAL_PREVIOUS_MANIFEST_BLOB" ]]
+}
+
 m03_verified_owner_trial() {
   # Authenticate EVERY trial runtime file before executing its CLI, not merely
   # the name, BUILD_ID or a self-provided manifest. Stable M03 is untouched.
   local root="$M03_OWNER_TRIAL_ROOT" expected name actual count=0
   [[ -d "$root" && ! -L "$root" && ! -L "$root/lib" &&
-     ! -L "$root/bin" && -f "$root/BUILD_ID" && ! -L "$root/BUILD_ID" &&
+     ! -L "$root/bin" && ! -L "$root/components" && -f "$root/BUILD_ID" && ! -L "$root/BUILD_ID" &&
      -f "$root/.runtime-manifest.gitblob" &&
      ! -L "$root/.runtime-manifest.gitblob" &&
      -L "$M03_OWNER_TRIAL_BIN" ]] || return 1
@@ -811,11 +829,12 @@ m03_verified_owner_trial() {
   declare -A seen=()
   while read -r expected name; do
     [[ "$expected" =~ ^[a-f0-9]{40}$ &&
-       "$name" =~ ^(bin|lib|components)/[A-Za-z0-9_./-]+$ || "$name" == BUILD_ID ]] || return 1
+       ( "$name" =~ ^(bin|lib|components)/[A-Za-z0-9_./-]+$ || "$name" == BUILD_ID ) ]] || return 1
     [[ "$name" != /* && "$name" != *../* && "$name" != */.. && "$name" != '..' ]] || return 1
     [[ ! -v seen[$name] ]] || return 1
     seen[$name]=1
-    [[ -f "$root/$name" && ! -L "$root/$name" ]] || return 1
+    [[ -f "$root/$name" && ! -L "$root/$name" &&
+       "$(readlink -f "$root/$name")" == "$root/$name" ]] || return 1
     actual="$(p07_git_blob_sha1 "$root/$name" 2>/dev/null || true)"
     [[ "$actual" == "$expected" ]] || return 1
     count=$((count+1))
@@ -829,23 +848,29 @@ run_m03_owner_trial() {
   screen_clear
   show_header
   say "P07-M03 网站与数据 / D04 服务器迁移 · 人工试用版"
-  say "版本：$M03_OWNER_TRIAL_BUILD（失败续迁只读核查版，真实迁移尚未验收）"
+  say "版本：$M03_OWNER_TRIAL_BUILD（独立维护版，真实迁移尚未验收）"
   say '旧 147-rc1 曾在全选22站时出现部分复制失败；请勿再用旧版重试。'
   say '新版本安装在独立目录，原失败任务和旧试用版全部保留。'
   say '已有失败任务的接收机先进入服务器迁移→4「继续未完成迁移（只读核查）」。'
   say '这一步不连旧服务器，不复制、导入或恢复数据库。'
   say '本试用程序安装在独立目录，不替换当前 release146；不自动迁移或改 DNS。'
-  local answer='' file='' rc=0
+  local answer='' file='' rc=0 source_kind=ABSENT action=安装
   if m03_verified_owner_trial; then
     say '已校验隔离试用版安装，无须重新下载。'
   else
-    if [[ -e "$M03_OWNER_TRIAL_ROOT" || -L "$M03_OWNER_TRIAL_ROOT" ||
-          -e "$M03_OWNER_TRIAL_BIN" || -L "$M03_OWNER_TRIAL_BIN" ]]; then
-      say '已有试用目录或命令未通过完整文件校验，拒绝覆盖，请保留现场。' >&2
+    if m03_owner_trial_previous_pinned; then
+      source_kind=RC3
+      action=升级
+      say '检测到已发行 RC3，可核验后升级；旧程序保留为恢复点。'
+    elif [[ -e "$M03_OWNER_TRIAL_ROOT" || -L "$M03_OWNER_TRIAL_ROOT" ||
+            -e "$M03_OWNER_TRIAL_BIN" || -L "$M03_OWNER_TRIAL_BIN" ||
+            -e "$M03_OWNER_TRIAL_ROOT.previous" || -L "$M03_OWNER_TRIAL_ROOT.previous" ||
+            -e "$M03_OWNER_TRIAL_ROOT.new" || -L "$M03_OWNER_TRIAL_ROOT.new" ]]; then
+      say '已有试用目录、恢复点或命令身份未确认，拒绝覆盖，请保留现场。' >&2
       return 13
     fi
     [[ -t 0 && -t 1 ]] || { say '人工试用安装必须在交互式 SSH 终端确认。'; return 7; }
-    printf '只安装隔离人工试用版，不迁移网站。继续？[y/N]：'
+    printf '只%s独立维护程序，不迁移网站。继续？[y/N]：' "$action"
     read -r answer || answer=''
     [[ "$answer" =~ ^[Yy]$ ]] || { say '已取消；正式版不变。'; return 7; }
     for tool in curl sha1sum mktemp bash; do
@@ -865,13 +890,13 @@ run_m03_owner_trial() {
     P07_INSTALL_DIR="$M03_OWNER_TRIAL_ROOT" \
     P07_PREVIOUS_DIR="$M03_OWNER_TRIAL_ROOT.previous" \
     P07_BIN_LINK="$M03_OWNER_TRIAL_BIN" \
-    P07_TOOLBOX_PARENT=1 P07_NO_EXEC=1 bash "$file" install
+    P07_M03_EXPECTED_SOURCE="$source_kind" P07_TOOLBOX_PARENT=1 P07_NO_EXEC=1 bash "$file" install
     rc=$?
     set -e
     rm -f -- "$file"
     [[ $rc -eq 0 ]] || { say '试用包安装失败，请保留现场；正式版不变。' >&2; return "$rc"; }
     m03_verified_owner_trial || { say '试用版安装后身份未通过验证。' >&2; return 13; }
-    say '隔离人工试用版安装完成，正式版本没有替换。'
+    say '独立维护程序已就绪，正式版本没有替换。'
   fi
   say '运行试用菜单由你手动选择；检测到已有网站/数据库/历史任务应直接停止，不执行迁入。'
   "$M03_OWNER_TRIAL_BIN"
@@ -1476,7 +1501,7 @@ main_menu() {
         show_header
         say 'P07-M03 网站与数据'
         say "  1. 进入正式版（$VF_SERVER_OPS_BUILD_EXPECTED）"
-        say "  2. 失败续迁核查试用版（$M03_OWNER_TRIAL_BUILD；独立安装）"
+        say "  2. 独立维护版（$M03_OWNER_TRIAL_BUILD；可升级 RC3）"
         say '  0. 返回'
         say '只在选定操作后下载安装；试用版没有完成迁移验收。'
         printf '请选择 [0-2]：'
