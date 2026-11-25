@@ -6,9 +6,9 @@ MODULE='P07-M03'
 BUILD='0.1.0-release147-rc4'
 RELEASE='p07-m03-v0.1.0-release147-rc4-maintenance-20261125'
 ZIP_NAME='P07-M03-0.1.0-release147-rc4-MAINTENANCE.zip'
-ZIP_SHA256='ef6e8731c4b0a7501d2fe55f18f86a74f374d03ad0e7030709b3120a7b13f1e7'
-RUNTIME_BLOB='980ef2b84b521f41b1d2ca51fa09ac5c83ecaea9'
-INSTALLER_BLOB='33556a8df5c5c0903613ecc42077d9292ca22cfc'
+ZIP_SHA256='85570da2d135e39ae3634e511298e50dede81015019e305c7de068e04ca93238'
+RUNTIME_BLOB='3ab5b43f6f9e3431872f96bbfbffc83733f5b6a4'
+INSTALLER_BLOB='309e32a0acd3903b05b84f3204db07fb6f55d638'
 URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/$RELEASE/$ZIP_NAME"
 # Fallback resolves the exact public tag/name/size; the same pinned ZIP hash remains mandatory.
 RELEASE_API_URL="https://api.github.com/repos/llhzx2018/core-free-runner-public/releases/tags/$RELEASE"
@@ -57,7 +57,7 @@ try:
     if p.stat().st_size>1024*1024: raise ValueError()
     data=json.loads(p.read_bytes())
     if data.get("tag_name")!=sys.argv[2] or data.get("draft") is not False: raise ValueError()
-    assets=[a for a in data["assets"] if a.get("name")==sys.argv[3] and a.get("browser_download_url")==sys.argv[4] and a.get("size")==719273 and a.get("state")=="uploaded"]
+    assets=[a for a in data["assets"] if a.get("name")==sys.argv[3] and a.get("browser_download_url")==sys.argv[4] and a.get("size")==719295 and a.get("state")=="uploaded"]
     if len(assets)!=1: raise ValueError()
     value=assets[0]["id"]
     if type(value) is not int or not re.fullmatch(r"[1-9][0-9]{0,18}",str(value)): raise ValueError()

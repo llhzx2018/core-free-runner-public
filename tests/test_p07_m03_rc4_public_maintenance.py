@@ -21,7 +21,7 @@ WRAPPER=REPO/"installers/p07-m03-ownertrial147rc4-atomic.sh"
 OLD="0.1.0-release147-rc3"
 NEW="0.1.0-release147-rc4"
 OLD_SHA="3646285a2732c8249d0296a72c7ce6fae83be1e9564d76849e65bc396642672d"
-NEW_SHA="ef6e8731c4b0a7501d2fe55f18f86a74f374d03ad0e7030709b3120a7b13f1e7"
+NEW_SHA="85570da2d135e39ae3634e511298e50dede81015019e305c7de068e04ca93238"
 ROOT=Path("/opt/vf-server-ops-ownertrial147rc3")
 PREV=Path(str(ROOT)+".previous")
 NEWROOT=Path(str(ROOT)+".new")
@@ -53,8 +53,8 @@ class PublicContract(unittest.TestCase):
         self.assertIn('M03_OWNER_TRIAL_PREVIOUS_BUILD="'+OLD+'"',t)
         self.assertIn('M03_OWNER_TRIAL_BUILD="'+NEW+'"',t)
         self.assertIn("ZIP_SHA256='"+NEW_SHA+"'",w)
-        self.assertIn("RUNTIME_BLOB='980ef2b84b521f41b1d2ca51fa09ac5c83ecaea9'",w)
-        self.assertIn("INSTALLER_BLOB='33556a8df5c5c0903613ecc42077d9292ca22cfc'",w)
+        self.assertIn("RUNTIME_BLOB='3ab5b43f6f9e3431872f96bbfbffc83733f5b6a4'",w)
+        self.assertIn("INSTALLER_BLOB='309e32a0acd3903b05b84f3204db07fb6f55d638'",w)
         self.assertIn("P07_M03_EXPECTED_SOURCE=",t)
         for f in (TOOLBOX,WRAPPER):
             self.assertEqual(subprocess.run(["bash","-n",str(f)]).returncode,0)
@@ -129,7 +129,7 @@ elif url==zipurl:
     if mode=="bad-zip": dst.write_bytes(b"corrupt test artifact")
     else: shutil.copyfile(os.environ["VF_TEST_ZIP"],dst)
 elif url==api+"tags/"+tag:
-    dst.write_text(json.dumps({"tag_name":tag,"draft":False,"assets":[{"name":name,"browser_download_url":zipurl,"size":719273 if mode!="bad-meta" else 1,"state":"uploaded","id":123456789}]}))
+    dst.write_text(json.dumps({"tag_name":tag,"draft":False,"assets":[{"name":name,"browser_download_url":zipurl,"size":719295 if mode!="bad-meta" else 1,"state":"uploaded","id":123456789}]}))
 elif url==api+"assets/123456789" and mode=="fallback":
     shutil.copyfile(os.environ["VF_TEST_ZIP"],dst)
 else:
@@ -206,10 +206,10 @@ else:
         # Never accept screen clear sequences in NO_COLOR. Report only
         # escape sequence identities rather than dumping the runtime transcript.
         escapes=re.findall(r"\x1b\[[0-9;]*[A-Za-z]",output)
-        self.assertNotIn("\x1b", "".join(escapes), "NO_COLOR_CONTROL_SEQUENCES="+repr(escapes))
+        self.assertNotIn("\x1b", output, "NO_COLOR_CONTROL_SEQUENCES="+repr(escapes))
     def test_cancel_and_invalid_confirmation(self):
         self.install_old(); before=fingerprint(ROOT)
-        for a in ("n","invalid",""):
+        for a in ("n","invalid","","\x04"):
             output=self.entry(answer=a)
             self.assertIn("已取消",output)
             self.assertFalse(self.log.exists())
