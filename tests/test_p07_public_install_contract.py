@@ -98,7 +98,7 @@ class PublicSingleEntryTests(unittest.TestCase):
         self.assertIn('M05_BUILD_EXPECTED="0.1.0-m05-ux16-runtime-identity-catalog"', toolbox)
         self.assertIn('M05_PREVIOUS_OFFICIAL_BUILD="0.1.0-m05-ux15-rc4-runtime-compat"', toolbox)
         self.assertIn('M05_BUNDLE_SHA256="5445a006327969ca9c3987680ae808def4a4991bd833a0ed176eeb5ab671c095"', toolbox)
-        self.assertIn("p07-m05-v0.1.0-ux15-rc4-runtime-compat-20261126/P07-M05-0.1.0-m05-ux16-runtime-identity-catalog.zip", toolbox)
+        self.assertIn("p07-m05-v0.1.0-ux16-runtime-identity-catalog-20261126/P07-M05-0.1.0-m05-ux16-runtime-identity-catalog.zip", toolbox)
         self.assertIn('M05_UPGRADE_FROM17="0.1.0-m05-ux10-bootstrap-ux-failstop"', toolbox)
         self.assertIn('"releases/$M05_UPGRADE_FROM17"|', toolbox)
         self.assertIn('M05_UPGRADE_FROM18="0.1.0-m05-ux11-toolbox-lock"', toolbox)
