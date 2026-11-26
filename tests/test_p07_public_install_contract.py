@@ -91,22 +91,23 @@ class PublicSingleEntryTests(unittest.TestCase):
                                         "ZIP SHA256"):
                 public_contract.validate(root)
 
-    def test_m05_ux14_recognizes_official_ux13_and_requires_interactive_upgrade(self):
+    def test_m05_ux15_recognizes_official_ux14_and_requires_interactive_upgrade(self):
         toolbox = (ROOT / public_contract.TOOLBOX).read_text(encoding="utf-8")
-        self.assertIn('M05_BUILD_EXPECTED="0.1.0-m05-ux14-verified-pycache"', toolbox)
-        self.assertIn('M05_PREVIOUS_OFFICIAL_BUILD="0.1.0-m05-ux13-provider-neutral"', toolbox)
-        self.assertIn('M05_BUNDLE_SHA256="8cca47f0a7bfed619daefe3074697f3837fc92c50103d218a12ca9149cd9d11d"', toolbox)
-        self.assertIn("p07-m05-v0.1.0-ux14-verified-pycache-20261125/P07-M05-0.1.0-m05-ux14-verified-pycache.zip", toolbox)
+        self.assertIn('M05_BUILD_EXPECTED="0.1.0-m05-ux15-rc4-runtime-compat"', toolbox)
+        self.assertIn('M05_PREVIOUS_OFFICIAL_BUILD="0.1.0-m05-ux14-verified-pycache"', toolbox)
+        self.assertIn('M05_BUNDLE_SHA256="fa67235dbc9fc7d132b057da7095d5064d1b72f7308a781aa7d616e942d27d99"', toolbox)
+        self.assertIn("p07-m05-v0.1.0-ux15-rc4-runtime-compat-20261126/P07-M05-0.1.0-m05-ux15-rc4-runtime-compat.zip", toolbox)
         self.assertIn('M05_UPGRADE_FROM17="0.1.0-m05-ux10-bootstrap-ux-failstop"', toolbox)
         self.assertIn('"releases/$M05_UPGRADE_FROM17"|', toolbox)
         self.assertIn('M05_UPGRADE_FROM18="0.1.0-m05-ux11-toolbox-lock"', toolbox)
         self.assertIn('M05_UPGRADE_FROM19="0.1.0-m05-ux12-apt-failstop"', toolbox)
-        self.assertIn('"releases/$M05_UPGRADE_FROM18"|"releases/$M05_UPGRADE_FROM19")', toolbox)
+        self.assertIn('M05_UPGRADE_FROM20="0.1.0-m05-ux13-provider-neutral"', toolbox)
+        self.assertIn('"releases/$M05_UPGRADE_FROM18"|"releases/$M05_UPGRADE_FROM19"|"releases/$M05_UPGRADE_FROM20")', toolbox)
         pins = "\n".join(re.findall(r"(?m)^M05_[A-Z0-9_]+=.*$", toolbox))
         ensure = re.search(r"(?ms)^ensure_m05_current\(\) \{\n.*?^\}$", toolbox)
         self.assertIsNotNone(ensure)
         with tempfile.TemporaryDirectory() as tmp:
-            (Path(tmp) / "current").symlink_to("releases/0.1.0-m05-ux13-provider-neutral")
+            (Path(tmp) / "current").symlink_to("releases/0.1.0-m05-ux14-verified-pycache")
             script = "\n".join((
                 "set -euo pipefail",
                 pins,
@@ -122,21 +123,21 @@ class PublicSingleEntryTests(unittest.TestCase):
                 capture_output=True, env={**os.environ, "P07_TEST_ROOT": tmp}, timeout=10,
             )
             self.assertEqual(run.returncode, 7, run.stderr)
-            self.assertIn("发现官方旧版 0.1.0-m05-ux13-provider-neutral", run.stdout)
+            self.assertIn("发现官方旧版 0.1.0-m05-ux14-verified-pycache", run.stdout)
             self.assertIn("请在交互式 SSH 中确认升级", run.stdout)
             self.assertNotIn("unexpected download", run.stdout)
             self.assertEqual((Path(tmp) / "current").readlink(),
-                             Path("releases/0.1.0-m05-ux13-provider-neutral"))
+                             Path("releases/0.1.0-m05-ux14-verified-pycache"))
 
     def test_m05_official_predecessor_changed_during_download_blocks_install(self):
-        """Confirmed UX13 must be read back after downloading; no M05 write."""
+        """Confirmed UX14 must be read back after downloading; no M05 write."""
         toolbox = (ROOT / public_contract.TOOLBOX).read_text(encoding="utf-8")
         pins = "\n".join(re.findall(r"(?m)^M05_[A-Z0-9_]+=.*$", toolbox))
         ensure = re.search(r"(?ms)^ensure_m05_current\(\) \{\n.*?^\}$", toolbox)
         self.assertIsNotNone(ensure)
         with tempfile.TemporaryDirectory() as tmp:
             current = Path(tmp) / "current"
-            current.symlink_to("releases/0.1.0-m05-ux13-provider-neutral")
+            current.symlink_to("releases/0.1.0-m05-ux14-verified-pycache")
             # Never use production paths, external network or a real installer.
             script = "\n".join((
                 "set -euo pipefail",
@@ -177,14 +178,14 @@ class PublicSingleEntryTests(unittest.TestCase):
             self.assertFalse((Path(tmp) / "installer-executed").exists())
 
     def test_m05_official_predecessor_stays_same_allows_confirmed_upgrade(self):
-        """The race guard must not block a legitimate unchanged UX13."""
+        """The race guard must not block a legitimate unchanged UX14."""
         toolbox = (ROOT / public_contract.TOOLBOX).read_text(encoding="utf-8")
         pins = "\n".join(re.findall(r"(?m)^M05_[A-Z0-9_]+=.*$", toolbox))
         ensure = re.search(r"(?ms)^ensure_m05_current\(\) \{\n.*?^\}$", toolbox)
         self.assertIsNotNone(ensure)
         with tempfile.TemporaryDirectory() as tmp:
             current = Path(tmp) / "current"
-            current.symlink_to("releases/0.1.0-m05-ux13-provider-neutral")
+            current.symlink_to("releases/0.1.0-m05-ux14-verified-pycache")
             script = "\n".join((
                 "set -euo pipefail",
                 pins,
@@ -220,12 +221,12 @@ class PublicSingleEntryTests(unittest.TestCase):
                     os.close(slave)
                 os.close(master)
             self.assertEqual(current.readlink(),
-                             Path("releases/0.1.0-m05-ux13-provider-neutral"))
+                             Path("releases/0.1.0-m05-ux14-verified-pycache"))
             args = (Path(tmp) / "installer-invoked").read_text()
             self.assertIn("install ", args)
-            self.assertIn("8cca47f0a7bfed619daefe3074697f3837fc92c50103d218a12ca9149cd9d11d", args)
+            self.assertIn("fa67235dbc9fc7d132b057da7095d5064d1b72f7308a781aa7d616e942d27d99", args)
 
-    def test_m05_ux14_old_ux12_historical_origin_remains_confirmed_and_no_auto_apply(self):
+    def test_m05_ux15_old_ux12_historical_origin_remains_confirmed_and_no_auto_apply(self):
         toolbox = (ROOT / public_contract.TOOLBOX).read_text(encoding="utf-8")
         pins = "\n".join(re.findall(r"(?m)^M05_[A-Z0-9_]+=.*$", toolbox))
         ensure = re.search(r"(?ms)^ensure_m05_current\(\) \{\n.*?^\}", toolbox)
@@ -255,6 +256,37 @@ class PublicSingleEntryTests(unittest.TestCase):
             self.assertIn("发现已验证的旧版 0.1.0-m05-ux12-apt-failstop", run.stdout)
             self.assertNotIn("UNEXPECTED_DOWNLOAD", run.stdout)
             self.assertEqual(current.readlink(), Path("releases/0.1.0-m05-ux12-apt-failstop"))
+
+    def test_m05_ux15_old_ux13_historical_origin_remains_confirmed_and_no_auto_apply(self):
+        toolbox = (ROOT / public_contract.TOOLBOX).read_text(encoding="utf-8")
+        pins = "\n".join(re.findall(r"(?m)^M05_[A-Z0-9_]+=.*$", toolbox))
+        ensure = re.search(r"(?ms)^ensure_m05_current\(\) \{\n.*?^\}", toolbox)
+        self.assertIsNotNone(ensure)
+        with tempfile.TemporaryDirectory() as tmp:
+            current = Path(tmp) / "current"
+            current.symlink_to("releases/0.1.0-m05-ux13-provider-neutral")
+            script = "\n".join((
+                "set -euo pipefail",
+                pins,
+                'M05_ROOT="$P07_TEST_ROOT"',
+                'C_CYAN=""',
+                'C_YELLOW=""',
+                'C_RED=""',
+                'C_RESET=""',
+                'say() { printf "%s\\n" "$*"; }',
+                'm05_verified_current() { return 0; }',
+                'curl() { echo "UNEXPECTED_DOWNLOAD"; return 99; }',
+                ensure.group(),
+                "ensure_m05_current",
+            ))
+            run = subprocess.run(
+                ["bash", "-c", script], stdin=subprocess.DEVNULL, text=True,
+                capture_output=True, env={**os.environ, "P07_TEST_ROOT": tmp}, timeout=10,
+            )
+            self.assertEqual(run.returncode, 7, run.stderr)
+            self.assertIn("发现已验证的旧版 0.1.0-m05-ux13-provider-neutral", run.stdout)
+            self.assertNotIn("UNEXPECTED_DOWNLOAD", run.stdout)
+            self.assertEqual(current.readlink(), Path("releases/0.1.0-m05-ux13-provider-neutral"))
 
     def test_public_toolbox_missing_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
