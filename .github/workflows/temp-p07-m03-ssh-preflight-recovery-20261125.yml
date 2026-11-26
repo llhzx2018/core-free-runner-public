@@ -1,4 +1,4 @@
-name: TEMP P07 M03 canonical state and filesystem negative proofs
+name: TEMP P07 M03 RC4 immutable archive and bulk runtime closure
 on:
   pull_request:
     branches: [main]
@@ -53,7 +53,7 @@ jobs:
           path: .gov-private
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
           persist-credentials: false
-      - name: Exact source and focused synthetic tests only
+      - name: Verify actual issued RC4 archive and stage noninstallable bulk overlay
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -64,39 +64,87 @@ jobs:
           test "$(git -C "$p" rev-parse 'HEAD^{tree}')" = "$TARGET_TREE"
           test "$(git -C "$g" rev-parse HEAD)" = "$GOV_SHA"
           test "$(cat "$p/VERSION")" = "$TARGET_VERSION"
-          cd "$p"
-          bash -n bin/vfops-migrate-ui components/p07-m03-safe-batch-ui.sh
-          python3 -B - <<'PY'
-          import ast,pathlib
-          for path in ('lib/migration_clean_bulk.py','lib/migration_safe_batch_cli.py','lib/migration_safe_batch_io.py','tests/test_p07_m03_clean_bulk.py','tests/test_p07_m03_safe_batch_terminal_ux.py'):
-              ast.parse(pathlib.Path(path).read_text(encoding="utf8"))
+          root="$RUNNER_TEMP/p07-bulk-package"
+          mkdir -m 700 "$root"
+          unset GH_TOKEN GITHUB_TOKEN GH_ENTERPRISE_TOKEN
+          curl -q --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 90 'https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m03-v0.1.0-release147-rc4-maintenance-20261125/P07-M03-0.1.0-release147-rc4-MAINTENANCE.zip' -o "$root/rc4.zip"
+          printf '%s  %s\n' '85570da2d135e39ae3634e511298e50dede81015019e305c7de068e04ca93238' "$root/rc4.zip" | sha256sum -c -
+          python3 -B - "$p" "$root" <<'PY'
+          import ast,hashlib,io,json,pathlib,stat,sys,tarfile,zipfile
+          p,root=map(pathlib.Path,sys.argv[1:])
+          sys.path.insert(0,str(p/"scripts"))
+          import p07_m03_rc3_recovery_bundle as rc
+          import p07_m03_trial_from_official as trial
+          def need(ok,code):
+              if not ok: raise SystemExit("P07_PACKAGE_BLOCKED:"+code)
+          with zipfile.ZipFile(root/"rc4.zip") as z:
+              items=z.infolist()
+              need(50<=len(items)<=250 and sum(x.file_size for x in items)<=rc.MAX_SIZE,"ARCHIVE_SIZE")
+              need(len({x.filename for x in items})==len(items),"DUPLICATE")
+              need(all(rc._safe_member(x.filename) and stat.S_IFMT(x.external_attr>>16)==stat.S_IFREG for x in items),"PATH_TYPE")
+              old={x.filename:z.read(x) for x in items}
+          names=rc._verified_rows(old,expected_build=rc.RC4_BUILD)
+          print("P07_RC4_ISSUED_MANIFEST=PASS")
+          base={}
+          with tarfile.open(fileobj=io.BytesIO(old[rc.BASE_PACKAGE]),mode="r:gz") as t:
+              members=t.getmembers()
+              need(len(members)<=10000 and sum(m.size for m in members)<=rc.MAX_SIZE,"BASE_LIMIT")
+              for m in members:
+                  path=pathlib.PurePosixPath(m.name)
+                  need(not path.is_absolute() and ".." not in path.parts and not m.issym() and not m.islnk(),"BASE_PATH")
+                  if m.isfile() and len(path.parts)>1:
+                      rel="/".join(path.parts[1:])
+                      need(rel not in base,"BASE_DUPLICATE")
+                      base[rel]=t.extractfile(m).read()
+          patches=set(trial.PATCH_FILES_146)
+          need(len(patches)==12 and "lib/migration_clean_bulk.py" in patches,"EXACT_PATCH_SCOPE")
+          source={}
+          for rel in sorted(patches):
+              fp=p/rel
+              need(fp.is_file() and not fp.is_symlink(),"SOURCE_FILE")
+              source[rel]=fp.read_bytes()
+          overlay={n:old[rc.PREFIX+n] for n in names}
+          overlay.update(source)
+          changed={n for n in patches if old.get(rc.PREFIX+n)!=source[n]}
+          preserved=all(overlay[n]==old[rc.PREFIX+n] for n in names if n not in patches)
+          need(preserved and overlay["BUILD_ID"]==old[rc.PREFIX+"BUILD_ID"],"RC4_PRESERVATION")
+          full={**base,**overlay}
+          local_names={x.stem for x in (p/"lib").glob("*.py")}
+          missing=set()
+          for rel in sorted(source):
+              if not rel.endswith(".py"):continue
+              syntax=ast.parse(source[rel].decode("utf8"))
+              for node in ast.walk(syntax):
+                  if isinstance(node,ast.Import): ns=[x.name.split(".")[0] for x in node.names]
+                  elif isinstance(node,ast.ImportFrom) and node.module:ns=[node.module.split(".")[0]]
+                  else:continue
+                  missing.update("lib/"+n+".py" for n in ns if n in local_names and "lib/"+n+".py" not in full)
+          need(not missing,"LOCAL_IMPORT_CLOSURE")
+          print("P07_BULK_RC4_DEPENDENCY_CLOSURE=PASS")
+          print("P07_BULK_SCOPE_COUNT="+str(len(patches)))
+          print("P07_BULK_CHANGED_OVERLAY_COUNT="+str(len(changed)))
+          print("P07_BULK_PRESERVED_ISSUED_OVERLAY_COUNT="+str(len(set(names)-patches)))
+          # DELIBERATELY NOT an installer or a runtime distribution. Preserve
+          # signed RC4 assets and derive a separate development-only delta.
+          receipt={"schema":"p07.m03.bulk-overlay-proof.v1","status":"NOT_INSTALLABLE_NOT_PUBLISHED","source_commit":"bd3db8f77a738b7c0bbcc43ba5e91e6735346edc","source_tree":"327cccefceb34d4555a52cd528c4118a1485947f","base_sha256":rc.sha256((root/"rc4.zip").read_bytes()),"files":{n:rc.gitblob(source[n]) for n in sorted(source)}}
+          def pack(dst):
+              with zipfile.ZipFile(dst,"x",compression=zipfile.ZIP_DEFLATED,compresslevel=9) as out:
+                  for n,data in sorted({"receipt.json":(json.dumps(receipt,sort_keys=True)+"\n").encode(),**{"candidate-delta/"+k:v for k,v in source.items()}}.items()):
+                      i=zipfile.ZipInfo(n,(2026,11,26,0,0,0));i.create_system=3;i.external_attr=0o100644<<16
+                      out.writestr(i,data,compress_type=zipfile.ZIP_DEFLATED,compresslevel=9)
+          pack(root/"delta.zip");pack(root/"repeat.zip")
+          need((root/"delta.zip").read_bytes()==(root/"repeat.zip").read_bytes(),"DETERMINISM")
+          with zipfile.ZipFile(root/"delta.zip") as out:
+              need(out.testzip() is None and len(out.namelist())==13,"DELTA_INTEGRITY")
+          print("P07_BULK_DEVELOPMENT_DELTA_SHA256="+rc.sha256((root/"delta.zip").read_bytes()))
+          print("P07_BULK_DEVELOPMENT_DELTA=PASS_NOT_INSTALLABLE")
+          print("P07_RC4_INSTALLER_UNCHANGED=YES")
           PY
-          echo P07_BULK_SYNTAX=PASS
-          failed=0
-          gate() {
-            local name="$1"; shift
-            local log="$RUNNER_TEMP/p07-bulk-$name.log"
-            if "$@" >"$log" 2>&1; then
-              echo "P07_BULK_GATE=$name:PASS"
-              grep -E '^Ran [0-9]+ tests? |^OK$|^PROJECT_ARCHITECTURE=STRUCTURAL_PASS|^PR_UX_EVIDENCE=STRUCTURAL_PASS' "$log" | head -4 || true
-            else
-              echo "P07_BULK_GATE=$name:FAIL"
-              grep -E '^(FAIL|ERROR): test_|^Ran [0-9]+ tests? |^FAILED \(' "$log" | head -20 || true
-              failed=1
-            fi
-          }
-          test "$(git diff --name-only 93c205728282ebee4c5f0b8763103173d2f5c574 HEAD | sort | tr '\n' ' ')" = "lib/migration_clean_bulk.py tests/test_p07_m03_clean_bulk.py "
-          gate filesystem_proof python3 -B -m unittest -q tests.test_p07_m03_clean_bulk.CleanBulkTests.test_noncanonical_state_root_cannot_hide_history tests.test_p07_m03_clean_bulk.CleanBulkTests.test_real_directory_state_layout_rejects_old_footprints_and_links tests.test_p07_m03_clean_bulk.CleanBulkTests.test_real_datadir_entries_orphan_schema_and_tables_are_refused tests.test_p07_m03_clean_bulk.CleanBulkTests.test_real_home_scan_detects_unrelated_web_root
-          gate architecture python3 -B .github/checks/architecture_gate.py --manifest .github/checks/code_architecture.json --gov-root "$g" --base-sha "$BASE_SHA" --head-sha "$TARGET_SHA" --git-root "$p"
-          echo P07_BULK_PRIOR_86_TESTS_AND_UNCHANGED_UI_GATE_REUSED=45830975836
-          test "$failed" = 0
-          echo P07_BULK_FOCUSED_SOURCE_ONLY=PASS
-      - name: Always erase transient private workspaces and logs
+      - name: Erase all transient private source and candidate bytes
         if: always()
         shell: bash
         run: |
           set -Eeuo pipefail
-          rm -rf -- "$GITHUB_WORKSPACE/.p07-private" "$GITHUB_WORKSPACE/.gov-private"
-          rm -f -- "$RUNNER_TEMP"/p07-bulk-*.log
-          test ! -e "$GITHUB_WORKSPACE/.p07-private" && test ! -e "$GITHUB_WORKSPACE/.gov-private"
-          echo P07_BULK_TRANSIENT_CLEANUP=PASS
+          rm -rf -- "$GITHUB_WORKSPACE/.p07-private" "$GITHUB_WORKSPACE/.gov-private" "$RUNNER_TEMP/p07-bulk-package"
+          test ! -e "$GITHUB_WORKSPACE/.p07-private" && test ! -e "$GITHUB_WORKSPACE/.gov-private" && test ! -e "$RUNNER_TEMP/p07-bulk-package"
+          echo P07_BULK_PACKAGE_CLEANUP=PASS
