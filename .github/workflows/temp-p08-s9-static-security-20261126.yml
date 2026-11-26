@@ -1,0 +1,151 @@
+name: TEMP P08 S9 remaining static upload browser security
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p08-s9-static-security-20261126.yml'
+permissions:
+  contents: read
+concurrency:
+  group: p08-s9-browser-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+env:
+  TARGET_REPO: llhzx2018/vf-adops
+  TARGET_VERSION: '0.1.18'
+  TARGET_SHA: 1c9a3f087190647aaf5a9289a6382ea52b8ac422
+  TARGET_TREE: 7d53882f2e553f94c7ca90153f1f12d9f7395620
+  GOV_SHA: 4223ce80b2cf7945cff485ba9ff598d1ceef6a3b
+jobs:
+  identity-preflight:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'llhzx2018' && github.head_ref == 'evidence/p08-s9-static-security-20261126'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: python3 scripts/ephemeral_lane_spec.py audit-rendered --spec specs/ephemeral/p08-s9-static-security-20261126.json --input .github/workflows/temp-p08-s9-static-security-20261126.yml
+  static-upload-security:
+    needs: identity-preflight
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'llhzx2018' && github.head_ref == 'evidence/p08-s9-static-security-20261126'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      P08_R43_DISPOSABLE_SCHEMA: 'YES'
+      P08_ISOLATED_INSTALL_TEST: 'YES'
+      P08_TEST_BASE_URL: http://127.0.0.1:18443
+    steps:
+      - name: Ephemeral read-only P08 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-p08
+      - name: Canonical GOV-DOC exact authority
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: ${{ env.GOV_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: gov-proof
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_sqlite, sqlite3, pdo_mysql, zip, mbstring, intl, bcmath, dom, fileinfo, curl
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build canonical development FULL, not a release
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$TARGET_TREE"
+          test "$(cat VERSION)" = "$TARGET_VERSION"
+          test "$(git -C "$GITHUB_WORKSPACE/gov-proof" rev-parse HEAD)" = "$GOV_SHA"
+          test ! -e .env
+          composer install --no-dev --no-scripts --no-plugins --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-composer.log" 2>&1 || { echo P08_FULL_COMPOSER=FAIL; exit 1; }
+          composer check-platform-reqs --format=json --no-dev > "$RUNNER_TEMP/p08-platform.log" 2>&1 || { echo P08_FULL_PLATFORM=FAIL; exit 1; }
+          npm ci --ignore-scripts --no-audit --no-fund > "$RUNNER_TEMP/p08-npm.log" 2>&1 || { echo P08_FULL_NPM=FAIL; exit 1; }
+          npm run build > "$RUNNER_TEMP/p08-build.log" 2>&1 || { echo P08_FULL_ASSETS=FAIL; exit 1; }
+          git diff --exit-code HEAD -- > "$RUNNER_TEMP/p08-diff.log" 2>&1 || { echo P08_FULL_SOURCE_CHANGED=FAIL; exit 1; }
+          python3 scripts/build_full.py --source . --output "$RUNNER_TEMP/p08-dev-full.zip" --version "$TARGET_VERSION" --source-sha "$TARGET_SHA" --governance-root "$GITHUB_WORKSPACE/gov-proof" > "$RUNNER_TEMP/p08-full.log" 2>&1 || { echo P08_CANONICAL_DEV_FULL=FAIL; exit 1; }
+          sha256sum "$RUNNER_TEMP/p08-dev-full.zip" | cut -d' ' -f1 | sed 's/^/P08_DEV_FULL_SHA256=/'
+          echo P08_CANONICAL_DEV_FULL=PASS
+      - name: Fresh extracted development site with isolated SQLite Owner
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          site="$RUNNER_TEMP/p08-r43-clean-full-sqlite"
+          test ! -e "$site"
+          mkdir -m 700 "$site"
+          unzip -q "$RUNNER_TEMP/p08-dev-full.zip" -d "$site"
+          P08_R43_ENGINE=sqlite php private-p08/tests/native/r43_clean_full_three_engines.php > "$RUNNER_TEMP/p08-browser-install.log" 2>&1 || { echo P08_BROWSER_FIXTURE_INSTALL=FAIL; exit 1; }
+          grep -qx 'P08_R43_REAL_018_sqlite_23_MIGRATIONS_S9_OWNER=PASS' "$RUNNER_TEMP/p08-browser-install.log"
+          grep -qx 'P08_R43_REAL_018_NO_TOKEN_AND_NO_REMOTE_PROVIDER=PASS' "$RUNNER_TEMP/p08-browser-install.log"
+          echo P08_BROWSER_FIXTURE_INSTALL=PASS
+      - name: Actual static upload security and anonymous CSRF browser rejection
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          site="$RUNNER_TEMP/p08-r43-clean-full-sqlite"
+          test -d "$site/public"
+          npx playwright install --with-deps chromium > "$RUNNER_TEMP/p08-browser-playwright.log" 2>&1 || { echo P08_STATIC_CHROMIUM_RUNTIME=BLOCKED; exit 1; }
+          fixture_dir="$RUNNER_TEMP/p08-browser-fixtures"
+          python3 tests/fixtures/make_browser_zip_fixtures.py "$fixture_dir" > "$RUNNER_TEMP/p08-browser-fixtures.log"
+          cat > "$RUNNER_TEMP/p08-browser-router-http.php" <<'HTTPROUTER'
+          <?php
+          $path=parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH) ?: '/';
+          if ($path!=='/' && is_file($_SERVER['DOCUMENT_ROOT'].$path)) return false;
+          require $_SERVER['DOCUMENT_ROOT'].'/index.php';
+          HTTPROUTER
+          APP_URL=http://127.0.0.1:18443 SESSION_SECURE_COOKIE=false php -S 127.0.0.1:18443 -t "$site/public" "$RUNNER_TEMP/p08-browser-router-http.php" > "$RUNNER_TEMP/p08-browser-http.log" 2>&1 &
+          backend=$!
+          trap 'kill "$backend" 2>/dev/null || true; wait "$backend" 2>/dev/null || true' EXIT
+          ready=0
+          for i in $(seq 1 12); do
+            if curl -sS --max-time 3 -o /dev/null -w '%{http_code}' "$P08_TEST_BASE_URL/login" | grep -qx 200; then ready=1; break; fi
+            sleep 1
+          done
+          test "$ready" = 1 || { echo P08_STATIC_LOOPBACK_HTTP_READY=BLOCKED; exit 1; }
+          echo P08_STATIC_LOOPBACK_HTTP_READY=PASS
+          rc=0
+          report="$RUNNER_TEMP/p08-browser-static.xml"
+          P08_BROWSER_FIXTURE_DIR="$fixture_dir" PLAYWRIGHT_JUNIT_OUTPUT_FILE="$report" npm run test:e2e -- tests/e2e/static-upload-security-responsive.spec.ts --workers=1 --reporter=junit > "$RUNNER_TEMP/p08-browser-static.log" 2>&1 || rc=$?
+          python3 - "$report" "$rc" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          try:
+              cases = list(ET.parse(sys.argv[1]).getroot().iter('testcase'))
+              bad = sum(any(c.find(t) is not None for t in ('failure','error','skipped')) for c in cases)
+              ok = int(sys.argv[2]) == 0 and len(cases) == 2 and bad == 0
+              print('P08_STATIC_SECURITY_BROWSER_CASES=' + str(len(cases)) + ';FAILED_OR_SKIPPED=' + str(bad) + ';RESULT=' + ('PASS' if ok else 'FAIL'))
+              sys.exit(0 if ok else 1)
+          except (OSError, ET.ParseError):
+              print('P08_STATIC_BROWSER_JUNIT=NOT_PROVEN')
+              sys.exit(1)
+          PY
+      - name: Remove transient sources and synthetic fixtures
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          rm -rf -- private-p08 gov-proof "$RUNNER_TEMP/p08-r43-clean-full-sqlite" "$RUNNER_TEMP/p08-browser-fixtures"
+          rm -f -- "$RUNNER_TEMP"/p08-*.log "$RUNNER_TEMP"/p08-browser-*.xml "$RUNNER_TEMP"/p08-browser-router-http.php "$RUNNER_TEMP/p08-dev-full.zip"
+          test ! -e private-p08 && test ! -e gov-proof && test ! -e "$RUNNER_TEMP/p08-r43-clean-full-sqlite" && test ! -e "$RUNNER_TEMP/p08-browser-fixtures" && test ! -e "$RUNNER_TEMP/p08-dev-full.zip"
+          echo P08_STATIC_PRIVATE_CLEANUP=PASS
