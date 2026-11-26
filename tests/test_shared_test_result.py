@@ -32,6 +32,18 @@ class SharedTestResultTests(unittest.TestCase):
         self.assertEqual((r["status"], r["cases"], r["skipped"], r["failed"]), ("REPORT_OBSERVED",2,1,0))
         self.assertEqual(summarize_junit(b'<testsuite/>')["status"], "REPORT_EMPTY")
 
+    def test_vitest_playwright_style_cdata_and_reviewed_title(self):
+        raw = b'<testsuites><testsuite><testcase name="suite &gt; shows the review list"><failure><![CDATA[expected source to contain PRIVATE_VALUE]]></failure></testcase></testsuite></testsuites>'
+        r = summarize_junit(raw, known_names=frozenset({"shows the review list"}))
+        self.assertEqual(r["failures"][0], {"test":"shows the review list","kind":"failure","assertion":"ASSERT_CONTAINS"})
+        self.assertNotIn("PRIVATE_VALUE", json.dumps(r))
+
+    def test_parameterized_private_label_is_not_emitted(self):
+        raw = b'<testsuite><testcase name="test_login with data set private-value"><failure/></testcase></testsuite>'
+        r = summarize_junit(raw, known_names=frozenset({"test_login"}))
+        self.assertEqual(r["failures"][0]["test"], "test_login")
+        self.assertNotIn("private-value", json.dumps(r))
+
     def test_bounded_failures(self):
         r = summarize_junit(b'<testsuite>' + b'<testcase name="x"><failure/></testcase>' * 50 + b'</testsuite>')
         self.assertEqual((r["failed"],len(r["failures"]),r["omitted_failures"]),(50,40,10))

@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 MAX_REPORT = 4 * 1024 * 1024
 MAX_CASES = 20000
 MAX_FAILURES = 40
-IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_\\.:/-]{0,179}\Z")
+IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_\\.:/() -]{0,179}\Z")
 REASONS = (
     ("ASSERT_EQUALITY", ("failed asserting that", "to equal", "to be equal", "assertionerror")),
     ("ASSERT_HTTP_STATUS", ("expected response status", "unexpected status code")),
@@ -21,6 +21,8 @@ REASONS = (
     ("DB_CONNECTION", ("sqlstate[hy000] [2002]", "connection refused")),
     ("DEPENDENCY_MISSING", ("module not found", "class not found", "cannot find module")),
     ("PERMISSION_DENIED", ("permission denied",)),
+    ("ASSERT_CONTAINS", ("tocontain", "to contain", "not to contain")),
+    ("ASSERT_LENGTH", ("tohavelength", "to have length")),
     ("ASSERT_MISMATCH", ("expected", "actual")),
 )
 
@@ -35,18 +37,23 @@ def _reason(value: str, tag: str) -> str:
 def _name(value: str, known_names: frozenset[str]) -> str:
     # Only names independently supplied from reviewed source may leave the
     # report. Parameterized titles and arbitrary XML strings remain private.
-    if value in known_names and IDENTIFIER.fullmatch(value):
-        return value
+    candidates = [value, value.rsplit(" > ", 1)[-1]]
+    parameterized = re.match(r"^([A-Za-z_][A-Za-z0-9_]*) with data set(?: |$)", value)
+    if parameterized:
+        candidates.append(parameterized.group(1))
+    for candidate in candidates:
+        if candidate in known_names and IDENTIFIER.fullmatch(candidate):
+            return candidate
     return "case-" + hashlib.sha256(value.encode()).hexdigest()[:16]
 
 def summarize_junit(data: bytes, *, known_names: frozenset[str] = frozenset()) -> dict:
     if not isinstance(data, bytes) or len(data) > MAX_REPORT:
         return {"status": "REPORT_INVALID", "reason": "REPORT_SIZE_OR_TYPE"}
-    # Accept only UTF-8 and reject all markup declarations other than XML's
-    # ordinary processing instruction; no DTD or entity expansion.
+    # Standard reporters use CDATA for failures; reject DTD/entity declarations
+    # while permitting ordinary JUnit CDATA and XML comments.
     try:
         xml = data.decode("utf-8-sig")
-        if "<!" in xml:
+        if re.search(r"<!\s*(?:DOCTYPE|ENTITY)\b", xml, re.IGNORECASE):
             raise ValueError("declaration")
         root = ET.fromstring(xml)
     except (UnicodeError, ValueError, ET.ParseError):
