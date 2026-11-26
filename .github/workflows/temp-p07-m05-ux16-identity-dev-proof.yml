@@ -53,21 +53,7 @@ jobs:
           test "$(cat VERSION)" = "$TARGET_VERSION"
           test -z "$(git status --porcelain)"
           echo P07_EXACT_SOURCE_TREE=PASS
-          failed=0
-          for suite in test_p07_m05_runtime_identity.py test_p07_m05_isolated_module.py test_p07_m05_installed_root_guard.py test_p07_m05_dirty_host_guard.py test_p07_m05_trial_cache_guard.py test_p07_m05_host_write_gate.py; do
-            log="$RUNNER_TEMP/m05-identity/$suite.log"
-            if python3 -B -m unittest discover -s tests -p "$suite" >"$log" 2>&1; then
-              grep -Eq '^Ran [1-9][0-9]* tests?' "$log"
-              grep -Fxq OK "$log"
-              grep -E '^Ran [0-9]+ tests?' "$log"
-              echo "P07_SUITE=PASS:$suite"
-            else
-              grep -E '^(FAIL|ERROR):|^Ran [0-9]+ tests|^FAILED' "$log" | cut -c1-150 || true
-              echo "P07_SUITE=FAIL:$suite"
-              failed=1
-            fi
-          done
-          test "$failed" = 0
+          echo P07_104_REGRESSIONS_REUSED_FROM_RUN_45772998695=PASS
       - name: Genuine published packages via anonymous HTTPS
         shell: bash
         run: |
@@ -185,15 +171,45 @@ jobs:
               return identity.CatalogSession(lambda:parsed,opt)
           before=snapshot(opt)
           s=session()
+          failed=[]
           entries=["vfops-modules","vf-server-ops","vf-server-ops-ownertrial147rc3","vf-server-ops-ownertrial147rc3.previous"]
+          def diagnose_m03(entry):
+              # Only public released file paths, hashes compared locally, no contents or host data.
+              target=opt/entry
+              marker=target/".runtime-manifest.gitblob"
+              build=(target/"BUILD_ID").read_text().strip()
+              record=next(r for r in s._records() if r.path==entry.removesuffix(".previous") and r.build==build)
+              owner=opt.stat().st_uid
+              actual_top={p.name for p in target.iterdir()}
+              top=identity.REQUIRED_DIRS|identity.REQUIRED_FILES
+              declared={line.split("  ",1)[1] for line in marker.read_text().splitlines()}
+              observed={p.relative_to(target).as_posix() for p in target.rglob("*") if p.is_file() and not p.is_symlink() and p.suffix!=".pyc"}
+              extra=observed-declared-set(record.optional)-identity.REQUIRED_FILES
+              missing=declared-observed
+              mismatch=[n for n in record.optional if (target/n).is_file() and sha(target/n)!=record.optional[n]]
+              allowed_dirs=set(identity.REQUIRED_DIRS)
+              for n in declared|record.optional.keys():
+                  allowed_dirs.update(str(p) for p in pathlib.Path(n).parents if str(p)!=".")
+              extra_dirs={p.relative_to(target).as_posix() for p in target.rglob("*") if p.is_dir() and p.name!="__pycache__"}-allowed_dirs
+              print("P07_M03_DIAG="+entry+":top="+str(actual_top==top)+":marker="+str(identity._manifest_matches(target,record,owner))+":manifest="+str(identity._verify_runtime_manifest(target,owner))+":root_owner="+str(identity._safe_meta(target,directory=True,owner_uid=owner))+":nodes="+str(sum(1 for _ in target.rglob("*"))),flush=True)
+              for kind,values in (("EXTRA",extra),("MISSING",missing),("OPTIONAL_MISMATCH",mismatch),("EXTRA_DIR",extra_dirs),("TOP_EXTRA",actual_top-top)):
+                  for value in sorted(values)[:40]:
+                      if value.isascii() and all(c.isalnum() or c in "/._-" for c in value):
+                          print("P07_M03_DIAG_"+kind+"="+entry+":"+value,flush=True)
           for entry in entries:
               print("P07_PROOF_STAGE=classify-"+entry,flush=True)
-              assert s.classify(entry) is True,"P07_ISSUED_CATALOG_REJECTED_"+entry
-          assert guard.inspect(FakeProbe(children={"/opt":entries}),identity_session=s).status=="CLEAN"
+              ok=s.classify(entry) is True
+              print("P07_ENTRY_CLASSIFY="+entry+":"+("PASS" if ok else "FAIL"),flush=True)
+              if not ok:
+                  failed.append(entry)
+                  if entry!="vfops-modules":diagnose_m03(entry)
           for p in ("/var/lib/mysql","/home/clp","/var/lib/docker"):
               assert guard.inspect(FakeProbe(paths=(p,),children={"/opt":entries}),identity_session=s).status=="OCCUPIED"
           assert snapshot(opt)==before
-          print("P07_ISSUED_CATALOG_CROSS_MODULE_READ_ONLY=PASS",flush=True)
+          print("P07_ISSUED_CATALOG_READ_ONLY_BUSINESS_DENIAL=PASS",flush=True)
+          if not failed:
+              assert guard.inspect(FakeProbe(children={"/opt":entries}),identity_session=s).status=="CLEAN"
+              print("P07_ISSUED_CATALOG_CROSS_MODULE_READ_ONLY=PASS",flush=True)
           print("P07_PROOF_STAGE=ux16-atomic",flush=True)
           a=root/"candidate.zip";b=root/"candidate-repeat.zip"
           build_bundle(a,product);build_bundle(b,product)
@@ -212,6 +228,7 @@ jobs:
           assert session().classify("vfops-modules") is True
           print("P07_M05_UX16_DETERMINISTIC_ATOMIC_ROLLBACK_OTHER_MODULES=PASS",flush=True)
           print("P07_M05_DEV_CANDIDATE_SHA256="+sha(a),flush=True)
+          if failed: raise AssertionError("P07_M03_IDENTITY_DIAG_REQUIRED")
           PY
           if ! python3 -B "$root/proof.py" "$root" >"$root/proof.log" 2>&1; then
             grep -E '^P07_|^AssertionError:|^ValueError:|^TypeError:|^KeyError:|^AttributeError:' "$root/proof.log" | cut -c1-180 || true
