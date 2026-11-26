@@ -119,7 +119,9 @@ class FiveIndependentToolboxSlots(unittest.TestCase):
     def test_owner_trial_readonly_stable_build_unchanged(self):
         src=SOURCE.read_text(encoding="utf-8")
         self.assertIn('VF_SERVER_OPS_BUILD_EXPECTED="0.1.0-release146"',src)
-        self.assertIn('M03_OWNER_TRIAL_BUILD="0.1.0-release147-rc3"',src)
+        self.assertIn('M03_OWNER_TRIAL_BUILD="0.1.0-release147-rc4"',src)
+        self.assertIn('M03_OWNER_TRIAL_PREVIOUS_BUILD="0.1.0-release147-rc3"',src)
+        self.assertIn('M03_OWNER_TRIAL_PREVIOUS_MANIFEST_BLOB="06c79cf8595de625cc84d6a849d9e88fe01c4520"',src)
         self.assertIn('M03_OWNER_TRIAL_ROOT="/opt/vf-server-ops-ownertrial147rc3"',src)
         self.assertIn('M03_OWNER_TRIAL_BIN="/usr/local/bin/vfops-rc147rc3"',src)
         self.assertIn('M03_OWNER_TRIAL_MANIFEST_BLOB=',src)
@@ -158,7 +160,7 @@ class FiveIndependentToolboxSlots(unittest.TestCase):
         self.assertIn('M03_OWNER_TRIAL_INSTALLER_BLOB',body)
         self.assertIn('拒绝覆盖，请保留现场',body)
         self.assertIn('试用包安装失败，请保留现场；正式版不变',body)
-        wrapper=(SOURCE.parent/"p07-m03-ownertrial147rc3-atomic.sh").read_text()
+        wrapper=(SOURCE.parent/"p07-m03-ownertrial147rc4-atomic.sh").read_text()
         self.assertIn('P07_INSTALL_DIR:-',wrapper)
         self.assertIn('/opt/vf-server-ops-ownertrial147rc3',wrapper)
         self.assertIn('P07_TOOLBOX_PARENT:-0',wrapper)
@@ -187,7 +189,9 @@ class FiveIndependentToolboxSlots(unittest.TestCase):
 
     def test_rc3_readonly_audit_installed_without_old_tree_changes(self):
         src = SOURCE.read_text(encoding="utf-8")
-        self.assertIn('M03_OWNER_TRIAL_BUILD="0.1.0-release147-rc3"',src)
+        self.assertIn('M03_OWNER_TRIAL_BUILD="0.1.0-release147-rc4"',src)
+        self.assertIn('M03_OWNER_TRIAL_PREVIOUS_BUILD="0.1.0-release147-rc3"',src)
+        self.assertIn('M03_OWNER_TRIAL_PREVIOUS_MANIFEST_BLOB="06c79cf8595de625cc84d6a849d9e88fe01c4520"',src)
         self.assertIn('M03_OWNER_TRIAL_ROOT="/opt/vf-server-ops-ownertrial147rc3"',src)
         self.assertIn('M03_OWNER_TRIAL_BIN="/usr/local/bin/vfops-rc147rc3"',src)
         self.assertIn('继续未完成迁移（只读核查）',src)
