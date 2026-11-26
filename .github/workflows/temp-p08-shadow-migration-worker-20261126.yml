@@ -1,0 +1,195 @@
+name: TEMP P08 disconnected shadow migration worker
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p08-shadow-migration-worker-20261126.yml'
+permissions:
+  contents: read
+concurrency:
+  group: p08-native-shadow-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+env:
+  TARGET_REPO: llhzx2018/vf-adops
+  TARGET_VERSION: '0.1.18'
+  TARGET_SHA: 015752f266593a052215a8180c2cd7c8ad10d256
+  TARGET_TREE: ba9575abe40dececc527181e468e99664ddae1f3
+  GOV_SHA: 3cc1c2c72ab6561dc1bcb3eddc5a4831b757d33d
+jobs:
+  identity-preflight:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'llhzx2018' && github.head_ref == 'evidence/p08-shadow-migration-worker-20261126'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: python3 scripts/ephemeral_lane_spec.py audit-rendered --spec specs/ephemeral/p08-shadow-migration-worker-20261126.json --input .github/workflows/temp-p08-shadow-migration-worker-20261126.yml
+  sqlite-shadow:
+    needs: identity-preflight
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'llhzx2018' && github.head_ref == 'evidence/p08-shadow-migration-worker-20261126'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      P08_SCHEMA_NATIVE_ENGINE: sqlite
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-p08
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+          extensions: sqlite3, pdo_sqlite, pdo_mysql
+      - name: Execute only disconnected shadow migration worker
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$TARGET_TREE"
+          test "$(cat VERSION)" = "$TARGET_VERSION"
+          test ! -e .env
+          test "$(git hash-object tests/native/r43_shadow_migration_worker.php)" = b086a1f1f490cc139b35f196ac0f985abf5cb695
+          echo P08_MIGRATION_WORKER_EXACT_SOURCE=PASS
+          export P08_R43_SHADOW_MIGRATION_TEST=YES
+          if ! composer install --no-dev --no-scripts --no-plugins --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-shadow-migration-composer.log" 2>&1; then
+            echo P08_MIGRATION_WORKER_DEPENDENCIES=FAIL
+            exit 1
+          fi
+          git diff --exit-code --quiet
+          php -l src/Upgrade/R43ShadowMigrationWorker.php >/dev/null
+          php -l tests/native/r43_shadow_migration_worker.php >/dev/null
+          if php tests/native/r43_shadow_migration_worker.php > "$RUNNER_TEMP/p08-shadow-migration.log" 2>&1; then
+            grep -qx "P08_R43_SHADOW_MIGRATION_TARGET_ONLY=PASS engine=$P08_SCHEMA_NATIVE_ENGINE" "$RUNNER_TEMP/p08-shadow-migration.log"
+            echo "P08_R43_SHADOW_MIGRATION_TARGET_ONLY=PASS engine=$P08_SCHEMA_NATIVE_ENGINE"
+          else
+            python3 - "$RUNNER_TEMP/p08-shadow-migration.log" <<'PY'
+          import pathlib, re, sys
+          raw = pathlib.Path(sys.argv[1]).read_text(errors='replace')
+          codes = sorted(set(re.findall(r'\b(?:R43_SHADOW_[A-Z_]+|SQLSTATE\[[A-Z0-9]+\]|P08_SCHEMA_NATIVE_SQLITE=NOT_PROVEN_MISSING_EXTENSION)\b', raw)))
+          print('P08_NATIVE_FAILURE_CODES=' + ','.join(codes[:8]) if codes else 'P08_NATIVE_FAILURE_CODES=UNCLASSIFIED')
+          PY
+            exit 1
+          fi
+      - name: Remove transient private source and log
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- private-p08
+          rm -f -- "$RUNNER_TEMP/p08-shadow-migration.log" "$RUNNER_TEMP/p08-shadow-migration-composer.log"
+          test ! -e private-p08 && test ! -e "$RUNNER_TEMP/p08-shadow-migration.log"
+          echo P08_MIGRATION_WORKER_CLEANUP=PASS
+  sql-native-parity:
+    needs: identity-preflight
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'llhzx2018' && github.head_ref == 'evidence/p08-shadow-migration-worker-20261126'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [mysql, mariadb]
+    services:
+      source:
+        image: ${{ matrix.engine == 'mysql' && 'mysql:8.4' || 'mariadb:11.8' }}
+        env:
+          MYSQL_ROOT_PASSWORD: fixture-only-source-root-2026
+          MARIADB_ROOT_PASSWORD: fixture-only-source-root-2026
+          MYSQL_DATABASE: p08schemamigrsrc
+          MARIADB_DATABASE: p08schemamigrsrc
+          MYSQL_USER: p08schemamigrsr
+          MARIADB_USER: p08schemamigrsr
+          MYSQL_PASSWORD: fixture-only-source-app-2026
+          MARIADB_PASSWORD: fixture-only-source-app-2026
+        ports:
+          - 13306:3306
+        options: >-
+          --health-cmd="sh -c 'mysqladmin ping --silent || mariadb-admin ping --silent'"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+      target:
+        image: ${{ matrix.engine == 'mysql' && 'mysql:8.4' || 'mariadb:11.8' }}
+        env:
+          MYSQL_ROOT_PASSWORD: fixture-only-target-root-2026
+          MARIADB_ROOT_PASSWORD: fixture-only-target-root-2026
+          MYSQL_DATABASE: p08schemamigrdst
+          MARIADB_DATABASE: p08schemamigrdst
+          MYSQL_USER: p08schemamigrds
+          MARIADB_USER: p08schemamigrds
+          MYSQL_PASSWORD: fixture-only-target-app-2026
+          MARIADB_PASSWORD: fixture-only-target-app-2026
+        ports:
+          - 13307:3306
+        options: >-
+          --health-cmd="sh -c 'mysqladmin ping --silent || mariadb-admin ping --silent'"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    env:
+      P08_SCHEMA_NATIVE_ENGINE: ${{ matrix.engine }}
+      P08_SCHEMA_NATIVE_ISOLATED: 'YES'
+      P08_SCHEMA_NATIVE_SOURCE_PORT: '13306'
+      P08_SCHEMA_NATIVE_TARGET_PORT: '13307'
+      P08_SCHEMA_SOURCE_PASSWORD: fixture-only-source-app-2026
+      P08_SCHEMA_TARGET_PASSWORD: fixture-only-target-app-2026
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-p08
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+          extensions: sqlite3, pdo_sqlite, pdo_mysql
+      - name: Execute only disconnected shadow migration worker
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$TARGET_TREE"
+          test "$(cat VERSION)" = "$TARGET_VERSION"
+          test ! -e .env
+          test "$(git hash-object tests/native/r43_shadow_migration_worker.php)" = b086a1f1f490cc139b35f196ac0f985abf5cb695
+          echo P08_MIGRATION_WORKER_EXACT_SOURCE=PASS
+          export P08_R43_SHADOW_MIGRATION_TEST=YES
+          if ! composer install --no-dev --no-scripts --no-plugins --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-shadow-migration-composer.log" 2>&1; then
+            echo P08_MIGRATION_WORKER_DEPENDENCIES=FAIL
+            exit 1
+          fi
+          git diff --exit-code --quiet
+          php -l src/Upgrade/R43ShadowMigrationWorker.php >/dev/null
+          php -l tests/native/r43_shadow_migration_worker.php >/dev/null
+          if php tests/native/r43_shadow_migration_worker.php > "$RUNNER_TEMP/p08-shadow-migration.log" 2>&1; then
+            grep -qx "P08_R43_SHADOW_MIGRATION_TARGET_ONLY=PASS engine=$P08_SCHEMA_NATIVE_ENGINE" "$RUNNER_TEMP/p08-shadow-migration.log"
+            echo "P08_R43_SHADOW_MIGRATION_TARGET_ONLY=PASS engine=$P08_SCHEMA_NATIVE_ENGINE"
+          else
+            python3 - "$RUNNER_TEMP/p08-shadow-migration.log" <<'PY'
+          import pathlib, re, sys
+          raw = pathlib.Path(sys.argv[1]).read_text(errors='replace')
+          codes = sorted(set(re.findall(r'\b(?:R43_SHADOW_[A-Z_]+|SQLSTATE\[[A-Z0-9]+\]|P08_SCHEMA_NATIVE_SQLITE=NOT_PROVEN_MISSING_EXTENSION)\b', raw)))
+          print('P08_NATIVE_FAILURE_CODES=' + ','.join(codes[:8]) if codes else 'P08_NATIVE_FAILURE_CODES=UNCLASSIFIED')
+          PY
+            exit 1
+          fi
+      - name: Remove transient private source and log
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- private-p08
+          rm -f -- "$RUNNER_TEMP/p08-shadow-migration.log" "$RUNNER_TEMP/p08-shadow-migration-composer.log"
+          test ! -e private-p08 && test ! -e "$RUNNER_TEMP/p08-shadow-migration.log"
+          echo P08_MIGRATION_WORKER_CLEANUP=PASS
