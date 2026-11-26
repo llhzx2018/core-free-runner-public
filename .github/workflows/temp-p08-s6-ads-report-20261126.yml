@@ -78,27 +78,35 @@ jobs:
           php -l app/Http/Controllers/PopAdsController.php >/dev/null
           php -l tests/Feature/PopAdsWorkflowTest.php >/dev/null
           php -l tests/native/s6_ads_saved_browser_fixture.php >/dev/null
+          mkdir -p bootstrap/cache storage/framework/cache/data storage/framework/sessions storage/framework/views storage/logs
           composer install --no-scripts --no-plugins --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-s6-dev-composer.log" 2>&1 || { echo P08_S6_DEPS=FAIL; exit 1; }
-          if vendor/bin/phpunit --bootstrap vendor/autoload.php tests/Feature/PopAdsWorkflowTest.php > "$RUNNER_TEMP/p08-s6-phpunit.log" 2>&1; then
-            python3 - "$RUNNER_TEMP/p08-s6-phpunit.log" <<'PY'
-          import pathlib,re,sys
-          s=pathlib.Path(sys.argv[1]).read_text(errors='replace')
-          m=re.search(r'OK \((\d+) tests, (\d+) assertions\)',s)
-          assert m and int(m.group(1))==5
-          print('P08_S6_POPADS_FEATURE=PASS tests='+m.group(1)+' assertions='+m.group(2))
-          PY
-          else
-            echo P08_S6_POPADS_FEATURE=FAIL
-            exit 1
-          fi
-          composer install --no-dev --no-scripts --no-plugins --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-composer.log" 2>&1 || { echo P08_FULL_COMPOSER=FAIL; exit 1; }
-          composer check-platform-reqs --format=json --no-dev > "$RUNNER_TEMP/p08-platform.log" 2>&1 || { echo P08_FULL_PLATFORM=FAIL; exit 1; }
           npm ci --ignore-scripts --no-audit --no-fund > "$RUNNER_TEMP/p08-npm.log" 2>&1 || { echo P08_FULL_NPM=FAIL; exit 1; }
           npm run typecheck > "$RUNNER_TEMP/p08-s6-types.log" 2>&1 || { echo P08_S6_TYPECHECK=FAIL; exit 1; }
           echo P08_S6_TYPECHECK=PASS
           npx --no-install vitest run tests/js/adsAccountReport.test.ts --reporter=json --outputFile="$RUNNER_TEMP/p08-s6-unit.json" > "$RUNNER_TEMP/p08-s6-unit.log" 2>&1
           node -e 'const r=require(process.env.RUNNER_TEMP+"/p08-s6-unit.json");if(r.numFailedTests!==0||r.numPassedTests!==5)process.exit(1);console.log("P08_S6_REPORT_UNIT=PASS cases="+r.numPassedTests)'
           npm run build > "$RUNNER_TEMP/p08-build.log" 2>&1 || { echo P08_FULL_ASSETS=FAIL; exit 1; }
+          feature_rc=0
+          php vendor/bin/phpunit --no-coverage --colors=never --fail-on-empty-test-suite --fail-on-skipped --fail-on-incomplete --fail-on-risky --log-junit "$RUNNER_TEMP/p08-s6-feature.xml" tests/Feature/PopAdsWorkflowTest.php > "$RUNNER_TEMP/p08-s6-phpunit.log" 2>&1 || feature_rc=$?
+          python3 - "$RUNNER_TEMP/p08-s6-feature.xml" "$feature_rc" <<'PY'
+          import sys,xml.etree.ElementTree as ET,re
+          from pathlib import Path
+          cases=list(ET.parse(sys.argv[1]).getroot().iter('testcase'))
+          bad=[]
+          for case in cases:
+              for child in case:
+                  if child.tag in ('failure','error','skipped'):
+                      name=case.get('name','')
+                      kind=child.get('type','')
+                      bad.append((name if re.fullmatch(r'[a-zA-Z0-9_]+',name) else 'UNKNOWN',kind.rsplit('\\',1)[-1] if re.fullmatch(r'[a-zA-Z0-9_\\]+',kind) else child.tag))
+          print('P08_S6_POPADS_FEATURE_CASES='+str(len(cases))+';FAILURES='+str(len(bad)))
+          for name,kind in bad: print('P08_S6_FAILURE_CASE='+name+';TYPE='+kind)
+          ok=int(sys.argv[2])==0 and len(cases)==5 and not bad
+          Path(__import__('os').environ['RUNNER_TEMP'],'p08-s6-feature-result').write_text('PASS' if ok else 'FAIL')
+          print('P08_S6_POPADS_FEATURE='+('PASS' if ok else 'FAIL'))
+          PY
+          composer install --no-dev --no-scripts --no-plugins --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-composer.log" 2>&1 || { echo P08_FULL_COMPOSER=FAIL; exit 1; }
+          composer check-platform-reqs --format=json --no-dev > "$RUNNER_TEMP/p08-platform.log" 2>&1 || { echo P08_FULL_PLATFORM=FAIL; exit 1; }
           git diff --exit-code HEAD -- > "$RUNNER_TEMP/p08-diff.log" 2>&1 || { echo P08_FULL_SOURCE_CHANGED=FAIL; exit 1; }
           python3 scripts/build_full.py --source . --output "$RUNNER_TEMP/p08-dev-full.zip" --version "$TARGET_VERSION" --source-sha "$TARGET_SHA" --governance-root "$GITHUB_WORKSPACE/gov-proof" > "$RUNNER_TEMP/p08-full.log" 2>&1 || { echo P08_CANONICAL_DEV_FULL=FAIL; exit 1; }
           sha256sum "$RUNNER_TEMP/p08-dev-full.zip" | cut -d' ' -f1 | sed 's/^/P08_DEV_FULL_SHA256=/'
@@ -176,6 +184,7 @@ jobs:
           done
           test "$failed" = 0
           echo P08_S6_HTTPS_BROWSER=PASS
+          test "$(cat "$RUNNER_TEMP/p08-s6-feature-result")" = PASS
       - name: Remove transient sources, fixtures, logs and TLS material
         if: always()
         shell: bash
@@ -183,6 +192,6 @@ jobs:
           set -Eeuo pipefail
           set +x
           rm -rf -- private-p08 gov-proof "$RUNNER_TEMP/p08-r43-clean-full-sqlite"
-          rm -f -- "$RUNNER_TEMP"/p08-*.log "$RUNNER_TEMP"/p08-s6-unit.json "$RUNNER_TEMP"/p08-browser-*.xml "$RUNNER_TEMP"/p08-browser-*.pem "$RUNNER_TEMP"/p08-browser-router.php "$RUNNER_TEMP/p08-dev-full.zip"
+          rm -f -- "$RUNNER_TEMP"/p08-*.log "$RUNNER_TEMP"/p08-s6-unit.json "$RUNNER_TEMP"/p08-s6-feature.xml "$RUNNER_TEMP"/p08-s6-feature-result "$RUNNER_TEMP"/p08-browser-*.xml "$RUNNER_TEMP"/p08-browser-*.pem "$RUNNER_TEMP"/p08-browser-router.php "$RUNNER_TEMP/p08-dev-full.zip"
           test ! -e private-p08 && test ! -e gov-proof && test ! -e "$RUNNER_TEMP/p08-r43-clean-full-sqlite" && test ! -e "$RUNNER_TEMP/p08-dev-full.zip"
           echo P08_BROWSER_PRIVATE_CLEANUP=PASS
