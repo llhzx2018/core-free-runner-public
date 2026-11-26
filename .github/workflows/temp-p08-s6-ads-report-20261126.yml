@@ -1,0 +1,188 @@
+name: TEMP P08 S6 selected-account business flow
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p08-s6-ads-report-20261126.yml'
+permissions:
+  contents: read
+concurrency:
+  group: p08-s6-ads-report-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+env:
+  TARGET_REPO: llhzx2018/vf-adops
+  TARGET_VERSION: '0.1.18'
+  TARGET_SHA: fdbaa736974b5801b6029d707fe959be3ea00db3
+  TARGET_TREE: e82219a1d84aaa714b19ccecd06887fa605d1367
+  GOV_SHA: 5afe0d29a5a401db80ecdb981038b89a8cefed0a
+jobs:
+  identity-preflight:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'llhzx2018' && github.head_ref == 'evidence/p08-s6-ads-report-20261126'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: python3 scripts/ephemeral_lane_spec.py audit-rendered --spec specs/ephemeral/p08-s6-ads-report-20261126.json --input .github/workflows/temp-p08-s6-ads-report-20261126.yml
+  integrated-https-browser:
+    needs: identity-preflight
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'llhzx2018' && github.head_ref == 'evidence/p08-s6-ads-report-20261126'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      P08_R43_DISPOSABLE_SCHEMA: 'YES'
+      P08_ISOLATED_INSTALL_TEST: 'YES'
+      P08_TEST_BASE_URL: https://127.0.0.1:18443
+      P08_S6_LOCAL_BROWSER: 'YES'
+    steps:
+      - name: Ephemeral read-only P08 source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-p08
+      - name: Canonical GOV-DOC exact authority
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: ${{ env.GOV_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: gov-proof
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          tools: composer:v2
+          coverage: none
+          extensions: pdo_sqlite, sqlite3, pdo_mysql, zip, mbstring, intl, bcmath, dom, fileinfo, curl
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Build canonical development FULL, not a release
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$TARGET_TREE"
+          test "$(cat VERSION)" = "$TARGET_VERSION"
+          test "$(git -C "$GITHUB_WORKSPACE/gov-proof" rev-parse HEAD)" = "$GOV_SHA"
+          test ! -e .env
+          php -l app/Http/Controllers/PopAdsController.php >/dev/null
+          php -l tests/Feature/PopAdsWorkflowTest.php >/dev/null
+          php -l tests/native/s6_ads_saved_browser_fixture.php >/dev/null
+          composer install --no-scripts --no-plugins --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-s6-dev-composer.log" 2>&1 || { echo P08_S6_DEPS=FAIL; exit 1; }
+          if vendor/bin/phpunit --bootstrap vendor/autoload.php tests/Feature/PopAdsWorkflowTest.php > "$RUNNER_TEMP/p08-s6-phpunit.log" 2>&1; then
+            python3 - "$RUNNER_TEMP/p08-s6-phpunit.log" <<'PY'
+          import pathlib,re,sys
+          s=pathlib.Path(sys.argv[1]).read_text(errors='replace')
+          m=re.search(r'OK \((\d+) tests, (\d+) assertions\)',s)
+          assert m and int(m.group(1))==5
+          print('P08_S6_POPADS_FEATURE=PASS tests='+m.group(1)+' assertions='+m.group(2))
+          PY
+          else
+            echo P08_S6_POPADS_FEATURE=FAIL
+            exit 1
+          fi
+          composer install --no-dev --no-scripts --no-plugins --prefer-dist --no-interaction --no-progress > "$RUNNER_TEMP/p08-composer.log" 2>&1 || { echo P08_FULL_COMPOSER=FAIL; exit 1; }
+          composer check-platform-reqs --format=json --no-dev > "$RUNNER_TEMP/p08-platform.log" 2>&1 || { echo P08_FULL_PLATFORM=FAIL; exit 1; }
+          npm ci --ignore-scripts --no-audit --no-fund > "$RUNNER_TEMP/p08-npm.log" 2>&1 || { echo P08_FULL_NPM=FAIL; exit 1; }
+          npm run typecheck > "$RUNNER_TEMP/p08-s6-types.log" 2>&1 || { echo P08_S6_TYPECHECK=FAIL; exit 1; }
+          echo P08_S6_TYPECHECK=PASS
+          npx --no-install vitest run tests/js/adsAccountReport.test.ts --reporter=json --outputFile="$RUNNER_TEMP/p08-s6-unit.json" > "$RUNNER_TEMP/p08-s6-unit.log" 2>&1
+          node -e 'const r=require(process.env.RUNNER_TEMP+"/p08-s6-unit.json");if(r.numFailedTests!==0||r.numPassedTests!==5)process.exit(1);console.log("P08_S6_REPORT_UNIT=PASS cases="+r.numPassedTests)'
+          npm run build > "$RUNNER_TEMP/p08-build.log" 2>&1 || { echo P08_FULL_ASSETS=FAIL; exit 1; }
+          git diff --exit-code HEAD -- > "$RUNNER_TEMP/p08-diff.log" 2>&1 || { echo P08_FULL_SOURCE_CHANGED=FAIL; exit 1; }
+          python3 scripts/build_full.py --source . --output "$RUNNER_TEMP/p08-dev-full.zip" --version "$TARGET_VERSION" --source-sha "$TARGET_SHA" --governance-root "$GITHUB_WORKSPACE/gov-proof" > "$RUNNER_TEMP/p08-full.log" 2>&1 || { echo P08_CANONICAL_DEV_FULL=FAIL; exit 1; }
+          sha256sum "$RUNNER_TEMP/p08-dev-full.zip" | cut -d' ' -f1 | sed 's/^/P08_DEV_FULL_SHA256=/'
+          echo P08_CANONICAL_DEV_FULL=PASS
+      - name: Fresh extracted development site with isolated SQLite Owner
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          site="$RUNNER_TEMP/p08-r43-clean-full-sqlite"
+          test ! -e "$site"
+          mkdir -m 700 "$site"
+          unzip -q "$RUNNER_TEMP/p08-dev-full.zip" -d "$site"
+          P08_R43_ENGINE=sqlite php private-p08/tests/native/s6_ads_saved_browser_fixture.php > "$RUNNER_TEMP/p08-browser-install.log" 2>&1 || { echo P08_BROWSER_FIXTURE_INSTALL=FAIL; exit 1; }
+          grep -qx 'P08_R43_REAL_018_sqlite_23_MIGRATIONS_S9_OWNER=PASS' "$RUNNER_TEMP/p08-browser-install.log"
+          grep -qx 'P08_R43_REAL_018_NO_TOKEN_AND_NO_REMOTE_PROVIDER=PASS' "$RUNNER_TEMP/p08-browser-install.log"
+          grep -qx 'P08_S6_LOCAL_SAVED_FIXTURE=PASS' "$RUNNER_TEMP/p08-browser-install.log"
+          echo P08_S6_LOCAL_SAVED_FIXTURE=PASS
+      - name: Isolated HTTPS selected account and local review Chromium acceptance
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          site="$RUNNER_TEMP/p08-r43-clean-full-sqlite"
+          test -d "$site/public"
+          sudo apt-get update -qq > "$RUNNER_TEMP/p08-browser-apt.log" 2>&1
+          sudo apt-get install -y -qq socat >> "$RUNNER_TEMP/p08-browser-apt.log" 2>&1
+          npx playwright install --with-deps chromium > "$RUNNER_TEMP/p08-browser-playwright.log" 2>&1 || { echo P08_CHROMIUM_RUNTIME=BLOCKED; exit 1; }
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -keyout "$RUNNER_TEMP/p08-browser-key.pem" -out "$RUNNER_TEMP/p08-browser-cert.pem" -subj '/CN=127.0.0.1' > /dev/null 2>&1
+          cat "$RUNNER_TEMP/p08-browser-key.pem" "$RUNNER_TEMP/p08-browser-cert.pem" > "$RUNNER_TEMP/p08-browser-site.pem"
+          cat > "$RUNNER_TEMP/p08-browser-router.php" <<'ROUTER'
+          <?php
+          $_SERVER['HTTPS']='on';
+          $_SERVER['SERVER_PORT']=443;
+          $path=parse_url($_SERVER['REQUEST_URI'],PHP_URL_PATH) ?: '/';
+          if ($path!=='/' && is_file($_SERVER['DOCUMENT_ROOT'].$path)) return false;
+          require $_SERVER['DOCUMENT_ROOT'].'/index.php';
+          ROUTER
+          php -S 127.0.0.1:18080 -t "$site/public" "$RUNNER_TEMP/p08-browser-router.php" > "$RUNNER_TEMP/p08-browser-http.log" 2>&1 &
+          backend=$!
+          socat OPENSSL-LISTEN:18443,cert="$RUNNER_TEMP/p08-browser-site.pem",verify=0,fork,reuseaddr TCP:127.0.0.1:18080 > "$RUNNER_TEMP/p08-browser-tls.log" 2>&1 &
+          proxy=$!
+          trap 'kill "$backend" "$proxy" 2>/dev/null || true; wait "$backend" "$proxy" 2>/dev/null || true' EXIT
+          ready=0
+          for i in $(seq 1 12); do
+            if curl -ksS --max-time 3 -o /dev/null -w '%{http_code}' "$P08_TEST_BASE_URL/login" | grep -qx 200; then ready=1; break; fi
+            sleep 1
+          done
+          test "$ready" = 1 || { echo P08_BROWSER_TLS_READY=BLOCKED; exit 1; }
+          echo P08_BROWSER_TLS_READY=PASS
+          failed=0
+          for spec in s6-ads-account-report.spec.ts; do
+            report="$RUNNER_TEMP/p08-browser-$spec.xml"
+            rc=0
+            PLAYWRIGHT_JUNIT_OUTPUT_FILE="$report" npm run test:e2e -- "tests/e2e/$spec" --workers=1 --reporter=junit > "$RUNNER_TEMP/p08-browser-$spec.log" 2>&1 || rc=$?
+            if python3 - "$report" "$spec" "$rc" <<'PY'
+          import sys, xml.etree.ElementTree as ET
+          from pathlib import Path
+          try:
+              root = ET.parse(sys.argv[1]).getroot()
+              cases = list(root.iter('testcase'))
+              bad = sum(any(c.find(t) is not None for t in ('failure','error','skipped')) for c in cases)
+              ok = int(sys.argv[3]) == 0 and len(cases) == 1 and bad == 0
+              print('P08_BROWSER_SPEC=' + Path(sys.argv[2]).name + ';CASES=' + str(len(cases)) + ';FAILED_OR_SKIPPED=' + str(bad) + ';RESULT=' + ('PASS' if ok else 'FAIL'))
+              sys.exit(0 if ok else 1)
+          except (OSError, ET.ParseError):
+              print('P08_BROWSER_JUNIT=NOT_PROVEN')
+              sys.exit(1)
+          PY
+            then :; else failed=1; fi
+            (cd "$site" && php artisan cache:clear) > "$RUNNER_TEMP/p08-browser-cache.log" 2>&1 || { echo P08_BROWSER_CACHE_CLEAR=FAIL; exit 1; }
+          done
+          test "$failed" = 0
+          echo P08_S6_HTTPS_BROWSER=PASS
+      - name: Remove transient sources, fixtures, logs and TLS material
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          rm -rf -- private-p08 gov-proof "$RUNNER_TEMP/p08-r43-clean-full-sqlite"
+          rm -f -- "$RUNNER_TEMP"/p08-*.log "$RUNNER_TEMP"/p08-s6-unit.json "$RUNNER_TEMP"/p08-browser-*.xml "$RUNNER_TEMP"/p08-browser-*.pem "$RUNNER_TEMP"/p08-browser-router.php "$RUNNER_TEMP/p08-dev-full.zip"
+          test ! -e private-p08 && test ! -e gov-proof && test ! -e "$RUNNER_TEMP/p08-r43-clean-full-sqlite" && test ! -e "$RUNNER_TEMP/p08-dev-full.zip"
+          echo P08_BROWSER_PRIVATE_CLEANUP=PASS
