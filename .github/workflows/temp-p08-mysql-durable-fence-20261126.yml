@@ -1,0 +1,121 @@
+name: TEMP P08 MySQL database-local durable fence
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-p08-mysql-durable-fence-20261126.yml'
+permissions:
+  contents: read
+concurrency:
+  group: p08-mysql-durable-fence-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+env:
+  TARGET_REPO: llhzx2018/vf-adops
+  TARGET_VERSION: '0.1.18'
+  TARGET_SHA: 6ef1ea3103db1c156f2485a85fe9af5e4d96e698
+  TARGET_TREE: aab782b0925cc11b1f0d4ef9be22abe9def17a0c
+  GOV_SHA: 3cc1c2c72ab6561dc1bcb3eddc5a4831b757d33d
+jobs:
+  identity-preflight:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'llhzx2018' && github.head_ref == 'evidence/p08-mysql-durable-fence-20261126'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - run: python3 scripts/ephemeral_lane_spec.py audit-rendered --spec specs/ephemeral/p08-mysql-durable-fence-20261126.json --input .github/workflows/temp-p08-mysql-durable-fence-20261126.yml
+  native-mysql-fence:
+    needs: identity-preflight
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'llhzx2018' && github.head_ref == 'evidence/p08-mysql-durable-fence-20261126'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: fixture-only-fence-bootstrap-2026
+        ports:
+          - 13306:3306
+        options: >-
+          --health-cmd="mysqladmin ping --silent"
+          --health-interval=10s --health-timeout=5s --health-retries=12
+    env:
+      P08_R43_MYSQL_FENCE_TEST: 'YES'
+      P08_R43_MYSQL_FENCE_PORT: '13306'
+      P08_FENCE_OPERATOR_PASSWORD: fixture-only-fence-operator-2026
+      P08_FENCE_WRITER_PASSWORD: fixture-only-fence-writer-2026
+      P08_FENCE_SHADOW_PASSWORD: fixture-only-fence-shadow-2026
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          ref: ${{ env.TARGET_SHA }}
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+          path: private-p08
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          coverage: none
+          extensions: pdo_mysql
+      - name: Exact source and isolated fixture bootstrap
+        working-directory: private-p08
+        env:
+          DB_CONTAINER: ${{ job.services.mysql.id }}
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$TARGET_TREE"
+          test "$(cat VERSION)" = "$TARGET_VERSION"
+          test ! -e .env
+          test "$(git hash-object src/Upgrade/R43MySqlDatabaseFence.php)" = 7be9905aa4fcdab46ae5b5f59513b5a2f9a52c42
+          test "$(git hash-object tests/native/r43_mysql_database_fence.php)" = 14d05fb0418f650d12a0b6b19479b9271ac5a754
+          test "$(git hash-object tests/native/fixtures/r43_mysql_database_fence.sql)" = a14479e138855737da58a889bd054a0694f39132
+          php -l src/Upgrade/R43MySqlDatabaseFence.php >/dev/null
+          php -l tests/native/r43_mysql_database_fence.php >/dev/null
+          echo P08_MYSQL_FENCE_EXACT_SOURCE=PASS
+          [[ "$DB_CONTAINER" =~ ^[a-f0-9]{64}$ ]]
+          test "$(docker inspect --format '{{.Config.Image}}' "$DB_CONTAINER")" = mysql:8.4
+          # Fresh per-job service bootstrap only. The product test never receives
+          # the bootstrap principal, and uses only the scoped fixture accounts.
+          if docker exec -i -e MYSQL_PWD=fixture-only-fence-bootstrap-2026 "$DB_CONTAINER" mysql --protocol=socket --user=root < tests/native/fixtures/r43_mysql_database_fence.sql > "$RUNNER_TEMP/p08-mysql-fence-bootstrap.log" 2>&1; then
+            echo P08_MYSQL_FENCE_FIXTURE_BOOTSTRAP=PASS
+          else
+            echo P08_MYSQL_FENCE_FIXTURE_BOOTSTRAP=FAIL
+            exit 1
+          fi
+      - name: Execute P08 native MySQL scoped writer fence
+        working-directory: private-p08
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          if php tests/native/r43_mysql_database_fence.php > "$RUNNER_TEMP/p08-mysql-fence.log" 2>&1; then
+            for result in P08_MYSQL_FENCE_BUSY_OLD_TRANSACTION P08_MYSQL_FENCE_WORKER_SIGKILL_DURABLE P08_MYSQL_FENCE_EXISTING_FRESH_DML_DDL_REFUSAL P08_MYSQL_FENCE_SIBLING_WRITABLE_SOURCE_UNCHANGED P08_R43_MYSQL_DATABASE_LOCAL_FENCE; do
+              grep -qx "$result=PASS" "$RUNNER_TEMP/p08-mysql-fence.log"
+              echo "$result=PASS"
+            done
+          else
+            python3 - "$RUNNER_TEMP/p08-mysql-fence.log" <<'PY'
+          import pathlib, re, sys
+          raw = pathlib.Path(sys.argv[1]).read_text(errors='replace')
+          codes = sorted(set(re.findall(r'\b(?:R43_MYSQL_[A-Z_]+|SQLSTATE\[[A-Z0-9]+\])', raw)))
+          print('P08_MYSQL_FENCE_FAILURE_CODES=' + ','.join(codes[:12]) if codes else 'P08_MYSQL_FENCE_FAILURE_CODES=UNCLASSIFIED')
+          PY
+            exit 1
+          fi
+      - name: Remove transient private source and logs
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          rm -rf -- private-p08
+          rm -f -- "$RUNNER_TEMP/p08-mysql-fence.log" "$RUNNER_TEMP/p08-mysql-fence-bootstrap.log"
+          test ! -e private-p08 && test ! -e "$RUNNER_TEMP/p08-mysql-fence.log" && test ! -e "$RUNNER_TEMP/p08-mysql-fence-bootstrap.log"
+          echo P08_MYSQL_FENCE_CLEANUP=PASS
