@@ -129,8 +129,8 @@ M04_RUNTIME="$M04_ROOT/current/vf-system-care.sh"
 # P07-M05 新服务器初始化 has its OWN runtime/build and no M03/M04 installer calls.
 # Exact published M05 artifact: no fallback to M03/M04 installers.
 # M05-only official build; no other module or Production writes.
-M05_BUILD_EXPECTED="0.1.0-m05-ux15-rc4-runtime-compat"
-M05_PREVIOUS_OFFICIAL_BUILD="0.1.0-m05-ux14-verified-pycache"
+M05_BUILD_EXPECTED="0.1.0-m05-ux16-runtime-identity-catalog"
+M05_PREVIOUS_OFFICIAL_BUILD="0.1.0-m05-ux15-rc4-runtime-compat"
 M05_UPGRADE_FROM="0.1.0-m05-candidate2"
 M05_UPGRADE_FROM2="0.1.0-m05-existing-safe1"
 M05_UPGRADE_FROM3="0.1.0-m05-clean-host-guard1"
@@ -151,12 +151,13 @@ M05_UPGRADE_FROM17="0.1.0-m05-ux10-bootstrap-ux-failstop"
 M05_UPGRADE_FROM18="0.1.0-m05-ux11-toolbox-lock"
 M05_UPGRADE_FROM19="0.1.0-m05-ux12-apt-failstop"
 M05_UPGRADE_FROM20="0.1.0-m05-ux13-provider-neutral"
+M05_UPGRADE_FROM21="0.1.0-m05-ux14-verified-pycache"
 M05_ROOT="/opt/vfops-modules/m05"
 M05_RUNTIME="$M05_ROOT/current/bin/vfops-init-entry"
 # M05 is published as an immutable reviewed public Release ZIP.
 # Never install M03/M04 in its place and verify SHA-256 before extraction.
-M05_BUNDLE_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-ux15-rc4-runtime-compat-20261126/P07-M05-0.1.0-m05-ux15-rc4-runtime-compat.zip"
-M05_BUNDLE_SHA256="fa67235dbc9fc7d132b057da7095d5064d1b72f7308a781aa7d616e942d27d99"
+M05_BUNDLE_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/p07-m05-v0.1.0-ux16-runtime-identity-catalog-20261126/P07-M05-0.1.0-m05-ux16-runtime-identity-catalog.zip"
+M05_BUNDLE_SHA256="5445a006327969ca9c3987680ae808def4a4991bd833a0ed176eeb5ab671c095"
 # Immutable private Owner Trial .run identity, never a public download source.
 M05_OFFLINE_TRIAL_SHA256="e42b6b3c59719f6ec189e4c62b7cfc54385aaa6e566c8f92ca5306246f022bbb"
 M05_INSTALLER_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/35e3fbcb1e8c40042558f9f163e4215570074793/installers/p07-m05-atomic.py"
@@ -1100,7 +1101,7 @@ ensure_m05_current() {
         # A concurrent version switch must never be silently overwritten.
         upgrade_from="$M05_PREVIOUS_OFFICIAL_BUILD"
         ;;
-      "releases/$M05_UPGRADE_FROM"|"releases/$M05_UPGRADE_FROM2"|"releases/$M05_UPGRADE_FROM3"|"releases/$M05_UPGRADE_FROM4"|"releases/$M05_UPGRADE_FROM5"|"releases/$M05_UPGRADE_FROM6"|"releases/$M05_UPGRADE_FROM7"|"releases/$M05_UPGRADE_FROM8"|"releases/$M05_UPGRADE_FROM9"|"releases/$M05_UPGRADE_FROM10"|"releases/$M05_UPGRADE_FROM11"|"releases/$M05_UPGRADE_FROM12"|"releases/$M05_UPGRADE_FROM13"|"releases/$M05_UPGRADE_FROM14"|"releases/$M05_UPGRADE_FROM15"|"releases/$M05_UPGRADE_FROM16"|"releases/$M05_UPGRADE_FROM17"|"releases/$M05_UPGRADE_FROM18"|"releases/$M05_UPGRADE_FROM19"|"releases/$M05_UPGRADE_FROM20")
+      "releases/$M05_UPGRADE_FROM"|"releases/$M05_UPGRADE_FROM2"|"releases/$M05_UPGRADE_FROM3"|"releases/$M05_UPGRADE_FROM4"|"releases/$M05_UPGRADE_FROM5"|"releases/$M05_UPGRADE_FROM6"|"releases/$M05_UPGRADE_FROM7"|"releases/$M05_UPGRADE_FROM8"|"releases/$M05_UPGRADE_FROM9"|"releases/$M05_UPGRADE_FROM10"|"releases/$M05_UPGRADE_FROM11"|"releases/$M05_UPGRADE_FROM12"|"releases/$M05_UPGRADE_FROM13"|"releases/$M05_UPGRADE_FROM14"|"releases/$M05_UPGRADE_FROM15"|"releases/$M05_UPGRADE_FROM16"|"releases/$M05_UPGRADE_FROM17"|"releases/$M05_UPGRADE_FROM18"|"releases/$M05_UPGRADE_FROM19"|"releases/$M05_UPGRADE_FROM20"|"releases/$M05_UPGRADE_FROM21")
         upgrade_from="${installed#releases/}"
         say "${C_CYAN}P07-M05 新服务器初始化：发现已验证的旧版 $upgrade_from。${C_RESET}"
         say "新版 $M05_BUILD_EXPECTED 优化中文菜单与状态提示；已有系统只做无损检查，干净新系统才主动选择数据库并安装。"
