@@ -1486,14 +1486,14 @@ main_menu() {
     case "$choice" in
       1)
         set +e
-        run_network_node
+        ( run_network_node )
         rc=$?
         set -e
         [[ $rc -eq 0 ]] || { show_module_issue '网络代理节点'; pause_menu; }
         ;;
       2)
         set +e
-        run_vps_audit
+        ( run_vps_audit )
         rc=$?
         set -e
         [[ $rc -eq 0 ]] || show_module_issue '服务器性能检测'
@@ -1513,13 +1513,13 @@ main_menu() {
         case "$m03_choice" in
           1)
             set +e
-            run_server_ops
+            ( run_server_ops )
             rc=$?
             set -e
             ;;
           2)
             set +e
-            run_m03_owner_trial
+            ( run_m03_owner_trial )
             rc=$?
             set -e
             ;;
@@ -1530,14 +1530,14 @@ main_menu() {
         ;;
       4)
         set +e
-        run_system_care
+        ( run_system_care )
         rc=$?
         set -e
         [[ $rc -eq 0 ]] || { show_module_issue '服务器维护与安全'; pause_menu; }
         ;;
       5)
         set +e
-        run_server_init
+        ( run_server_init )
         rc=$?
         set -e
         [[ $rc -eq 0 ]] || { show_module_issue '新服务器初始化'; pause_menu; }
