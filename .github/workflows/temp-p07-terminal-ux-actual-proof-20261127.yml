@@ -1,144 +1,59 @@
-name: TEMP P07 exact terminal viewport and M05 selection regression
+name: TEMP P07 independent internal UX and audit proof
 on:
   pull_request:
-    types: [opened]
+    types: [reopened]
     branches: [main]
     paths:
       - '.github/workflows/temp-p07-terminal-ux-actual-proof-20261127.yml'
 permissions:
   contents: read
 jobs:
-  public-viewport:
+  private-ux-delta:
     if: github.repository == 'llhzx2018/core-free-runner-public' && github.actor == 'llhzx2018' && github.event.pull_request.user.login == 'llhzx2018' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'temp/p07-terminal-ux-actual-proof-20261127'
     runs-on: ubuntu-24.04
     timeout-minutes: 12
-    steps:
-      - name: Actual public toolbox and module entry viewport recordings
-        shell: bash
-        run: |
-          set -Eeuo pipefail
-          test "$RUNNER_ENVIRONMENT" = github-hosted
-          test ! -e /opt/vfops-modules
-          test ! -e /opt/vf-server-ops
-          test ! -e /home/clp
-          work="$(mktemp -d)"
-          trap 'rm -rf -- "$work"' EXIT
-          curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/main/installers/p07-toolbox.sh -o "$work/toolbox.sh"
-          test "$(git hash-object "$work/toolbox.sh")" = 2b021ab7df93a339fd3cf9885a25ac9b91dc3768
-          python3 - "$work/toolbox.sh" <<'PY'
-          import errno,fcntl,math,os,pty,re,select,struct,subprocess,sys,termios,time,unicodedata
-          toolbox=sys.argv[1]
-          prompt="请选择 [0-5]："
-          routes=[("M01","1","请选择 [0-5]："),("M02","2","请选择 [0-2]："),("M03","3","请选择 [0-2]："),("M04","4","请选择 [0-8]："),("M05","5","请选择 [0-2]：")]
-          def cells(s):
-              return sum(0 if unicodedata.combining(c) else 2 if unicodedata.east_asian_width(c) in ("W","F","A") and ord(c)>127 else 1 for c in s)
-          def audit(label,data,cols):
-              text=data.decode("utf-8","replace").replace("\r","")
-              ansi=bool(re.search(r"\x1b\[",text))
-              plain=re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]","",text)
-              lines=plain.splitlines()
-              width=max([cells(line) for line in lines]+[0])
-              rows=sum(max(1,math.ceil(cells(line)/cols)) for line in lines)
-              print(f"VIEWPORT_OBSERVED={label};cols={cols};rows=24;max_cells={width};wrapped_rows={rows};ansi={int(ansi)};overflow={int(width>cols or rows>24)}",flush=True)
-              for line in lines:
-                  if re.search(r"请选择|返回工具箱|退出|^[ ]*[0-9]+\.",line) or line.strip()=="功能：5 项":
-                      if not re.search(r"vmess://|password|token|secret",line,re.I):
-                          print(f"MENU_LINE:{label}:{line[:160]}",flush=True)
-              if ansi: print(f"NO_COLOR_DEFECT={label}",flush=True)
-          def session(cols,slot):
-              master,slave=pty.openpty()
-              fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack("HHHH",24,cols,0,0))
-              p=subprocess.Popen(["sudo","-n","env","NO_COLOR=1","TERM=dumb","bash",toolbox],stdin=slave,stdout=slave,stderr=slave)
-              os.close(slave)
-              buf=bytearray()
-              def wait_for(token,seconds=60):
-                  target=token.encode()
-                  deadline=time.monotonic()+seconds
-                  while time.monotonic()<deadline:
-                      pos=buf.find(target)
-                      if pos>=0:
-                          end=pos+len(target);out=bytes(buf[:end]);del buf[:end];return out
-                      if p.poll() is not None: raise RuntimeError("entry terminated before expected prompt")
-                      readable,_,_=select.select([master],[],[],.2)
-                      if readable:
-                          try: data=os.read(master,65536)
-                          except OSError as e:
-                              if e.errno==errno.EIO: break
-                              raise
-                          if not data: break
-                          buf.extend(data)
-                          if len(buf)>2_000_000: raise RuntimeError("bounded output exceeded")
-                  raise RuntimeError("expected prompt not observed")
-              def send(s): os.write(master,(s+"\n").encode())
-              try:
-                  top=wait_for(prompt,20)
-                  if slot is None:
-                      audit("toolbox",top,cols)
-                      send("9")
-                      invalid=wait_for(prompt,20)
-                      assert "无效选择" in invalid.decode("utf-8","replace")
-                      print(f"ACTUAL_INVALID_RETURNS={cols}",flush=True)
-                      send("0")
-                  else:
-                      mod,num,sub=slot
-                      send(num)
-                      raw=wait_for(sub,120)
-                      if mod=="M03":
-                          audit("M03-route",raw,cols)
-                          send("1");raw=wait_for(prompt,120)
-                      # The first run may contain installation progress. Measure only
-                      # subsequent menu lines after the final visible section heading.
-                      lines=raw.splitlines(keepends=True)
-                      heading={"M01":"网络代理节点","M02":"服务器性能检测 ·","M03":"网站与数据","M04":"服务器维护与安全","M05":"新服务器初始化"}[mod].encode()
-                      starts=[i for i,l in enumerate(lines) if heading in l and not re.search(rb"^[ ]*[0-9]+\.",l)]
-                      screen=b"".join(lines[starts[-1]:] if starts else lines[-24:])
-                      audit(mod,screen,cols)
-                      send("0")
-                      if mod=="M02":
-                          wait_for("按 Enter 返回主菜单",20);send("")
-                      wait_for(prompt,30)
-                      print(f"ACTUAL_RETURN_ZERO={mod}:{cols}",flush=True)
-                      send("0")
-                  if p.wait(timeout=15)!=0: raise RuntimeError("unexpected exit")
-              finally:
-                  if p.poll() is None: p.kill();p.wait(timeout=5)
-                  os.close(master)
-          for cols in (80,40):
-              for slot in [None]+routes:
-                  label=slot[0] if slot else "toolbox"
-                  try: session(cols,slot)
-                  except Exception as exc: print(f"VIEWPORT_NOT_PROVEN={label}:{cols}:{type(exc).__name__}",flush=True)
-          print("ACTUAL_VIEWPORT_AUDIT_ONLY=NOT_FULL_PRODUCT_ACCEPTANCE")
-          PY
-  m05-delta:
-    if: github.repository == 'llhzx2018/core-free-runner-public' && github.actor == 'llhzx2018' && github.event.pull_request.user.login == 'llhzx2018' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'temp/p07-terminal-ux-actual-proof-20261127'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 12
-    env:
-      PYTHONDONTWRITEBYTECODE: '1'
-      PRODUCT_SHA: 'd087d42f55723946d5aefcef61e91bdac1a3a4ea'
-      PRODUCT_BASE: '5a9fd0d1cfdc485f9709586f191689f9e47a3415'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - module: m03-selection
+            sha: 4f7494ebbb892164da8bb0a1942d6da672f61f82
+            tree: f20cacebdb6d3703a60e80cc0e0ecafe888827a8
+            suites: test_p07_m03_site_ux_v3.py
+          - module: m05-shared
+            sha: 5734f7e26abf23dd0e85e9970f2c3dbd2a298367
+            tree: 4415fb5f3dde304b2d963d60e204bd31bd4d061f
+            suites: test_p07_terminal_ui_rendering.py test_p07_m03_site_ux_v3.py test_p07_m05_host_write_gate.py
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: llhzx2018/vf-server-ops
-          ref: 'd087d42f55723946d5aefcef61e91bdac1a3a4ea'
+          ref: '${{ matrix.sha }}'
           path: transient-p07
           fetch-depth: 0
           persist-credentials: false
           token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
-      - name: Exact product M05 state drift Bash tests and UX scope
+      - name: Exact source and scoped independent UX regression
         shell: bash
+        env:
+          PRODUCT_SHA: '${{ matrix.sha }}'
+          PRODUCT_TREE: '${{ matrix.tree }}'
+          SUITES: '${{ matrix.suites }}'
+          PYTHONDONTWRITEBYTECODE: '1'
         run: |
           set -Eeuo pipefail
           set +x
           cd transient-p07
           test "$(git rev-parse HEAD)" = "$PRODUCT_SHA"
-          test "$(git rev-parse HEAD^{tree})" = bf3340fbd38240e829eabf9a99103ae531f420c7
-          bash -n bin/vfops-init-ui
+          test "$(git rev-parse HEAD^{tree})" = "$PRODUCT_TREE"
+          echo EXACT_SOURCE_TREE=PASS
           mkdir -m 700 "$RUNNER_TEMP/p07-ux-delta"
           result=0
-          for suite in test_p07_m05_host_write_gate.py test_p07_terminal_ux_contract.py; do
+          for suite in $SUITES; do
+            case "$suite" in
+              test_p07_m03_site_ux_v3.py|test_p07_terminal_ui_rendering.py|test_p07_m05_host_write_gate.py) ;;
+              *) exit 13;;
+            esac
             log="$RUNNER_TEMP/p07-ux-delta/$suite"
             if python3 -B -m unittest discover -s tests -p "$suite" -v >"$log" 2>&1 && grep -Fxq OK "$log"; then
               echo "P07_UX_SUITE=PASS:$suite"
@@ -149,14 +64,14 @@ jobs:
             fi
             grep -E '^Ran [0-9]+ tests?' "$log" || true
           done
-          if python3 -B scripts/check_p07_terminal_ux.py --base-ref "$PRODUCT_BASE" >"$RUNNER_TEMP/p07-ux-delta/scope.log" 2>&1; then
-            echo P07_UX_SCOPE_STRUCTURAL=PASS
+          if python3 -B scripts/check_p07_terminal_ux.py --base-ref 5a9fd0d1cfdc485f9709586f191689f9e47a3415 >"$RUNNER_TEMP/p07-ux-delta/scope.log" 2>&1; then
+            echo UX_SCOPE_STRUCTURAL=PASS
           else
-            echo P07_UX_SCOPE_STRUCTURAL=FAIL
+            echo UX_SCOPE_STRUCTURAL=FAIL
             result=1
           fi
           exit "$result"
-      - name: Clean transient private source and proof logs
+      - name: Clean transient source and logs
         if: always()
         shell: bash
         run: |
@@ -165,3 +80,48 @@ jobs:
           test ! -e "$GITHUB_WORKSPACE/transient-p07"
           test ! -e "$RUNNER_TEMP/p07-ux-delta"
           echo TRANSIENT_PRIVATE_CHECKOUT_CLEANUP=PASS
+  m02-full-audit:
+    if: github.repository == 'llhzx2018/core-free-runner-public' && github.actor == 'llhzx2018' && github.event.pull_request.user.login == 'llhzx2018' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'temp/p07-terminal-ux-actual-proof-20261127'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - name: Run real exact UX4 performance detection and inspect generated report
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test ! -e /opt/vfops-modules
+          test ! -e /opt/vf-server-ops
+          test ! -e /home/clp
+          work="$(mktemp -d)"
+          trap 'sudo -n rm -rf -- "$work"' EXIT
+          mkdir -p "$work/bench" "$work/reports" "$work/runtime"
+          curl --proto '=https' --tlsv1.2 -fsSL --connect-timeout 10 --max-time 60 \
+            https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/d79c2a3185511654dd7fb6ca402009965704d5e0/experiments/p07-vps-audit-v21-ux4.sh -o "$work/runtime/vps-audit.sh"
+          test "$(git hash-object "$work/runtime/vps-audit.sh")" = 88b38d2ca46ac7325da8b45621a1f0cf16cf8951
+          bash -n "$work/runtime/vps-audit.sh"
+          test "$(bash "$work/runtime/vps-audit.sh" --build-id)" = 2.1.1-ux4
+          echo EXACT_M02_SOURCE=PASS
+          rc=0
+          sudo -n env -u P07_V21_SKIP_BASE -u P07_V21_SKIP_FIO -u P07_V21_SKIP_ROUTE -u P07_ROUTE_MOCK \
+            NO_COLOR=1 TERM=dumb P07_BENCH_DIR="$work/bench" P07_REPORT_DIR="$work/reports" \
+            timeout --kill-after=10s 840s bash "$work/runtime/vps-audit.sh" >"$work/audit.log" 2>&1 || rc=$?
+          echo "ACTUAL_FULL_AUDIT_EXIT=$rc"
+          test "$rc" = 0
+          sudo -n python3 - "$work" <<'PY'
+          import pathlib,sys,stat
+          root=pathlib.Path(sys.argv[1])
+          reports=list((root/"reports").glob("*.md"))
+          assert len(reports)==1
+          report=reports[0]
+          text=report.read_text()
+          assert text.index("## 验机结论")<text.index("## 基础与网络验机输出")
+          for field in ("综合评级","基础得分","增强磁盘","三网回程","建议","本次耗时"):
+              assert field+"：" in text
+          assert stat.S_IMODE(report.stat().st_mode)==0o600
+          assert not list((root/"reports").glob(".p07-report.*"))
+          assert not list((root/"bench").glob(".p07-fio-*"))
+          print("ACTUAL_REPORT_SUMMARY_RAW_PRIVACY=PASS")
+          print("ACTUAL_BENCHMARK_FILE_CLEANUP=PASS")
+          print("ATOMIC_MODULE_INSTALL_AND_ROLLBACK=NOT_RUN")
+          PY
