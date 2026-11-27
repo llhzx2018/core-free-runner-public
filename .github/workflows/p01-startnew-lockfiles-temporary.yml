@@ -1,0 +1,220 @@
+name: TEMP P01 exact dependency lock resolution
+on:
+  pull_request:
+    types: [opened]
+    branches: [main]
+    paths:
+      - .github/workflows/p01-startnew-lockfiles-temporary.yml
+permissions:
+  contents: read
+concurrency:
+  group: p01-exact-lock-resolution-5530f470
+  cancel-in-progress: false
+jobs:
+  resolve:
+    if: >-
+      github.repository == 'llhzx2018/core-free-runner-public' &&
+      github.actor == 'llhzx2018' &&
+      github.triggering_actor == 'llhzx2018' &&
+      github.event.pull_request.user.login == 'llhzx2018' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'test/p01-startnew-lockfiles-20261127'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      P01_SOURCE: '5530f470b66cf9b2c655e1c9c4bc7cd731442891'
+      P01_TREE: '68213b9621c59f736c499c151f4318d08c65a850'
+      P01_BRANCH: 'feat/p01-legacy-ux-parity-20261127'
+      GOV_SOURCE: 'ae3864dc30315b4344a9294eb994018eb6c75e72'
+    steps:
+      - name: Transient exact P01 source without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-startnew
+          ref: 5530f470b66cf9b2c655e1c9c4bc7cd731442891
+          path: target
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Verify exact private inputs
+        shell: bash
+        working-directory: target
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$P01_SOURCE"
+          test "$(git rev-parse HEAD^{tree})" = "$P01_TREE"
+          test -z "$(git status --porcelain)"
+          test "$(git hash-object composer.json)" = 67f056f508636f59f5fff1c078b2ec497b0baf49
+          test "$(git hash-object package.json)" = 7ea28678c37964f9b4f2e7fee3e857f7110d9ebf
+          test ! -e .env
+          test ! -L composer.json
+          test ! -L package.json
+          echo P01_EXACT_RESOLVER_INPUT=PASS
+      - name: Official PHP compatibility runtime and exact Composer
+        uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962
+        with:
+          php-version: '8.4'
+          tools: composer:2.11.3
+          extensions: mbstring, pdo_sqlite, sqlite3, pdo_mysql, dom, xml, curl, zip, openssl, sodium
+          coverage: none
+      - name: Exact Node toolchain
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.22.3'
+      - name: Install exact resolver and assert real executable versions
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          php -r 'exit(PHP_VERSION_ID>=80428 && PHP_VERSION_ID<80500 ? 0:2);'
+          test "$(node --version)" = v24.22.3
+          composer --no-plugins --no-scripts --no-ansi --version | grep -Eq '^Composer version 2\.11\.3( |$)'
+          mkdir -p "$RUNNER_TEMP/p01-resolver-tools"
+          if ! npm install --prefix "$RUNNER_TEMP/p01-resolver-tools" --ignore-scripts --save-exact --no-fund pnpm@11.29.0 > "$RUNNER_TEMP/p01-bootstrap.log" 2>&1; then
+            echo P01_PNPM_BOOTSTRAP=FAIL
+            exit 1
+          fi
+          test "$("$RUNNER_TEMP/p01-resolver-tools/node_modules/.bin/pnpm" --version)" = 11.29.0
+          printf '%s\n' "$RUNNER_TEMP/p01-resolver-tools/node_modules/.bin" >> "$GITHUB_PATH"
+          echo P01_REAL_RESOLVER_TOOLS=PASS
+      - name: Resolve and install real same-project locks with bounded retries
+        shell: bash
+        working-directory: target
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          export COMPOSER_HOME="$RUNNER_TEMP/p01-composer-home"
+          export COMPOSER_CACHE_DIR="$RUNNER_TEMP/p01-composer-cache"
+          export COMPOSER_NO_INTERACTION=1
+          mkdir -p "$COMPOSER_HOME" "$COMPOSER_CACHE_DIR"
+          phase() {
+            local label="$1"; shift
+            local log="$RUNNER_TEMP/p01-phase-$label.log"
+            if "$@" > "$log" 2>&1; then
+              echo "$label=PASS"; return
+            fi
+            if grep -Eiq 'could not resolve host|temporary failure in name resolution|EAI_AGAIN|ECONNRESET|ETIMEDOUT|connection timed out|connection reset by peer' "$log"; then
+              echo "$label=TRANSIENT_RETRY_ONCE"
+              sleep 3
+              if "$@" > "$log" 2>&1; then echo "$label=PASS"; return; fi
+            fi
+            echo "$label=FAIL"
+            exit 1
+          }
+          phase P01_COMPOSER_RESOLVE composer update --with-all-dependencies --no-install --no-scripts --no-plugins --no-interaction --prefer-dist --no-progress
+          phase P01_PNPM_RESOLVE pnpm install --lockfile-only --ignore-scripts --store-dir "$RUNNER_TEMP/p01-pnpm-store"
+          test -s composer.lock
+          test -s pnpm-lock.yaml
+          test ! -L composer.lock
+          test ! -L pnpm-lock.yaml
+          rm -- package-lock.json
+          phase P01_COMPOSER_VALIDATE composer --no-plugins --no-scripts validate --no-check-publish --no-check-all --strict
+          phase P01_COMPOSER_AUDIT composer --no-plugins --no-scripts audit --locked
+          phase P01_COMPOSER_FROZEN composer install --no-scripts --no-plugins --no-interaction --prefer-dist --no-progress
+          phase P01_COMPOSER_PLATFORM composer --no-plugins --no-scripts check-platform-reqs
+          phase P01_PNPM_FROZEN pnpm install --frozen-lockfile --ignore-scripts --store-dir "$RUNNER_TEMP/p01-pnpm-store"
+          phase P01_PNPM_AUDIT pnpm audit
+          test "$(git hash-object composer.json)" = 67f056f508636f59f5fff1c078b2ec497b0baf49
+          test "$(git hash-object package.json)" = 7ea28678c37964f9b4f2e7fee3e857f7110d9ebf
+          echo P01_REAL_LOCK_RESOLUTION=PASS
+      - name: Transient trusted GOV baseline checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/gov-doc
+          ref: ae3864dc30315b4344a9294eb994018eb6c75e72
+          path: authority
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Real canonical runtime version gate and exact lock provenance
+        shell: bash
+        working-directory: target
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          test "$(git -C ../authority rev-parse HEAD)" = "$GOV_SOURCE"
+          test -z "$(git -C ../authority status --porcelain)"
+          test "$(git -C ../authority hash-object governance/agent/validate_repository_entry.py)" = 664a1404890399c13b79d33e5faf9673d281cb64
+          test "$(git -C ../authority hash-object governance/agent/VF_WEB_APP_TECHNOLOGY_BASELINE_V1.json)" = 3f7c88c5c437cd19ec3d01a58b1ed44023cd3325
+          if ! python3 -E -s -B ../authority/governance/agent/validate_repository_entry.py --gov-root "$GITHUB_WORKSPACE/authority" --web-stack-root "$GITHUB_WORKSPACE/target" > "$RUNNER_TEMP/p01-version-gate.json" 2>&1; then
+            echo P01_CANONICAL_RUNTIME_VERSION_GATE=FAIL
+            exit 1
+          fi
+          python3 - <<'PY'
+          import hashlib,json,os,subprocess
+          from pathlib import Path
+          result=json.loads((Path(os.environ["RUNNER_TEMP"])/"p01-version-gate.json").read_text())
+          assert result.get("result")=="VERSION_CHECK_PASS" and result.get("pnpm_lock_and_runtime")=="CHECKED" and not result.get("errors")
+          evidence=Path("docs/evidence/DEPENDENCY_LOCK_PROVENANCE.json")
+          previous=json.loads(evidence.read_text())
+          run="https://github.com/llhzx2018/core-free-runner-public/actions/runs/"+os.environ["GITHUB_RUN_ID"]
+          def lock(path):
+              p=Path(path)
+              return {"sha256":hashlib.sha256(p.read_bytes()).hexdigest(),"git_blob":subprocess.check_output(["git","hash-object",path],text=True).strip()}
+          data={"schema":previous["schema"],"repository":"llhzx2018/vf-startnew",
+                "expected_branch":os.environ["P01_BRANCH"],"resolved_from_source":os.environ["P01_SOURCE"],
+                "resolved_from_tree":os.environ["P01_TREE"],"gov_commit":os.environ["GOV_SOURCE"],
+                "source_machine_run":run,"pinned_machine_run":run,
+                "files":{p:lock(p) for p in ("composer.lock","pnpm-lock.yaml")},
+                "previous_lock_provenance":previous,
+                "scope":"DEVELOPMENT_LOCKS_AND_REAL_VERSION_GATE_PHP84_ONLY_NOT_FULL_RELEASE",
+                "full_release_ready":False}
+          evidence.write_text(json.dumps(data,indent=2)+"\n")
+          PY
+          python3 -B scripts/check_dependency_lock.py > "$RUNNER_TEMP/p01-provenance.log" 2>&1
+          git diff --exit-code -- composer.json package.json
+          echo P01_CANONICAL_RUNTIME_VERSION_GATE=PASS
+      - name: Commit only validated lockfiles and receipt to exact private development branch
+        shell: bash
+        working-directory: target
+        env:
+          WF_WRITE_TOKEN: ${{ secrets.VF_RELEASE_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+          set +x
+          umask 077
+          test -n "$WF_WRITE_TOKEN"
+          test "$(git rev-parse HEAD)" = "$P01_SOURCE"
+          test "$(git rev-parse HEAD^{tree})" = "$P01_TREE"
+          test "$(git remote get-url origin)" = https://github.com/llhzx2018/vf-startnew
+          git add -- composer.lock pnpm-lock.yaml package-lock.json docs/evidence/DEPENDENCY_LOCK_PROVENANCE.json
+          expected="$(printf '%s\n' composer.lock docs/evidence/DEPENDENCY_LOCK_PROVENANCE.json package-lock.json pnpm-lock.yaml)"
+          test "$(git diff --cached --name-only | LC_ALL=C sort)" = "$expected"
+          git diff --exit-code
+          test -z "$(git ls-files --others --exclude-standard)"
+          cat > "$RUNNER_TEMP/p01-lock-askpass.sh" <<'ASKPASS'
+          #!/bin/sh
+          case "$1" in
+            *Username*) printf 'x-access-token';;
+            *Password*) printf '%s' "$WF_WRITE_TOKEN";;
+            *) exit 1;;
+          esac
+          ASKPASS
+          chmod 700 "$RUNNER_TEMP/p01-lock-askpass.sh"
+          export GIT_ASKPASS="$RUNNER_TEMP/p01-lock-askpass.sh"
+          export GIT_TERMINAL_PROMPT=0
+          export GIT_CONFIG_NOSYSTEM=1
+          export GIT_CONFIG_GLOBAL=/dev/null
+          actual="$(git -c credential.helper= ls-remote origin "refs/heads/$P01_BRANCH" | cut -f1)"
+          test "$actual" = "$P01_SOURCE"
+          git -c core.hooksPath=/dev/null -c user.name='VF Dependency Lock Validation' -c user.email='github-actions[bot]@users.noreply.github.com' commit -m 'P01: resolve real approved Composer and pnpm locks' > "$RUNNER_TEMP/p01-write.log" 2>&1
+          new="$(git rev-parse HEAD)"
+          if ! git -c credential.helper= -c core.hooksPath=/dev/null push origin "HEAD:refs/heads/$P01_BRANCH" >> "$RUNNER_TEMP/p01-write.log" 2>&1; then
+            echo P01_EXACT_PRIVATE_LOCK_WRITE=FAIL
+            exit 1
+          fi
+          test "$(git -c credential.helper= ls-remote origin "refs/heads/$P01_BRANCH" | cut -f1)" = "$new"
+          echo "P01_PRIVATE_LOCK_COMMIT=$new"
+          echo P01_EXACT_PRIVATE_LOCK_WRITE=PASS
+      - name: Always remove private checkout, resolver caches and logs
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          set +x
+          rm -rf -- target authority "$RUNNER_TEMP/p01-resolver-tools" "$RUNNER_TEMP/p01-composer-home" "$RUNNER_TEMP/p01-composer-cache" "$RUNNER_TEMP/p01-pnpm-store"
+          rm -f -- "$RUNNER_TEMP"/p01-phase-*.log "$RUNNER_TEMP/p01-bootstrap.log" "$RUNNER_TEMP/p01-version-gate.json" "$RUNNER_TEMP/p01-provenance.log" "$RUNNER_TEMP/p01-write.log" "$RUNNER_TEMP/p01-lock-askpass.sh"
+          test ! -e target && test ! -e authority
+          echo P01_PRIVATE_LOCK_WORKSPACE_CLEANUP=PASS
