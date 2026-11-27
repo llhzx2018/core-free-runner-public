@@ -257,6 +257,56 @@ START_EPOCH=10 end_epoch=30
         self.assertTrue(entries[0].is_dir())
         self.assertEqual(list(entries[0].iterdir()),[])
 
+    def test_m02_ux4_actual_atomic_install_in_disposable_root(self):
+        # Existing public product UX gate, no new workflow or Runner.
+        # Refuse execution as root on an ordinary machine with an existing host.
+        if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
+            self.skipTest("real root installer proof requires disposable GitHub-hosted runner")
+        cmd=["python3","-B",str(ROOT/"tests/p07_m02_ux4_actual_atomic_gate.py")]
+        if os.geteuid()!=0:
+            cmd=["sudo","-n",*cmd]
+        p=subprocess.run(cmd,text=True,capture_output=True,timeout=150)
+        self.assertEqual(p.returncode,0,p.stderr[-1500:])
+        for marker in ("M02_OFFICIAL_UX3_TO_EXACT_UX4_REAL_ATOMIC=PASS",
+                       "M02_BAD_ARCHIVE_RESEALED_OLD_AND_FAILED_SWITCH=PASS",
+                       "M02_ROLLBACK_REUPGRADE_FRESH_INSTALL_FOUR_SIBLINGS=PASS"):
+            self.assertIn(marker,p.stdout)
+        print(p.stdout, end="")
+
+    def test_m02_ux4_real_menu_40_and_80_columns(self):
+        import fcntl,struct,termios,unicodedata
+        script=ROOT/"experiments/p07-vps-audit-v21-ux4.sh"
+        for cols in (40,80):
+            with self.subTest(cols=cols):
+                master,slave=pty.openpty()
+                fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack("HHHH",24,cols,0,0))
+                proc=subprocess.Popen(["bash",str(script)],stdin=slave,stdout=slave,stderr=slave,env=ENV)
+                os.close(slave)
+                data=bytearray();sent=False
+                try:
+                    until=time.monotonic()+7
+                    while time.monotonic()<until:
+                        ready,_,_=select.select([master],[],[],0.1)
+                        if ready:
+                            try:data.extend(os.read(master,65536))
+                            except OSError:break
+                        if not sent and "请选择 [0-2]：".encode() in data:
+                            os.write(master,b"0\n");sent=True
+                        if proc.poll() is not None and not ready:break
+                    self.assertTrue(sent)
+                    self.assertEqual(proc.wait(timeout=2),0)
+                    out=data.decode("utf-8","replace")
+                    self.assertNotIn("\x1b",out)
+                    self.assertIn("0. 返回工具箱",out)
+                    self.assertNotIn("增强 Markdown 报告",out)
+                    widths=[sum(2 if unicodedata.east_asian_width(c) in ("W","F") else 1 for c in line) for line in out.splitlines()]
+                    self.assertLessEqual(max(widths),cols,out)
+                    self.assertLessEqual(len(widths),24,out)
+                finally:
+                    if proc.poll() is None:
+                        proc.kill();proc.wait(timeout=2)
+                    os.close(master)
+
     def test_m04_main_menu(self):
         out = run_menu(self.m04)
         self.assertIn("本页只显示最近缓存", out)
