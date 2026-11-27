@@ -294,17 +294,19 @@ print_fio_header(){
 print_fio_row(){
   local bs="$1" qd="$2" rb="$3" ri="$4" wb="$5" wi="$6"
   printf ' %s · QD %s\n' "$bs" "$qd"
-  printf '   读取 %s MB/s\n   IOPS %s\n' "$rb" "$ri"
-  printf '   写入 %s MB/s\n   IOPS %s\n' "$wb" "$wi"
+  result_line "  读取 $rb MB/s"
+  result_line "  IOPS $ri"
+  result_line "  写入 $wb MB/s"
+  result_line "  IOPS $wi"
 }
 print_fio(){
   rule
   printf '%s%s 增强磁盘低负载测试%s\n' "$BOLD" "$CYAN" "$RESET"
   printf ' %s有界文件：%s MiB；低队列深度。%s\n' "$GRAY" "$FIO_TEST_MIB" "$RESET"
   printf ' %snice/ionice 降低资源竞争。%s\n' "$GRAY" "$RESET"
-  if ! fio_preflight; then printf ' %s当前负载/内存/磁盘空间不满足安全条件，已自动跳过。%s\n' "$YELLOW" "$RESET"; FIO_VERDICT="未执行"; return 0; fi
-  if ! prepare_fio; then printf ' %sfio 不可安全使用，已自动跳过。%s\n' "$YELLOW" "$RESET"; FIO_VERDICT="未执行"; return 0; fi
-  printf ' 测试引擎           : %s\n' "$FIO_SOURCE"
+  if ! fio_preflight; then result_line '负载/内存/磁盘空间不满足安全条件。已安全跳过。'; FIO_VERDICT="未执行"; return 0; fi
+  if ! prepare_fio; then result_line 'fio 不可安全使用，已安全跳过。'; FIO_VERDICT="未执行"; return 0; fi
+  result_line "测试引擎：$FIO_SOURCE"
   print_fio_header
   local bs qd row rb ri wb wi rc pass=0
   for bs in 4k 64k 512k 1m; do
@@ -321,9 +323,9 @@ print_fio(){
   done
   assess_fio
   printf ' 有效档位           : %s / 4\n' "$pass"
-  printf ' 小文件/数据库      : %s\n' "$FIO_SMALL"
-  printf ' 大块混合吞吐       : %s\n' "$FIO_LARGE"
-  printf ' 增强磁盘判断       : %s\n' "$FIO_VERDICT"
+  result_line "小文件/数据库：$FIO_SMALL"
+  result_line "大块混合吞吐：$FIO_LARGE"
+  result_line "增强磁盘判断：$FIO_VERDICT"
 }
 
 route_mock(){
@@ -395,17 +397,19 @@ print_route_header(){
   printf '地区 / 线路 / 等级\n'
 }
 print_route_row(){
-  printf ' %s\n   %s · %s\n' "$1" "$2" "$3"
+  result_line "$1"
+  result_line "  $2 · $3"
 }
 print_three_carrier_route(){
   rule
   printf '%s%s 中国三网回程%s\n' "$BOLD" "$CYAN" "$RESET"
-  printf ' %s只读短探测；识别电信 CN2/163、联通 9929/4837、移动 CMIN2/CMI。%s\n' "$GRAY" "$RESET"
+  result_line '只读短探测；识别电信 CN2/163、联通 9929/4837、移动 CMIN2/CMI。'
   run_three_carrier_route
   local n good ct_good cu_good cm_good
   n="$(wc -l <"$ROUTE_TSV" 2>/dev/null | tr -d ' ')"; [[ "$n" =~ ^[0-9]+$ ]] || n=0
   if (( n == 0 )); then
-    printf ' %s当前内核/权限未取得可靠三网回程证据，已安全跳过，不影响其它验机结果。%s\n' "$YELLOW" "$RESET"
+    result_line '未取得可靠三网回程证据，已安全跳过。'
+    result_line '不影响其他验机结果。'
     return 0
   fi
   print_route_header
@@ -419,7 +423,7 @@ print_three_carrier_route(){
   printf ' 电信优质回程       : %s / 4\n' "$ct_good"
   printf ' 联通优质回程       : %s / 4\n' "$cu_good"
   printf ' 移动优质回程       : %s / 4\n' "$cm_good"
-  printf ' 三网回程证据       : %s\n' "$ROUTE_VERDICT"
+  result_line "三网回程证据：$ROUTE_VERDICT"
 }
 
 extract_base_summary(){
@@ -495,16 +499,34 @@ render_markdown_body(){
   )
 }
 
+result_line() {
+  # Conservative width: every non-ASCII code point occupies at most two cells.
+  # Preserve measurement text; control characters are not terminal instructions.
+  local LC_ALL=C.UTF-8 text="$1" line=' ' ch code width=1 cells i
+  for ((i=0;i<${#text};i++)); do
+    ch="${text:i:1}"
+    printf -v code '%d' "'$ch"
+    if (( code < 32 || (code >= 127 && code <= 159) )); then ch='?'; code=63; fi
+    cells=1; (( code > 126 )) && cells=2
+    if (( width+cells > 36 )); then
+      printf '%s\n' "$line"
+      line=' '; width=1
+    fi
+    line+="$ch"; width=$((width+cells))
+  done
+  printf '%s\n' "$line"
+}
+
 render_terminal_summary() {
   rule
   printf '%s%s 验机结论%s\n' "$BOLD" "$CYAN" "$RESET"
-  printf ' 综合评级       : %s\n' "$BASE_GRADE"
-  printf ' 基础得分       : %s\n' "$BASE_SCORE"
-  printf ' 增强磁盘       : %s\n' "$FIO_VERDICT"
-  printf ' 三网回程       : %s\n' "$ROUTE_VERDICT"
-  printf ' 建议           : %s\n' "$FINAL_RECOMMEND"
-  printf ' 本次耗时       : %s 秒\n' "$((end_epoch-START_EPOCH))"
-  printf ' 结果说明       : 未取得证据的项目标为证据不足，不冒充已通过。\n'
+  result_line "综合评级：$BASE_GRADE"
+  result_line "基础得分：$BASE_SCORE"
+  result_line "增强磁盘：$FIO_VERDICT"
+  result_line "三网回程：$ROUTE_VERDICT"
+  result_line "建议：$FINAL_RECOMMEND"
+  result_line "本次耗时：$((end_epoch-START_EPOCH)) 秒"
+  result_line '缺少证据的项目不计为通过。'
 }
 
 printf '%s%s服务器性能检测  %s%s\n' "$BOLD" "$CYAN" "$VERSION" "$RESET"

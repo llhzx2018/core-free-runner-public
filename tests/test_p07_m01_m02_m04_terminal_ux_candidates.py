@@ -307,6 +307,61 @@ START_EPOCH=10 end_epoch=30
                         proc.kill();proc.wait(timeout=2)
                     os.close(master)
 
+    def test_m02_ux4_result_page_in_actual_40_80_pty(self):
+        import errno,fcntl,re,struct,termios,unicodedata
+        src=(ROOT/"experiments/p07-vps-audit-v21-ux4.sh").read_text()
+        summary=src[src.index("result_line() {"):src.index("\nprintf '%s%s服务器性能检测")]
+        disk=src[src.index("print_fio_row(){"):src.index("\nprint_fio(){")]
+        route_row=src[src.index("print_route_row(){"):src.index("\nprint_three_carrier_route(){")]
+        recommendation="适合轻量网站；数据库/混合磁盘负载需观察；请结合实际业务决定"
+        for cols in (40,80):
+            for color in (False,True):
+                for route in ("证据不足","有效 12/12，优质 10/12"):
+                    with self.subTest(cols=cols,color=color,route=route):
+                        master,slave=pty.openpty()
+                        fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack("HHHH",24,cols,0,0))
+                        env={**os.environ,"TERM":"xterm","BASE_GRADE":"良好","BASE_SCORE":"88",
+                             "FIO_VERDICT":"可用","ROUTE_VERDICT":route,"FINAL_RECOMMEND":recommendation}
+                        env.pop("NO_COLOR",None)
+                        if not color:env["NO_COLOR"]="1"
+                        prelude=r'''
+set -euo pipefail
+rule(){ printf '%s\n' '--------------------------------'; }
+BOLD= CYAN= RESET=
+if [[ -t 0 && -t 1 && -z "${NO_COLOR:-}" ]]; then
+  BOLD=$'\033[1m'; CYAN=$'\033[36m'; RESET=$'\033[0m'
+fi
+end_epoch=408 START_EPOCH=0
+'''
+                        p=subprocess.Popen(["bash","-c",prelude+summary+"\n"+disk+"\n"+route_row+
+                            '\nrender_terminal_summary\nprint_fio_row 4k 4 123.45 30000 67.89 16000\nprint_route_row 北京电信 电信CN2 优质\n'],
+                            stdin=slave,stdout=slave,stderr=slave,env=env)
+                        os.close(slave);data=bytearray()
+                        try:
+                            until=time.monotonic()+5
+                            while time.monotonic()<until:
+                                ready,_,_=select.select([master],[],[],0.1)
+                                if ready:
+                                    try:data.extend(os.read(master,65536))
+                                    except OSError as exc:
+                                        if exc.errno!=errno.EIO:raise
+                                        break
+                                if p.poll() is not None and not ready:break
+                            self.assertEqual(p.wait(timeout=2),0)
+                            raw=data.decode()
+                            self.assertEqual("\x1b[" in raw,color)
+                            plain=re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]","",raw)
+                            lines=plain.splitlines()
+                            widths=[sum(2 if ord(c)>127 and unicodedata.east_asian_width(c) in ("W","F","A") else 1 for c in l) for l in lines]
+                            self.assertLessEqual(max(widths),cols,plain)
+                            self.assertLessEqual(len(lines),24,plain)
+                            flat="".join(l.lstrip() for l in lines)
+                            for expected in (recommendation,route,"123.45","30000","67.89","16000","北京电信","电信CN2","缺少证据的项目不计为通过"):
+                                self.assertIn(expected,flat)
+                        finally:
+                            if p.poll() is None:p.kill();p.wait(timeout=2)
+                            os.close(master)
+
     def test_m04_main_menu(self):
         out = run_menu(self.m04)
         self.assertIn("本页只显示最近缓存", out)
