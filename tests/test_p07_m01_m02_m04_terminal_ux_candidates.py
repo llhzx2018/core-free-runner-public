@@ -213,6 +213,95 @@ class CandidateSandbox(unittest.TestCase):
         self.assertIn("未知命令", p.stderr)
         self.assertIn("暂无最近检查结果", self.m04.read_text())
 
+    def m04_ux6_fixture(self):
+        # Actual candidate shell files on a temporary copy; no published
+        # runtime writes and no host package changes.
+        root=self.root/"m04-ux6"
+        shutil.copytree(CARE_OLD,root)
+        source=ROOT/"packages/p07-system-care/0.1.0-ux6"
+        for name in ("vf-system-care.sh","lib/common.sh","updates.sh"):
+            shutil.copy2(source/name,root/name)
+        (root/"VERSION").write_text("0.1.0-ux6\n")
+        return root
+
+    def test_m04_ux6_failed_apt_query_is_unknown_and_blocks_menu(self):
+        root=self.m04_ux6_fixture()
+        common=root/"lib/common.sh"
+        script=root/"vf-system-care.sh"
+        # The exact functions are executed by real Bash; the APT replies
+        # are synthetic so that no package manager writes are possible.
+        source=script.read_text()
+        flow=source[source.index("updates_flow_beginner() {"):source.index("\ncleanup_flow_beginner() {")]
+        shell='source "$1"\n'+r'''
+apt(){ printf 'Listing...\n'; return 100; }
+apt-get(){ printf '0 upgraded, 0 newly installed, 0 to remove\n'; return 100; }
+write_update_cache(){ printf 'CACHE=%s,%s\n' "$1" "$2"; }
+run_action_friendly(){ printf 'UNEXPECTED_WRITE_ACTION\n'; return 91; }
+pause_menu(){ :; }
+'''+flow+'\nupdates_flow_beginner\n'
+        p=subprocess.run(["bash","-c",shell,"bash",str(common)],capture_output=True,text=True,
+                         env=ENV,timeout=8)
+        self.assertEqual(p.returncode,0,p.stderr)
+        self.assertIn("CACHE=UNKNOWN,UNKNOWN",p.stdout)
+        self.assertIn("更新状态未确认；未执行安装",p.stdout)
+        self.assertNotIn("UNEXPECTED_WRITE_ACTION",p.stdout)
+        self.assertNotIn("没有可安装更新",p.stdout)
+
+    def test_m04_ux6_zero_is_valid_only_after_successful_apt_query(self):
+        root=self.m04_ux6_fixture()
+        shell=r'''
+source "$1"
+apt(){ printf 'Listing...\n'; }
+apt-get(){ printf '0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded.\n'; }
+printf 'COUNTS=%s,%s\n' "$(apt_upgradable_count)" "$(apt_security_count)"
+apt(){ printf 'unrecognized response\n'; }
+apt-get(){ printf 'unrecognized response\n'; }
+printf 'INVALID=%s,%s\n' "$(apt_upgradable_count)" "$(apt_security_count)"
+'''
+        p=subprocess.run(["bash","-c",shell,"bash",str(root/"lib/common.sh")],
+                         text=True,capture_output=True,timeout=8,env=ENV)
+        self.assertEqual(p.returncode,0,p.stderr)
+        self.assertIn("COUNTS=0,0",p.stdout)
+        self.assertIn("INVALID=UNKNOWN,UNKNOWN",p.stdout)
+
+    def test_m04_ux6_security_list_query_failure_is_not_empty_success(self):
+        root=self.m04_ux6_fixture()
+        source=(root/"updates.sh").read_text()
+        fn=source[source.index("security_packages() {"):source.index("\ncloudpanel_protected_package() {")]
+        flow=source[source.index("apply_security() {"):source.index("\napply_all() {")]
+        shell='source "$1"\n'+fn+'\n'+flow+r'''
+require_root(){ :; }
+require_apt(){ :; }
+apt-get(){ printf 'Inst sample (1 security)\n'; return 100; }
+confirm_numeric(){ printf 'UNEXPECTED_CONFIRM\n'; return 1; }
+apply_security
+'''
+        p=subprocess.run(["bash","-c",shell,"bash",str(root/"lib/common.sh")],
+                         text=True,capture_output=True,env=ENV,timeout=8)
+        self.assertEqual(p.returncode,90,p.stderr)
+        self.assertIn("安全更新清单未确认",p.stderr)
+        self.assertNotIn("UNEXPECTED_CONFIRM",p.stdout)
+        self.assertNotIn("没有识别到安全更新",p.stdout)
+
+    def test_m04_ux6_plain_terminal_even_when_legacy_force_color(self):
+        root=self.m04_ux6_fixture()
+        p=subprocess.run(["bash","-c",'source "$1"; ui_title "系统更新"; ui_rule; screen_clear; pause_menu',
+                          "bash",str(root/"lib/common.sh")],input="",capture_output=True,text=True,
+                         env={**ENV,"P07_FORCE_COLOR":"1"},timeout=8)
+        self.assertEqual(p.returncode,0,p.stderr)
+        self.assertIn("系统更新",p.stdout)
+        self.assertNotIn("\x1b",p.stdout)
+        self.assertNotIn("按 Enter 返回",p.stdout)
+        self.assertLessEqual(max(map(len,p.stdout.splitlines())),32)
+
+    def test_m04_ux6_real_menu_returns(self):
+        root=self.m04_ux6_fixture()
+        out=run_menu(root/"vf-system-care.sh",b"9\n0\n")
+        self.assertIn("只显示最近缓存",out)
+        self.assertIn("0. 返回工具箱",out)
+        self.assertIn("无效选择",out)
+        self.assertNotIn("\x1b",out)
+
     def test_m04_no_color_non_tty(self):
         for arg in ("--help", "--version"):
             p = run_command(self.m04, arg)
