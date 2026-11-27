@@ -444,7 +444,7 @@ write_markdown(){
   local md temporary
   # Write privately, then publish a complete report without replacing an
   # existing file. A failed write or collision never advertises success.
-  md="$REPORT_DIR/p07-vps-audit-v21_${STAMP}_$.md"
+  md="$REPORT_DIR/p07-vps-audit-v21_${STAMP}_$$.md"
   temporary="$(mktemp "$REPORT_DIR/.p07-report.XXXXXXXX")" || {
     printf '检测已结束，但无法创建报告。请检查保存目录。\n' >&2
     return 1
