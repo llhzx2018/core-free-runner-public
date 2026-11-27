@@ -192,7 +192,7 @@ class CandidateSandbox(unittest.TestCase):
         self.assertNotIn("\x1b", out)
         self.assertNotIn("增强 Markdown 报告", out)
 
-    def m02_ux4_render(self, target, fail=False):
+    def m02_ux4_render(self, target, fail=False, directory_collision=False):
         # Actual original report writers with synthetic measurement inputs,
         # not a CPU/network benchmark or full installation test.
         source = (ROOT / "experiments/p07-vps-audit-v21-ux4.sh").read_text()
@@ -216,6 +216,8 @@ START_EPOCH=10 end_epoch=30
 """
         if fail:
             prelude += 'ln(){ return 1; }\n'
+        if directory_collision:
+            prelude += 'mkdir -- "$REPORT_DIR/p07-vps-audit-v21_${STAMP}_$$.md"\n'
         return subprocess.run(["bash", "-c", prelude+fragment+"\nwrite_markdown\n"],
                               capture_output=True,text=True,env=env,timeout=8)
 
@@ -247,6 +249,13 @@ START_EPOCH=10 end_epoch=30
         p=self.m02_ux4_render(target/"missing")
         self.assertNotEqual(p.returncode,0)
         self.assertIn("无法创建报告",p.stderr)
+        p=self.m02_ux4_render(target,directory_collision=True)
+        self.assertNotEqual(p.returncode,0)
+        self.assertIn("报告未保存",p.stderr)
+        entries=list(target.iterdir())
+        self.assertEqual(len(entries),1)
+        self.assertTrue(entries[0].is_dir())
+        self.assertEqual(list(entries[0].iterdir()),[])
 
     def test_m04_main_menu(self):
         out = run_menu(self.m04)

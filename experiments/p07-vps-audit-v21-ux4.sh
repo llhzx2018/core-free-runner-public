@@ -454,7 +454,7 @@ write_markdown(){
     printf '检测已结束，但报告写入失败。\n' >&2
     return 1
   fi
-  if [[ ! -s "$temporary" ]] || ! ln -- "$temporary" "$md"; then
+  if [[ ! -s "$temporary" ]] || ! ln -T -- "$temporary" "$md"; then
     rm -f -- "$temporary"
     printf '检测已结束，但报告未保存。请检查目录及同名文件。\n' >&2
     return 1
