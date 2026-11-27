@@ -180,6 +180,74 @@ class CandidateSandbox(unittest.TestCase):
             self.assertNotIn("\033[", p.stdout)
         self.assertNotIn("\033[", run_menu(self.m02))
 
+    def test_m02_ux4_menu_and_identity(self):
+        script = ROOT / "experiments/p07-vps-audit-v21-ux4.sh"
+        p = run_command(script, "--build-id")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.strip(), "2.1.1-ux4")
+        out = run_menu(script, b"9\n0\n")
+        self.assertIn("开始完整 VPS 验机", out)
+        self.assertIn("选择无效", out)
+        self.assertIn("0. 返回工具箱", out)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("增强 Markdown 报告", out)
+
+    def m02_ux4_render(self, target, fail=False):
+        # Actual original report writers with synthetic measurement inputs,
+        # not a CPU/network benchmark or full installation test.
+        source = (ROOT / "experiments/p07-vps-audit-v21-ux4.sh").read_text()
+        begin = source.index("write_markdown(){")
+        end = source.index("render_terminal_summary()", begin)
+        fragment = source[begin:end]
+        base = self.root / "base.txt"
+        fio = self.root / "fio.tsv"
+        route = self.root / "route.tsv"
+        base.write_text("原始基础测量数据\n")
+        fio.write_text("4k\t4|10|100|20|200\n")
+        route.write_text("北京电信\t电信CN2\t优质\n")
+        env = {**ENV, "REPORT_DIR": str(target), "BASE_PLAIN": str(base),
+               "FIO_TSV": str(fio), "ROUTE_TSV": str(route)}
+        prelude = """set -uo pipefail
+VERSION=V2.1.1
+STAMP=fixture
+BASE_GRADE=良好 BASE_SCORE=88 FIO_VERDICT=可用
+ROUTE_VERDICT=证据不足 FINAL_RECOMMEND=适合轻量网站
+START_EPOCH=10 end_epoch=30
+"""
+        if fail:
+            prelude += 'ln(){ return 1; }\n'
+        return subprocess.run(["bash", "-c", prelude+fragment+"\nwrite_markdown\n"],
+                              capture_output=True,text=True,env=env,timeout=8)
+
+    def test_m02_ux4_report_conclusion_first_and_raw_preserved(self):
+        target=self.root/"reports"
+        target.mkdir()
+        p=self.m02_ux4_render(target)
+        self.assertEqual(p.returncode,0,p.stderr)
+        files=list(target.glob("*.md"))
+        self.assertEqual(len(files),1)
+        report=files[0].read_text()
+        self.assertLess(report.index("## 验机结论"),report.index("## 基础与网络验机输出"))
+        for item in ("综合评级：良好","基础得分：88","三网回程：证据不足",
+                     "建议：适合轻量网站","本次耗时：20 秒","原始基础测量数据",
+                     "| 4k | 4 | 10 | 100 | 20 | 200 |","北京电信"):
+            self.assertIn(item,report)
+        self.assertIn(str(files[0]),p.stdout)
+        self.assertEqual(files[0].stat().st_mode & 0o777,0o600)
+        self.assertFalse(list(target.glob(".p07-report.*")))
+
+    def test_m02_ux4_report_failure_never_advertises_success(self):
+        target=self.root/"reports"
+        target.mkdir()
+        p=self.m02_ux4_render(target,fail=True)
+        self.assertNotEqual(p.returncode,0)
+        self.assertIn("报告未保存",p.stderr)
+        self.assertNotIn("增强 Markdown 报告",p.stdout)
+        self.assertEqual(list(target.iterdir()),[])
+        p=self.m02_ux4_render(target/"missing")
+        self.assertNotEqual(p.returncode,0)
+        self.assertIn("无法创建报告",p.stderr)
+
     def test_m04_main_menu(self):
         out = run_menu(self.m04)
         self.assertIn("本页只显示最近缓存", out)
