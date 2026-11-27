@@ -9,6 +9,9 @@ A separate runner workflow exercises actual old formal M03 install/upgrade.
 from __future__ import annotations
 
 import os
+import pty
+import select
+import time
 from pathlib import Path
 import shutil
 import subprocess
@@ -38,11 +41,45 @@ class P07OwnerLiveRegression(unittest.TestCase):
         self.assertIn('逐文件核验的正式旧版才可升级', content)
 
     def test_toolbox_blank_enter_is_not_an_error_and_m05_intent_is_true(self):
-        text = TOOLBOX.read_text()
-        self.assertIn('      "") continue ;;', text)
-        self.assertIn('新服务器初始化      ${C_GRAY}空机安装/现有环境检查', text)
-        self.assertNotIn('新服务器初始化      ${C_GRAY}系统更新/CloudPanel/数据库选择', text)
-        self.assertIn('--check-m03)', text)
+        # Exercise the actual public menu: blank Enter must redisplay rather
+        # than dispatch any module. Verify the M05 task, not padding or color.
+        master, slave = pty.openpty()
+        proc = subprocess.Popen(["bash", str(TOOLBOX)], stdin=slave,
+                                stdout=slave, stderr=slave,
+                                env={**os.environ, "NO_COLOR":"1", "TERM":"xterm"})
+        os.close(slave)
+        output = bytearray()
+        prompt = "请选择 [0-5]：".encode()
+        sent = 0
+        try:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                ready, _, _ = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        output.extend(os.read(master, 65536))
+                    except OSError:
+                        break
+                if output.count(prompt) > sent and sent < 2:
+                    os.write(master, b"\n" if sent == 0 else b"0\n")
+                    sent += 1
+                if proc.poll() is not None:
+                    break
+            self.assertEqual(sent, 2)
+            self.assertEqual(proc.wait(timeout=2), 0)
+            rendered = output.decode("utf-8", "replace")
+            self.assertEqual(rendered.count("请选择 [0-5]："), 2)
+            self.assertNotIn("无效选择", rendered)
+            self.assertIn("5. 新服务器初始化", rendered)
+            self.assertIn("空机安装", rendered)
+            self.assertIn("现有环境检查", rendered)
+            self.assertNotIn("\x1b", rendered)
+            self.assertIn('--check-m03)', TOOLBOX.read_text())
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=2)
+            os.close(master)
 
     def test_write_confirmation_kept_for_disk_and_module_upgrades(self):
         script = JOURNAL_SCRIPT.read_text()
@@ -62,7 +99,45 @@ class P07OwnerLiveRegression(unittest.TestCase):
 
     def test_no_color_non_tty_maintains_explicit_safety(self):
         text = TOOLBOX.read_text()
-        self.assertIn('[[ -t 1 && -z "${NO_COLOR:-}" ]]', text)
+        # Pipes and redirected output must stay plain even without NO_COLOR.
+        for no_color in (False, True):
+            env = {**os.environ, "TERM":"xterm"}
+            env.pop("NO_COLOR", None)
+            if no_color:
+                env["NO_COLOR"] = "1"
+            for args in (["--help"], ["--version"], ["--modules"], []):
+                with self.subTest(no_color=no_color, args=args):
+                    proc = subprocess.run(["bash", str(TOOLBOX), *args],
+                        input="", capture_output=True, text=True, env=env, timeout=10)
+                    self.assertEqual(proc.returncode, 0 if args else 2)
+                    self.assertNotIn("\x1b", proc.stdout + proc.stderr)
+                    if not args:
+                        self.assertIn("交互式终端", proc.stderr)
+            # stdout is a terminal but stdin is redirected: must not color or clear.
+            master, slave = pty.openpty()
+            proc = subprocess.Popen(["bash", str(TOOLBOX), "--help"],
+                stdin=subprocess.DEVNULL, stdout=slave, stderr=slave, env=env)
+            os.close(slave)
+            chunks = bytearray()
+            try:
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    ready, _, _ = select.select([master], [], [], 0.1)
+                    if ready:
+                        try:
+                            chunks.extend(os.read(master, 65536))
+                        except OSError:
+                            break
+                    if proc.poll() is not None and not ready:
+                        break
+                self.assertEqual(proc.wait(timeout=2), 0)
+                self.assertIn("新服务器初始化", chunks.decode("utf-8", "replace"))
+                self.assertNotIn(b"\x1b", chunks)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                os.close(master)
         self.assertIn('p07_three_ux_route P07-M04',text)
         route=(ROOT/'installers/p07-three-ux-owner-route.py').read_text()
         self.assertIn('升级需要在交互式 SSH 中由本人确认',route)
