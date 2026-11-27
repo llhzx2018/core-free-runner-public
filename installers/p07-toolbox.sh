@@ -168,34 +168,33 @@ M05_CACHE_RECOVERY_URL="https://github.com/llhzx2018/core-free-runner-public/rel
 M05_CACHE_RECOVERY_BLOB="ab185d13f3db07b76bd2ccc5da80263acbeffa3c"
 
 C_RESET=''; C_BOLD=''; C_CYAN=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_GRAY=''
-if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+if [[ -t 0 && -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != dumb ]]; then
   C_RESET=$'\033[0m'; C_BOLD=$'\033[1m'; C_CYAN=$'\033[36m'; C_GREEN=$'\033[32m'; C_YELLOW=$'\033[33m'; C_RED=$'\033[31m'; C_GRAY=$'\033[90m'
 fi
 
 say() { printf '%b\n' "$*"; }
 pause_menu() { [[ -t 0 ]] || return 0; printf '\n按 Enter 返回主菜单...'; read -r _ || true; }
-screen_clear() { if [[ -t 0 && -t 1 && -z "${NO_COLOR:-}" ]]; then printf '\033[2J\033[H'; fi; }
+screen_clear() { if [[ -t 0 && -t 1 && -z "${NO_COLOR:-}" && "${TERM:-}" != dumb ]]; then printf '\033[2J\033[H'; fi; }
 
 show_header() {
   screen_clear
-  say "${C_CYAN}┌──────────────────────────────────────────────────────────────┐${C_RESET}"
-  say "${C_CYAN}│${C_RESET}  ${C_BOLD}服务器工具箱${C_RESET}   ${C_GRAY}${VERSION}${C_RESET}                                       ${C_CYAN}│${C_RESET}"
-  say "${C_CYAN}└──────────────────────────────────────────────────────────────┘${C_RESET}"
-  say
+  say "${C_BOLD}服务器工具箱${C_RESET}  ${C_GRAY}${VERSION}${C_RESET}"
+  say "${C_GRAY}--------------------------------${C_RESET}"
 }
 
 show_menu() {
   show_header
   say "${C_BOLD}功能：5 项${C_RESET}"
   say
-  say "  ${C_CYAN}1.${C_RESET} 网络代理节点        ${C_GRAY}V2Ray代理${C_RESET}"
-  say "  ${C_CYAN}2.${C_RESET} 服务器性能检测      ${C_GRAY}VPS验机${C_RESET}"
-  say "  ${C_CYAN}3.${C_RESET} 网站与数据          ${C_GRAY}网站/数据库/备份${C_RESET}"
-  say "  ${C_CYAN}4.${C_RESET} 服务器维护与安全    ${C_GRAY}更新/清理/安全${C_RESET}"
-  say "  ${C_CYAN}5.${C_RESET} 新服务器初始化      ${C_GRAY}空机安装/现有环境检查${C_RESET}"
+  say "  ${C_CYAN}1.${C_RESET} 网络代理节点 · V2Ray"
+  say "  ${C_CYAN}2.${C_RESET} 服务器性能检测 · VPS 验机"
+  say "  ${C_CYAN}3.${C_RESET} 网站与数据 · 备份/迁移"
+  say "  ${C_CYAN}4.${C_RESET} 服务器维护与安全"
+  say "  ${C_CYAN}5.${C_RESET} 新服务器初始化 · CloudPanel"
   say "  ${C_GRAY}0.${C_RESET} 退出"
   say
-  say "${C_GRAY}选择模块后再操作；打开菜单本身不修改服务器。${C_RESET}"
+  say "${C_GRAY}选择模块后再操作。${C_RESET}"
+  say "${C_GRAY}打开菜单本身不修改服务器。${C_RESET}"
 }
 
 m01_verified_current() {
@@ -1500,13 +1499,15 @@ main_menu() {
         pause_menu
         ;;
       3)
-        screen_clear
         show_header
-        say 'P07-M03 网站与数据'
-        say "  1. 进入正式版（$VF_SERVER_OPS_BUILD_EXPECTED）"
-        say "  2. 独立维护版（$M03_OWNER_TRIAL_BUILD；可升级 RC3）"
+        say '网站与数据'
+        say '  1. 进入正式版'
+        say "     $VF_SERVER_OPS_BUILD_EXPECTED"
+        say '  2. 独立维护版'
+        say "     $M03_OWNER_TRIAL_BUILD"
+        say '     可升级 RC3；迁移未验收'
         say '  0. 返回'
-        say '只在选定操作后下载安装；试用版没有完成迁移验收。'
+        say '只在选定操作后下载安装。'
         printf '请选择 [0-2]：'
         local m03_choice=''
         read -r m03_choice || return 0
