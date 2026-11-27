@@ -1,6 +1,12 @@
 """Public P07 toolbox five-module terminal UX: only safe menu, help and no-write paths."""
 from __future__ import annotations
+import fcntl
+import math
 import os
+import re
+import struct
+import termios
+import unicodedata
 from pathlib import Path
 import pty
 import select
@@ -61,6 +67,70 @@ class ToolboxTerminalUX(unittest.TestCase):
         self.assertLess(out.index("1. 网络代理节点"),out.index("5. 新服务器初始化"))
         self.assertNotIn("\033[",out)
 
+    def test_actual_main_and_m03_route_fit_both_terminal_sizes(self):
+        # Real complete public entry, only no-write paths (main invalid input,
+        # M03 version selector, then 0 return); no installer or business action.
+        def cells(line):
+            return sum(0 if unicodedata.combining(c) else
+                       2 if ord(c)>127 and unicodedata.east_asian_width(c) in ("W","F","A")
+                       else 1 for c in line)
+
+        for cols in (80,40):
+            for color_mode in ("NO_COLOR","TERM_DUMB"):
+                with self.subTest(cols=cols,color_mode=color_mode):
+                    master,slave=pty.openpty()
+                    fcntl.ioctl(slave,termios.TIOCSWINSZ,
+                                struct.pack("HHHH",24,cols,0,0))
+                    env={**os.environ,"TERM":"xterm"}
+                    env.pop("NO_COLOR",None)
+                    if color_mode=="NO_COLOR":
+                        env["NO_COLOR"]="1"
+                    else:
+                        env["TERM"]="dumb"
+                    proc=subprocess.Popen(["bash",str(SHELL)],stdin=slave,
+                          stdout=slave,stderr=slave,env=env)
+                    os.close(slave)
+                    output=bytearray()
+
+                    def observe(prompt,answer,assertions):
+                        target=prompt.encode("utf-8")
+                        end=time.monotonic()+8
+                        while time.monotonic()<end:
+                            pos=output.find(target)
+                            if pos>=0:
+                                stop=pos+len(target)
+                                screen=bytes(output[:stop]).decode("utf-8","replace")
+                                del output[:stop]
+                                self.assertNotIn("\033[",screen)
+                                lines=screen.replace("\r","").splitlines()
+                                width=max([cells(line) for line in lines]+[0])
+                                rows=sum(max(1,math.ceil(cells(line)/cols)) for line in lines)
+                                self.assertLessEqual(width,cols,screen)
+                                self.assertLessEqual(rows,24,screen)
+                                for token in assertions:
+                                    self.assertIn(token,screen)
+                                os.write(master,(answer+"\n").encode())
+                                return
+                            ready,_,_=select.select([master],[],[],0.1)
+                            if ready:
+                                try: output.extend(os.read(master,65536))
+                                except OSError: break
+                            if proc.poll() is not None: break
+                        self.fail("Expected actual menu prompt missing")
+
+                    try:
+                        observe("请选择 [0-5]：","3",
+                                ["功能：5 项","0. 退出"])
+                        observe("请选择 [0-2]：","0",
+                                ["进入正式版","0.1.0-release146","独立维护版",
+                                 "0.1.0-release147-rc4","迁移未验收","0. 返回"])
+                        observe("请选择 [0-5]：","0",["功能：5 项"])
+                        self.assertEqual(proc.wait(timeout=5),0)
+                    finally:
+                        if proc.poll() is None:
+                            proc.kill();proc.wait(timeout=2)
+                        os.close(master)
+
     def test_readonly_modules_status_returns_without_install(self):
         p=self.run_safe("--modules")
         self.assertEqual(p.returncode,0,p.stderr)
@@ -101,6 +171,47 @@ class ToolboxTerminalUX(unittest.TestCase):
         self.assertNotIn("退出码",fn)
         menu=code.split("main_menu() {",1)[1].split("\n}\n",1)[0]
         self.assertIn("show_module_issue '新服务器初始化'",menu)
+
+    def test_module_error_errexit_isolated_from_real_toolbox_menu(self):
+        # Exercise the exact Bash menu and real shell option semantics.
+        # External module operations are deliberately replaced with exit codes:
+        # this is failure propagation coverage, not business acceptance.
+        code=SHELL.read_text(encoding="utf-8")
+        menu="main_menu() {"+code.split("main_menu() {",1)[1].split("\n}\n",1)[0]+"\n}\n"
+        routes=(("1","run_network_node","网络代理节点"),
+                ("2","run_vps_audit","服务器性能检测"),
+                ("3\n1","run_server_ops","网站与数据"),
+                ("3\n2","run_m03_owner_trial","网站与数据"),
+                ("4","run_system_care","服务器维护与安全"),
+                ("5","run_server_init","新服务器初始化"))
+        for selection,expected,label in routes:
+            for rc in (0,13):
+                with self.subTest(route=expected,rc=rc):
+                    prelude="""set -Eeuo pipefail
+C_YELLOW='' C_RESET='' C_GRAY=''
+VF_SERVER_OPS_BUILD_EXPECTED=stable M03_OWNER_TRIAL_BUILD=trial
+say() { printf '%s\\n' "$*"; }
+screen_clear() { :; }
+show_header() { :; }
+show_menu() { printf 'MENU_READY\\n'; }
+pause_menu() { :; }
+"""
+                    # Actual module wrappers restore errexit before returning.
+                    # Isolating the call must preserve both this behavior and its status.
+                    stubs="\n".join(f'{name}() {{ printf "\\nCALL:{name}\\n"; set -e; return {rc}; }}'
+                                     for _,name,_ in routes)
+                    issue="show_module_issue() {"+code.split("show_module_issue() {",1)[1].split("\n}\n",1)[0]+"\n}\n"
+                    result=subprocess.run(["bash","-c",prelude+stubs+"\n"+issue+menu+"\nmain_menu\n"],
+                        input=selection+"\n0\n",text=True,capture_output=True,timeout=5,
+                        env={**os.environ,"NO_COLOR":"1","TERM":"dumb"})
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    self.assertEqual(result.stdout.count("MENU_READY"),2,result.stdout)
+                    self.assertEqual([line for line in result.stdout.splitlines() if line.startswith("CALL:")],
+                                     ["CALL:"+expected])
+                    if rc:
+                        self.assertIn("未完成 · "+label,result.stdout)
+                    else:
+                        self.assertNotIn("未完成 · ",result.stdout)
 
     def test_m01_m02_m04_existing_independent_menus_have_clear_safe_exit(self):
         m01=(ROOT/"packages/p07-network-node/0.1.0-ux2/vf-node.sh").read_text()
