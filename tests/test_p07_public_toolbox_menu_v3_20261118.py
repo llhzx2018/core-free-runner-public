@@ -102,6 +102,47 @@ class ToolboxTerminalUX(unittest.TestCase):
         menu=code.split("main_menu() {",1)[1].split("\n}\n",1)[0]
         self.assertIn("show_module_issue '新服务器初始化'",menu)
 
+    def test_module_error_errexit_isolated_from_real_toolbox_menu(self):
+        # Exercise the exact Bash menu and real shell option semantics.
+        # External module operations are deliberately replaced with exit codes:
+        # this is failure propagation coverage, not business acceptance.
+        code=SHELL.read_text(encoding="utf-8")
+        menu="main_menu() {"+code.split("main_menu() {",1)[1].split("\n}\n",1)[0]+"\n}\n"
+        routes=(("1","run_network_node","网络代理节点"),
+                ("2","run_vps_audit","服务器性能检测"),
+                ("3\n1","run_server_ops","网站与数据"),
+                ("3\n2","run_m03_owner_trial","网站与数据"),
+                ("4","run_system_care","服务器维护与安全"),
+                ("5","run_server_init","新服务器初始化"))
+        for selection,expected,label in routes:
+            for rc in (0,13):
+                with self.subTest(route=expected,rc=rc):
+                    prelude="""set -Eeuo pipefail
+C_YELLOW='' C_RESET='' C_GRAY=''
+VF_SERVER_OPS_BUILD_EXPECTED=stable M03_OWNER_TRIAL_BUILD=trial
+say() { printf '%s\\n' "$*"; }
+screen_clear() { :; }
+show_header() { :; }
+show_menu() { printf 'MENU_READY\\n'; }
+pause_menu() { :; }
+"""
+                    # Actual module wrappers restore errexit before returning.
+                    # Isolating the call must preserve both this behavior and its status.
+                    stubs="\n".join(f'{name}() {{ printf "CALL:{name}\\n"; set -e; return {rc}; }}'
+                                     for _,name,_ in routes)
+                    issue="show_module_issue() {"+code.split("show_module_issue() {",1)[1].split("\n}\n",1)[0]+"\n}\n"
+                    result=subprocess.run(["bash","-c",prelude+stubs+"\n"+issue+menu+"\nmain_menu\n"],
+                        input=selection+"\n0\n",text=True,capture_output=True,timeout=5,
+                        env={**os.environ,"NO_COLOR":"1","TERM":"dumb"})
+                    self.assertEqual(result.returncode,0,result.stderr)
+                    self.assertEqual(result.stdout.count("MENU_READY"),2,result.stdout)
+                    self.assertEqual([line for line in result.stdout.splitlines() if line.startswith("CALL:")],
+                                     ["CALL:"+expected])
+                    if rc:
+                        self.assertIn("未完成 · "+label,result.stdout)
+                    else:
+                        self.assertNotIn("未完成 · ",result.stdout)
+
     def test_m01_m02_m04_existing_independent_menus_have_clear_safe_exit(self):
         m01=(ROOT/"packages/p07-network-node/0.1.0-ux2/vf-node.sh").read_text()
         m02=(ROOT/"experiments/p07-vps-audit-v21-ux2.sh").read_text()
