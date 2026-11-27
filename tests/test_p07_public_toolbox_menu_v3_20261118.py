@@ -128,7 +128,7 @@ pause_menu() { :; }
 """
                     # Actual module wrappers restore errexit before returning.
                     # Isolating the call must preserve both this behavior and its status.
-                    stubs="\n".join(f'{name}() {{ printf "CALL:{name}\\n"; set -e; return {rc}; }}'
+                    stubs="\n".join(f'{name}() {{ printf "\\nCALL:{name}\\n"; set -e; return {rc}; }}'
                                      for _,name,_ in routes)
                     issue="show_module_issue() {"+code.split("show_module_issue() {",1)[1].split("\n}\n",1)[0]+"\n}\n"
                     result=subprocess.run(["bash","-c",prelude+stubs+"\n"+issue+menu+"\nmain_menu\n"],
