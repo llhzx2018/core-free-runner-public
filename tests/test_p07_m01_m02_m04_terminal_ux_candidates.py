@@ -180,6 +180,66 @@ class CandidateSandbox(unittest.TestCase):
             self.assertNotIn("\033[", p.stdout)
         self.assertNotIn("\033[", run_menu(self.m02))
 
+    def test_m01_ux4_menu_state_change_stops_before_write(self):
+        source=(ROOT/"packages/p07-network-node/0.1.0-ux4/vf-node.sh").read_text()
+        select=source[source.index("menu_state_unchanged() {"):source.index("\n# P07-M01")]
+        # Actual menu functions, controlled observations, no service writes.
+        for before,after in (("HEALTHY","ABSENT"),("ABSENT","EXTERNAL"),
+                             ("MANAGED_UNHEALTHY","HEALTHY")):
+            shell=r'''
+set -Eeuo pipefail
+warn(){ printf '%s\n' "$*"; }
+info(){ printf '%s\n' "$*"; }
+pause_if_tty(){ :; }
+node_menu_state(){ printf '%s' "$AFTER"; }
+run_and_pause(){ printf 'UNEXPECTED_ACTION\n'; }
+repair_managed_install(){ printf 'UNEXPECTED_ACTION\n'; }
+'''+select+'\ninstall_from_menu\n'
+            p=subprocess.run(["bash","-c",shell],input="y\n",text=True,
+                capture_output=True,timeout=5,
+                env={**ENV,"P07_NODE_DISPLAY_STATE":before,"AFTER":after})
+            self.assertEqual(p.returncode,0,p.stderr)
+            self.assertIn("节点状态已变化",p.stdout)
+            self.assertNotIn("UNEXPECTED_ACTION",p.stdout)
+
+    def test_m01_ux4_state_change_after_confirmation_stops_repair(self):
+        source=(ROOT/"packages/p07-network-node/0.1.0-ux4/vf-node.sh").read_text()
+        select=source[source.index("menu_state_unchanged() {"):source.index("\n# P07-M01")]
+        state=self.root/"node-state-count"
+        shell=r'''
+set -Eeuo pipefail
+warn(){ printf '%s\n' "$*"; }
+info(){ printf '%s\n' "$*"; }
+pause_if_tty(){ :; }
+node_menu_state(){
+  if [[ -e "$COUNT_FILE" ]]; then printf 'EXTERNAL'
+  else : > "$COUNT_FILE"; printf 'MANAGED_UNHEALTHY'; fi
+}
+run_and_pause(){ printf 'UNEXPECTED_ACTION\n'; }
+repair_managed_install(){ printf 'UNEXPECTED_ACTION\n'; }
+'''+select+'\ninstall_from_menu\n'
+        p=subprocess.run(["bash","-c",shell],input="y\n",text=True,capture_output=True,
+            timeout=5,env={**ENV,"COUNT_FILE":str(state),"P07_NODE_DISPLAY_STATE":"MANAGED_UNHEALTHY"})
+        self.assertEqual(p.returncode,0,p.stderr)
+        self.assertIn("确认修复",p.stdout)
+        self.assertIn("节点状态已变化",p.stdout)
+        self.assertNotIn("UNEXPECTED_ACTION",p.stdout)
+
+    def test_m01_ux4_actual_menu_and_plain_output(self):
+        root=self.root/"m01-ux4"
+        shutil.copytree(NETWORK_OLD,root)
+        overlay=ROOT/"packages/p07-network-node/0.1.0-ux4"
+        for name in ("vf-node.sh","lib/common.sh"):
+            shutil.copy2(overlay/name,root/name)
+        (root/"VERSION").write_text("0.1.0-ux4\n")
+        out=run_menu(root/"vf-node.sh",b"9\n0\n")
+        self.assertIn("当前状态",out)
+        self.assertIn("0. 返回工具箱",out)
+        self.assertNotIn("\x1b",out)
+        p=run_command(root/"vf-node.sh","--version")
+        self.assertEqual(p.returncode,0,p.stderr)
+        self.assertEqual(p.stdout.strip(),"VF Network Node 0.1.0-ux4")
+
     def test_m04_main_menu(self):
         out = run_menu(self.m04)
         self.assertIn("本页只显示最近缓存", out)
