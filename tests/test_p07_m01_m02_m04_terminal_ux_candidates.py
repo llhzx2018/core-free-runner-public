@@ -180,6 +180,17 @@ class CandidateSandbox(unittest.TestCase):
             self.assertNotIn("\033[", p.stdout)
         self.assertNotIn("\033[", run_menu(self.m02))
 
+    def test_m04_ux6_exact_actual_atomic_install_and_rollback(self):
+        if os.environ.get("GITHUB_ACTIONS")!="true" or os.environ.get("RUNNER_ENVIRONMENT")!="github-hosted":
+            self.skipTest("actual root proof needs disposable hosted runner")
+        cmd=["python3","-B",str(ROOT/"tests/p07_m04_ux6_actual_atomic_gate.py")]
+        if os.geteuid()!=0:cmd=["sudo","-n",*cmd]
+        p=subprocess.run(cmd,text=True,capture_output=True,timeout=150)
+        self.assertEqual(p.returncode,0,p.stderr[-2000:])
+        self.assertIn("M04_EXACT_OFFICIAL_UPGRADE_ROLLBACK_FRESH=PASS",p.stdout)
+        self.assertIn("M04_TAMPER_REFUSAL_FAILED_SWITCH_FOUR_SIBLINGS=PASS",p.stdout)
+        print(p.stdout,end="")
+
     def test_m04_main_menu(self):
         out = run_menu(self.m04)
         self.assertIn("本页只显示最近缓存", out)
