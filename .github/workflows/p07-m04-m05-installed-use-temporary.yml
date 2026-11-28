@@ -1,0 +1,233 @@
+name: TEMP P07 M04 M05 actual installed use
+on:
+  pull_request:
+    branches: [main]
+    paths: ['.github/workflows/p07-m04-m05-installed-use-temporary.yml']
+permissions:
+  contents: read
+jobs:
+  m04-maintenance:
+    if: github.repository == 'llhzx2018/core-free-runner-public' && github.actor == 'llhzx2018' && github.triggering_actor == 'llhzx2018' && github.event.pull_request.user.login == 'llhzx2018' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'temp/p07-m04-m05-installed-use-20261128'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    env:
+      SOURCE: 4d6cc374291f81893c0adfed02a03c06fa99a6c3
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 4d6cc374291f81893c0adfed02a03c06fa99a6c3
+          persist-credentials: false
+          path: m04-source
+      - name: Actual candidate install and controlled APT maintenance on disposable hosted VM
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          cd m04-source
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          test "$(git rev-parse 'HEAD^{tree}')" = d44e2794914280263fa94b7922abd7bfecc05e91
+          test -z "$(git status --porcelain)"
+          test ! -e /opt/vfops-modules/m04
+          work=$(mktemp -d "$RUNNER_TEMP/p07-m04-actual.XXXXXX")
+          printf '%s\n' "$work" > "$RUNNER_TEMP/p07-m04-owned-$GITHUB_RUN_ID"
+          chmod 755 "$work"
+          python3 -B installers/p07-m04-ux6-atomic.py build "$work/m04.zip"
+          digest=$(sha256sum "$work/m04.zip" | cut -d' ' -f1)
+          sudo -n python3 -B installers/p07-m04-ux6-atomic.py install "$work/m04.zip" "$digest"
+          installed=/opt/vfops-modules/m04/current
+          test "$(sudo -n bash "$installed/vf-system-care.sh" --version)" = '服务器维护与安全 0.1.0-ux6'
+          test "$(git hash-object "$installed/updates.sh")" = 52da66b997f65f563b5365388c35e27d0339dd5f
+          echo "P07_M04_EXACT_SOURCE=$SOURCE; DEV_ZIP_SHA256=$digest; ACTUAL_INSTALL=PASS"
+          pkg=p07-dev-maintenance-fixture
+          ! dpkg-query -W "$pkg" >/dev/null 2>&1
+          boot=$(cat /proc/sys/kernel/random/boot_id)
+          dpkg-query -W -f='${Package} ${Version}\n' | sort > "$work/os-before"
+          sudo -n sha256sum /etc/ssh/sshd_config > "$work/ssh-before"
+          mkdir -p "$work/repo" "$work/debs" "$work/lists/partial" "$work/archives/partial" "$work/no-parts"
+          chmod 755 "$work/repo" "$work/debs" "$work/lists" "$work/archives" "$work/no-parts"
+          for v in 1 2 3; do
+            d="$work/pkg-$v"
+            mkdir -p "$d/DEBIAN" "$d/usr/share/$pkg"
+            printf 'Package: %s\nVersion: %s.0\nArchitecture: all\nMaintainer: Synthetic fixture <fixture@example.invalid>\nDescription: Disposable P07 maintenance fixture\n' "$pkg" "$v" > "$d/DEBIAN/control"
+            printf 'fixture-%s\n' "$v" > "$d/usr/share/$pkg/version"
+            chmod 755 "$d" "$d/DEBIAN" "$d/usr" "$d/usr/share" "$d/usr/share/$pkg"
+            chmod 644 "$d/DEBIAN/control" "$d/usr/share/$pkg/version"
+            dpkg-deb --root-owner-group --build "$d" "$work/debs/$pkg-$v.deb" >/dev/null
+            chmod 644 "$work/debs/$pkg-$v.deb"
+          done
+          sudo -n dpkg -i "$work/debs/$pkg-1.deb" > "$work/seed.log" 2>&1
+          test "$(dpkg-query -W -f='${Version}' "$pkg")" = 1.0
+          printf 'deb [trusted=yes] file:%s/repo ./\n' "$work" > "$work/sources.list"
+          cat > "$work/apt.conf" <<EOF
+          Dir::Etc::sourcelist "$work/sources.list";
+          Dir::Etc::sourceparts "$work/no-parts";
+          Dir::State::lists "$work/lists";
+          Dir::Cache::archives "$work/archives";
+          Acquire::Languages "none";
+          APT::Get::List-Cleanup "true";
+          EOF
+          chmod 644 "$work/apt.conf" "$work/sources.list"
+          export LC_ALL=C
+          publish_fixture() {
+            local v=$1 file="$pkg.deb"
+            cp "$work/debs/$pkg-$v.deb" "$work/repo/$file"
+            (cd "$work/repo"; dpkg-deb -f "$file"; printf 'Filename: ./%s\nSize: %s\nSHA256: %s\n\n' "$file" "$(stat -c %s "$file")" "$(sha256sum "$file" | cut -d' ' -f1)") > "$work/repo/Packages"
+            chmod 644 "$work/repo/"*
+          }
+          actual_apt() { sudo -n env APT_CONFIG="$work/apt.conf" LC_ALL=C NO_COLOR=1 "$@"; }
+          verify_plan() {
+            actual_apt apt-get -s -o Debug::NoLocking=true upgrade > "$work/plan"
+            test "$(awk '/^Inst /{print $2}' "$work/plan")" = "$pkg"
+            ! grep -Eq '^Remv |will be DOWNGRADED|will be REMOVED' "$work/plan"
+          }
+          update_tty() {
+            printf 'y\n' | sudo -n script -qfec "env APT_CONFIG='$work/apt.conf' LC_ALL=C NO_COLOR=1 bash '$installed/updates.sh' all" "$work/update.tty" > "$work/update.log" 2>&1
+          }
+          publish_fixture 2
+          actual_apt bash "$installed/updates.sh" refresh > "$work/refresh.log" 2>&1
+          verify_plan
+          update_tty
+          test "$(dpkg-query -W -f='${Version}' "$pkg")" = 2.0
+          test "$(cat "/usr/share/$pkg/version")" = fixture-2
+          echo P07_M04_REAL_APT_UPGRADE_1_TO_2=PASS
+          publish_fixture 3
+          actual_apt bash "$installed/updates.sh" refresh > "$work/refresh3.log" 2>&1
+          verify_plan
+          mv "$work/repo" "$work/repo-unavailable"
+          set +e
+          update_tty
+          rc=$?
+          set -e
+          test "$rc" = 90
+          grep -Fq 'APT 刷新失败' "$work/update.log"
+          test "$(dpkg-query -W -f='${Version}' "$pkg")" = 2.0
+          sudo -n grep -Fxq UPDATES=UNKNOWN /tmp/p07-system-care-updates-0.cache
+          sudo -n grep -Fxq SECURITY=UNKNOWN /tmp/p07-system-care-updates-0.cache
+          echo P07_M04_REAL_REFRESH_FAILURE_NO_INSTALL_UNKNOWN_CACHE=PASS
+          mv "$work/repo-unavailable" "$work/repo"
+          actual_apt bash "$installed/updates.sh" refresh > "$work/recovered.log" 2>&1
+          verify_plan
+          update_tty
+          test "$(dpkg-query -W -f='${Version}' "$pkg")" = 3.0
+          test "$(cat "/usr/share/$pkg/version")" = fixture-3
+          echo P07_M04_REAL_APT_RECOVERY_2_TO_3=PASS
+          sudo -n cp "$work/debs/$pkg-3.deb" "/var/cache/apt/archives/$pkg-3.deb"
+          printf 'y\n' | sudo -n script -qfec "env NO_COLOR=1 bash '$installed/cleanup.sh' apt" "$work/cleanup.tty" > "$work/cleanup.log" 2>&1
+          test ! -e "/var/cache/apt/archives/$pkg-3.deb"
+          grep -Fq '软件缓存清理：' "$work/cleanup.log"
+          echo P07_M04_REAL_APT_CACHE_CLEANUP=PASS
+          printf 'y\n' | sudo -n script -qfec "env NO_COLOR=1 bash '$installed/cleanup.sh' journal" "$work/journal.tty" > "$work/journal.log" 2>&1
+          grep -Eq '旧归档日志|日志清理命令已执行' "$work/journal.log"
+          echo P07_M04_REAL_JOURNAL_COMMAND=PASS
+          for action in audit memory services security; do
+            set +e
+            timeout 90 sudo -n env NO_COLOR=1 bash "$installed/vf-system-care.sh" "$action" > "$work/$action.log" 2>&1
+            rc=$?
+            set -e
+            echo "P07_M04_ACTUAL_${action^^}=$rc"
+          done
+          test "$(cat /proc/sys/kernel/random/boot_id)" = "$boot"
+          sudo -n sha256sum -c "$work/ssh-before" >/dev/null
+          dpkg-query -W -f='${Package} ${Version}\n' | grep -v "^$pkg " | sort > "$work/os-after"
+          cmp "$work/os-before" "$work/os-after"
+          echo P07_M04_HOST_PACKAGE_SSH_BOOT_PROTECTION=PASS
+      - name: Always remove owned fixture and isolated candidate
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          pkg=p07-dev-maintenance-fixture
+          f="$RUNNER_TEMP/p07-m04-owned-$GITHUB_RUN_ID"
+          if [[ -f "$f" && ! -L "$f" ]]; then
+            read -r work < "$f"
+            [[ "$work" == "$RUNNER_TEMP"/p07-m04-actual.* && -d "$work" && ! -L "$work" ]]
+            if dpkg-query -W "$pkg" >/dev/null 2>&1; then sudo -n dpkg --purge "$pkg" >/dev/null 2>&1; fi
+            test ! -e "/usr/share/$pkg/version"
+            if [[ -L /opt/vfops-modules/m04/current ]]; then
+              test "$(readlink /opt/vfops-modules/m04/current)" = releases/0.1.0-ux6
+              sudo -n rm -rf -- /opt/vfops-modules/m04
+            fi
+            sudo -n rm -f -- "/var/cache/apt/archives/$pkg-3.deb"
+            sudo -n rm -rf -- "$work"
+            test ! -e "$work"
+            rm -- "$f"
+          fi
+          test ! -e /opt/vfops-modules/m04
+          echo P07_M04_OWNED_FIXTURE_CANDIDATE_CLEANUP=PASS
+  m05-installed:
+    if: github.repository == 'llhzx2018/core-free-runner-public' && github.actor == 'llhzx2018' && github.triggering_actor == 'llhzx2018' && github.event.pull_request.user.login == 'llhzx2018' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'temp/p07-m04-m05-installed-use-20261128'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    env:
+      SOURCE: 5734f7e26abf23dd0e85e9970f2c3dbd2a298367
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 5734f7e26abf23dd0e85e9970f2c3dbd2a298367
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: m05-source
+      - name: Build and install exact candidate and use real installed terminal
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          cd m05-source
+          test "$(git rev-parse HEAD)" = "$SOURCE"
+          test "$(git rev-parse 'HEAD^{tree}')" = 4415fb5f3dde304b2d963d60e204bd31bd4d061f
+          test -z "$(git status --porcelain)"
+          test ! -e /opt/vfops-modules/m05
+          work=$(mktemp -d "$RUNNER_TEMP/p07-m05-actual.XXXXXX")
+          printf '%s\n' "$work" > "$RUNNER_TEMP/p07-m05-owned-$GITHUB_RUN_ID"
+          python3 -B scripts/build_p07_m05_bundle.py --output "$work/m05.zip" > "$work/build.log"
+          digest=$(sha256sum "$work/m05.zip" | cut -d' ' -f1)
+          sudo -n python3 -B scripts/install_p07_m05_bundle.py --archive "$work/m05.zip" --sha256 "$digest" > "$work/install.log"
+          root=/opt/vfops-modules/m05/current
+          test "$(git hash-object "$root/bin/vfops-init-ui")" = 87b54071463d773969a114076545c4011a3d078b
+          sudo -n bash "$root/bin/vfops-init-entry" --version
+          echo "P07_M05_EXACT_SOURCE=$SOURCE; DEV_ZIP_SHA256=$digest; ACTUAL_INSTALL=PASS"
+          sudo -n sha256sum /etc/fstab /etc/passwd /var/lib/dpkg/status > "$work/before"
+          sudo -n python3 -B "$root/lib/m05_environment_guard.py" --inspect > "$work/guard.json"
+          state=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]));assert d["read_only"] and not d["destructive_actions"];print(d["status"])' "$work/guard.json")
+          echo "P07_M05_REAL_HOST_GUARD=$state"
+          for width in 40 80; do
+            printf '0\n' | sudo -n script -qfec "stty cols $width rows 24; env NO_COLOR=1 TERM=dumb bash '$root/bin/vfops-init-entry'" "$work/menu-$width.tty" > "$work/menu-$width.log" 2>&1
+            grep -Fq '请选择 [0-2]' "$work/menu-$width.log"
+            echo "P07_M05_INSTALLED_MENU_RETURN_$width=PASS"
+          done
+          if [[ "$state" != CLEAN ]]; then
+            set +e
+            sudo -n bash "$root/bin/vfops-init-core" server-migrate target-status --bootstrap-preflight > "$work/preflight.log" 2>&1
+            rc=$?
+            set -e
+            test "$rc" = 13
+            grep -Eq 'P07_M05_HOST_OCCUPIED|P07_M05_HOST_UNVERIFIED' "$work/preflight.log"
+            echo P07_M05_REAL_OCCUPIED_OR_UNVERIFIED_REFUSAL=PASS
+          fi
+          echo P07_M05_REAL_CLEAN_HOST_CLOUDPANEL_INSTALL=NOT_RUN
+          sudo -n sha256sum -c "$work/before" >/dev/null
+          echo P07_M05_HOST_CONFIG_AND_DPKG_UNCHANGED=PASS
+      - name: Always clean candidate and private source
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          f="$RUNNER_TEMP/p07-m05-owned-$GITHUB_RUN_ID"
+          if [[ -f "$f" && ! -L "$f" ]]; then
+            read -r work < "$f"
+            [[ "$work" == "$RUNNER_TEMP"/p07-m05-actual.* && -d "$work" && ! -L "$work" ]]
+            if [[ -L /opt/vfops-modules/m05/current ]]; then
+              test "$(readlink /opt/vfops-modules/m05/current)" = releases/0.1.0-m05-ux16-runtime-identity-catalog
+              sudo -n rm -rf -- /opt/vfops-modules/m05
+            fi
+            sudo -n rm -rf -- "$work"
+            test ! -e "$work"
+            rm -- "$f"
+          fi
+          test ! -e /opt/vfops-modules/m05
+          p="$GITHUB_WORKSPACE/m05-source"
+          [[ ! -L "$p" ]]
+          rm -rf -- "$p"
+          test ! -e "$p"
+          echo P07_M05_OWNED_CANDIDATE_PRIVATE_CHECKOUT_CLEANUP=PASS
