@@ -22,9 +22,14 @@ P07_THREE_ASSET_BASE="https://github.com/llhzx2018/core-free-runner-public/relea
 P07_M01_ZIP="P07-M01-0.1.0-ux3.zip"
 P07_M01_ZIP_SHA256="13e79e7c7a4f1170c74da24e783804c3c2bda06fe6c46b768497694e826b3ed7"
 P07_M01_META_SHA256="b52b2d17095bc9e84567319a71fa19a8822bd6bb696bac3dfccd85d80923d6ab"
-P07_M02_ZIP="P07-M02-2.1.1-ux3.zip"
-P07_M02_ZIP_SHA256="88da5b8219fb7e04d606eb3de998d872747cb05153bdd93c7351b46f957164b4"
-P07_M02_META_SHA256="0c4d646c59b7aa1e8ad23ac37e1c2139b4f29692b446926e5728d94ca079387a"
+P07_M02_RELEASE="p07-m02-v2.1.1-ux4-20261128"
+P07_M02_ROUTE_REF="6464919d6235e6ea84d07e69a46354de65f1d264"
+P07_M02_ROUTE_BLOB="f78eb79ffee29d4a9868059b68af5bf5787f95e7"
+P07_M02_ROUTE_URL="https://raw.githubusercontent.com/llhzx2018/core-free-runner-public/${P07_M02_ROUTE_REF}/installers/p07-m02-ux4-owner-route.py"
+P07_M02_ZIP="P07-M02-2.1.1-ux4.zip"
+P07_M02_ZIP_SHA256="1cae35bf31f119ae1ad891df4846503bbea45745ad8ac55678b666a35aaa35ad"
+P07_M02_META_SHA256="1663d325fc2781c949d81c95ea84ef14ba31d23c37cd1c7d3674bc8f15bef92a"
+P07_M02_UX3_META_SHA256="0c4d646c59b7aa1e8ad23ac37e1c2139b4f29692b446926e5728d94ca079387a"
 P07_M04_ZIP="P07-M04-0.1.0-ux5.zip"
 P07_M04_ZIP_SHA256="2ff45c263f930e258a3c323b6c009e0973531d3f90a2e432a66aed704c9baa7d"
 P07_M04_META_SHA256="370385aab38b4b8f4c069e40ed59fa8d5c6454d65c7982925d0fb123404eb0d7"
@@ -45,9 +50,9 @@ M01_TARGET_MANIFEST_SHA256="$M01_MANIFEST_SHA256"
 
 VPS_AUDIT_PUBLIC="V2.1.1"
 VPS_AUDIT_EXPECTED="V2.1.1"
-VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux3"
-VPS_AUDIT_URL="$P07_THREE_ASSET_BASE/$P07_M02_ZIP"
-VPS_AUDIT_SHA256="88da5b8219fb7e04d606eb3de998d872747cb05153bdd93c7351b46f957164b4"
+VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux4"
+VPS_AUDIT_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/$P07_M02_RELEASE/$P07_M02_ZIP"
+VPS_AUDIT_SHA256="$P07_M02_ZIP_SHA256"
 VPS_AUDIT_PREVIOUS_BUILD="2.1.1-ux2"
 VPS_AUDIT_LEGACY1_BUILD="2.1.1-ux1"
 VPS_AUDIT_LEGACY1_SHA256="7b083e4cf105d40b04b4cbe898fb6b9e1bb7f1ef3385bc1d20829796f6852013"
@@ -261,13 +266,13 @@ sha256_file() {
 # checksum as a raw vps-audit.sh digest). All bytes are checked before
 # executing even --version from the installed archive.
 m02_verified_new_release() {
-  local root="$1"
+  local root="$1" expected_meta="${2:-$P07_M02_META_SHA256}" expected_build="${3:-$VPS_AUDIT_BUILD_EXPECTED}"
   [[ -d "$root" && -f "$root/MODULE_MANIFEST.json" &&
      ! -L "$root/MODULE_MANIFEST.json" &&
      -f "$root/VERSION" && ! -L "$root/VERSION" &&
      -f "$root/vps-audit.sh" && ! -L "$root/vps-audit.sh" ]] || return 1
   command -v python3 >/dev/null 2>&1 || return 1
-  python3 -B - "$root" "$P07_M02_META_SHA256" "$VPS_AUDIT_BUILD_EXPECTED" <<'PY'
+  python3 -B - "$root" "$expected_meta" "$expected_build" <<'PY'
 import hashlib,json,pathlib,sys
 root=pathlib.Path(sys.argv[1])
 expected_meta=sys.argv[2]
@@ -321,6 +326,13 @@ m02_verified_current() {
     [[ "$version" == "$VPS_AUDIT_EXPECTED" && "$build" == "$installed" ]]
     return
   fi
+  if [[ "$installed" == "2.1.1-ux3" ]]; then
+    m02_verified_new_release "$current" "$P07_M02_UX3_META_SHA256" "$installed" || return 1
+    version="$(NO_COLOR=1 bash "$script" --version 2>/dev/null | awk '{print $NF}' || true)"
+    build="$(NO_COLOR=1 bash "$script" --build-id 2>/dev/null || true)"
+    [[ "$version" == "$VPS_AUDIT_EXPECTED" && "$build" == "$installed" ]]
+    return
+  fi
   actual="$(sha256_file "$script" 2>/dev/null || true)"
   [[ "$actual" =~ ^[a-f0-9]{64}$ ]] || return 1
   # Keep the existing official no-manifest install valid after a later update.
@@ -348,7 +360,36 @@ m02_verified_current() {
 }
 
 ensure_m02_current() {
-  p07_three_ux_route P07-M02
+  # Keep the original verified UX2 -> UX3 transition as its own selection.
+  # The next selection can then offer the separately confirmed UX3 -> UX4.
+  if [[ -L "$M02_ROOT/current" && "$(readlink "$M02_ROOT/current")" == "releases/2.1.1-ux2" ]]; then
+    p07_three_ux_route P07-M02
+    return $?
+  fi
+  local script="" digest="" rc=0
+  for cmd in curl sha1sum python3 mktemp; do
+    command -v "$cmd" >/dev/null 2>&1 || { say "P07-M02：缺少 $cmd，未执行操作。" >&2; return 3; }
+  done
+  script="$(mktemp -t p07-m02-ux4-owner-route.XXXXXXXX)" || return 13
+  chmod 0600 "$script"
+  if ! curl --proto '=https' --tlsv1.2 --fail --silent --show-error \
+      --location --max-time 60 "$P07_M02_ROUTE_URL" -o "$script"; then
+    rm -f -- "$script"
+    say 'P07-M02：官方升级入口无法下载；原模块保持不变。' >&2
+    return 4
+  fi
+  digest="$(p07_git_blob_sha1 "$script" 2>/dev/null || true)"
+  if [[ "$digest" != "$P07_M02_ROUTE_BLOB" ]]; then
+    rm -f -- "$script"
+    say 'P07-M02：官方升级入口身份不符，已停止。' >&2
+    return 6
+  fi
+  set +e
+  python3 -B "$script" P07-M02
+  rc=$?
+  set -e
+  rm -f -- "$script"
+  return "$rc"
 }
 
 rollback_m02_current() {
@@ -377,6 +418,8 @@ rollback_m02_current() {
   [[ -d "$target" && ! -L "$target" ]] || return 13
   if [[ "$build" == "$VPS_AUDIT_BUILD_EXPECTED" ]]; then
     m02_verified_new_release "$target" || return 13
+  elif [[ "$build" == "2.1.1-ux3" ]]; then
+    m02_verified_new_release "$target" "$P07_M02_UX3_META_SHA256" "$build" || return 13
   else
     [[ -f "$target/MANIFEST.sha256" && ! -L "$target/MANIFEST.sha256" &&
        -f "$target/vps-audit.sh" && ! -L "$target/vps-audit.sh" ]] || return 13
