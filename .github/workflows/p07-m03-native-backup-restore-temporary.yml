@@ -1,0 +1,215 @@
+name: TEMP P07 M03 native database backup restore
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/p07-m03-native-backup-restore-temporary.yml'
+permissions:
+  contents: read
+jobs:
+  native-backup-restore:
+    if: github.repository == 'llhzx2018/core-free-runner-public' && github.actor == 'llhzx2018' && github.triggering_actor == 'llhzx2018' && github.event.pull_request.user.login == 'llhzx2018' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'temp/p07-m03-native-backup-restore-20261128'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      P07_SOURCE: 829d4fb55d7b06e2dd1397d673cc7a502a1ea83a
+      P07_TREE: 325cbb1ba4e0dfb01895036548ab060f068d6a87
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Transient exact private source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: llhzx2018/vf-server-ops
+          ref: 829d4fb55d7b06e2dd1397d673cc7a502a1ea83a
+          token: ${{ secrets.VF_PRIVATE_READ_TOKEN }}
+          persist-credentials: false
+          path: p07-native-source
+          fetch-depth: 1
+      - name: Verify source and execute the actual product CLI against an isolated native MariaDB
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          cd p07-native-source
+          test "$(git rev-parse HEAD)" = "$P07_SOURCE"
+          test "$(git rev-parse 'HEAD^{tree}')" = "$P07_TREE"
+          test -z "$(git status --porcelain)"
+          work=$(mktemp -d "$RUNNER_TEMP/p07-native-backup.XXXXXX")
+          printf '%s\n' "$work" > "$RUNNER_TEMP/p07-native-owned-$GITHUB_RUN_ID"
+          export P07_WORK="$work"
+          mkdir "$work/runtime"
+          git archive HEAD | tar -x -C "$work/runtime"
+          test "$(git hash-object "$work/runtime/lib/package_core.py")" = 6c03e27bde76f8bfaa9e12a1d9bd5118811b520c
+          test "$(git hash-object "$work/runtime/bin/vfops")" = 0966bf1e4c98e22ce3636914f8d3872492be26b8
+          printf 'P07_EXACT_SOURCE=%s\nP07_EXACT_TREE=%s\n' "$P07_SOURCE" "$P07_TREE"
+          # This is a source-tree DEV runtime deployment, not an official installer.
+          timeout 180 docker pull mariadb:11.8 >"$work/pull.log" 2>&1 || { echo P07_NATIVE_IMAGE_NOT_READY; exit 20; }
+          python3 -B - <<'PY'
+          import gzip, hashlib, json, os, pathlib, re, sqlite3, subprocess, time
+          from pathlib import Path
+          w = Path(os.environ["P07_WORK"])
+          cli = w / "runtime/bin/vfops"
+          name = "p07-native-" + os.environ["GITHUB_RUN_ID"] + "-" + os.environ["GITHUB_RUN_ATTEMPT"]
+          assert re.fullmatch(r"p07-native-[0-9]+-[0-9]+", name)
+          pw = "p07_synthetic_fixture_only"
+          def run(args, data=None, limit=60, env=None):
+              return subprocess.run(args, input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    timeout=limit, env=env, check=False)
+          def need(ok, code):
+              if not ok:
+                  raise SystemExit(code)
+          def db(sql, schema=None):
+              args = ["docker", "exec", "-i", "-e", "MYSQL_PWD="+pw, name,
+                      "mariadb", "-uroot", "-N", "-B"]
+              if schema:
+                  args.append(schema)
+              r = run(args, sql.encode(), 45)
+              need(r.returncode == 0, "NATIVE_SQL_FAILED")
+              return r.stdout
+          def call(args, env=None):
+              return run(["bash", str(cli), *args], limit=180, env=env)
+          def digest(p):
+              return hashlib.sha256(p.read_bytes()).hexdigest()
+          need(run(["docker","inspect",name]).returncode != 0, "CONTAINER_EXISTS")
+          r = run(["docker","run","--rm","-d","--name",name,
+                   "--label","vf-p07-native="+name,"--network","none","--memory","768m",
+                   "--cpus","2","--pids-limit","256","-e","MARIADB_ROOT_PASSWORD="+pw,
+                   "mariadb:11.8"],limit=60)
+          need(r.returncode == 0, "CONTAINER_START_FAILED")
+          try:
+              meta=json.loads(run(["docker","inspect",name]).stdout)[0]
+              need(meta["HostConfig"]["NetworkMode"]=="none" and
+                   not meta["HostConfig"]["Privileged"] and
+                   not meta["HostConfig"].get("Binds") and
+                   meta["Config"]["Labels"]["vf-p07-native"]==name, "ISOLATION_FAILED")
+              for _ in range(45):
+                  r=run(["docker","exec","-e","MYSQL_PWD="+pw,name,
+                         "mariadb","-uroot","-N","-B","-e","SELECT VERSION()"],limit=5)
+                  if r.returncode==0:
+                      break
+                  time.sleep(2)
+              need(r.returncode==0 and r.stdout.startswith(b"11.8."), "ENGINE_NOT_READY")
+              print("P07_NATIVE_ENGINE="+r.stdout.decode().strip(),flush=True)
+              db("CREATE DATABASE p07_source;")
+              db("CREATE TABLE demo(id INT PRIMARY KEY, value VARCHAR(50)); INSERT INTO demo VALUES "
+                 + ",".join("(%d,'row-%d')"%(i,i) for i in range(1,251))+";", "p07_source")
+              expected=db("SELECT id,value FROM demo ORDER BY id;", "p07_source")
+              need(len(expected.splitlines())==250,"SOURCE_ROWS")
+              root=w/"source"; site=root/"home/alice/htdocs/p07-fixture.test"
+              site.mkdir(parents=True); (site/"index.html").write_text("p07 native backup fixture\n")
+              sq=site/"app.sqlite"
+              with sqlite3.connect(sq) as c:
+                  c.execute("CREATE TABLE fixture(id INT PRIMARY KEY,value TEXT)")
+                  c.executemany("INSERT INTO fixture VALUES(?,?)",[(i,"sqlite-"+str(i)) for i in range(1,101)])
+              panel=root/"home/clp/htdocs/app/data/db.sq3";panel.parent.mkdir(parents=True)
+              with sqlite3.connect(panel) as c:
+                  c.executescript("CREATE TABLE site(id INTEGER PRIMARY KEY, domain_name TEXT,user TEXT,type TEXT,vhost_template TEXT);"
+                    "CREATE TABLE php_settings(site_id INT,php_version TEXT);"
+                    "CREATE TABLE database(site_id INT,name TEXT,user_name TEXT,password TEXT);"
+                    "INSERT INTO site VALUES(1,'p07-fixture.test','alice','static','Generic');"
+                    "INSERT INTO database VALUES(1,'p07_demo','fixture','synthetic-only');")
+              vhost=root/"etc/nginx/sites-enabled/p07-fixture.test.conf";vhost.parent.mkdir(parents=True)
+              vhost.write_text("server {\n server_name p07-fixture.test;\n root /home/alice/htdocs/p07-fixture.test;\n}\n")
+              before={p:digest(p) for p in (site/"index.html",sq,panel)}
+              # Only the external CloudPanel API is a synthetic adapter; actual
+              # dump/import/create/delete use the one isolated real database.
+              adapter=w/"clpctl"
+              adapter.write_text("""#!/usr/bin/env python3
+          import gzip,os,pathlib,re,subprocess,sys
+          root=pathlib.Path(os.environ['P07_WORK']).resolve()
+          name=os.environ['P07_CONTAINER']
+          schema=os.environ['P07_DB_TARGET']
+          if not re.fullmatch(r'p07-native-[0-9]+-[0-9]+',name) or schema not in ('p07_source','p07_restore','p07_failed'):sys.exit(80)
+          cmd=sys.argv[1];args=dict(x[2:].split('=',1) for x in sys.argv[2:] if x.startswith('--') and '=' in x)
+          def execute(tool,extra,data=None):
+              p=subprocess.run(['docker','exec','-i','-e','MYSQL_PWD=p07_synthetic_fixture_only',name,tool,'-uroot',*extra],input=data,capture_output=True,timeout=60)
+              if p.returncode:sys.exit(81)
+              return p.stdout
+          if cmd in ('site:add:static','site:delete'):
+              if args.get('domainName')!='p07-fixture.test':sys.exit(82)
+              sys.exit(0)
+          if args.get('databaseName')!='p07_demo':sys.exit(83)
+          if cmd in ('db:export','db:import'):
+              f=pathlib.Path(args['file']).resolve()
+              if root not in f.parents:sys.exit(84)
+          if cmd=='db:export' and schema=='p07_source':
+              f.parent.mkdir(parents=True,exist_ok=True)
+              f.write_bytes(gzip.compress(execute('mariadb-dump',['--single-transaction','--skip-lock-tables','p07_source'])))
+          elif cmd=='db:add' and schema!='p07_source':
+              execute('mariadb',['-e','CREATE DATABASE '+schema])
+          elif cmd=='db:import' and schema!='p07_source':
+              if os.environ.get('P07_INJECT_IMPORT_FAILURE')=='1':sys.exit(42)
+              execute('mariadb',[schema],gzip.decompress(f.read_bytes()))
+          elif cmd=='db:delete' and schema!='p07_source':
+              execute('mariadb',['-e','DROP DATABASE '+schema])
+          else:sys.exit(85)
+          """)
+              adapter.chmod(0o700)
+              env=os.environ.copy();env.update(P07_CONTAINER=name,P07_DB_TARGET="p07_source",
+                  VFOPS_NOW="2026-11-28T00:00:00+00:00")
+              r=call(["backup","--site","p07-fixture.test","--root",str(root),"--output-dir",str(w/"backups"),"--clpctl",str(adapter)],env)
+              need(r.returncode==0, "PRODUCT_BACKUP_EXIT_"+str(r.returncode))
+              package=Path(r.stdout.decode().strip()).resolve()
+              need((w/"backups") in package.parents and json.loads((package/"verification.json").read_text())["status"]=="PASS","BACKUP_VERIFY")
+              manifest=json.loads((package/"manifest.json").read_text())
+              need(len(manifest["contents"]["mysql"])==1 and len(manifest["contents"]["sqlite"])==1,"MANIFEST_COUNTS")
+              print("P07_ACTUAL_CLI_BACKUP_AND_VERIFY=PASS",flush=True)
+              def target(label):
+                  path=w/label;path.mkdir()
+                  (path/".vfops-sandbox-root").write_text("VF_SERVER_OPS_SANDBOX_V1\n")
+                  return path
+              def restore(path, schema, fault=False):
+                  e=env.copy();e["P07_DB_TARGET"]=schema
+                  if fault:e["P07_INJECT_IMPORT_FAILURE"]="1"
+                  return call(["restore","apply-sandbox","--package",str(package),"--target-root",str(path),"--clpctl",str(adapter)],e)
+              good=target("good")
+              r=restore(good,"p07_restore")
+              need(r.returncode==0,"PRODUCT_RESTORE_EXIT_"+str(r.returncode))
+              result=json.loads(r.stdout)
+              need(result["status"]=="PASS" and result["mysql_database_count"]==1 and result["sqlite_database_count"]==1 and result["dns_changed"] is False,"RESTORE_RESULT")
+              restored=good/"home/alice/htdocs/p07-fixture.test"
+              need(digest(restored/"index.html")==before[site/"index.html"],"FILE_BYTES")
+              with sqlite3.connect("file:"+str(restored/"app.sqlite")+"?mode=ro",uri=True) as c:
+                  need(c.execute("PRAGMA integrity_check").fetchone()==("ok",) and c.execute("SELECT COUNT(*) FROM fixture").fetchone()==(100,),"SQLITE_RESTORE")
+              need(db("SELECT id,value FROM demo ORDER BY id;","p07_restore")==expected,"NATIVE_DATA_RESTORE")
+              print("P07_NATIVE_MYSQL_ROWS=250/250; SQLITE_ROWS=100/100; FILE_MATCH=PASS",flush=True)
+              need(restore(good,"p07_restore").returncode!=0,"OVERWRITE_NOT_REFUSED")
+              bad=target("failed")
+              need(restore(bad,"p07_failed",True).returncode!=0,"FAULT_NOT_REJECTED")
+              need(db("SELECT COUNT(*) FROM information_schema.SCHEMATA WHERE SCHEMA_NAME='p07_failed';").strip()==b"0","FAILED_DB_LEFT")
+              need(not (bad/"home/alice/htdocs/p07-fixture.test").exists(),"FAILED_SITE_LEFT")
+              need(all(digest(p)==d for p,d in before.items()),"SOURCE_FILES_CHANGED")
+              need(db("SELECT id,value FROM demo ORDER BY id;","p07_source")==expected and db("SELECT id,value FROM demo ORDER BY id;","p07_restore")==expected,"SIBLING_DB_CHANGED")
+              print("P07_ACTUAL_NATIVE_IMPORT_FAILURE_ROLLBACK_AND_NO_OVERWRITE=PASS",flush=True)
+              print("P07_SCOPE=DEV_SOURCE_TREE_CLI_REAL_MARIADB_SYNTHETIC_PANEL_NOT_CLOUDPANEL_INSTALL",flush=True)
+          finally:
+              meta=run(["docker","inspect","--format",'{{index .Config.Labels "vf-p07-native"}}',name])
+              if meta.returncode==0:
+                  need(meta.stdout.decode().strip()==name,"CLEANUP_OWNER")
+                  need(run(["docker","rm","-f","-v",name]).returncode==0,"CLEANUP_CONTAINER")
+              need(run(["docker","inspect",name]).returncode!=0,"CONTAINER_STILL_PRESENT")
+              print("P07_NATIVE_OWNED_CONTAINER_CLEANUP=PASS",flush=True)
+          PY
+      - name: Always clean owned private source and runtime
+        if: always()
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          owner="p07-native-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          if docker inspect "$owner" >/dev/null 2>&1; then
+            test "$(docker inspect --format '{{index .Config.Labels "vf-p07-native"}}' "$owner")" = "$owner"
+            docker rm -f -v "$owner" >/dev/null
+          fi
+          f="$RUNNER_TEMP/p07-native-owned-$GITHUB_RUN_ID"
+          if [[ -f "$f" && ! -L "$f" ]]; then
+            read -r work < "$f"
+            [[ "$work" == "$RUNNER_TEMP"/p07-native-backup.* && -d "$work" && ! -L "$work" ]]
+            rm -rf -- "$work"
+            test ! -e "$work"
+            rm -- "$f"
+          fi
+          p="$GITHUB_WORKSPACE/p07-native-source"
+          [[ ! -L "$p" ]]
+          rm -rf -- "$p"
+          test ! -e "$p"
+          echo P07_TRANSIENT_PRIVATE_CHECKOUT_AND_FIXTURES_CLEANUP=PASS
