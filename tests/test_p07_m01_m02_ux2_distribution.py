@@ -19,7 +19,7 @@ class P07OriginalVersionsUX2Distribution(unittest.TestCase):
                        "服务器维护与安全", "新服务器初始化", "0."):
             self.assertIn(marker,self.source)
         self.assertIn('VF_NODE_EXPECTED="0.1.0-ux3"',self.source)
-        self.assertIn('VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux3"',self.source)
+        self.assertIn('VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux4"',self.source)
         self.assertIn('M01_PREVIOUS_BUILD="0.1.0-ux2"',self.source)
         self.assertIn('VPS_AUDIT_PREVIOUS_BUILD="2.1.1-ux2"',self.source)
 

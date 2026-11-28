@@ -25,7 +25,7 @@ class P07ModuleTargetUpgradeGate(FiveModuleOwnerRoute):
         self.assertIn('VPS_AUDIT_PREVIOUS_BUILD="2.1.1-ux2"',source)
         self.assertIn('M04_PREVIOUS_BUILD="0.1.0-ux4"',source)
         self.assertIn('VF_NODE_EXPECTED="0.1.0-ux3"',source)
-        self.assertIn('VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux3"',source)
+        self.assertIn('VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux4"',source)
         self.assertIn('M04_BUILD_EXPECTED="0.1.0-ux5"',source)
 
     def test_unknown_legacy_module_versions_fail_closed_without_fetch(self):
