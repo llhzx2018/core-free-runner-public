@@ -5,6 +5,7 @@ candidate is mounted over a throwaway copy of its own module for real Bash UX.
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import os
 from pathlib import Path
@@ -13,6 +14,8 @@ import select
 import shutil
 import subprocess
 import tempfile
+import struct
+import termios
 import time
 import unittest
 
@@ -31,10 +34,20 @@ def run_command(script: Path, *args: str, input_text: str = "") -> subprocess.Co
                           text=True, capture_output=True, timeout=8, env=ENV)
 
 
-def run_menu(script: Path, answers: bytes = b"0\n", timeout: float = 7.0) -> str:
+def run_menu(script: Path, answers: bytes = b"0\n", timeout: float = 7.0, *,
+             columns: int = 80) -> str:
     parent, slave = pty.openpty()
-    child = subprocess.Popen(["bash", str(script)], stdin=slave, stdout=slave,
-                             stderr=slave, env=ENV)
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, columns, 0, 0))
+        rows, cols, _, _ = struct.unpack("HHHH", fcntl.ioctl(slave, termios.TIOCGWINSZ, bytes(8)))
+        if (rows, cols) != (24, columns):
+            raise AssertionError("PTY window size was not applied")
+        child = subprocess.Popen(["bash", str(script)], stdin=slave, stdout=slave,
+                                 stderr=slave, env={**ENV, "COLUMNS": str(columns), "LINES": "24"})
+    except BaseException:
+        os.close(parent)
+        os.close(slave)
+        raise
     os.close(slave)
     output = bytearray()
     try:
@@ -291,6 +304,22 @@ repair_managed_install(){ printf 'UNEXPECTED_ACTION\n'; }
             self.assertNotIn("\033[", p.stdout)
         self.assertNotIn("\033[", run_menu(self.m04))
 
+
+    def test_m01_ux4_real_terminal_40_and_80_columns(self):
+        root = self.root / "m01-ux4-width"
+        shutil.copytree(NETWORK_OLD, root)
+        overlay = ROOT / "packages/p07-network-node/0.1.0-ux4"
+        for name in ("vf-node.sh", "lib/common.sh"):
+            shutil.copy2(overlay / name, root / name)
+        (root / "VERSION").write_text("0.1.0-ux4\n")
+        for cols in (40, 80):
+            with self.subTest(columns=cols):
+                out = run_menu(root / "vf-node.sh", b"9\n0\n", columns=cols)
+                self.assertIn("网络代理节点", out)
+                self.assertIn("当前状态", out)
+                self.assertIn("无效选择", out)
+                self.assertIn("0. 返回工具箱", out)
+                self.assertNotIn("\x1b", out)
 
 if __name__ == "__main__":
     unittest.main()
