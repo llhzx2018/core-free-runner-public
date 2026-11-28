@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - 'experiments/p07-vps-audit-v227-r1.sh'
+      - 'experiments/p07-vps-audit-v21-ux4.sh'
       - 'installers/p07-toolbox.sh'
       - '.github/workflows/p07-vps-audit-native-stream-gate.yml'
 permissions:
@@ -57,3 +58,108 @@ jobs:
           grep -Fq '基础 CPU 或磁盘证据不足' /tmp/p07-native.txt
           test "$(date +%s)" -le "$((start+75))"
           echo P07_NATIVE_FULL_STREAM_SYNTHETIC=PASS
+
+  m02-ux4-installed-full-audit:
+    name: P07 M02 installed UX4 full audit and generated report
+    if: github.repository == 'llhzx2018/core-free-runner-public' && github.event.pull_request.user.login == 'llhzx2018' && github.event.pull_request.head.repo.full_name == github.repository && github.actor == 'llhzx2018'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 19
+    steps:
+      - name: Checkout exact owner product candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Full actual performance detection from installed candidate
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -Eeuo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          git cat-file -e "$BASE_SHA^{commit}"
+          file=experiments/p07-vps-audit-v21-ux4.sh
+          if ! git diff --name-only "$BASE_SHA" HEAD | grep -Fx "$file" >/dev/null; then
+            echo M02_UX4_FULL_AUDIT=NOT_APPLICABLE
+            exit 0
+          fi
+          test "$(git hash-object "$file")" = 470aae8d118e1d1ac74edc414b04282f20aff3b6
+          for path in /opt/vfops-modules /opt/vf-server-ops /home/clp /etc/cloudpanel; do
+            test ! -e "$path" && test ! -L "$path"
+          done
+          work="$(mktemp -d)"
+          trap 'sudo -n rm -rf -- "$work"' EXIT
+          mkdir -p "$work/bench" "$work/reports" "$work/slots"
+          # Install exact candidate using the same M02 atomic engine, to this
+          # disposable directory only. Never invoke a public updater or owner VPS.
+          sudo -n python3 -B - "$work" <<'PY'
+          import importlib.util,pathlib,sys,os
+          root=pathlib.Path.cwd()
+          work=pathlib.Path(sys.argv[1])
+          def load(path,name):
+              spec=importlib.util.spec_from_file_location(name,path)
+              mod=importlib.util.module_from_spec(spec)
+              spec.loader.exec_module(mod)
+              return mod
+          candidate=load(root/"installers/p07-m02-ux4-atomic.py","m02")
+          builder=load(root/"scripts/build_p07_ux_three_release_candidates.py","builder")
+          script=(root/"experiments/p07-vps-audit-v21-ux4.sh").read_bytes()
+          files={candidate.ENTRY:script,"VERSION":(candidate.NEW+"\n").encode()}
+          files[candidate.META]=candidate.manifest(candidate.NEW,script)
+          candidate.check_payload(candidate.NEW,files)
+          archive=work/"m02-ux4.zip"
+          digest=builder.output_zip(archive,candidate.MODULE,files)
+          assert candidate.engine_for(work/"slots").install(candidate.MODULE,archive,digest)==candidate.NEW
+          assert os.readlink(work/"slots/m02/current")=="releases/"+candidate.NEW
+          assert set(p.name for p in (work/"slots").iterdir())=={"m02"}
+          print("M02_ACTUAL_EXACT_CANDIDATE_INSTALLED=PASS")
+          PY
+          entry="$work/slots/m02/current/vps-audit.sh"
+          test "$(sudo -n bash "$entry" --build-id)" = 2.1.1-ux4
+          # The same full, non-mocked measurement mechanism as the prior real
+          # UX3 audit. Capture raw host/network output privately, no artifacts.
+          rc=0
+          sudo -n env -u P07_V21_SKIP_BASE -u P07_V21_SKIP_FIO -u P07_V21_SKIP_ROUTE -u P07_ROUTE_MOCK \
+            -u P07_FIO_TEST_MIB -u P07_FIO_TIMEOUT_SEC -u P07_ROUTE_TIMEOUT_SEC \
+            NO_COLOR=1 TERM=dumb P07_BENCH_DIR="$work/bench" P07_REPORT_DIR="$work/reports" \
+            timeout --kill-after=10s 840s bash "$entry" >"$work/audit.log" 2>&1 || rc=$?
+          echo "M02_ACTUAL_FULL_AUDIT_EXIT=$rc"
+          if [ "$rc" -ne 0 ]; then
+            if grep -Fq '基础验机模块下载失败' "$work/audit.log"; then echo M02_FULL_AUDIT_BLOCK=BASE_DOWNLOAD; fi
+            if grep -Fq '基础验机未正常完成' "$work/audit.log"; then echo M02_FULL_AUDIT_BLOCK=BASE_FAILED; fi
+            if grep -Fq '报告未保存' "$work/audit.log"; then echo M02_FULL_AUDIT_BLOCK=REPORT_SAVE; fi
+            exit "$rc"
+          fi
+          sudo -n python3 - "$work" <<'PY'
+          import pathlib,re,stat,sys
+          root=pathlib.Path(sys.argv[1])
+          files=list((root/"reports").glob("*.md"))
+          assert len(files)==1,"report count"
+          report=files[0]
+          data=report.read_text(encoding="utf-8")
+          raw=(root/"audit.log").read_text(encoding="utf-8",errors="replace")
+          assert "\x1b" not in raw,"unexpected color in non-TTY audit"
+          assert data.index("## 验机结论")<data.index("## 基础与网络验机输出"),"summary order"
+          for label in ("综合评级","基础得分","增强磁盘","三网回程","建议","本次耗时"):
+              assert re.search(r"^- "+label+r"：\S",data,re.M),"missing summary field"
+          score=re.search(r"^- 基础得分：(.+)$",data,re.M).group(1)
+          assert score!="未知","base score not measured"
+          assert stat.S_IMODE(report.stat().st_mode)==0o600
+          assert not list((root/"reports").glob(".p07-report.*"))
+          assert not list((root/"bench").glob(".p07-fio-*"))
+          fio=sum(bool(re.search(r"^\| "+re.escape(size)+r" \|",data,re.M)) for size in ("4k","64k","512k","1m"))
+          route=re.search(r"^- 三网回程：(.+)$",data,re.M).group(1)
+          assert "未执行" not in route,"route probe not executed"
+          print("M02_REAL_REPORT_CONCLUSION_RAW_AND_PRIVATE=PASS")
+          print("M02_REAL_BENCHMARK_FILES_CLEANUP=PASS")
+          print("M02_MEASURED_FIO_ROWS="+str(fio)+"/4")
+          print("M02_ROUTE_EVIDENCE="+("MEASURED" if "有效" in route else "INSUFFICIENT"))
+          assert fio==4,"enhanced disk measurements incomplete"
+          PY
+          for path in /opt/vfops-modules /opt/vf-server-ops /home/clp /etc/cloudpanel; do
+            test ! -e "$path" && test ! -L "$path"
+          done
+          echo M02_INSTALLED_FULL_AUDIT_AND_REPORT=PASS
