@@ -5,7 +5,16 @@ SCRIPT_DIR="${BASH_SOURCE[0]%/*}"
 source "$SCRIPT_DIR/lib/common.sh"
 
 require_apt() { [[ "$(pkg_manager)" == apt ]] || { fail '当前仅支持 Debian/Ubuntu APT 更新。'; return 65; }; }
-refresh() { require_root; require_apt; apt-get update; }
+refresh() {
+  require_root || return $?
+  require_apt || return $?
+  if ! apt-get -o APT::Update::Error-Mode=any update; then
+    write_update_cache UNKNOWN UNKNOWN
+    fail 'APT 刷新失败；更新状态未确认，未执行安装。'
+    info '检查软件源后重新刷新。'
+    return 90
+  fi
+}
 
 security_packages() {
   local output
@@ -144,7 +153,7 @@ apply_security() {
   fi
 
   confirm_numeric '将刷新 APT 列表并安装以上安全更新；不会自动重启。' || { warn '已取消。'; return 0; }
-  apt-get update
+  refresh || return $?
   if ! package_list="$(security_packages)"; then
     fail '刷新后安全更新清单未确认，未执行安装。'
     return 90
@@ -171,7 +180,7 @@ apply_all() {
   fi
 
   confirm_numeric '将刷新 APT 列表；刷新后会再次安全预检，通过后才安装可用更新。不会自动重启。' || { warn '已取消。'; return 0; }
-  apt-get update
+  refresh || return $?
 
   if ! preflight_upgrade; then
     warn '刷新后升级计划发生变化，已安全停止，没有执行 apt-get upgrade。'
@@ -204,7 +213,7 @@ case "${1:-menu}" in
       printf '请选择 [0-4]：'; read -r choice || exit 0
       case "$choice" in
         1) check_state; pause_menu ;;
-        2) if confirm_numeric '刷新 APT 更新列表？'; then refresh; check_state; else warn '已取消。'; fi; pause_menu ;;
+        2) if confirm_numeric '刷新 APT 更新列表？'; then if refresh; then check_state || true; fi; else warn '已取消。'; fi; pause_menu ;;
         3) apply_security; pause_menu ;;
         4) apply_all; pause_menu ;;
         0) exit 0 ;;
