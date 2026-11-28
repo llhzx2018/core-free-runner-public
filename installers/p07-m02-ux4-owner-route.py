@@ -123,9 +123,13 @@ def main():
     with tempfile.TemporaryDirectory(prefix="p07-m02-ux4-official-") as raw:
         temp=Path(raw)
         c=get_candidate(temp)
-        engine=c.engine_for(BASE)
+        try:
+            engine=c.engine_for(BASE)
+            if prior:
+                c.verify_saved(home/"releases"/prior,prior,MODULE)
+        except c.Blocked as error:
+            blocked(str(error))
         if prior:
-            c.verify_saved(home/"releases"/prior,prior,MODULE)
             print(f"{MODULE} {conf['label']}：已核验旧正式版 {prior}，新版本 {conf['version']}。")
             print("仅升级本模块程序；其它模块、V2Ray 服务、系统更新和 CloudPanel 均不自动执行。")
             if not sys.stdin.isatty() or not sys.stdout.isatty():
@@ -148,7 +152,11 @@ def main():
                 blocked("安装锁内的版本指针与确认时不符")
             return current,actual
         engine.current_state=guarded_current_state
-        if engine.install(MODULE,archive,conf["sha"])!=conf["version"]:
+        try:
+            installed=engine.install(MODULE,archive,conf["sha"])
+        except (c.Blocked,engine.Rejected) as error:
+            blocked(str(error))
+        if installed!=conf["version"]:
             blocked("原子安装后的版本未达到目标")
     verified_new(home,MODULE,conf)
     print(f"{MODULE} {conf['label']}：独立 UX 新版已就绪，未修改其它模块。")
