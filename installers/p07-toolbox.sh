@@ -52,7 +52,7 @@ VPS_AUDIT_PUBLIC="V2.1.1"
 VPS_AUDIT_EXPECTED="V2.1.1"
 VPS_AUDIT_BUILD_EXPECTED="2.1.1-ux4"
 VPS_AUDIT_URL="https://github.com/llhzx2018/core-free-runner-public/releases/download/$P07_M02_RELEASE/$P07_M02_ZIP"
-VPS_AUDIT_SHA256="$P07_M02_ZIP_SHA256"
+VPS_AUDIT_SHA256="1cae35bf31f119ae1ad891df4846503bbea45745ad8ac55678b666a35aaa35ad"
 VPS_AUDIT_PREVIOUS_BUILD="2.1.1-ux2"
 VPS_AUDIT_LEGACY1_BUILD="2.1.1-ux1"
 VPS_AUDIT_LEGACY1_SHA256="7b083e4cf105d40b04b4cbe898fb6b9e1bb7f1ef3385bc1d20829796f6852013"
@@ -384,10 +384,7 @@ ensure_m02_current() {
     say 'P07-M02：官方升级入口身份不符，已停止。' >&2
     return 6
   fi
-  set +e
-  python3 -B "$script" P07-M02
-  rc=$?
-  set -e
+  if python3 -B "$script" P07-M02; then rc=0; else rc=$?; fi
   rm -f -- "$script"
   return "$rc"
 }
