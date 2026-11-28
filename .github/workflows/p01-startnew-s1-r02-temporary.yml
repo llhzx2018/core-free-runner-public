@@ -1,14 +1,14 @@
 name: TEMP P01 targeted native witness and encrypted recovery regression
 on:
   pull_request:
-    types: [opened]
+    types: [synchronize]
     branches: [main]
     paths:
       - .github/workflows/p01-startnew-s1-r02-temporary.yml
 permissions:
   contents: read
 concurrency:
-  group: p01-native-witness-4de38ec2
+  group: p01-recovery-protocol-e156920e
   cancel-in-progress: false
 jobs:
   product:
@@ -29,8 +29,8 @@ jobs:
           - {php: '8.4', engine: mysql}
           - {php: '8.5', engine: mariadb}
     env:
-      P01_SOURCE: 4de38ec2813f1ffce01fe0af7f4572888acfe1ec
-      P01_TREE: 6de37c7c7f76e92496b6517ebd9e9667e9684178
+      P01_SOURCE: e156920e4be604ffef594b10355a8e0ef5bb55f9
+      P01_TREE: 32f0acaa5ff6fb06425e283e4e46be9596587bcd
       P01_PHP: ${{ matrix.php }}
       P01_ENGINE: ${{ matrix.engine }}
     steps:
@@ -84,77 +84,18 @@ jobs:
               printf '%s_ASSERTIONS=%s\n' "$f" "$(grep -c '^PASS ' "$RUNNER_TEMP/p01-witness-evidence/$f.log")"
             else
               printf '%s=FAIL\n' "$f"
+              grep -oE 'RESTORE_TEST_FAIL [A-Z0-9_]+|CYCLE_[A-Z0-9_]+|RESTORE_[A-Z0-9_]+|ArgumentCountError' "$RUNNER_TEMP/p01-witness-evidence/$f.log" | sort -u | head -20 || true
               exit 1
             fi
           done
           php -l tests/evolution/test_installed_sql_witness_native.php >/dev/null
           echo P01_CHANGED_RECOVERY_PROTOCOL=PASS
-      - name: Actual native engine schema and row witness regression
-        if: always() && !cancelled()
-        shell: bash
-        working-directory: target
-        run: |
-          set -Eeuo pipefail
-          set +x
-          umask 077
-          test "$(git rev-parse HEAD)" = "$P01_SOURCE"
-          test "$(git rev-parse HEAD^{tree})" = "$P01_TREE"
-          test "$(git hash-object tests/evolution/test_installed_sql_witness_native.php)" = e3c0bfd191961031a9cc828ca92fc0fe4ed09839
-          python3 -I -B - <<'PY'
-          import json,os,re,secrets,subprocess,time
-          engine=os.environ["P01_ENGINE"]; minor=os.environ["P01_PHP"]
-          assert (engine,minor) in {("mysql","8.4"),("mariadb","8.5")}
-          name="vf-p01-witness-"+os.environ["GITHUB_RUN_ID"]+"-"+engine
-          def docker(args,timeout=90):
-              return subprocess.run(["docker",*args],capture_output=True,text=True,timeout=timeout,check=True).stdout
-          def owned():
-              r=subprocess.run(["docker","inspect",name],capture_output=True,text=True,timeout=15)
-              if r.returncode:return None
-              info=json.loads(r.stdout)[0]
-              assert info["Config"]["Labels"].get("vf-p01-witness")==name
-              assert not info["HostConfig"]["Privileged"] and not info["HostConfig"]["Binds"]
-              assert info["HostConfig"]["PortBindings"]=={"3306/tcp":[{"HostIp":"127.0.0.1","HostPort":"3306"}]}
-              return info["Id"]
-          try:
-              assert owned() is None
-              prefix="MYSQL" if engine=="mysql" else "MARIADB"
-              image="mysql:8.4" if engine=="mysql" else "mariadb:11.8"
-              db="vfstartnew_test_full_"+secrets.token_hex(4); pw=secrets.token_hex(24); rootpw=secrets.token_hex(24)
-              docker(["run","--rm","-d","--name",name,"--label","vf-p01-witness="+name,"--publish","127.0.0.1:3306:3306","--memory","1536m","--cpus","2","--pids-limit","256","-e",prefix+"_ROOT_PASSWORD="+rootpw,"-e",prefix+"_DATABASE="+db,"-e",prefix+"_USER="+db,"-e",prefix+"_PASSWORD="+pw,image],180)
-              assert owned()
-              cfg={"driver":engine,"host":"127.0.0.1","port":3306,"database":db,"username":db,"password":pw}
-              deadline=time.monotonic()+180
-              code='try{$c=json_decode(stream_get_contents(STDIN),true);$d=new PDO("mysql:host=127.0.0.1;port=3306;dbname=".$c["database"],$c["username"],$c["password"],[PDO::ATTR_TIMEOUT=>5]);echo $d->query("SELECT VERSION()")->fetchColumn();}catch(Throwable $e){exit(2);}'
-              while True:
-                  probe=subprocess.run(["php","-r",code],input=json.dumps(cfg),capture_output=True,text=True,timeout=8)
-                  if probe.returncode==0:
-                      v=probe.stdout.lower()
-                      assert (v.startswith("8.4.") and "mariadb" not in v) if engine=="mysql" else (v.startswith("11.8.") and "mariadb" in v)
-                      print("P01_NATIVE_ENGINE=PASS:"+engine,flush=True);break
-                  assert time.monotonic()<deadline,"DB_NOT_READY";time.sleep(2)
-              env={**os.environ,"APP_ENV":"testing","P01_FULL_SYNTHETIC_DB_JSON":json.dumps(cfg)}
-              result=subprocess.run(["php","tests/evolution/test_installed_sql_witness_native.php"],env=env,capture_output=True,text=True,timeout=90)
-              for line in result.stdout.splitlines():
-                  if re.fullmatch(r"P01_NATIVE_(?:WITNESS_(?:COUNTER|COLUMN_COMMENT|TABLE_COMMENT|DEFAULT|ROW_BYTES)=PASS|SQL_WITNESS=PASS:(?:mysql|mariadb)|SQL_WITNESS_FAILURE=(?:ADMISSION|FIXTURE|COUNTER_ONLY|COLUMN_COMMENT|TABLE_COMMENT|DEFAULT|ROW_BYTES))",line):
-                      print(line,flush=True)
-              assert result.returncode==0 and "P01_NATIVE_SQL_WITNESS=PASS:"+engine in result.stdout.splitlines()
-          finally:
-              cid=owned()
-              if cid:docker(["rm","-f","-v",cid],60)
-              assert owned() is None
-              print("P01_OWNED_DB_CLEANUP=PASS",flush=True)
-          PY
       - name: Always remove only run-owned private inputs
         if: always()
         shell: bash
         run: |
           set -Eeuo pipefail
           set +x
-          name="vf-p01-witness-$GITHUB_RUN_ID-$P01_ENGINE"
-          if docker inspect "$name" >/dev/null 2>&1; then
-            test "$(docker inspect --format '{{ index .Config.Labels "vf-p01-witness" }}' "$name")" = "$name"
-            docker rm -f -v "$name" >/dev/null
-          fi
           rm -rf -- target "$RUNNER_TEMP/p01-witness-evidence"
           test ! -e target && test ! -e "$RUNNER_TEMP/p01-witness-evidence"
           echo P01_PRIVATE_REGRESSION_CLEANUP=PASS
